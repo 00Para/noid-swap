@@ -209,11 +209,12 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   there (see the table below).
 - The three actions (checkout, setup-node, upload-artifact) are pinned to full commit ids, looked up on 2026-11-17; that
   each id is the release its comment names was not checked a second way.
-- **Two more actions, pinned from the build specification and not looked up, must be checked before the first run of the desktop
-  jobs:** `actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093` (comment: v4.3.0) and
-  `actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8` (comment: v4.2.2). For each: open the repository's release
-  page for the tag, confirm the full commit id behind the tag, and change both the id and the comment if they differ. A test
-  (`desktop/test/workflow.test.js`) pins the five ids, so change it together with the workflow.
+- The two actions added with the desktop jobs were looked up on 2026-11-18 through GitHub's public API: the tag `v4.3.0` of
+  `actions/download-artifact` is commit `d3f86a106a0bac45b974a628896c90dbdf5c8093` and the tag `v4.2.2` of `actions/attest-build-provenance`
+  is commit `4d101475d8b20a2381f78447822ac1eab6504dd8`, the ids pinned in the workflow.
+- Each platform's desktop jobs go ahead on their own (since run 4): a swap-cli job of another platform that failed or never got a
+  machine no longer holds them back. Run 4's macOS swap-cli job was never given a machine ("not acquired", GitHub's capacity), and the
+  desktop jobs of both platforms were skipped because of it.
 - The two desktop jobs (above) have not run. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

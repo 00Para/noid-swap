@@ -79,6 +79,17 @@ test("job order: desktop needs the swap-cli and eth jobs, the start-up test need
   assert.deepEqual(Object.keys(doc.jobs), ["swap-cli", "eth", "desktop", "desktop-startup"]);
   assert.deepEqual([...doc.jobs.desktop.needs].sort(), ["eth", "swap-cli"]);
   assert.equal(doc.jobs["desktop-startup"].needs, "desktop");
+  // each platform goes ahead without the other: not after a cancelled run, and the eth job is still required
+  assert.equal(doc.jobs.desktop.if, "${{ !cancelled() && needs.eth.result == 'success' }}");
+  assert.equal(doc.jobs["desktop-startup"].if, "${{ !cancelled() }}");
+  // which is safe only while each artifact is uploaded after every step of its job (no condition on the upload steps) and each job
+  // downloads its own platform's artifact
+  const upload = (job, re) => doc.jobs[job].steps.find((s) => re.test(s.name || ""));
+  assert.equal(upload("swap-cli", /^Upload the program/).if, undefined);
+  assert.equal(upload("desktop", /^Upload the installer/).if, undefined);
+  const download = (job) => doc.jobs[job].steps.filter((s) => /download-artifact/.test(s.uses || "")).map((s) => s.with.name);
+  assert.deepEqual(download("desktop"), ["swap-cli-${{ matrix.platform }}"]);
+  assert.deepEqual(download("desktop-startup"), ["desktop-${{ matrix.platform }}"]);
   const platforms = (j) => j.strategy.matrix.include.map((i) => i.os);
   assert.deepEqual(platforms(doc.jobs.desktop), ["windows-latest", "macos-14"]);
   assert.deepEqual(platforms(doc.jobs["desktop-startup"]), ["windows-latest", "macos-14"]);

@@ -331,6 +331,11 @@ jobs:
   desktop:
     name: desktop program (${{ matrix.platform }})
     needs: [swap-cli, eth]
+    # Each platform goes ahead on its own: a swap-cli job of another platform that failed or never got a machine (macOS runners are
+    # sometimes not available at all) does not hold this one back. Safe, because a platform's swap-cli artifact is uploaded only when
+    # every step of that platform's swap-cli job passed, and this job downloads its own platform's artifact or fails. The eth job is
+    # still required.
+    if: ${{ !cancelled() && needs.eth.result == 'success' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     permissions:
@@ -553,6 +558,9 @@ jobs:
   desktop-startup:
     name: desktop start-up (${{ matrix.platform }})
     needs: desktop
+    # The same rule: each platform's start-up test runs when that platform's installer was uploaded (only after every step of its
+    # desktop job passed); a missing installer fails this platform's job at its download step.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
