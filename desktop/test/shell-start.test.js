@@ -411,7 +411,8 @@ test("open import builds the migrator with the vault, the secret window and swap
     await e.program().open("import");
     const a = e.modules.migrate.lastArgs;
     assert.ok(e.rec.includes("importRun"));
-    assert.equal(a.runsDir, path.join(e.dataDir, "runs"));
+    // the fake platform is win32 (the fixture's default), and the program joins paths by the rules of its platform, on any host
+    assert.equal(a.runsDir, path.win32.join(e.dataDir, "runs"));
     assert.equal(a.home, e.program().home);
     assert.equal(a.programVersion, "0.1.0");
     assert.equal(typeof a.statusOf, "function");

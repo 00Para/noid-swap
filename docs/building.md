@@ -227,6 +227,9 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   script takes the commit from it, as written. The test now runs the script without `GITHUB_SHA`, and it checks a good and a bad
   `GITHUB_SHA` as well. Run 5 most likely failed on the same test, which it had too. The whole desktop suite passes here with
   GitHub's usual build variables set. macOS again had no machine.
+- A build of `356d595` by hand on a Mac (the workflow's steps, for the rehearsal) found the same failing test, and one more that
+  fails on macOS and Linux only: `shell-start.test.js` compared the program's runs folder, joined by Windows path rules (the test's
+  fake platform), with the host's own rules. It now uses Windows rules. Its swap-cli, code-hash and console tests passed there.
 - A scheduled run once a day at 03:17 UTC, a quiet hour, gives the Mac program a hosted build without anyone starting one. GitHub
   gave the macOS jobs a machine in runs 2 and 3 and none in runs 4 to 6 ("not acquired", its capacity).
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
