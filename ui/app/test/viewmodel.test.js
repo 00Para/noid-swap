@@ -206,6 +206,11 @@ test("wait / spending / withheld / held: what the action card may offer", () => 
   assert.equal(withheld.action.actionable, false);
   assert.deepEqual(withheld.action.commands, []);
   assert.match(withheld.action.withheld_note, /tick --apply/);
+  // an observe-only tick (the program's read loop) says its own thing, not "the loop records the intent"
+  const observing = view("alice", { ...mkTick({ phase: "lock_final", lock: mkLock(), action: { kind: "reveal_eth", parameters: "withheld", note: "an observe-only tick records no intent" } }), observe_only: true, events_applied_to_file: true });
+  assert.equal(observing.action.withheld, true);
+  assert.equal(observing.action.withheld_note, "Observing only: the program records what happens on the chains but decides nothing until you have approved and deposited.");
+  assert.equal(observing.header.tick.applied, false, "shown as a read-only tick");
   assert.equal(withheld.status, "waiting");
 
   // a held intent: the engine says wait; the page shows the held step and the dry-run command, and an alarm

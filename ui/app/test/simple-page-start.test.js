@@ -127,35 +127,36 @@ test("the make step says what the program is doing: 'running by itself', 'waitin
 test("a failed make step: 'did not end cleanly', the last result under it, the exact advice, and Try again (only now) runs the step that failed", async () => {
   const L4 = "The last run did not end cleanly. Its result is below; read it before you try again. If it stops again because some of the wallet files already exist, make a new swap instead: nothing was sent.";
   const setupFailed = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [F.job("setup", { ok: false, exit_code: 1, stderr: "setup failed for a reason" })], first_steps: { running: null, failed: "setup", waiting: null } }));
-  assert.match(squash(setupFailed.text("start")), /did not end cleanly/);
-  assert.ok(squash(setupFailed.text("next-action")).includes(L4));
+  assert.match(squash(setupFailed.text("pg-card")), /did not end cleanly/);
+  assert.ok(squash(setupFailed.text("pg-card")).includes(L4));
   assert.match(squash(setupFailed.text("next-action")), /setup failed for a reason/, "the step's own result is shown");
-  await btnWith(setupFailed.byId("next-action"), "Try again").click();
+  assert.equal(btnWith(setupFailed.byId("pg-details"), "Try again"), null, "the stage card holds the button, not Details");
+  await btnWith(setupFailed.byId("pg-card"), "Try again").click();
   await setupFailed.flush();
   assert.deepEqual(setupFailed.posted[0], ["/api/action", { id: "setup", swap: F.SWAP_A }]);
 
   const walletFailed = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-bob", { ok: false, exit_code: 1, stderr: "wallet files exist" })], first_steps: { running: null, failed: "wallet", waiting: null } }));
-  await btnWith(walletFailed.byId("next-action"), "Try again").click();
+  await btnWith(walletFailed.byId("pg-card"), "Try again").click();
   await walletFailed.flush();
   assert.deepEqual(walletFailed.posted[0], ["/api/action", { id: "wallet-setup-bob", swap: F.SWAP_B }]);
 
   // without the program's view the newest failed record says the same
   const bare = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-alice", { ok: false, exit_code: 1 })], first_steps: null }));
-  assert.ok(btnWith(bare.byId("next-action"), "Try again"));
+  assert.ok(btnWith(bare.byId("pg-card"), "Try again"));
   // done: no failure is shown
   const done = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [F.job("setup", { ok: false, exit_code: 1 }), F.job("wallet-setup-alice")], wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } }, first_steps: { running: null, failed: null, waiting: null } }));
-  assert.equal(btnWith(done.byId("next-action"), "Try again"), null);
+  assert.equal(btnWith(done.byId("pg-card"), "Try again"), null);
   assert.doesNotMatch(squash(done.text("start")), /did not end cleanly/);
 });
 
 test("Prepare and Bob's file step keep their buttons: Prepare posts the table id, 'Choose Alice's file…' posts the join", async () => {
   const alice = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-alice")], wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } } }));
-  assert.ok(squash(alice.text("next-action")).includes("from then on the clock runs, and your deposit and the funding must go in within about 25 minutes, or the swap does not start (nothing is lost then). Sends nothing."));
-  await btnWith(alice.byId("next-action"), "Prepare the swap file").click();
+  assert.match(squash(alice.text("pg-card")), /From then on you have about 25 minutes to deposit, or the swap does not start\. Nothing is lost then\./);
+  await btnWith(alice.byId("pg-card"), "Prepare the swap file").click();
   await alice.flush();
   assert.deepEqual(alice.posted[0], ["/api/action", { id: "prepare", swap: F.SWAP_A }]);
   const bob = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-bob")], wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, status: null } } } }));
-  await btnWith(bob.byId("next-action"), "Choose Alice's file…").click();
+  await btnWith(bob.byId("pg-card"), "Choose Alice's file…").click();
   await bob.flush();
   assert.deepEqual(bob.posted[0], ["/api/action", { id: "join", swap: F.SWAP_B }]);
 });
@@ -308,7 +309,7 @@ test("the approval's line statement is pre-ticked from the record, and still req
     const ticks = page.byId("pg-card").all((n) => n.tag === "input" && n.attrs.type === "checkbox" && String(n.attrs.id).startsWith("ap-stmt-"));
     assert.deepEqual(ticks.map((c) => c.attrs.id), ["ap-stmt-stay_on", "ap-stmt-no_manual_steps", `ap-stmt-${st}`], role);
     assert.deepEqual(ticks.map((c) => c.checked), [false, false, true], role);
-    const go = btnWith(page.byId("pg-card"), "Turn on…");
+    const go = btnWith(page.byId("pg-card"), "Approve…");
     assert.equal(go.disabled, true, "still required: the amount and the other statements are open");
   }
 });
@@ -333,12 +334,15 @@ test("the approval box starts with what the person gives and gets, in coin colou
       c.checked = true;
       await c.fire("change");
     }
-    await btnWith(box, "Turn on…").click();
+    await btnWith(box, "Approve…").click();
     const dlg = page.document.body.all((n) => n.tag === "dialog")[0];
     const lines = dlg.all((n) => n.tag === "p" && n.className.includes("plain")).map((n) => squash(textOf(n)));
     assert.equal(lines[0], `You give ${give}. You get ${get}.`, role);
-    assert.match(lines[1], /^From now on this console does every step of this swap/);
-    await btnWith(dlg, "Yes, turn it on").click();
+    assert.match(lines[1], /^From now on the program does every step of this swap/);
+    assert.doesNotMatch(dlg.textContent, /this console|the buttons below/, "program mode: the dialog says the program and a step sent by hand");
+    assert.equal(dlg.all((n) => n.tag === "h2")[0].textContent, "Approve this swap");
+    assert.equal(page.document.activeElement.attrs.id, "confirm-title", "focus is on the dialog's title, so one Enter never approves");
+    await btnWith(dlg, "Yes, approve").click();
     await page.flush();
     const p = page.posted.find((x) => x[0] === "/api/autopilot");
     assert.equal(p[1].typed, give);
@@ -449,10 +453,12 @@ test("Bob's start screen shows the invitation box between his key and his check:
   assert.ok(t.includes("Your Parano1d address (the NOID comes here)") && t.includes(OWN_NOID));
   assert.ok(t.includes("This swap's Ethereum key (the sender of your lock)") && t.includes(KEY_ADDR));
   assert.ok(t.includes("Do not send coins to it yet: the deposit box shows when the swap is ready."));
-  await btnWith(box, "Save an invitation for Alice…").click();
+  // the stage card holds the two files and the button; the box under Details has the addresses and the warning, and no button of its own
+  assert.equal(btnWith(box, "Save an invitation for Alice…"), null);
+  await btnWith(page.byId("pg-card"), "Save an invitation for Alice…").click();
   await page.flush();
   assert.deepEqual(page.posted[0], ["/api/invitation/save", { swap: F.SWAP_B }]);
-  assert.match(squash(page.text("start")), /Saved\. Send that file to Alice\./);
+  assert.match(squash(page.text("pg-card")), /Saved\. Send that file to Alice\./);
 });
 
 test("Bob's invitation box is drawn only while his key exists and his swap file does not", async () => {

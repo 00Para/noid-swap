@@ -1,7 +1,8 @@
 "use strict";
 /*
  * One tick of one role (scripts/live/tick.sh): `swap-cli tick FILE <nodes> <log start> <reveal tx> --record-noid .. --record-eth .. [--apply] [--closed-by TXID]`.
- * Read-only without --apply (it withholds a spend's parameters). The tick's JSON goes to last-tick-ROLE.json and its stderr to last-tick-ROLE.err in the run
+ * Read-only without --apply (it withholds a spend's parameters). `opts.observeOnly` runs `--apply --observe-only` instead: it records the facts the chains show (phase moves) and
+ * never an intent, an abort or a spend's parameters (swap-cli README, "tick --apply --observe-only"); it is refused by swap-cli while the file holds an intent (exit 1, "observe-only is refused"). The tick's JSON goes to last-tick-ROLE.json and its stderr to last-tick-ROLE.err in the run
  * folder (both opened, and so emptied, before the tool runs: the console reads a half-written file as "being written"); every node answer is recorded under rec/.
  * The result's stdout is the one-screen summary the helper prints, with each ALERT: note and the pending-claim ALARM: note on a line of its own.
  *
@@ -89,7 +90,8 @@ function summaryLines(text) {
   for (const note of notes) if (typeof note === "string" && note.startsWith("ALERT:")) L.push(note);
   for (const note of notes) if (typeof note === "string" && note.startsWith("ALARM: the NOID claim is still pending")) L.push(note);
   L.push(p("intent:", pyDumps(v.intent).slice(0, 300)));
-  L.push(p("applied:", v.events_applied_to_file, "phase_after:", v.phase_after));
+  // an observe-only tick (the program's read loop) wrote facts and decided nothing: not "applied: True" (scripts/live/tick.sh never passes --observe-only, so its wording is unchanged)
+  L.push(p("applied:", v.observe_only === true ? "observe-only" : v.events_applied_to_file, "phase_after:", v.phase_after));
   return L;
 }
 
@@ -111,14 +113,16 @@ function checkExtraArgs(args) {
 /**
  * @param {object} ctx the step context (see README.md)
  * @param {"alice"|"bob"} role
- * @param {{args?: string[], limitMs?: number}} [opts] args: extra flags (`--apply`, `--closed-by TXID`)
+ * @param {{args?: string[], limitMs?: number, observeOnly?: boolean}} [opts] args: extra flags (`--apply`, `--closed-by TXID`); observeOnly: `--apply --observe-only` (no other flag)
  * @returns {Promise<{code:number|null, stdout:string, stderr:string, files:string[]}>}
  */
 function tick(ctx, role, opts = {}) {
   return C.guard(async (out) => {
     C.checkRole(ctx, role);
-    const extra = opts.args || [];
-    checkExtraArgs(extra);
+    const observeOnly = opts.observeOnly === true;
+    if (observeOnly && opts.args && opts.args.length) throw new C.Refusal(2, "tick: observe-only takes no other flag. Nothing was run");
+    const extra = observeOnly ? ["--apply", "--observe-only"] : opts.args || [];
+    if (!observeOnly) checkExtraArgs(extra);
     C.checkTool(ctx, "swapCli");
     const F = C.swapFile(ctx, role);
     C.mkdir700(path.join(ctx.runDir, "rec"));

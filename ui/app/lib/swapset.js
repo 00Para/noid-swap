@@ -430,7 +430,7 @@ class SwapSet {
 
   /** Facts of one swap: role, settings, swap file, phase, active, in_contract, needs_you, until. Never throws. */
   facts(swap) {
-    const f = { swap: swap.id, role: null, settings: null, label: "", phase: null, active: false, in_contract: false, needs_you: false, ended: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
+    const f = { swap: swap.id, role: null, settings: null, label: "", give: null, get: null, phase: null, active: false, in_contract: false, needs_you: false, ended: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
     if (!swap.runner) {
       f.label = "A folder this program did not open";
       return f;
@@ -444,6 +444,9 @@ class SwapSet {
         const noid = microToDec(s.amount_micronoid);
         const eth = weiToDec(s.amount_wei);
         f.label = s.role === "alice" ? `You sell ${noid} NOID for ${eth} ETH` : `You sell ${eth} ETH for ${noid} NOID`;
+        // the two halves the label is made from, for the list's pair: what the person gives and what they get, each with its coin
+        f.give = s.role === "alice" ? { text: noid, coin: "noid" } : { text: eth, coin: "eth" };
+        f.get = s.role === "alice" ? { text: eth, coin: "eth" } : { text: noid, coin: "noid" };
       } else f.label = swap.slot ? "Board offer (not agreed yet)" : "A swap this program cannot read";
       const hasFile = this.swapFileOf(swap, f.role);
       const run = this.runOf(swap);
@@ -481,7 +484,7 @@ class SwapSet {
 
   summary(swap) {
     const f = this.facts(swap);
-    return { swap: f.swap, role: f.role, label: f.label, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at };
+    return { swap: f.swap, role: f.role, label: f.label, give: f.give, get: f.get, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at };
   }
 
   list() {

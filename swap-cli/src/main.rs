@@ -33,7 +33,7 @@ use swap_cli::bundle::{open_bundle, BundleStatus, CheckedBundle};
 use swap_cli::client::{IntentSubmitter, RpcSubmitter};
 use swap_cli::contract_params::{alice_commands, check_object_file, contract_params};
 use swap_cli::engine::{
-    cancel_intent_checked, check_external_close_phase, decide, expected_lock_id, external_close_event, normalize_txid, tick_apply, Action, IntentStatus, Runner,
+    cancel_intent_checked, check_external_close_phase, decide, expected_lock_id, external_close_event, normalize_txid, observe_only_refusal, tick_apply, tick_observe, Action, IntentStatus, Runner,
     INTENT_KINDS,
 };
 use swap_cli::equiv::{verify_receipt, ProcessRunner, VerifyRequest};
@@ -92,7 +92,11 @@ const USAGE: &str = "usage:
   swap-cli secret FILE [--passphrase-env VAR]   (Alice only: the 32-byte secret as 0x-hex, for equiv-prove and the Ethereum reveal)
   swap-cli tick FILE (--noid-fixture FILE | --noid-rpc URL) (--eth-fixture FILE | --eth-rpc URL)
                 [--record-noid FILE] [--record-eth FILE] [--now UNIX (fixtures only)] [--pending-tx 0x..]... [--reveal-tx 0x..] [--apply]
-                [--closed-by TXID] [--accept-producer-concentration] [--single-node-ok]
+                [--closed-by TXID] [--accept-producer-concentration] [--single-node-ok] [--observe-only]
+                (--observe-only, with --apply only: write the facts the observation shows (phase moves, instance gone, lock seen, reorgs, the stored --eth-from-block,
+                 the producer-screen detections and other alerts) and NOTHING a decision records: no intent, no recorded abort, no spend parameters in the output (the action
+                 prints as a read-only tick prints it). Refused when the file holds an intent or a pending action or its history shows an intent was ever decided (run a full --apply then), together with --closed-by,
+                 and without --apply. For a watch that must not freeze a spend before the person has approved it)
                 (--closed-by: record a close made OUTSIDE this tool, e.g. the wallet CLI's recovery close. Needs the transaction confirmed on the node and the
                  instance gone; writes only with --apply; refuses otherwise. Alice: recovery close at h >= D, Bob: claim at h < D)
                 [--eth-from-block N] [--transport tcp|curl] [--curl-path PATH] [--rpc-timeout SECS]
@@ -155,10 +159,11 @@ const USAGE: &str = "usage:
   It is a screen, not a defence.";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 14] = [
+const BOOL_FLAGS: [&str; 15] = [
     "dry-run",
     "i-understand-this-is-the-key",
     "apply",
+    "observe-only",
     "submit",
     "fast-kdf",
     "cancel",
@@ -654,12 +659,16 @@ fn intent_json(status: &IntentStatus) -> serde_json::Value {
 
 /// The action as printed. A spending action of the intent ledger ([`INTENT_KINDS`]) that no intent backs
 /// (`backed == false`: a read-only command, or a tick that recorded none) prints its kind only (REVIEW-3 F3).
-fn printable_action(action: &Action, backed: bool) -> Res<serde_json::Value> {
+fn printable_action(action: &Action, backed: bool, observe_only: bool) -> Res<serde_json::Value> {
     if !backed && INTENT_KINDS.contains(&action.kind()) {
         return Ok(serde_json::json!({
             "kind": action.kind(),
             "parameters": "withheld",
-            "note": "a read-only tick records nothing; run tick --apply to record this intent and print its parameters",
+            "note": if observe_only {
+                "an observe-only tick records no intent; run a full tick --apply to record this intent and print its parameters"
+            } else {
+                "a read-only tick records nothing; run tick --apply to record this intent and print its parameters"
+            },
         }));
     }
     serde_json::to_value(action).map_err(|e| e.to_string())
@@ -668,9 +677,22 @@ fn printable_action(action: &Action, backed: bool) -> Res<serde_json::Value> {
 fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     let path = PathBuf::from(path);
     let apply = flags.contains_key("apply");
+    let observe_only = flags.contains_key("observe-only");
+    if observe_only && !apply {
+        return Err("--observe-only is a mode of --apply (it writes the facts of the observation and no intent): give --apply with it".into());
+    }
+    if observe_only && flags.contains_key("closed-by") {
+        return Err("--observe-only cannot be combined with --closed-by: a close made outside the tool is recorded by a full `tick --apply --closed-by`".into());
+    }
     // Only a command that saves needs the lock (REVIEW-2 F8); a read-only tick never writes.
     let _lock = if apply { Some(lock_swap_file(&path)?) } else { None };
     let file = SwapFile::load(&path).map_err(|e| e.to_string())?;
+    // Before any node is asked and anything is written beside the file: a held intent needs the full `--apply`.
+    if observe_only {
+        if let Some(why) = observe_only_refusal(&file) {
+            return Err(why);
+        }
+    }
     // M2.5d: `--closed-by TXID` records a close made outside this tool. The phase is checked first (no node needed).
     let closed_by = match flags.get("closed-by") {
         None => None,
@@ -701,7 +723,8 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
         work.apply(&event, now).map_err(|e| e.to_string())?;
         closed_event = Some(event);
     }
-    let outcome = tick_apply(&mut work, noid, eth, now, apply).map_err(|e| e.to_string())?;
+    // Observe-only: the same events and facts as `--apply`, saved; no intent, no recorded abort (`tick_observe`).
+    let outcome = if observe_only { tick_observe(&mut work, noid, eth, now)? } else { tick_apply(&mut work, noid, eth, now, apply).map_err(|e| e.to_string())? };
     if apply {
         work.save(&path).map_err(|e| e.to_string())?;
     }
@@ -761,8 +784,11 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     // REVIEW-3 F3: a read-only tick records nothing, so it must not hand out the parameters of a spend. An operator who
     // acts on them and then acts again on the next tick's fresh ones sends twice (a double lock). A held intent never
     // reaches here as a spend (the ledger turned it into `wait`); `claim_noid` is not a ledger kind (`swap-cli claim`).
-    let recorded = apply || !matches!(outcome.intent, IntentStatus::None | IntentStatus::Resolved(_));
-    let action_json = printable_action(&decision.action, recorded)?;
+    let recorded = (apply && !observe_only) || !matches!(outcome.intent, IntentStatus::None | IntentStatus::Resolved(_));
+    let action_json = printable_action(&decision.action, recorded, observe_only)?;
+    if observe_only {
+        decision.notes.push("observe-only: the facts above were written to the swap file; no intent was recorded and no spend parameters are printed; a full `tick --apply` decides and records the action".to_string());
+    }
     let v = serde_json::json!({
         "now": now,
         "sources": obs.sources,
@@ -788,6 +814,7 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
             "hashlock": format!("0x{}", hex::encode(file.public.hashlock)),
         },
         "events_applied_to_file": apply,
+        "observe_only": observe_only,
         "action_executed": false,
         "phase_after": if apply { work.phase.name() } else { file.phase.name() },
     });
@@ -835,7 +862,7 @@ fn claim(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
             "claim": "not attempted: the engine's action is not claim_noid",
             "sources": obs.sources,
             // Nothing is recorded here: a ledger spend's parameters stay withheld (REVIEW-3 F3).
-            "action": printable_action(&decision.action, false)?,
+            "action": printable_action(&decision.action, false, false)?,
             "events": decision.events,
             "notes": decision.notes,
             "submitted": false,

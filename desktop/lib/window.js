@@ -7,6 +7,9 @@
 
 const { originOf } = require("./hardening");
 
+// The ground of the page (the program's own dark colour): both windows are painted with it from the first frame.
+const WINDOW_BACKGROUND = "#050908";
+
 /** The exact `webPreferences` of every window of the program (build spec 7.3). */
 function baseWebPreferences({ isPackaged, partition, preload, devTools }) {
   if (typeof partition !== "string" || !partition || partition.startsWith("persist:")) throw new Error("window: the partition must be a named in-memory one (no persist:)");
@@ -48,7 +51,7 @@ function isReloadKey(input) {
 const GONE_PAGE =
   "data:text/html;charset=utf-8," +
   encodeURIComponent(
-    '<!doctype html><meta charset="utf-8"><title>No1d Swap</title><body style="font-family:sans-serif;margin:3em;max-width:36em;line-height:1.5">' +
+    '<!doctype html><meta charset="utf-8"><title>No1d Swap</title><body style="font-family:system-ui,sans-serif;margin:3em;max-width:36em;line-height:1.5;background:#050908;color:#e6edea">' +
       "<h1>This window stopped working</h1><p>Quit No1d Swap from its tray icon or its menu, then open it again.</p></body>"
   );
 
@@ -84,6 +87,8 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
     minHeight: 600,
     show: false,
     title: "No1d Swap",
+    // the page's ground, so that no white shows before it is drawn
+    backgroundColor: WINDOW_BACKGROUND,
     webPreferences: baseWebPreferences({ isPackaged, partition: MAIN_PARTITION, preload: undefined }),
   });
   const wc = win.webContents;
@@ -170,4 +175,4 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   };
 }
 
-module.exports = { createMainWindow, baseWebPreferences, isReloadKey, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT };
+module.exports = { createMainWindow, baseWebPreferences, isReloadKey, WINDOW_BACKGROUND, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT };

@@ -35,6 +35,9 @@
     <div id="pg-root" class="pg" hidden></div>
     <div id="bd-root" class="bd" hidden></div>
     <section id="pg-card" class="sc-card" tabindex="-1" aria-label="This swap, step by step" hidden></section>
+    <aside id="pg-ticket" class="tk" aria-label="This swap: what you give and what you get" hidden></aside>
+    <section id="pg-picture" class="tl" aria-labelledby="pg-h-picture" hidden></section>
+
     <div id="op-view">
     <section id="alarms" class="alarms" aria-label="Alarms" aria-live="polite"></section>
     <p id="board-line" class="margin-line" aria-live="polite" hidden></p>
@@ -67,6 +70,8 @@
       or a transaction opening. Spending commands are shown to be copied into your own terminal. See <a href="/console">the chain-polling console</a>.
     </p>
   </footer>
+
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
   <script src="/phases.js"></script>
   <script src="/enginetext.js"></script>

@@ -37,6 +37,7 @@
     cardLook: "", // program mode: the reasons the card showed last time it said "needs a look" (Details opens when they change)
     detailsFilled: false, // program mode: the swap page has been moved into the "Details" fold
     cardWas: false, // program mode: whether the card was drawn on the last render
+    mainPicture: null, // program mode: { act } while "The two locks, from now" is drawn on the main view (redrawn every second)
   };
 
   // ------------------------------------------------------------ DOM helpers
@@ -56,6 +57,9 @@
     }
     return e;
   }
+  // the icons are built by actions.js (one table); an icon is only decoration, so a page without that script simply has none
+  const icon = (name, extra) => (window.NoidActions && window.NoidActions.icon ? window.NoidActions.icon(name, extra) : null);
+  const coinGlyph = (coin, extra) => (window.NoidActions && window.NoidActions.coinGlyph ? window.NoidActions.coinGlyph(coin, extra) : null);
   const clear = (n) => {
     while (n.firstChild) n.removeChild(n.firstChild);
     return n;
@@ -74,14 +78,42 @@
     return (m[1] || "") + body.slice(0, 8) + "…" + body.slice(-6);
   }
 
-  function copyButton(full, label, text) {
+  function copyButton(full, label, text, opts) {
     const shown = text || short(full);
-    const b = el("button", { type: "button", class: "copy", title: String(full), "aria-label": `Copy ${label || "value"}: ${full}` }, el("span", { class: "txt", text: shown }), el("span", { class: "glyph", "aria-hidden": "true", text: "⧉" }));
-    b.addEventListener("click", () => copyText(String(full), b));
+    if (opts && opts.icon) {
+      // the copy icon and the words (or the shortened value); the flash of "copied" goes in the empty glyph beside them
+      const t = el("button", { type: "button", class: opts.mono ? "copy-txt addr" : "copy-txt", title: String(full), "aria-label": `Copy ${label || "value"}: ${full}` }, icon("copy"), el("span", { class: "txt", text: shown }), el("span", { class: "glyph", "aria-hidden": "true", dataset: { rest: "" } }));
+      t.addEventListener("click", () => copyText(String(full), t, label));
+      return t;
+    }
+    // the drawn copy icon (never a text glyph, which comes from whatever system font has it); the glyph beside it is empty until a copy answers "copied"
+    const b = el("button", { type: "button", class: "copy", title: String(full), "aria-label": `Copy ${label || "value"}: ${full}` }, el("span", { class: "txt", text: shown }), icon("copy"), el("span", { class: "glyph", "aria-hidden": "true", dataset: { rest: "" } }));
+    b.addEventListener("click", () => copyText(String(full), b, label));
     return b;
   }
 
-  async function copyText(text, btn) {
+  /**
+   * A short word at the foot of the window that says what was done ("Amount copied: 5.009", "Settings saved"): a paragraph in the live region #toasts, gone after 2.4 s. It only confirms: it
+   * never carries a warning (those are safety boxes) and never a secret (the figure of an amount is the one shown on the page).
+   */
+  const TOAST_MS = 2400;
+  function toast(text) {
+    const box = $("toasts");
+    if (!box || !text) return;
+    const t = el("p", { class: "toast" }, icon("check"), el("span", { text: String(text) }));
+    box.appendChild(t);
+    while (box.children.length > 3) box.removeChild(box.children[0]);
+    setTimeout(() => t.remove(), TOAST_MS);
+  }
+  /** What a copy says, by what was copied: the figure of an amount, "Address copied" for an address, else "Copied". */
+  function copiedWords(label, full) {
+    const l = String(label || "");
+    if (/amount/i.test(l)) return `Amount copied: ${full}`;
+    if (/address|root|contract|key/i.test(l)) return "Address copied";
+    return "Copied";
+  }
+
+  async function copyText(text, btn, label) {
     let ok = false;
     try {
       await navigator.clipboard.writeText(text);
@@ -98,12 +130,13 @@
       }
       ta.remove();
     }
+    if (ok) toast(copiedWords(label, text));
     const g = btn.querySelector(".glyph");
     if (g) {
       g.textContent = ok ? "✓ copied" : "✗ copy failed";
       g.classList.add("flash");
       setTimeout(() => {
-        g.textContent = "⧉";
+        g.textContent = g.dataset && g.dataset.rest !== undefined ? g.dataset.rest : "";
         g.classList.remove("flash");
       }, 1400);
     }
@@ -343,6 +376,7 @@
   function renderAction(view) {
     const detailsWasOpen = !!$("next-action").querySelector("details.due-details[open]");
     const root = clear($("next-action"));
+    root.hidden = false; // the first screen of a swap hides it while the card holds the step
     root.classList.remove("act", "warn-rail", "attn-rail", "danger-rail", "ok-rail", "two");
     const a = view.action;
     const aborted = !!(view.phase && view.phase.id === "aborted");
@@ -493,7 +527,7 @@
   function commandBlock(c) {
     const cls = c.kind === "send" ? "send" : c.kind === "manual" ? "manual" : "dry";
     const tag = c.kind === "send" ? chip("warn", "moves funds, your go-ahead") : c.kind === "manual" ? chip("quiet", "manual step") : chip("ok", "sends nothing");
-    return el("div", { class: "cmd " + cls }, el("div", { class: "cmd-head" }, el("strong", { text: c.label }), tag, el("button", { type: "button", class: "btn sm", "aria-label": `Copy command: ${c.label}`, onclick: (ev) => copyText(c.cmd, ev.currentTarget) }, el("span", { class: "glyph", text: "⧉ Copy" }))), el("pre", { text: c.cmd }), c.note ? el("div", { class: "note", text: c.note }) : null);
+    return el("div", { class: "cmd " + cls }, el("div", { class: "cmd-head" }, el("strong", { text: c.label }), tag, el("button", { type: "button", class: "btn sm", "aria-label": `Copy command: ${c.label}`, onclick: (ev) => copyText(c.cmd, ev.currentTarget) }, icon("copy"), el("span", { class: "glyph", text: "Copy", dataset: { rest: "Copy" } }))), el("pre", { text: c.cmd }), c.note ? el("div", { class: "note", text: c.note }) : null);
   }
 
   function dryBlock(d) {
@@ -617,110 +651,188 @@
   const TICK_STEPS = [60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800];
   const tickText = (s) => (s < 3600 ? `+${s / 60} min` : `+${Math.floor(s / 3600)} h${s % 3600 ? ` ${(s % 3600) / 60} min` : ""}`);
 
-  function renderPicture(view) {
-    const root = clear($("picture"));
-    const p = view.picture;
-    if (!p) return;
-    const act = $("next-action").classList.contains("act");
+  // the plain words of a mark on the main view, by role: what happens there (the technical names stay in Details, whose picture names the rows as the Deadlines list does)
+  const MARK_PLAIN = {
+    alice: { reveal_start_by: "Reveal by", t_reveal: "Bob's refund opens", d: "Your NOID can come back" },
+    bob: { t_reveal: "Your ETH can come back", claim_target: "Collect the NOID by", d: "Alice's refund opens" },
+  };
+  // a track that has no line to draw says so in a word, on the inner side of its track
+  const TRACK_PLAIN = { none: "not locked yet", sent: "sent, not confirmed yet", pending: "locked, not final", final: "locked and final", secret_public: "secret public: can be claimed at any moment", closing: "being closed, not final yet", closed: "closed" };
+  const LABEL_H = 30; // two lines of 12 px
+  const LABEL_NEAR = 14; // from the track line to the near edge of a label
+  const LABEL_PITCH = LABEL_H + 6;
+  const areaOf = (n) => (n ? LABEL_NEAR + n * LABEL_PITCH - 6 : 0);
+
+  /**
+   * The two locks on one axis, into `root` (the section #pg-picture on the main view, the block #picture under Details). The SVG is built at the width it is shown at, so that its text
+   * stays 12 px; under 900 px (CSS) it is replaced by the same marks as a list in time order with the two lock lines running down beside it. The labels are placed by the view model's
+   * placeMarks (no two overlap, no leader runs through one). Returns false when the view has no picture (root is then empty).
+   * opts: { main: the main view's drawing (plain words, its own heading and legend), act: the amber band and the amber mark of the step that is due }.
+   */
+  function drawPicture(root, view, opts) {
+    const main = !!(opts && opts.main);
+    const act = !!(opts && opts.act);
+    clear(root);
+    const p = view && view.picture;
+    if (!p) return false;
     const rowOf = (id) => view.deadlines.find((d) => d.id === id);
     const countdown = (id) => {
       const r = rowOf(id);
       return r ? dlValue(r)[0] : "";
     };
-    const mname = (m) => `${m.short}${m.estimate ? " (expected)" : ""}`;
-    const mtext = (m) => `${mname(m)}  ${countdown(m.row_id)}`; // two spaces (the CSS keeps them), not a dot
+    // "in 22 min", "in about 2 h 2 min": the countdown of the row, as it is read in a sentence
+    const when = (id) => {
+      const c = countdown(id);
+      return /^≈ /.test(c) ? `in about ${c.slice(2)}` : `in ${c}`;
+    };
+    // the main view leaves out the two cutoffs of the reveal while the reveal's own "start by" is drawn (they stay in Details and in Deadlines)
+    const hasStart = p.marks.some((m) => m.row_id === "reveal_start_by");
+    const marks = main && hasStart ? p.marks.filter((m) => m.row_id !== "reveal_cutoff" && m.row_id !== "reveal_resend_cutoff") : p.marks;
+    const mname = (m) => `${(main && MARK_PLAIN[view.role] && MARK_PLAIN[view.role][m.row_id]) || m.short}${m.estimate ? " (expected)" : ""}`;
+    const msub = (m) => (main ? when(m.row_id) : countdown(m.row_id));
     const endId = (t) => (t.chain === "noid" ? "d" : "t_reveal");
     const endName = (t) => (t.chain === "noid" ? "D" : "T_reveal");
-    const endWord = (t) => {
-      const r = rowOf(endId(t));
-      return r && r.state === "passed" ? `${endName(t)} passed` : "no end ahead";
-    };
+    const bandMark = act && p.band ? marks.find((m) => m.at_s === p.band.to_s) || null : null;
 
-    root.appendChild(el("div", { class: "card-head" }, el("h2", { id: "h-picture", text: "The two locks, from now" }), el("div", { class: "right" }, p.stale ? chip("attn", "from an old tick") : null)));
+    // the sentence: the drawing's label for a screen reader and, on the main view, the line under it
+    const word = (t) => (main ? TRACK_PLAIN[t.state] : TRACK_WORD[t.state]);
+    const trackSentence = (t) => `${CHAIN_NAME[t.chain]}: ${word(t)}${!main && t.end_s !== null ? `, until ${endName(t)} (${countdown(endId(t))})` : ""}`;
+    const sentence = `${main ? "The two locks from now" : "Two locks from now"}${p.stale ? (main ? ", from an old reading" : ", from an old tick") : ""}. ${p.tracks.map(trackSentence).join(". ")}. ${marks.map((m) => `${mname(m)} ${main ? when(m.row_id) : countdown(m.row_id)}`).join("; ")}.`;
 
-    // the sentence of the SVG's label
-    const trackSentence = (t) => `${CHAIN_NAME[t.chain]}: ${TRACK_WORD[t.state]}${t.end_s !== null ? `, until ${endName(t)} (${countdown(endId(t))})` : ""}`;
-    const sentence = `Two locks from now${p.stale ? ", from an old tick" : ""}. ${p.tracks.map(trackSentence).join(". ")}. ${p.marks.map((m) => `${mname(m)} ${countdown(m.row_id)}`).join("; ")}.`;
-
-    // ---- wide: the SVG, built at the width it is shown at so its text stays 12 px
-    const W = Math.max(640, Math.min(1180, root.clientWidth || 1000));
-    const plotL = W < 800 ? 100 : 130;
-    const plotR = W - (W < 800 ? 120 : 150);
-    const x = (s) => plotL + (s / p.span_s) * (plotR - plotL);
-    const CW = 7.3; // mono 12 px, per character
-    const placed = [];
-    for (const m of p.marks) {
-      const mx = x(m.at_s);
-      const w = mtext(m).length * CW;
-      const cands = [
-        { x0: mx + 5, x1: mx + 5 + w },
-        { x0: mx - 5 - w, x1: mx - 5 },
-      ].filter((c) => c.x0 >= 0 && c.x1 <= W);
-      const clamped = Math.max(0, Math.min(mx + 5, W - w));
-      cands.push({ x0: clamped, x1: clamped + w });
-      let pick = null;
-      for (let r = 0; r < 14 && !pick; r++) {
-        for (const c of cands) {
-          const clashRow = placed.some((q) => q.row === r && c.x0 - 18 < q.x1 && c.x1 + 18 > q.x0);
-          const crossedBelow = placed.some((q) => q.row > r && mx > q.x0 - 3 && mx < q.x1 + 3); // this leader would run through a label below it
-          const crossedAbove = placed.some((q) => q.row < r && q.mx > c.x0 - 3 && q.mx < c.x1 + 3); // a leader above would run through this label
-          if (!clashRow && !crossedBelow && !crossedAbove) {
-            pick = { ...c, row: r };
-            break;
-          }
-        }
-      }
-      if (!pick) pick = { ...cands[0], row: placed.length };
-      placed.push({ ...pick, mx, m });
+    // ---- the frame
+    if (main) {
+      root.appendChild(
+        el(
+          "div",
+          { class: "tl-head" },
+          el("h2", { id: "pg-h-picture", text: "The two locks, from now" }),
+          p.stale
+            ? chip("attn", "from an old reading")
+            : el("p", { class: "tl-legend", "aria-hidden": "true" }, el("span", {}, el("i"), "locked and final"), el("span", {}, el("i", { class: "dot" }), "locked, not final"), el("span", {}, el("i", { class: "dash" }), "not locked yet"), bandMark ? el("span", {}, el("i", { class: "band" }), "your time to act") : null)
+        )
+      );
+    } else {
+      root.appendChild(el("div", { class: "card-head" }, el("h2", { id: "h-picture", text: "The two locks, from now" }), el("div", { class: "right" }, p.stale ? chip("attn", "from an old tick") : null)));
     }
-    const rows = placed.reduce((n, q) => Math.max(n, q.row + 1), 1);
-    const rowY = (r) => 16 + r * 18;
-    const y1 = rowY(rows - 1) + 34;
-    const y2 = y1 + 46;
-    const axisY = y2 + 30;
+    const plot = el("div", { class: "pic" });
+    root.appendChild(plot);
+
+    // ---- wide: the SVG, at the width of its box
+    const avail = plot.clientWidth || (main ? 616 : 1000);
+    const W = Math.max(480, Math.min(1180, avail));
+    const plotL = W < 560 ? 76 : 88;
+    const plotR = W - 34;
+    const x = (s) => plotL + (s / p.span_s) * (plotR - plotL);
+    const items = marks.map((m) => ({ id: m.row_id, x: x(m.at_s), w: Math.max(V.labelWidth(mname(m), true), V.labelWidth(msub(m), false)), track: m.chain || (m.row_id === "d" || m.row_id === "claim_target" ? "noid" : "eth") }));
+    // a track that is not locked, or has no line, says so in its inner row 0
+    const wordOf = {};
+    const fixed = [];
+    for (const t of p.tracks) {
+      if (t.state === "none" || t.state === "sent" || t.state === "secret_public" || t.state === "closing" || t.state === "closed") {
+        wordOf[t.chain] = word(t);
+        fixed.push({ track: t.chain, x0: plotL + 6, x1: plotL + 6 + V.labelWidth(word(t), false) });
+      }
+    }
+    const placed = V.placeMarks(items, { left: plotL - 4, right: W - 2 }, fixed);
+    const R = placed.rows;
+    const midN = R.noid.inner;
+    const midE = R.eth.inner;
+    const yN = 22 + areaOf(R.noid.outer);
+    const yE = yN + Math.max(60, areaOf(midN) + areaOf(midE) + (midN || midE ? 6 : 0));
+    const axisY = yE + areaOf(R.eth.outer) + 26;
     const H = axisY + 30;
     const svg = svgEl("svg", { class: "pic-svg", width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": sentence });
-    // the send band (amber only while the strip is "your move") sits behind everything
-    if (act && p.band) svg.appendChild(svgEl("rect", { class: "band", x: plotL, y: y1 - 18, width: Math.max(2, x(p.band.to_s) - plotL), height: y2 - y1 + 36 }));
-    // axis with relative ticks (no wall-clock time)
+    const trackY = { noid: yN, eth: yE };
+    // the grid and the axis, with relative ticks (no wall-clock time)
     const step = TICK_STEPS.find((s) => p.span_s / s <= 6) || TICK_STEPS[TICK_STEPS.length - 1];
-    const axis = svgEl("g", { class: "axis" }, svgEl("line", { x1: plotL, y1: axisY, x2: plotR, y2: axisY }));
-    for (let s = step, n = 0; s <= p.span_s && n < 12; s += step, n++) axis.append(svgEl("line", { class: "tick", x1: x(s), y1: axisY, x2: x(s), y2: axisY + 5 }), svgEl("text", { class: "sub", x: x(s), y: axisY + 20, "text-anchor": "middle" }, tickText(s)));
-    svg.appendChild(axis);
-    // the two tracks
-    p.tracks.forEach((t, i) => {
-      const y = i === 0 ? y1 : y2;
-      svg.appendChild(svgEl("text", { class: "name c-" + t.chain, x: 0, y: y + 5 }, CHAIN_NAME[t.chain]));
-      const ex = t.end_s !== null ? x(t.end_s) : null;
-      if (t.state === "none" || t.state === "sent") {
-        svg.appendChild(svgEl("rect", { class: "lock none", x: plotL, y: y - 7, width: ex !== null ? Math.max(2, ex - plotL) : 80, height: 14, rx: 2 }));
-        svg.appendChild(svgEl("text", { class: "sub", x: plotL + 4, y: y + 24 }, TRACK_WORD[t.state]));
-      } else if (t.state === "secret_public" || t.state === "closing" || t.state === "closed") {
-        svg.appendChild(svgEl("text", { class: "sub", x: plotL + 6, y: y + 4 }, TRACK_WORD[t.state]));
-      } else if (ex === null) {
-        svg.appendChild(svgEl("text", { class: "sub", x: plotL + 6, y: y + 4 }, endWord(t)));
-      } else {
-        svg.appendChild(svgEl("line", { class: `lock ${t.state === "final" ? "fin" : "pend"} ${t.chain}`, x1: plotL, y1: y, x2: ex, y2: y }));
-      }
-    });
-    // marks: a leader from the label down to the axis, then the label
-    for (const q of placed) svg.appendChild(svgEl("line", { class: "mk" + (q.m.estimate ? " est" : ""), x1: q.mx, y1: rowY(q.row) + 4, x2: q.mx, y2: axisY }));
-    for (const q of placed) {
-      const anchorEnd = q.x1 < q.mx;
-      svg.appendChild(svgEl("text", { class: "ml" + (q.m.estimate ? " est" : ""), x: anchorEnd ? q.x1 : q.x0, y: rowY(q.row), "text-anchor": anchorEnd ? "end" : "start" }, mtext(q.m)));
+    const ticks = [];
+    for (let s = step, n = 0; s <= p.span_s && n < 12; s += step, n++) if (x(s) - plotL >= 36) ticks.push(s);
+    for (const s of ticks) svg.appendChild(svgEl("line", { class: "grid", x1: x(s), y1: yN - 16, x2: x(s), y2: axisY }));
+    // the band sits behind the lines (amber only while the swap waits on the person): on the track of the step that is due, from now to its deadline
+    // (drawn whenever the strip is "your move", as before the new look; on the track of the mark it ends at when that mark is drawn, else across both)
+    if (act && p.band) {
+      const by = bandMark ? trackY[bandMark.chain] : undefined;
+      svg.appendChild(svgEl("rect", { class: "band", x: plotL, y: by === undefined ? yN - 9 : by - 9, width: Math.max(2, x(p.band.to_s) - plotL), height: by === undefined ? yE - yN + 18 : 18 }));
     }
-    // the now cursor, labelled under the axis
-    svg.appendChild(svgEl("line", { class: "cursor", x1: plotL, y1: y1 - 22, x2: plotL, y2: axisY }));
-    svg.appendChild(svgEl("text", { class: "now", x: plotL, y: axisY + 20, "text-anchor": "middle" }, "now"));
+    svg.appendChild(svgEl("line", { class: "axis", x1: plotL, y1: axisY, x2: plotR, y2: axisY }));
+    for (const s of ticks) svg.appendChild(svgEl("text", { class: "tk-t", x: x(s), y: axisY + 18, "text-anchor": "middle" }, tickText(s)));
+    // the two tracks: a name, the line of the lock by its state, and the word of a track that has no line
+    for (const t of p.tracks) {
+      const y = trackY[t.chain];
+      svg.appendChild(svgEl("text", { class: "name c-" + t.chain, x: 0, y: y + 4 }, t.chain === "noid" ? "NOID" : "ETH"));
+      svg.appendChild(svgEl("text", { class: "sub", x: 0, y: y + 20 }, CHAIN_NAME[t.chain]));
+      const ex = t.end_s !== null ? x(t.end_s) : null;
+      if (t.state === "none" || t.state === "sent") svg.appendChild(svgEl("line", { class: `lock ${t.state} ${t.chain}`, x1: plotL, y1: y, x2: ex !== null ? Math.max(plotL + 2, ex) : plotL + 80, y2: y }));
+      else if (t.state === "final" || t.state === "pending") {
+        if (ex !== null) svg.appendChild(svgEl("line", { class: `lock ${t.state === "final" ? "fin" : "pend"} ${t.chain}`, x1: plotL, y1: y, x2: ex, y2: y }));
+        else {
+          const r = rowOf(endId(t));
+          svg.appendChild(svgEl("text", { class: "lbl", x: plotL + 6, y: y + 4 }, r && r.state === "passed" ? `${endName(t)} passed` : "no end ahead"));
+        }
+      }
+      // a lock that is not there yet says so beside its dashed line (on the inner side); one that has no line any more says so where its line was
+      if (wordOf[t.chain]) svg.appendChild(svgEl("text", { class: "lbl", x: plotL + 6, y: t.state === "none" || t.state === "sent" ? (t.chain === "noid" ? yN + LABEL_NEAR + 11 : yE - LABEL_NEAR - 4) : y + 4 }, wordOf[t.chain]));
+    }
+    // the marks: an upright on the line, a leader to a label that is not in the nearest row, then the label (two lines: what happens there, and when)
+    const boxTop = (pl) => {
+      const outer = pl.lane === "outer";
+      if (pl.track === "noid") return outer ? yN - LABEL_NEAR - pl.row * LABEL_PITCH - LABEL_H : yN + LABEL_NEAR + pl.row * LABEL_PITCH;
+      return outer ? yE + LABEL_NEAR + pl.row * LABEL_PITCH : yE - LABEL_NEAR - pl.row * LABEL_PITCH - LABEL_H;
+    };
+    const placeOf = (m) => placed.places.find((q) => q.id === m.row_id);
+    for (const m of marks) {
+      const pl = placeOf(m);
+      const y = trackY[pl.track];
+      svg.appendChild(svgEl("line", { class: "mk" + (m.estimate ? " est" : ""), x1: x(m.at_s), y1: y - 9, x2: x(m.at_s), y2: y + 9 }));
+      if (pl.stem !== null) {
+        const top = boxTop(pl);
+        const nearEdge = (pl.track === "noid") === (pl.lane === "outer") ? top + LABEL_H : top;
+        svg.appendChild(svgEl("line", { class: "lead", x1: pl.stem, y1: nearEdge >= y ? y + 9 : y - 9, x2: pl.stem, y2: nearEdge }));
+      }
+    }
+    for (const m of marks) {
+      const pl = placeOf(m);
+      const top = boxTop(pl);
+      const end = pl.anchor === "end";
+      const tx = end ? pl.x1 : pl.x0;
+      const due = m === bandMark;
+      svg.appendChild(svgEl("text", { class: "ml" + (due ? " due" : "") + (m.estimate ? " est" : ""), x: tx, y: top + 12, "text-anchor": end ? "end" : "start" }, mname(m)));
+      svg.appendChild(svgEl("text", { class: "when" + (due ? " due" : ""), x: tx, y: top + 27, "text-anchor": end ? "end" : "start" }, msub(m)));
+    }
+    svg.appendChild(svgEl("line", { class: "cursor", x1: plotL, y1: yN - 16, x2: plotL, y2: axisY }));
+    svg.appendChild(svgEl("text", { class: "now", x: plotL, y: axisY + 18, "text-anchor": "middle" }, "now"));
 
-    // ---- narrow: the same marks and track ends as a list in time order
-    const list = el("ol", { class: "pic-list" });
-    list.appendChild(el("li", {}, el("span", { class: "t", text: "now" }), p.stale ? el("span", { text: "from an old tick" }) : null));
-    for (const t of p.tracks) list.appendChild(el("li", { class: "track " + t.chain }, el("span", { class: "t", text: CHAIN_NAME[t.chain] }), el("span", { text: `${TRACK_WORD[t.state]}${t.end_s !== null ? `, until ${endName(t)}` : ""}` })));
-    for (const m of p.marks) list.appendChild(el("li", { class: m.estimate ? "est" : null }, el("span", { class: "t", text: countdown(m.row_id) }), el("span", { text: mname(m) })));
+    // ---- narrow: the same marks in time order, with the two lock lines running down beside them, each ending at its own mark
+    const list = el("ol", { class: "pic-list", "aria-label": "The two locks, in time order" });
+    const live = { noid: true, eth: true };
+    const stateClass = (t) => (t.state === "final" ? "" : t.state === "pending" ? "pending" : t.state === "none" || t.state === "sent" ? "none" : "gone");
+    const railsFor = (endsChain) => {
+      const r = el("span", { class: "rails", "aria-hidden": "true" });
+      for (const t of p.tracks) {
+        const sc = stateClass(t);
+        if (!live[t.chain] || sc === "gone") continue;
+        const ends = endsChain === t.chain;
+        r.appendChild(el("i", { class: [t.chain, sc, ends ? "end" : ""].filter(Boolean).join(" ") }));
+        if (ends) live[t.chain] = false;
+      }
+      return r;
+    };
+    const item = (cls, whenText, whatText, endsChain) => el("li", { class: cls || null }, railsFor(endsChain), el("span", { class: "tx" }, el("span", { class: "when", text: whenText }), el("span", { class: "what", text: whatText })));
+    list.appendChild(item("now", "now", p.stale ? (main ? "from an old reading" : "from an old tick") : "as the chains show it", null));
+    for (const t of p.tracks) if (wordOf[t.chain]) list.appendChild(item("word " + t.chain, CHAIN_NAME[t.chain], wordOf[t.chain], null));
+    for (const m of marks) {
+      const endsHere = p.tracks.some((t) => t.chain === m.chain && t.end_s !== null && t.end_s === m.at_s);
+      list.appendChild(item([m === bandMark ? "due" : "", m.estimate ? "est" : ""].filter(Boolean).join(" "), msub(m), mname(m), endsHere ? m.chain : null));
+    }
+    plot.appendChild(svg);
+    plot.appendChild(list);
+    if (main) root.appendChild(el("p", { class: "tl-note", text: sentence }));
+    else root.appendChild(el("p", { class: "dim pic-key", text: "Solid: locked and final. Dotted: locked, not final. Dashed: not locked yet, sent but not confirmed, or expected. No line: the secret is public, or the lock is being closed or closed (the words say which). Every figure is the one in Deadlines below; the axis only places it." }));
+    return true;
+  }
 
-    root.appendChild(el("div", { class: "pic" }, svg, list));
-    root.appendChild(el("p", { class: "dim pic-key", text: "Solid: locked and final. Dotted: locked, not final. Dashed: not locked yet, sent but not confirmed, or expected. No line: the secret is public, or the lock is being closed or closed (the words say which). Every figure is the one in Deadlines below; the axis only places it." }));
+  function renderPicture(view) {
+    drawPicture($("picture"), view, { act: $("next-action").classList.contains("act") });
   }
 
   // ------------------------------------------------------------ render: timeline & explainers
@@ -836,7 +948,7 @@
     }
     for (const [g, items] of groups) {
       const box = el("div", { class: "rc-group" }, el("div", { class: "label", text: g }));
-      for (const r of items) box.appendChild(el("div", { class: "rc" }, el("span", { class: "l", text: r.label }), r.plain ? el("span", { class: r.ok === false ? "attn" : "", text: r.value }) : copyButton(r.value, r.label)));
+      for (const r of items) box.appendChild(el("div", { class: "rc" }, el("span", { class: "l", text: r.label }), r.plain ? el("span", { class: r.ok === false ? "attn" : "", text: r.value }) : copyButton(r.value, r.label, undefined, state.program ? { icon: true, mono: true } : undefined)));
       root.appendChild(box);
     }
   }
@@ -1001,6 +1113,10 @@
     document.title = kind === "join" ? "Join a swap, No1d Swap" : "Start a swap, No1d Swap";
   }
 
+  // What this page shows and never shows: in program mode it is the foot of the list and the forms, and inside the "Details" fold on a swap's page.
+  const PROGRAM_BACKUP = "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough.";
+  const PROGRAM_NOTE = "This page shows what the program reads from a swap's run folder and from the chains. It never shows a secret, a key, a passphrase or a recovery code: those are shown and typed only in the program's own windows. Everything that moves coins needs a dry run, the engine's decision and a typed confirmation, and every action is written to the swap's audit log.";
+
   // ------------------------------------------------------------ program mode: screens
   function renderProgramStartScreen() {
     state.view = null;
@@ -1065,6 +1181,12 @@
     state.swap = id;
     state.screen = "swap";
     await load(true);
+    // focus goes to the swap's title in the breadcrumb (as New swap and Settings put it on their heading), so that a keyboard user starts at the top of this swap, not on the page
+    const t = $("pg-swapbar") ? $("pg-swapbar").querySelector(".pg-label") : null;
+    if (t && t.focus) {
+      t.setAttribute("tabindex", "-1");
+      t.focus();
+    }
   }
 
   async function goScreen(screen) {
@@ -1124,10 +1246,9 @@
     const bar = clear($("pg-swapbar"));
     const s = ((state.program && state.program.swaps) || []).find((x) => x && x.swap === state.swap) || null;
     bar.hidden = false;
-    const row = el("div", { class: "pg-swapbar-in" }, el("button", { type: "button", class: "btn sm", onclick: () => goScreen("list") }, "← Your swaps"), s ? el("strong", { class: "pg-label", text: s.label || "A swap" }) : null, s ? chip("quiet", window.NoidProgram.roleWords(s.role)) : null);
+    const row = el("div", { class: "pg-swapbar-in" }, el("button", { type: "button", class: "pg-back", onclick: () => goScreen("list") }, icon("chevL"), "Your swaps"), s ? el("span", { class: "sep", "aria-hidden": "true", text: "/" }) : null, s ? el("strong", { class: "pg-label here", text: s.label || "A swap" }) : null);
     bar.appendChild(row);
-    if (s && s.refused) bar.appendChild(el("div", {}, el("p", { class: "alarm danger", role: "alert" }, el("span", { class: "lv", text: "read only" }), el("span", { class: "tx", text: `This swap's folder is read only: ${s.refused}. Nothing can be run from here.` }))));
-    bar.appendChild(el("div", {}, el("p", { class: "margin-line dim", text: "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough." })));
+    if (s && s.refused) bar.appendChild(el("div", {}, el("p", { class: "alarm danger", role: "alert" }, icon("alert"), el("span", { class: "lv", text: "Read only" }), el("span", { class: "tx", text: `This swap's folder is read only: ${s.refused}. Nothing can be run from here.` }))));
   }
 
   function renderProgramScreen() {
@@ -1144,18 +1265,22 @@
     clear(root);
     if (state.pgMsg) root.appendChild(el("p", { class: state.pgMsg.kind === "danger" ? "attn" : "plain", role: "alert", text: state.pgMsg.text }));
     if (!state.program) {
-      root.appendChild(el("p", { class: "attn", role: "alert", text: `The program did not answer: ${state.error || "no answer"}` }));
+      // before the first answer the list is drawn in the shape of what is coming; after a failure it says so
+      if (!state.error && window.NoidProgram.loadingList) root.appendChild(window.NoidProgram.loadingList());
+      else root.appendChild(el("p", { class: "attn", role: "alert", text: `The program did not answer: ${state.error || "no answer"}` }));
       return;
     }
     if (state.error) root.appendChild(el("p", { class: "attn", role: "alert", text: `The last read failed: ${state.error}` }));
     root.appendChild(window.NoidProgram.swapList(state.program, progHandlers()));
-    document.title = "Your swaps, No1d Swap";
+    document.title = "Your swaps · No1d Swap";
   }
 
   function renderProgram() {
     renderProgramBar();
     const swapScreen = state.screen === "swap";
     $("pg-root").hidden = swapScreen;
+    // a swap's page has its own way back and keeps the page-wide note in its Details fold: the footer is for the list and the forms
+    document.body.classList.toggle("on-swap", swapScreen);
     $("pg-swapbar").hidden = !swapScreen;
     $("swap-head").hidden = !swapScreen;
     $("files").hidden = true;
@@ -1163,6 +1288,8 @@
     if (pgd) pgd.hidden = !swapScreen;
     if (!swapScreen) {
       $("pg-card").hidden = true;
+      fillTicket(null);
+      fillPicture(null);
       state.cardWas = false;
       $("op-view").hidden = true;
       $("bd-root").hidden = true;
@@ -1221,11 +1348,50 @@
     const d = $("pg-details");
     const body = $("pg-details-body");
     if (!state.detailsFilled) {
+      // the advice about the run folder is not a safety box: it opens the technical page, above the swap's header
+      body.appendChild(el("p", { class: "margin-line dim backup-note", text: PROGRAM_BACKUP }));
       body.appendChild($("swap-head"));
       body.appendChild($("op-view"));
+      body.appendChild(el("p", { class: "foot-note", text: PROGRAM_NOTE }));
       state.detailsFilled = true;
     }
     return d;
+  }
+
+  /** The ticket beside the card (stagecard.js drawTicket): its elements, or nothing, in which case it is hidden. */
+  function fillTicket(nodes) {
+    const tk = $("pg-ticket");
+    if (!tk) return;
+    clear(tk);
+    for (const n of nodes || []) tk.appendChild(n);
+    tk.hidden = !(nodes && nodes.length);
+  }
+
+  /**
+   * "The two locks, from now" on the main view (drawPicture, main): drawn when the card says so (plan.picture), from the same view model picture as the one under Details, and
+   * redrawn every second with it. The section is unhidden first so that the drawing can measure its box.
+   */
+  function fillPicture(plan) {
+    const root = $("pg-picture");
+    if (!root) return;
+    state.mainPicture = plan && plan.drawn && plan.picture && plan.view ? { act: !!plan.picture.act } : null;
+    if (!state.mainPicture) {
+      clear(root);
+      root.hidden = true;
+      return;
+    }
+    root.hidden = false;
+    let ok = false;
+    try {
+      ok = drawPicture(root, plan.view, { main: true, act: state.mainPicture.act });
+    } catch {
+      ok = false; // the picture is a view: if it cannot be drawn the card still stands, and Details has the same picture
+    }
+    if (!ok) {
+      clear(root);
+      root.hidden = true;
+      state.mainPicture = null;
+    }
   }
 
   function renderStageCard(plan, node) {
@@ -1237,6 +1403,8 @@
     card.hidden = !drawn;
     if (!drawn) {
       // no card for this swap (a production run, a board run, no actions): today's page as it was, with no fold
+      fillTicket(null);
+      fillPicture(null);
       det.open = true;
       det.classList.add("flat");
       if (sum) sum.hidden = true;
@@ -1252,6 +1420,14 @@
     }
     state.cardWas = true;
     if (node) card.appendChild(node);
+    let tkNodes = null;
+    try {
+      tkNodes = window.NoidStage.drawTicket ? window.NoidStage.drawTicket(plan, state.payload) : null;
+    } catch {
+      tkNodes = null; // the ticket is a view: if it cannot be drawn the card still stands
+    }
+    fillTicket(tkNodes);
+    fillPicture(plan);
     // a card that says "needs a look" (or that a step failed) opens Details when its reasons change, and leaves it as the person set it otherwise
     const sig = plan.forceOpen ? plan.lookSig || "open" : "";
     if (sig && sig !== state.cardLook) det.open = true;
@@ -1353,7 +1529,11 @@
     renderReceipts(view);
     renderHistory(view);
     if (window.NoidActions) window.NoidActions.renderPanel(state.payload);
-    document.title = `${view.role === "alice" ? "Alice" : "Bob"}, ${view.phase ? view.phase.id : "no data"}, No1d Swap`;
+    if (state.program) {
+      // program mode: the swap's plain label (the swap bar's), never the engine's phase word
+      const s = (state.program.swaps || []).find((x) => x && x.swap === state.swap) || null;
+      document.title = `${(s && s.label) || "A swap"} · No1d Swap`;
+    } else document.title = `${view.role === "alice" ? "Alice" : "Bob"}, ${view.phase ? view.phase.id : "no data"}, No1d Swap`;
   }
 
   /** Once a second: only the parts that show a clock, so focus and text selection elsewhere are left alone. */
@@ -1371,6 +1551,22 @@
       else cb.remove();
     }
     renderPicture(view);
+    if (state.mainPicture) {
+      const mp = $("pg-picture");
+      let ok = false;
+      try {
+        mp.hidden = false;
+        ok = drawPicture(mp, view, { main: true, act: state.mainPicture.act });
+      } catch {
+        ok = false;
+      }
+      if (!ok) {
+        clear(mp);
+        mp.hidden = true;
+        state.mainPicture = null;
+      }
+    }
+    if (window.NoidStage && window.NoidStage.tick) window.NoidStage.tick(view);
     if (window.NoidActions) window.NoidActions.tick();
     if (window.NoidBoard) window.NoidBoard.tick();
   }
@@ -1394,9 +1590,9 @@
     }
     if (state.program) {
       document.body.classList.add("program");
-      window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel });
+      window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel, icon, coinGlyph, toast });
       // the card of one swap, one stage at a time (stagecard.js): its helpers are the page's own
-      if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS });
+      if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS, icon, coinGlyph, copyButton });
       const skip = document.getElementById("skip-link");
       if (skip) skip.setAttribute("href", "#pg-card");
     } else {
@@ -1423,9 +1619,9 @@
     }
     if (window.NoidBoard) window.NoidBoard.init({ el, nowS, clock, hm: (u) => (typeof u === "number" ? new Date(u * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—"), fmtDur, state, reload: load, rerender: () => { state.lastSig = null; render(); } });
     if (window.NoidActions) {
-      window.NoidActions.init({ el, chip, copyButton, short, clock, dayClock, nowS, state, reload: load, rerender: () => { state.lastSig = null; render(); } });
+      window.NoidActions.init({ el, chip, copyButton, toast, short, clock, dayClock, nowS, state, icon, coinGlyph, reload: load, rerender: () => { state.lastSig = null; render(); } });
       const foot = $("foot-note");
-      if (foot && state.program) foot.textContent = "This page shows what the program reads from a swap's run folder and from the chains. It never shows a secret, a key, a passphrase or a recovery code: those are shown and typed only in the program's own windows. Everything that moves coins needs a dry run, the engine's decision and a typed confirmation, and every action is written to the swap's audit log.";
+      if (foot && state.program) foot.textContent = PROGRAM_NOTE;
       else if (foot && op.actions_enabled) foot.textContent = "Actions mode: this page can run the fixed helpers of scripts/live through WSL. Anything that sends to a chain needs a fresh dry run, the engine's tick naming that step and a typed confirmation, and every action is written to the audit log. It still never opens a *.swap.json, a key file or a passphrase, and never shows the secret or a transaction opening.";
     }
     await load();

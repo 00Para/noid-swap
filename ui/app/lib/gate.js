@@ -385,7 +385,9 @@ function evaluateSpend(spend, ctx) {
   if (writing) no("tick_writing", "A tick is being written right now: try again in a few seconds.");
   else if (!tick) no("tick_missing", `There is no readable last tick for ${spend.role}.${r && r.tick_error ? " (" + String(r.tick_error).slice(0, 120) + ")" : ""}`);
   if (tick && !writing) {
-    if (tick.events_applied_to_file !== true) no("tick_not_applied", "The last tick was not applied (a read-only tick). Wait for the watch loop's next tick.");
+    // An observe-only tick (swap-cli `tick --apply --observe-only`, the program's read loop) writes facts but decides and records nothing: it opens no send of any kind (a ledger spend, the claim, a sweep, a re-send).
+    if (tick.observe_only === true) no("tick_observe_only", "An observe-only tick cannot open a send: the loop must run a full tick first.");
+    else if (tick.events_applied_to_file !== true) no("tick_not_applied", "The last tick was not applied (a read-only tick). Wait for the watch loop's next tick.");
     const age = r.tick_mtime === null || r.tick_mtime === undefined ? null : nowS - r.tick_mtime;
     if (age === null || age > TICK_FRESH_S || age < -CLOCK_SKEW_S) no("tick_stale", `The last tick file is ${age === null ? "of unknown age" : age + " s old"}; it must be between 0 and ${TICK_FRESH_S} s old.`);
     const tAge = typeof tick.now === "number" ? nowS - tick.now : null;

@@ -33,6 +33,7 @@ for (const spend of Object.values(SPENDS)) {
     const breaks = {
       tick_missing: (c) => (c.run.roles[spend.role].tick = null),
       tick_not_applied: (c) => (T(c).events_applied_to_file = false),
+      tick_observe_only: (c) => (T(c).observe_only = true), // the program's read loop: facts written, nothing decided; it opens no send of any kind (ledger spends, the claim, the sweeps, the re-sends)
       tick_stale: (c) => (c.run.roles[spend.role].tick_mtime = F.NOW - TICK_FRESH_S - 1),
       tick_stale_future: (c) => (c.run.roles[spend.role].tick_mtime = F.NOW + 60),
       tick_clock: (c) => (T(c).now = F.NOW - TICK_FRESH_S - 60),

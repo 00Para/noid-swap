@@ -445,6 +445,11 @@
     const ap = f.ap || {};
     for (const n of Array.isArray(ap.needs_you) ? ap.needs_you : []) {
       const spend = n && typeof n.spend === "string" ? n.spend : "";
+      // a short deposit (or the engine's "too late"): the console's own sentence, which goes away by itself; nothing was stopped and there is no "will not try again"
+      if (n && n.kind === "deposit") {
+        out.push({ code: spend === "deposit-closed" ? "deposit_closed" : "deposit_short", title: spend === "deposit-closed" ? "It is too late for this swap" : "Your deposit is short", text: typeof n.reason === "string" ? n.reason : "", tool_words: null });
+        continue;
+      }
       out.push({
         code: "step_stopped",
         title: `The app stopped ${own(SPEND_WORDS, spend) ? SPEND_WORDS[spend] : "a step"}`,

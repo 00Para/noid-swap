@@ -20,7 +20,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const { baseWebPreferences } = require("./window");
+const { baseWebPreferences, WINDOW_BACKGROUND } = require("./window");
 const { SCHEME } = require("./scheme");
 
 const CHANNEL = "no1d-secret";
@@ -108,6 +108,7 @@ function createSecretUi({ electron, guard, preloadPath, htmlPath, getParent }) {
       maximizable: false,
       fullscreenable: false,
       title: "No1d Swap",
+      backgroundColor: WINDOW_BACKGROUND,
       autoHideMenuBar: true,
       parent: parent || undefined,
       modal: !!parent,

@@ -218,7 +218,7 @@
 .bd .bd-rail li:last-child::before { display: none; }
 .bd .bd-rail .mk { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; }
 .bd .bd-rail .mk .bd-ic { stroke-width: 2; margin: 0; }
-.bd .bd-rail .done .mk { background: var(--safe); color: #04110d; }
+.bd .bd-rail .done .mk { background: var(--safe); color: var(--on-safe); }
 .bd .bd-rail .now .mk { border: 2px solid var(--text); }
 .bd .bd-rail .now .mk i { width: 10px; height: 10px; border-radius: 50%; background: var(--text); animation: bd-pulse 2.4s ease-in-out infinite; }
 .bd .bd-rail .todo .mk, .bd .bd-rail .skipped .mk { border: 1.5px dashed var(--ghost); }

@@ -10,7 +10,11 @@
  * The loop line is the helper's: the time, then eight parts, each cut on its own, the last (`applied: .. phase_after: ..`) whole. The terminal rule
  * is watch.sh's: phase_after refunded, lost or aborted, or `done` unless the action or reason still names a leftover leg.
  * Injectable for tests: ctx.now (the clock of the line), opts.sleep(ms) (resolves when the pause is over), opts.tick (replaces the tick step).
- * `opts.apply` (default true): false makes every tick read-only (no --apply): it records nothing, and shows what the engine would decide (lib/firststeps.js, rule W).
+ * `opts.apply` (default true): false makes every tick of Bob's an observe-only tick (`--apply --observe-only`, the tick step's `observeOnly`): it records the facts the chains show, never an
+ * intent, an abort or a spend's parameters, and shows what the engine would decide (lib/firststeps.js, rule W). swap-cli refuses it while the file holds an intent or a pending action; the round
+ * then reads with the plain read-only tick (never a full --apply) and `opts.onNote(text)` is told once per refusal streak. Alice's ticks in read mode stay plain read-only ticks (no --apply):
+ * from `created` the engine adopts any fitting instance at her contract root, so an observe tick could move her file to `funded` on a deposit someone else made there, and rule W reads any
+ * phase past `created` as her own act and would switch to apply before her approval and deposit.
  */
 
 const fs = require("fs");
@@ -64,6 +68,8 @@ class Watch {
     this.sleepFn = opts.sleep || null;
     this.onLine = opts.onLine || null;
     this.apply = opts.apply !== false;
+    this.onNote = opts.onNote || null;
+    this.refused = new Map(); // role -> the observe-only refusal streak is on (the note was given)
     this.ticks = 0;
     this.lastError = null;
     this.stopped = false;
@@ -97,11 +103,34 @@ class Watch {
     });
   }
 
+  /** An observe-only tick that swap-cli refused (the file holds an intent): this round reads without recording, one note per streak. Never a full --apply. */
+  async afterObserve(ctx, role, res) {
+    const text = `${(res && res.stderr) || ""}${(res && res.stdout) || ""}`;
+    const refused = !!res && res.code === 1 && /observe-only is refused/.test(text);
+    if (!refused) {
+      this.refused.delete(role);
+      return res;
+    }
+    if (!this.refused.has(role)) {
+      this.refused.set(role, true);
+      if (this.onNote) {
+        try {
+          this.onNote("observe-only was refused (the file holds an intent or a pending action): reading without recording until it is not");
+        } catch {
+          /* a listener cannot stop the loop */
+        }
+      }
+    }
+    return this.tickStep(ctx, role, { args: [] });
+  }
+
   async tickOnce(role) {
     const ctx = this.ctx;
     let res;
     try {
-      res = await this.tickStep(ctx, role, { args: this.apply ? ["--apply"] : [] });
+      const observe = !this.apply && role === "bob"; // Alice reads with the plain read-only tick (see the head of this file)
+      res = await this.tickStep(ctx, role, this.apply ? { args: ["--apply"] } : observe ? { args: [], observeOnly: true } : { args: [] });
+      if (observe) res = await this.afterObserve(ctx, role, res);
     } catch (e) {
       this.lastError = String((e && e.message) || e);
       res = { code: null, stdout: "", stderr: "", files: [] };

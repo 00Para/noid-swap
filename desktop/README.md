@@ -75,6 +75,8 @@ in-memory partition `no1d-main` (never `persist:`). The guard refuses new window
 (fragment ignored), webviews, downloads, every permission, device pickers, and every request whose origin is not the server's
 (inline `data:` URLs are let through: they never touch the network). The server's own content security policy stays.
 
+Both windows (the main one and the secret one) are created with `backgroundColor: "#050908"`, the page's own ground (`WINDOW_BACKGROUND` in `lib/window.js`), so no white shows before the page is drawn; the page shown after a second loss of the window has the same ground and ink and the same words, and no script.
+
 Closing the window hides it while any swap is active; with none active it quits. Quitting with a swap active asks first and names
 every swap at stake and until when. The system's own shutdown or log-off is never blocked.
 
@@ -87,7 +89,7 @@ It was first loaded from a `file://` URL, which never worked in an installed pro
 fuse off, Chromium's own file loader serves `file://`, it cannot read inside `app.asar` (ERR_FILE_NOT_FOUND), and the window
 closed at once, so the recovery code could not be shown (seen at the first start of the rehearsal's installers on both systems;
 reproduced in Electron 45.2.3 with the build's fuses, where the new way loads with its script, stylesheet and preload). The
-self-test now loads this page too (below). Values cross one IPC channel, accepted only from that window's own webContents and
+self-test now loads this page too (below). Its look (2026-11-20) is the page's own: the same ground, ink and amber, dark only (no light theme), system type on purpose (no web font: the sheet may hold no `url(` and no import, and the window may load nothing but its three files), one stylesheet. The recovery code is a box of 14 groups drawn as a grid of two columns filled downwards, 1 to 7 on the left and 8 to 14 on the right, numbered by a CSS counter, so that it can be copied onto paper in order; it still cannot be selected. The one button is amber (the program waits on the person), the other is quiet. `secret.js` was not changed. Values cross one IPC channel, accepted only from that window's own webContents and
 only while a request is open. Requests are served one at a time. Closing the window ends a request as a cancel (`askGroups` and `askText` give `null`;
 `show` rejects with `code: "CLOSED"`, which the vault reads as "the person never saw the code"). The vault asks for a new
 fallback passphrase in two prompts (`fallback-new`, then again with `again: true`) and compares them itself.
@@ -133,6 +135,8 @@ Administrators. A refused folder gives its descriptor as the self-test's detail.
 ```sh
 node --test "desktop/test/*.test.js"
 ```
+
+`test/look-shell.test.js` checks the dark ground of both windows, the fallback page and the secret window's sheet (dark only, system type, nothing to load, the numbered grid, the buttons).
 
 `test/shell-fixture.js` builds a shell over a fake electron, fake step 4.6 and 4.5 modules and a fake process. The real vault is
 driven through the real secret-window logic in `test/vault-wiring.test.js`.

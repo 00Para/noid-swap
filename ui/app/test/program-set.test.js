@@ -581,3 +581,27 @@ test("scanIfStale rescans after 5 s only", async () => {
 
 void noidAddress;
 void makeSettings;
+
+test("the summary of a swap gives the two halves of its label, each with its coin, for the list's pair; a folder with no settings gives none", async () => {
+  const env = makeEnv();
+  try {
+    const a = env.addSwap({ role: "alice" });
+    const b = env.addSwap({ role: "bob" });
+    const set = mk(env);
+    set.scan();
+    for (const sw of [a, b]) {
+      const s = set.summary(set.get(sw.id));
+      const [side, other] = sw === a ? [{ coin: "noid" }, { coin: "eth" }] : [{ coin: "eth" }, { coin: "noid" }];
+      assert.equal(s.give.coin, side.coin, sw === a ? "Alice gives NOID" : "Bob gives ETH");
+      assert.equal(s.get.coin, other.coin);
+      // the label is made of exactly these two texts
+      assert.equal(s.label, `You sell ${s.give.text} ${s.give.coin.toUpperCase()} for ${s.get.text} ${s.get.coin.toUpperCase()}`);
+    }
+    const unread = set.facts({ id: "f".repeat(32), refused: "x", runner: null });
+    assert.equal(unread.give, null);
+    assert.equal(unread.get, null);
+    await set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});

@@ -44,9 +44,17 @@ const chosen = (fields) => ({ "POST /api/invitation/open": () => ({ status: 200,
 // ------------------------------------------------------------------ the layout
 test("form: the main fields in order, the remember tick on, the single-node tick off, and the intro says nothing is sent", async () => {
   const { root, g } = await formPage();
-  const grid = root.all((n) => n.className.includes("form-grid"))[0];
-  const ids = grid.all((n) => n.tag === "input" || n.tag === "select").map((n) => n.attrs.id);
-  assert.deepEqual(ids, ["ns-role", "ns-noid_amount", "ns-eth_amount", "ns-bob_noid", "ns-bob_eth", "ns-noid_payout", "ns-eth_payout"]);
+  // the side first, then the two amounts as the two blocks of a convert, then Bob's addresses, then the person's own (the optional settings come after them)
+  const main = root.all((n) => (n.tag === "input" || n.tag === "select") && !n.attrs.id.startsWith("ns-remember") && n.attrs.id !== "ns-single_node_ok").map((n) => n.attrs.id).slice(0, 7);
+  assert.deepEqual(main, ["ns-role", "ns-noid_amount", "ns-eth_amount", "ns-bob_noid", "ns-bob_eth", "ns-noid_payout", "ns-eth_payout"]);
+  const convert = root.all((n) => n.className.split(/\s+/).includes("convert"))[0];
+  assert.deepEqual(convert.all((n) => n.tag === "input").map((n) => n.attrs.id), ["ns-noid_amount", "ns-eth_amount"]);
+  // the address grids keep the form-grid class
+  const grids = root.all((n) => n.className.split(/\s+/).includes("form-grid"));
+  assert.ok(grids.length >= 3);
+  assert.deepEqual(grids[0].all((n) => n.tag === "input").map((n) => n.attrs.id), ["ns-bob_noid", "ns-bob_eth"]);
+  assert.deepEqual(grids[1].all((n) => n.tag === "input").map((n) => n.attrs.id), ["ns-noid_payout", "ns-eth_payout"]);
+  assert.deepEqual(root.all((n) => n.tag === "h2").map((n) => textOf(n).trim()).slice(0, 2), ["Bob's addresses", "Your own addresses"]);
   assert.equal(g("ns-remember").checked, true);
   assert.equal(g("ns-single_node_ok").checked, false);
   assert.match(textOf(root), /Every value is checked by the program before anything is made\. A new swap sends nothing to any chain; coins move only after you approve and deposit\./);
@@ -383,8 +391,12 @@ async function settingsPage(settings = SETTINGS, routes = {}) {
 
 test("settings: the groups in their order and the closed Advanced fold holding the rehearsal chain and the offer board", async () => {
   const { root, g } = await settingsPage();
-  const legends = root.all((n) => n.tag === "legend").map((n) => textOf(n).trim());
-  assert.deepEqual(legends, ["Parano1d node", "Ethereum node (Sepolia)", "Your addresses (they fill the form of a new swap)", "Updates", "Alerts", "Rehearsal chain", "Offer board"]);
+  // the groups are sections with a title and one line (no fieldset any more), each tied to its title
+  const titles = root.all((n) => n.tag === "h2" && n.attrs.id && n.attrs.id.startsWith("st-sec-")).map((n) => textOf(n).trim());
+  assert.deepEqual(titles, ["Parano1d node", "Ethereum node (Sepolia)", "Your addresses", "Updates", "Alerts", "Rehearsal chain", "Offer board"]);
+  assert.equal(root.all((n) => n.tag === "fieldset" || n.tag === "legend").length, 0);
+  for (const sec of root.all((n) => n.className.split(/\s+/).includes("set-sec"))) assert.ok(root.all((n) => n.attrs.id === sec.attrs["aria-labelledby"]).length === 1);
+  assert.match(textOf(root), /They fill the form of a new swap./);
   const fold = g("st-advanced");
   assert.equal(fold.tag, "details");
   assert.ok(fold.className.split(/\s+/).includes("fold"));

@@ -31,7 +31,7 @@ const crypto = require("crypto");
 const { pathCandidates } = require("./runfolder");
 const runsettings = require("./runsettings");
 const { TOOL_KEYS, stepCodeHash } = require("./toolhash");
-const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES, LINE_MATCH_MISSING } = require("./gate");
+const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES, LINE_MATCH_MISSING, TICK_FRESH_S } = require("./gate");
 const E = require("./enginetext");
 const FS = require("./firststeps");
 
@@ -83,6 +83,43 @@ const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const fileOf = (role) => `autopilot-${role}.json`;
 const bad = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
 
+// ---- a short deposit after the approval: plain units, exact figures (BigInt only), no key and no secret in any text
+const BLOCK_S_FAST = 20; // plan with 20 s a block (the project's own pace for a margin)
+const DEPOSIT_REASON_MAX = 420;
+const trimFrac = (whole, frac) => {
+  const f = frac.replace(/0+$/, "");
+  return f ? `${whole}.${f}` : String(whole);
+};
+/** Micro-NOID as NOID, exact ("5.006"); null for anything that is not a whole number. */
+function noidPlain(micro) {
+  try {
+    const v = BigInt(micro);
+    return v < 0n ? null : trimFrac(v / 1000000n, String(v % 1000000n).padStart(6, "0"));
+  } catch {
+    return null;
+  }
+}
+/** Wei as ETH, exact ("0.0011"); null for anything that is not a whole number. */
+function ethPlain(wei) {
+  try {
+    const v = BigInt(wei);
+    return v < 0n ? null : trimFrac(v / 10n ** 18n, String(v % 10n ** 18n).padStart(18, "0"));
+  } catch {
+    return null;
+  }
+}
+const abbrevAddress = (a) => (typeof a === "string" && a.length > 14 ? `${a.slice(0, 6)}…${a.slice(-5)}` : String(a));
+const LAST_LOCK_EXACT = /; the last lock height is \d+/; // the engine's exact last lock height (the inexact form says "at most")
+const CLOSED_ID = "deposit-closed";
+const CLOSED_TEXT = "The engine says it is too late for this swap: do not send coins to it.";
+const DEPOSIT_CLEAR_WHY = {
+  approval: { any: "the approval is not in force any more" },
+  phase: { any: "the swap has moved past the deposit step" },
+  started: { alice: "your funding was started, so the wallet's balance no longer shows a missing deposit", bob: "your lock was started, so the key's balance no longer shows a missing deposit", any: "the step this deposit pays for was started" },
+};
+const DEPOSIT_COINS = { alice: ["NOID", "ETH"], bob: ["ETH"] };
+const DEPOSIT_WAIT_CODES = new Set(["deposit_short", "reserve_short"]); // the gate's reasons that mean "the deposit is not there yet" (the others mean the status is missing or stale)
+
 /** null when the console (started with --role cfgRole) drives this role, else the reason. */
 function roleBlocked(cfgRole, role) {
   if (!cfgRole || cfgRole === "both" || cfgRole === role) return null;
@@ -99,6 +136,7 @@ class Autopilot {
     this.now = o.now || (() => this.actions.now());
     this.token = Object.freeze({ autopilot: true }); // the private value `startSpend` accepts as `meta.auto`
     this.needs = { alice: [], bob: [] }; // the entries of the approval file, kept here too
+    this.deposit = { alice: [], bob: [] }; // the "short deposit" entries (computed from the wallet status, not persisted, cleared by themselves): see watchDeposits
     this.state = { alice: { doing: null, waiting_reason: null }, bob: { doing: null, waiting_reason: null } };
     this.pending = []; // the jobs this module started and has not looked at the end of yet
     this.refusals = new Map(); // spend id -> refusals in a row
@@ -688,6 +726,7 @@ class Autopilot {
       throw bad(500, `the approval file cannot be removed (${e.code || e.message}); this console does not use it any more, delete ${fileOf(role)} in the run folder by hand`);
     }
     this.note(role, "approval removed");
+    this.clearDeposits(role, "the approval was withdrawn");
     this.needs[role] = [];
     this.state[role] = { doing: null, waiting_reason: null };
     if (role === "alice") this.fundingStatements = null;
@@ -710,8 +749,198 @@ class Autopilot {
     return { status: 200, body: { ok: true, role, needs_you: this.needViews(role) } };
   }
 
-  needViews(role) {
-    return this.needs[role].map((e) => ({ spend: e.spend, label: SPEND_TABLE[e.spend] ? SPEND_TABLE[e.spend].label : e.spend, reason: e.reason, at: e.at, ...(e.retrying ? { retrying: true } : {}) }));
+  needViews(role, withDeposit = true) {
+    const own = this.needs[role].map((e) => ({ spend: e.spend, label: SPEND_TABLE[e.spend] ? SPEND_TABLE[e.spend].label : e.spend, reason: e.reason, at: e.at, ...(e.retrying ? { retrying: true } : {}) }));
+    // a short deposit has no "I have dealt with it": `kind: "deposit"` tells the page to leave the button out; the entry goes by itself when the coin is covered
+    const dep = withDeposit ? this.deposit[role].map((e) => ({ spend: e.spend, label: "Your deposit", reason: e.reason, at: e.at, kind: "deposit", figs: e.figs || "", until: this.depositUntil(e) })) : [];
+    return [...own, ...dep];
+  }
+
+  // ------------------------------------------------------------------ a short deposit after the approval
+  /** The unix time the engine's count of blocks runs out, for the page's counting line; null once the tick it came from is older than the gate's limit (no confident time from a stale reading). */
+  depositUntil(e) {
+    if (typeof e.seconds !== "number" || typeof e.tick_now !== "number") return null;
+    const age = Math.floor(this.now() / 1000) - e.tick_now;
+    return age > TICK_FRESH_S || age < -TICK_FRESH_S ? null : e.tick_now + e.seconds;
+  }
+
+  /**
+   * Why the deposit watch does not apply to this role now, or null when it does: "approval" (not in force, or not a wallet run), "started" (the role's first spend was started: the
+   * balance now shows what is left, not a missing deposit), "phase" (a known phase past the deposit phases), or "unknown" (no run, no tick, a transient unreadable approval): then
+   * nothing is raised and nothing is cleared.
+   */
+  depositNotApplicable(role, run) {
+    const a = this.actions;
+    if (this.roleBlockedFor(role) || !this.hasApproval(role)) return "approval";
+    if (!run) return "unknown";
+    const wr = a.walletRun();
+    if (wr.use_swap_wallet !== true || wr.ambiguous) return "approval";
+    if (a.productionBlock(run)) return "approval";
+    const ap = this.approvalState(role, run);
+    if (!ap.in_force) return ap.exists && ap.hash === null && !this.forcedOff.has(role) && /cannot be read now/.test(String(ap.why || "")) ? "unknown" : "approval";
+    // the role's first spend (the lock for Bob, the funding for Alice): the latch of the actions module is the record of a start that was not cleanly refused; Alice's funding marker is the other
+    const funded = !!(a.fundedMarker() || a.walletMarker("wallet-funded.marker"));
+    if (a.latchOf(role === "alice" ? "send-fund" : "send-lock") || (role === "alice" && funded)) return "started";
+    const tick = run.roles && run.roles[role] ? run.roles[role].tick || null : null;
+    const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
+    if (phase === null) return "unknown";
+    // the same test as the page's `depositNeeded` (Alice: created and no funding marker; Bob: received, funded, funding_final)
+    return FS.lineConfirmable(role, phase, funded) ? null : "phase";
+  }
+
+  /**
+   * What the engine's own words on the tick say about the time, from a fresh tick, else null: `{note, level, seconds, tickNow, over, overText, unsure}`.
+   *   over    the engine has given up (a height abort that cannot turn back) or its note says the window is closed or the lock-by has passed (the form "nominal lock-by N has passed ...; the
+   *           lock is still allowed until ..." is not one: the page rates it a warning)
+   *   unsure  an abort that can turn back on the next tick: nothing is said either way
+   *   seconds (the engine's block count at 20 s a block) only where the note's count is the real limit: "funding window", "lock margin", or "lock-by margin" with an exact last lock height
+   */
+  depositMargin(role, tick, nowMs) {
+    if (!tick || typeof tick.now !== "number") return null;
+    const age = Math.floor(nowMs / 1000) - tick.now;
+    if (age > TICK_FRESH_S || age < -TICK_FRESH_S) return null;
+    const note = E.lockByNote(Array.isArray(tick.notes) ? tick.notes : []);
+    const act = tick.action && typeof tick.action === "object" ? tick.action : null;
+    const isAbort = !!act && (act.action || act.kind) === "abort";
+    const heightAbort = isAbort && FS.isHeightAbort(role, tick);
+    // still-allowed forms (engine.rs `lock_by_margin_note`): the nominal lock-by passed while Bob's lock is still offered, and "lock-by L has passed: ...; the last lock height is [at most] H" (the last lock height is still ahead)
+    const allowed = !!note && (/; the lock is still allowed until /.test(note) || (/^lock-by \d+ has passed: /.test(note) && /; the last lock height is /.test(note)));
+    const noteOver = !!note && !allowed && /\bhas passed\b|\bis closed\b/.test(note);
+    const over = heightAbort || noteOver;
+    let seconds = null;
+    if (note && !over) {
+      const m = /: (\d+) blocks\b/.exec(note);
+      const firm = /^(?:funding window\b|lock margin\b)/.test(note) || (/^lock-by margin\b/.test(note) && LAST_LOCK_EXACT.test(note));
+      const blocks = m ? Number(m[1]) : null;
+      if (firm && blocks !== null && Number.isSafeInteger(blocks)) seconds = blocks * BLOCK_S_FAST;
+    }
+    return { note: note ? note.trim() : null, level: !note ? "quiet" : allowed ? "warn" : E.lockByLevel(note), seconds, tickNow: tick.now, over, overText: note ? note.trim() : isAbort && typeof act.reason === "string" ? act.reason.slice(0, 160) : null, unsure: isAbort && !heightAbort };
+  }
+
+  /**
+   * The state of one coin of one role: `{state: "covered"}`, `{state: "keep"}` (nothing is known well enough to say or to take back anything), `{state: "over"}` (the engine gave up) or
+   * `{state: "entry", entry}`. `ws` is a clean, fresh wallet status. A coin with nothing deposited gets an entry only when the engine's note is short.
+   */
+  depositEntry(role, coin, ws, margin, nowMs) {
+    let held;
+    let need;
+    let address;
+    let holder;
+    let fig;
+    if (coin === "NOID") {
+      if (!ws.noid) return { state: "keep" };
+      if (ws.noid.covers === true) return { state: "covered" };
+      [held, need, address, holder, fig] = [ws.noid.plain_micronoid, ws.noid.need_micronoid, ws.noid.address, "wallet", noidPlain];
+    } else {
+      if (!ws.eth) return { state: "keep" };
+      if (ws.eth.covered === true) return { state: "covered" };
+      [held, need, address, holder, fig] = [ws.eth.balance_wei, ws.eth.required_wei, ws.eth.address, "key", ethPlain];
+    }
+    let h;
+    let n;
+    try {
+      h = BigInt(held);
+      n = BigInt(need);
+    } catch {
+      return { state: "keep" };
+    }
+    if (h >= n) return { state: "covered" };
+    const hs = fig(h);
+    const ns = fig(n);
+    const ds = fig(n - h);
+    if (hs === null || ns === null || ds === null) return { state: "keep" };
+    if (margin && margin.unsure) return { state: "keep" };
+    if (margin && margin.over) return { state: "over" };
+    // the time left is not in the sentence: it is a field of its own (`seconds` and the tick it came from), shown by the page as a separate, counting line and dropped when that tick is old
+    const left = margin && margin.note ? `The engine says: ${margin.note}.` : "";
+    let reason;
+    if (h > 0n) {
+      reason = `Your ${coin} deposit is short: this swap's ${holder} holds ${hs} ${coin} of ${ns} ${coin}. Send ${ds} ${coin} more to ${abbrevAddress(address)}.${left ? " " + left : ""}`;
+    } else {
+      // nothing deposited: only when the engine's own note is short (the page's level), no threshold of this module; without a fresh note nothing changes
+      if (!margin || margin.level === "quiet") return { state: "keep" };
+      reason = `Deposit now: this swap's ${holder} holds no ${coin} and needs ${ns} ${coin}. Send ${ns} ${coin} to ${abbrevAddress(address)}. ${left}`;
+    }
+    return { state: "entry", entry: { spend: `deposit-${coin.toLowerCase()}`, kind: "deposit", coin, reason: reason.slice(0, DEPOSIT_REASON_MAX), figs: `${held}|${need}`, seconds: margin && margin.seconds !== null && margin.seconds !== undefined ? margin.seconds : null, tick_now: margin ? margin.tickNow : null, at: Math.floor(nowMs / 1000) } };
+  }
+
+  /** Drops this role's deposit entries (one audit line each). `why` is plain words. */
+  clearDeposits(role, why) {
+    for (const e of this.deposit[role]) this.note(role, `cleared: ${e.spend}`, why);
+    this.deposit[role] = [];
+  }
+
+  /** Drops one deposit entry by id (one audit line). */
+  clearDeposit(role, id, why) {
+    const i = this.deposit[role].findIndex((e) => e.spend === id);
+    if (i < 0) return;
+    this.note(role, `cleared: ${id}`, why);
+    this.deposit[role].splice(i, 1);
+  }
+
+  /**
+   * While a role's approval is in force and its first spend still needs the deposit, a coin that holds something but not enough raises a "needs you" entry at once; a coin with nothing
+   * deposited raises one only when the engine's own lock-by or funding-window note is short. An entry is taken back only when its coin is covered, the role's first spend was started, the
+   * phase is a known later one, or the approval ends: a stale or missing tick or wallet status, a node that is down, an abort that can turn back, all leave it as it is (no flapping, no
+   * new line). When the engine has given up (a closed window, a passed lock-by, a height abort) no instruction to send coins is made: an entry that is open becomes one plain line saying so.
+   * Writes only audit notes; moves no coin, touches no gate.
+   */
+  watchDeposits(run, nowMs) {
+    for (const role of ROLES) {
+      try {
+        const why = this.depositNotApplicable(role, run);
+        if (why === "unknown") continue;
+        if (why) {
+          this.clearDeposits(role, DEPOSIT_CLEAR_WHY[why][role] || DEPOSIT_CLEAR_WHY[why].any);
+          continue;
+        }
+        const reasons = FS.depositReasonsFor(this.actions, role, run, nowMs);
+        if (reasons.length === 0) {
+          this.clearDeposits(role, "the deposit is seen and covers it");
+          continue;
+        }
+        if (!reasons.every((c) => DEPOSIT_WAIT_CODES.has(c))) continue; // the status is missing, stale or not about this swap: nothing new is said
+        const ws = this.actions.walletStatus ? this.actions.walletStatus[role] : null;
+        if (!ws || ws.ok !== true) continue;
+        const tick = run.roles && run.roles[role] ? run.roles[role].tick || null : null;
+        const margin = this.depositMargin(role, tick, nowMs);
+        if (margin && margin.unsure) continue;
+        const list = this.deposit[role];
+        if (margin && margin.over) {
+          // the engine has given up: no instruction to send anything; an open entry becomes one plain line
+          if (!list.length) continue;
+          const reason = `${CLOSED_TEXT}${margin.overText ? ` The engine says: ${margin.overText}.` : ""}`.slice(0, DEPOSIT_REASON_MAX);
+          const open = list.find((e) => e.spend === CLOSED_ID);
+          if (open) {
+            open.reason = reason;
+            continue;
+          }
+          for (const e of list.filter((x) => x.spend !== CLOSED_ID)) this.clearDeposit(role, e.spend, "the engine says it is too late for this swap");
+          this.deposit[role].push({ spend: CLOSED_ID, kind: "deposit", coin: null, reason, figs: "", seconds: null, tick_now: null, at: Math.floor(nowMs / 1000) });
+          this.note(role, `needs you: ${CLOSED_ID}`, `deposit: ${reason}`);
+          continue;
+        }
+        if (list.some((e) => e.spend === CLOSED_ID)) {
+          // a height abort cannot turn back: the line goes only when a fresh, readable tick no longer says it (else with the phase or the approval); a stale tick keeps it and adds nothing
+          if (!margin) continue;
+          this.clearDeposit(role, CLOSED_ID, "the engine no longer says it is too late");
+        }
+        for (const coin of DEPOSIT_COINS[role]) {
+          const id = `deposit-${coin.toLowerCase()}`;
+          const i = this.deposit[role].findIndex((e) => e.spend === id);
+          const r = this.depositEntry(role, coin, ws, margin, nowMs);
+          if (r.state === "covered") this.clearDeposit(role, id, "the deposit is seen and covers it");
+          else if (r.state === "entry") {
+            if (i < 0) {
+              this.deposit[role].push(r.entry);
+              this.note(role, `needs you: ${id}`, `deposit: ${r.entry.reason}`);
+            } else this.deposit[role][i] = { ...r.entry, at: this.deposit[role][i].at };
+          }
+        }
+      } catch {
+        /* a deposit look never blocks the step; what could not be read says nothing new */
+      }
+    }
   }
 
   // ------------------------------------------------------------------ what the page shows
@@ -741,7 +970,7 @@ class Autopilot {
           doing: ap.in_force ? st.doing : null,
           waiting_reason: ap.in_force ? st.waiting_reason : null,
           finished_notes: ap.in_force ? this.finishedNotes(role) : [],
-          needs_you: ap.exists ? this.needViews(role) : [],
+          needs_you: ap.exists ? this.needViews(role, !!ap.in_force) : [],
           funding_statements_valid_until: role === "alice" && !wallet && this.fundingStatementsValid(nowMs) ? Math.floor((this.fundingStatements.at_ms + FUNDING_WINDOW_MS) / 1000) : null,
           expected_typed: exp ? exp.text : null,
           statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode()).map((id) => ({ id, text: STATEMENTS[id] })),
@@ -820,7 +1049,16 @@ class Autopilot {
       const a = this.actions;
       if (this.pending.length) this.settleJobs();
       const roles = ROLES.filter((r) => !this.roleBlockedFor(r) && this.hasApproval(r));
-      if (!roles.length) return;
+      // a short deposit is looked at on every step, also while an action runs (it starts nothing)
+      if (!roles.length) {
+        for (const r of ROLES) if (this.deposit[r].length) this.clearDeposits(r, "the approval was withdrawn");
+        return;
+      }
+      try {
+        this.watchDeposits(a.readRunFn(a.cfg.runDirs, Math.floor(this.now() / 1000)), this.now());
+      } catch {
+        /* never blocks the step */
+      }
       if (a.busy) return;
       if (a.programMode) {
         // the program's own conditions (the key store is open, the folder is private, the node has answered since the start): until they hold, nothing is started

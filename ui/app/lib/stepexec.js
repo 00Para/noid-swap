@@ -264,7 +264,7 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     const ac = new AbortController();
     const ctx = buildCtx(settings, ac.signal);
     const rec = { lastLineAt: 0 };
-    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], onLine: () => (rec.lastLineAt = clock()), ...(watchOpts || {}), apply: mode === "apply" });
+    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], onLine: () => (rec.lastLineAt = clock()), onNote: (text) => audit({ action: "watch", role: settings.role, phase: "note", result: text }), ...(watchOpts || {}), apply: mode === "apply" });
     const entry = { w, ac, mode, startedAt: clock(), get lastLineAt() { return rec.lastLineAt; } };
     if (mode === "apply") appliedOnce = true;
     watch = entry;

@@ -124,6 +124,9 @@ test("the swap page is the card above a closed Details fold that holds today's p
   for (const id of ["swap-head", "op-view"]) assert.ok(inside.contains(page.byId(id)), `${id} is in Details`);
   assert.ok(!det.contains(page.byId("pg-card")), "the card is not in the fold");
   assert.ok(!det.contains(page.byId("pg-swapbar")), "the swap bar (the read-only alarm, the way back) stays outside");
+  const tk = page.byId("pg-ticket");
+  assert.equal(tk.hidden, false, "the ticket is drawn");
+  assert.ok(!det.contains(tk) && !card0.contains(tk), "the ticket is outside the fold and outside the card");
   assert.match(squash(page.text("swap-head")), /NOID/);
   // the card has one headline, one status line, a progress line of six stages
   assert.equal(page.byId("pg-card").all((n) => n.tag === "h2").length, 1);
@@ -134,6 +137,8 @@ test("the swap page is the card above a closed Details fold that holds today's p
   await page.flush();
   assert.equal(page.byId("pg-card").hidden, true);
   assert.equal(page.byId("pg-details").hidden, true);
+  assert.equal(page.byId("pg-ticket").hidden, true, "nor the ticket");
+  assert.equal(page.byId("pg-ticket").children.length, 0);
 });
 
 test("the terminal console is unchanged: no program, no card, no fold, and the fold of index.html is hidden and empty", async () => {
@@ -228,7 +233,7 @@ test("Alice, Approve: once the lines are confirmed the card asks for the approva
     assert.match(card(page), /To approve, type the amount and unit of your step: 5 NOID/);
     for (const id of ["ap-typed", "ap-stmt-stay_on", "ap-stmt-no_manual_steps", "ap-stmt-bob_check_matches"]) assert.equal(ids(page, id), 1, `${id} once`);
     assert.equal(page.byId("pg-card").all((n) => n.attrs.id === "ap-typed").length, 1);
-    const go = btnWith(page.byId("pg-card"), "Turn on…");
+    const go = btnWith(page.byId("pg-card"), "Approve…");
     assert.equal(go.disabled, true, "the typed amount and the statements are still required");
     // the confirmed check line is not drawn on the card any more (its box is in Details)
     assert.equal(page.byId("pg-card").all((n) => n.attrs.id === "cl-match").length, 0);
@@ -245,9 +250,9 @@ test("Alice, Approve: the whole approval still goes through the page's own dialo
     c.checked = true;
     await c.fire("change");
   }
-  await btnWith(box, "Turn on…").click();
+  await btnWith(box, "Approve…").click();
   const dlg = page.document.body.all((n) => n.tag === "dialog")[0];
-  await btnWith(dlg, "Yes, turn it on").click();
+  await btnWith(dlg, "Yes, approve").click();
   await page.flush();
   const sent = page.posted.find((x) => x[0] === "/api/autopilot");
   assert.ok(sent, "posted");
@@ -263,8 +268,8 @@ test("Alice, Deposit: the approved swap shows two rows (the figure with Copy amo
   assert.ok(box, card(page));
   assert.equal(box.all((n) => n.className.includes("deposit-row")).length, 2);
   const t = squash(textOf(box));
-  assert.match(t, /NOID to deposit Send at least 5\.009 NOID Copy amount/);
-  assert.match(t, /ETH to deposit Send at least 0\.001 ETH Copy amount/);
+  assert.match(t, /NOID to deposit not yet Send at least 5\.009 NOID Copy amount/);
+  assert.match(t, /ETH to deposit not yet Send at least 0\.001 ETH Copy amount/);
   assert.match(t, /Deposit before about \d\d:\d\d/, "Alice's clock stays");
   assert.match(t, /not from an exchange/);
   assert.doesNotMatch(t, /Exact amount needed|What is left when the swap is over|Read \d+ s ago|Read the deposit again/, "the exact figures, the leftovers and the re-read button are in Details");
@@ -450,7 +455,7 @@ const above = (page) => {
 test("a step that needs the person: the approval's own alert, with its whole reason and its button, is on the card above the headline, whatever the stage", async () => {
   const needs = [{ spend: "send-lock", label: "Lock the ETH", reason: "the dry run does not match the terms", retrying: false }];
   const page = await openSwap(F.SWAP_B, (r) => cardPayload(r, { phase: "funding_final", line_match: { hex: HEX, at: NOW }, autopilot: { alice: null, bob: ON("bob", { needs_you: needs }) }, status: status("bob") }));
-  assert.match(above(page), /needs you Lock the ETH the dry run does not match the terms/);
+  assert.match(above(page), /needs you Lock the ETH: the dry run does not match the terms/i);
   assert.ok(btnWith(page.byId("pg-card").all((n) => n.className.includes("sc-safety"))[0], "I have dealt with it"));
   assert.equal(ids(page, "ap-typed"), 0);
   // drawn once: the page below does not draw the approval box a second time
@@ -468,11 +473,11 @@ test("terms that changed since the approval: 'approve again' is on the card", as
 test("the banners of the page (key lost, a step still running, the run folder's lock) are on the card as well, and each element id is on the page once", async () => {
   const busy = { id: "send-lock", job: 3, started_at: NOW - 25 * 60 - 5, overdue: true, overdue_minutes: 25, warning: "still running after 25 minutes: do not start another action; quitting now counts as may have been sent" };
   const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW }, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), actions: { busy } }));
-  assert.match(above(page), /still running Still running after 25 minutes: do not start another action; quitting now counts as may have been sent\./);
+  assert.match(above(page), /still running Still running after 25 minutes: do not start another action; quitting now counts as may have been sent./i);
   assert.equal(page.byId("alarms").all((n) => n.attrs.id === "banner-hung").length, 1, "today's page keeps its banner");
   assert.equal(ids(page, "banner-hung"), 1, "the id is on the page once");
   const noKey = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW } }), {}, "");
-  assert.match(above(noKey), /key This page lost its key \(a reload drops it\)\. Close this window and open the program again\./);
+  assert.match(above(noKey), /key This page lost its key \(a reload drops it\)\. Close this window and open the program again./i);
   assert.equal(ids(noKey, "banner-key"), 1);
   const lock = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW }, actions: { lock: { held: false, why: "another console holds it", folder_missing: false } } }));
   assert.match(above(lock), /does not hold the run folder's lock/);
@@ -480,8 +485,8 @@ test("the banners of the page (key lost, a step still running, the run folder's 
 
 test("the engine's loud notes and danger alarms are on the card, whole, and the card says it needs a look and opens Details", async () => {
   const page = await openSwap(F.SWAP_B, (r) => cardPayload(r, { phase: "locked", line_match: { hex: HEX, at: NOW }, autopilot: { alice: null, bob: ON("bob") }, status: status("bob"), tick: { lock: mkLock(), notes: ["ALERT: a reorg removed your claim; send it again before D", "ANOMALY: our lock was refunded while the secret may be public"] } }));
-  assert.match(above(page), /ALERT: a reorg removed your claim; send it again before D/);
-  assert.match(above(page), /ANOMALY: our lock was refunded while the secret may be public/);
+  assert.match(above(page), /A reorg removed your claim; send it again before the deadline/);
+  assert.match(above(page), /Our lock was refunded while the secret may be public/);
   assert.equal(page.byId("pg-card").all((n) => n.className.includes("loud-notes")).length, 1);
   assert.equal(head(page), "Something needs a look");
   assert.match(card(page), /The engine raised an alarm: it is shown above\./);
@@ -592,7 +597,7 @@ test("the card's plan is data only: the same facts give the same plan, with the 
   const b = S.plan({ payload: p, role: "alice", view, now: NOW });
   assert.equal(a.kind, "approve");
   assert.equal(a.stage, 2);
-  assert.equal(JSON.stringify(a.claims), JSON.stringify({ autopilot: true }));
+  assert.equal(JSON.stringify(a.claims), JSON.stringify({ step: false, autopilot: true }));
   assert.equal(JSON.stringify({ ...a, view: null }), JSON.stringify({ ...b, view: null }));
 });
 
@@ -767,7 +772,7 @@ test("S1: if the card cannot be drawn, the boxes it would have claimed are drawn
   };
   await ap.byId("refresh").click();
   await ap.flush();
-  assert.match(squash(ap.text("next-action")), /needs you Lock the ETH the dry run does not match the terms/);
+  assert.match(squash(ap.text("next-action")), /needs you Lock the ETH: the dry run does not match the terms/i);
   // no view: the plan does not claim a box that cannot be drawn
   const p = cardPayload("bob", { phase: "funding_final", line_match: { hex: HEX, at: NOW }, autopilot: { alice: null, bob: ON("bob", { needs_you: needs }) } });
   const plan = ap.window.NoidStage.plan({ payload: p, role: "bob", view: null, now: NOW });

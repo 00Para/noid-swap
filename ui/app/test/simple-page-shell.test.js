@@ -30,7 +30,10 @@ test("guide: an empty list shows the heading, the intro, six numbered steps and 
   const items = ol.children.map((li) => textOf(li).replace(/\s+/g, " ").trim());
   assert.equal(items.length, 6);
   ITEMS.forEach((re, i) => assert.match(items[i], re, `step ${i + 1}`));
-  assert.match(textOf(root), /No swaps yet\. Make one with New swap, or use the offer board if it is on\./);
+  const emptyBox = root.all((n) => n.className.split(/\s+/).includes("pg-empty"))[0];
+  assert.ok(emptyBox, "the empty state is drawn above the guide");
+  assert.equal(emptyBox.querySelector("h2").textContent, "No swaps yet");
+  assert.equal(emptyBox.querySelector("p").textContent, "Make one with New swap, or use the offer board if it is on.");
   // the heading names the section
   assert.equal(guide.attrs["aria-labelledby"], "pg-h-guide");
   assert.equal(guide.querySelector("h2").attrs.id, "pg-h-guide");

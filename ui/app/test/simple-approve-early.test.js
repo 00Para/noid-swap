@@ -93,7 +93,8 @@ test("in force with no deposit seen: only a read loop runs and nothing is sent, 
     assert.equal(swap.executor.watchStatus().mode, "read");
     assert.equal(env.steps.calls.filter((c) => c.name === "walletFund").length, 0, "no dry run and no funding");
     assert.equal(swap.autopilot.view(runOf(swap)).alice.waiting_reason, "Waiting for your deposit to be seen; until then the program only reads the chains.");
-    assert.deepEqual(swap.autopilot.needViews("alice"), []);
+    // no stopped step; the 5 micro-NOID the wallet holds are a short deposit, which the person is told (test/simple-short-deposit.test.js)
+    assert.deepEqual(swap.autopilot.needViews("alice").filter((n) => n.kind !== "deposit"), []);
     await set.stopAll();
   } finally {
     await env.cleanup();

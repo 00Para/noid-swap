@@ -92,7 +92,8 @@
     const nodes = nodeWords(prog && prog.node);
     const n = activeCount(prog && prog.swaps);
     const net = prog && prog.network === "test" ? H.chip("quiet", "Test network") : H.chip("danger", "Network not recognised");
-    const summary = el("summary", { class: "btn sm", "aria-label": "Menu" }, "Menu");
+    const ic = (name) => (H.icon ? H.icon(name) : null);
+    const summary = el("summary", { class: "btn ghost sm", "aria-label": "Menu" }, ic("menu"), el("span", { text: "Menu" }));
     const menu = el("details", { class: "pg-menu" }, summary);
     // Escape closes the menu and gives focus back to its button (a details element does not do that by itself)
     menu.addEventListener("keydown", (ev) => {
@@ -116,9 +117,9 @@
       "div",
       { class: "wrap pg-bar-in" },
       el("div", { class: "pg-brand" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 22, height: 22 }), el("span", { class: "wordmark", "aria-label": "No1d Swap" }, "No1d", el("i", { class: "dia", "aria-hidden": "true" }), "Swap")),
-      el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" ? "page" : null, onclick: () => h.go("list") }, "Your swaps", el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
+      el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" ? "page" : null, onclick: () => h.go("list") }, el("span", { class: "lbl", text: "Your swaps" }), el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
       el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, nodeChip("Parano1d", nodes.noid), nodeChip("Ethereum", nodes.eth)),
-      el("div", { class: "pg-tools" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => h.refresh() }, "Refresh"), menu)
+      el("div", { class: "pg-tools" }, el("button", { type: "button", class: "btn ghost icon", "aria-label": "Refresh", onclick: () => h.refresh() }, ic("refresh"), el("span", { class: "sr-only", text: "Refresh" })), menu)
     );
   }
 
@@ -128,23 +129,35 @@
     return H.phaseLabel ? H.phaseLabel(role, phase) : String(phase);
   }
 
+  const ic = (name, extra) => (H.icon ? H.icon(name, extra) : null);
+  const glyph = (coin) => (H.coinGlyph ? H.coinGlyph(coin, "sm") : null);
+  /** One half of the pair of a row: the coin glyph's partner, the figure in mono and the ticker in the coin's colour. `half` is { text, coin } from the summary; anything else is not drawn. */
+  const validHalf = (x) => !!(x && typeof x === "object" && (x.coin === "noid" || x.coin === "eth") && typeof x.text === "string" && /^[0-9][0-9.]{0,38}$/.test(x.text));
+  const amountOf = (half) => H.el("span", { class: `amt ${half.coin}` }, H.el("span", { class: "num", text: half.text }), H.el("span", { class: "tic", text: half.coin === "noid" ? "NOID" : "ETH" }));
+  // a swap that ended but still needs the person (a sweep that stopped) is not under the "Ended" divider: it stays with the swaps that need attention
+  const isEnded = (s) => !s.active && !!s.phase && !s.needs_you;
+
   function swapRow(s, h) {
     const el = H.el;
     const chips = [];
-    if (!s.refused) chips.push(H.chip("quiet", phaseWord(s.role, s.phase)));
     if (s.needs_you) chips.push(H.chip("accent", "Needs you"));
     if (s.in_contract) chips.push(H.chip("warn", "Coins are in the contract"));
     if (s.refused) chips.push(H.chip("danger", "Read only"));
-    else if (!s.active && s.phase) chips.push(H.chip("quiet", "Ended"));
+    else if (isEnded(s)) chips.push(H.chip(s.phase === "done" ? "ok" : "quiet", "Ended"));
+    // the label is also the swap's name for a screen reader: with the pair drawn (which is hidden from one) it stays as a word that only a screen reader sees
+    const main = validHalf(s.give) && validHalf(s.get)
+      ? el("span", { class: "pg-row-main" }, el("span", { class: "sr-only", text: s.label || "A swap" }), el("span", { class: "pg-pair", "aria-hidden": "true" }, glyph(s.give.coin), amountOf(s.give), ic("arrowR"), glyph(s.get.coin), amountOf(s.get)), el("span", { class: "pg-role", text: roleWords(s.role) }))
+      : el("span", { class: "pg-row-main" }, el("strong", { class: "pg-label", text: s.label || "A swap" }), el("span", { class: "pg-role", text: roleWords(s.role) }));
     return el(
       "li",
-      { class: "pg-swap" + (s.needs_you ? " needs" : "") },
+      { class: "pg-swap" + (s.needs_you ? " needs" : "") + (isEnded(s) ? " ended" : "") },
       el(
         "button",
         { type: "button", class: "pg-row", onclick: () => h.openSwap(s.swap) },
-        el("span", { class: "pg-row-main" }, el("strong", { class: "pg-label", text: s.label || "A swap" }), el("span", { class: "dim", text: ` ${roleWords(s.role)}` })),
+        main,
+        el("span", { class: "pg-row-state" }, s.refused ? null : el("span", { text: phaseWord(s.role, s.phase) }), s.until_text ? el("span", { class: "pg-until", text: s.until_text }) : null),
         el("span", { class: "pg-row-chips" }, ...chips),
-        s.until_text ? el("span", { class: "dim pg-until", text: s.until_text }) : null,
+        ic("chevR", "go"),
         s.refused ? el("span", { class: "pg-refused", text: `This folder is read only: ${s.refused}` }) : null
       )
     );
@@ -181,17 +194,21 @@
     const v = vaultNotes(prog);
     const noKey = !(H.state && H.state.token);
     const root = el("section", { class: "pg-list", "aria-labelledby": "pg-h-swaps" });
-    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, "New swap"))));
+    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
     if (noKey) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: KEY_LOST_PROGRAM }));
     else if (!ns.ok) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: ns.why || "A new swap cannot start now." }));
-    if (v.not_ready) root.appendChild(el("div", { class: "alarm danger big", role: "alert" }, el("span", { class: "lv", text: "key store" }), el("span", { class: "tx" }, "The program's key store is not open, so no swap can act. Restore from your recovery code, or close the program and open it again. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("restore") }, "Restore from a recovery code"))));
-    if (v.unconfirmed) root.appendChild(el("div", { class: "alarm warn big", role: "note" }, el("span", { class: "lv", text: "recovery code" }), el("span", { class: "tx" }, "Your recovery code is not confirmed yet. Without it a swap cannot be restored on another machine, so no new swap starts until you have written it down and typed it back. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("recovery-code") }, "Show my recovery code"))));
+    if (v.not_ready) root.appendChild(el("div", { class: "alarm danger big", role: "alert" }, ic("alert"), el("span", { class: "lv", text: "Key store" }), el("span", { class: "tx" }, "The program's key store is not open, so no swap can act. Restore from your recovery code, or close the program and open it again. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("restore") }, "Restore from a recovery code"))));
+    if (v.unconfirmed) root.appendChild(el("div", { class: "alarm needs big", role: "note" }, ic("alert"), el("span", { class: "lv", text: "Recovery code" }), el("span", { class: "tx" }, "Your recovery code is not confirmed yet. Without it a swap cannot be restored on another machine, so no new swap starts until you have written it down and typed it back. ", el("button", { type: "button", class: "btn primary due sm", onclick: () => h.openProgram("recovery-code") }, "Show my recovery code"))));
     if (!swaps.length) {
+      root.appendChild(el("div", { class: "pg-empty" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 44, height: 44 }), el("h2", { text: "No swaps yet" }), el("p", { text: "Make one with New swap, or use the offer board if it is on." })));
       root.appendChild(firstStartGuide(prog));
-      root.appendChild(el("p", { class: "plain", text: "No swaps yet. Make one with New swap, or use the offer board if it is on." }));
     } else {
+      // the swaps that are over follow a one-line "Ended"; a swap the program cannot read (no phase) stays above it
       const ul = el("ul", { class: "pg-swaps", "aria-label": "Your swaps" });
-      for (const s of swaps) ul.appendChild(swapRow(s, h));
+      for (const s of swaps.filter((x) => !isEnded(x))) ul.appendChild(swapRow(s, h));
+      const over = swaps.filter(isEnded);
+      if (over.length) ul.appendChild(el("li", { class: "pg-group", text: "Ended" }));
+      for (const s of over) ul.appendChild(swapRow(s, h));
       root.appendChild(ul);
     }
     const b = prog && prog.board;
@@ -206,6 +223,17 @@
       }
       root.appendChild(sec);
     }
+    return root;
+  }
+
+  /** The list while the program has not answered yet: the heading, a New swap that cannot be pressed, and three rows in the shape of the real ones. */
+  function loadingList() {
+    const el = H.el;
+    const root = el("section", { class: "pg-list", "aria-labelledby": "pg-h-swaps" });
+    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: true }, ic("plus"), "New swap"))));
+    const ul = el("ul", { class: "pg-swaps", "aria-busy": "true", "aria-label": "Your swaps, loading" });
+    for (const w of ["w60", "w45", "w60"]) ul.appendChild(el("li", { class: "pg-swap" }, el("div", { class: "pg-row" }, el("span", { class: "pg-row-main" }, el("span", { class: `sk h16 ${w}` }), el("span", { class: "sk h12 w30" })), el("span", { class: "pg-row-state" }, el("span", { class: "sk h12 w80" })), el("span", {}), el("span", {}))));
+    root.appendChild(ul);
     return root;
   }
 
@@ -233,13 +261,19 @@
   /** Shows server errors under their fields; anything it cannot place goes into `general` as words. Returns the lines that were not placed. */
   function placeErrors(errors, byKey, general) {
     const left = [];
-    for (const k of Object.keys(byKey)) byKey[k].err.textContent = "";
+    for (const k of Object.keys(byKey)) {
+      byKey[k].err.textContent = "";
+      if (byKey[k].control && byKey[k].control.removeAttribute) byKey[k].control.removeAttribute("aria-invalid");
+    }
     if (general) general.textContent = "";
     if (Array.isArray(errors)) for (const e of errors) left.push(String(e));
     else if (errors && typeof errors === "object") {
       for (const [k, m] of Object.entries(errors)) {
         const f = byKey[k] || null;
-        if (f) f.err.textContent = String(m);
+        if (f) {
+          f.err.textContent = String(m);
+          if (f.control && f.control.setAttribute) f.control.setAttribute("aria-invalid", "true");
+        }
         else left.push(`${k}: ${m}`);
       }
     }
@@ -258,6 +292,8 @@
     alice: "The ETH you get is sent here at the end, with anything left over. Use your own wallet, not an exchange deposit address.",
     bob: "What is left of this swap's ETH is sent here at the end. Use your own wallet, not an exchange deposit address.",
   };
+  // what the Ethereum block says under its figure, by the network chosen
+  const PROFILE_ON = { sepolia: "on Ethereum Sepolia, a test network", rehearsal: "on a test chain on this machine" };
   const BOB_NOID_LABEL = { alice: "Bob's Parano1d address", bob: "Your Parano1d address (where the NOID you buy goes)" };
 
   /**
@@ -281,18 +317,37 @@
     const prefillBobNoid = (r) => (r === "alice" ? "" : str(S.bob_noid) || str(S.noid_payout));
 
     const role = reg("role", field(F, "role", "Your side", selectInput(F, "role", [["alice", "I sell NOID and get ETH (Alice)"], ["bob", "I sell ETH and get NOID (Bob)"]], "alice"), "Each swap has one side, chosen here and never changed."));
-    const noid = reg("noid_amount", field(F, "noid_amount", "NOID amount", textInput(F, "noid_amount", "", "5"), "The program refuses more than its test limit and says how much that is.", "amt amt-noid"));
-    const eth = reg("eth_amount", field(F, "eth_amount", "ETH amount", textInput(F, "eth_amount", "", "0.001"), "Same limit rule.", "amt amt-eth"));
-    const bobNoid = reg("bob_noid", field(F, "bob_noid", BOB_NOID_LABEL.alice, textInput(F, "bob_noid", "", "o1…"), "Where the NOID goes when the swap completes."));
-    const bobEth = reg("bob_eth", field(F, "bob_eth", "Bob's Ethereum address", textInput(F, "bob_eth", "", "0x…"), "The address Bob's tool shows after it makes his key for this swap."));
-    const noidPay = reg("noid_payout", field(F, "noid_payout", "Your Parano1d address for what is left", textInput(F, "noid_payout", S.noid_payout, "o1…"), "If the swap does not go through, your NOID comes back to this address."));
-    const ethPay = reg("eth_payout", field(F, "eth_payout", "Your Ethereum address", textInput(F, "eth_payout", S.eth_payout, "0x…"), ETH_PAYOUT_HINT.alice));
+    // the two amounts are the two blocks of a convert: the label says give or get by the side, the glyph and the ticker are the coin's, the chain is under the figure
+    const noid = reg("noid_amount", field(F, "noid_amount", "You give", textInput(F, "noid_amount", "", "0"), "The program refuses more than its test limit and says how much that is.", "amt amt-noid"));
+    const eth = reg("eth_amount", field(F, "eth_amount", "You get", textInput(F, "eth_amount", "", "0"), "Same limit rule.", "amt amt-eth"));
+    const chainNoid = el("span", { class: "on", text: "on Parano1d" });
+    const chainEth = el("span", { class: "on", text: PROFILE_ON.sepolia });
+    // the coin sits in a sibling span: the field's accessible name is its label and the coin (it starts with the visible label), so a screen reader hears "You give NOID", not "You give" alone
+    const nameAmount = (f, coin) => f.control.setAttribute("aria-label", `${f.label.textContent} ${coin === "noid" ? "NOID" : "ETH"}`);
+    const amountBlock = (f, coin, chain) => {
+      for (const c of [...f.box.children]) f.box.removeChild(c);
+      const glyph = H.coinGlyph ? H.coinGlyph(coin) : null;
+      const tic = el("span", { class: "tic", text: coin === "noid" ? "NOID" : "ETH" });
+      for (const c of [f.label, glyph, f.control, tic, chain, f.hint, f.err]) if (c) f.box.appendChild(c);
+      nameAmount(f, coin);
+    };
+    amountBlock(noid, "noid", chainNoid);
+    amountBlock(eth, "eth", chainEth);
+    const bobNoid = reg("bob_noid", field(F, "bob_noid", BOB_NOID_LABEL.alice, textInput(F, "bob_noid", "", "o1…"), "Where the NOID goes when the swap completes.", "code"));
+    const bobEth = reg("bob_eth", field(F, "bob_eth", "Bob's Ethereum address", textInput(F, "bob_eth", "", "0x…"), "The address Bob's tool shows after it makes his key for this swap.", "code"));
+    const noidPay = reg("noid_payout", field(F, "noid_payout", "Your Parano1d address for what is left", textInput(F, "noid_payout", S.noid_payout, "o1…"), "If the swap does not go through, your NOID comes back to this address.", "code"));
+    const ethPay = reg("eth_payout", field(F, "eth_payout", "Your Ethereum address", textInput(F, "eth_payout", S.eth_payout, "0x…"), ETH_PAYOUT_HINT.alice, "code"));
+    const bobGrid = el("div", { class: "form-grid" }, bobNoid.box, bobEth.box);
+    const ownGrid = el("div", { class: "form-grid" }, noidPay.box, ethPay.box);
+    const bobSec = el("section", { class: "ns-sec", "aria-labelledby": "ns-h-bob" }, el("h2", { id: "ns-h-bob", text: "Bob's addresses" }), bobGrid);
+    const ownSec = el("section", { class: "ns-sec", "aria-labelledby": "ns-h-own" }, el("h2", { id: "ns-h-own", text: "Your own addresses" }), ownGrid);
+    let root = null; // the form's section, once it is made (the side's class goes on it)
     const remember = checkInput(F, "remember", true);
     const single = checkInput(F, "single_node_ok", false);
     // the optional settings: the defaults are right for most swaps
     const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Test networks only: the Ethereum side has no value, the NOID is real."));
     const version = reg("contract_version", field(F, "contract_version", "Parano1d contract version", selectInput(F, "contract_version", [["1", "1"], ["2", "2"]], "1"), "1 unless you and the other person agreed on 2."));
-    const contract = reg("contract", field(F, "contract", "Ethereum contract", textInput(F, "contract", pinOf("sepolia"), "0x…"), pinOf("sepolia") ? PIN_HINT : NO_PIN_HINT));
+    const contract = reg("contract", field(F, "contract", "Ethereum contract", textInput(F, "contract", pinOf("sepolia"), "0x…"), pinOf("sepolia") ? PIN_HINT : NO_PIN_HINT, "code"));
     const optBlock = reg("deploy_block", field(F, "deploy_block", "Log start block", textInput(F, "deploy_block", "", ""), "Optional. The first Ethereum block the tool scans for this swap's contract events; empty lets the tool pick a recent one. Never a block after the lock."));
     const hcLead = reg("hc_lead", field(F, "hc_lead", "Blocks before the funding block", textInput(F, "hc_lead", "", "50"), "Optional, 1 to 1000. Empty uses 50."));
     const gas = reg("gas_price_gwei", field(F, "gas_price_gwei", "Ethereum gas price, gwei", textInput(F, "gas_price_gwei", "", "20"), "Optional, for the test networks."));
@@ -308,6 +363,7 @@
     contract.control.setAttribute("aria-describedby", `${F}-hint-contract ${F}-inv-contract-note ${F}-err-contract`);
     const invHint = el("span", { class: "dim hint", id: "ns-inv-hint", text: "Fills the form from the file Bob's program saved. You still check every value." });
     const invButton = el("button", { type: "button", class: "btn", id: "ns-open-invitation", "aria-describedby": "ns-inv-hint", disabled: !H.state.token ? true : null }, "Open Bob's invitation…");
+    const inviteBox = el("div", { class: "invite-open" }, ic("open"), el("div", { class: "invite-text" }, invNote, invHint), invButton);
 
     let curRole = "alice";
     let bobTyped = false; // the person typed in "Bob's Parano1d address" (a fill by the program does not count)
@@ -324,9 +380,27 @@
     const syncContractHint = () => {
       if (contract.hint) contract.hint.textContent = pinOf(profile.control.value) ? PIN_HINT : NO_PIN_HINT;
     };
+    const place = (grid, ...boxes) => {
+      for (const b of boxes) grid.appendChild(b);
+    };
+    const syncChain = () => {
+      chainEth.textContent = PROFILE_ON[profile.control.value] || PROFILE_ON.sepolia;
+    };
     const applyRole = (r) => {
       bobEth.box.hidden = r !== "alice";
       noidPay.box.hidden = r !== "alice";
+      bobSec.hidden = r !== "alice";
+      // Alice looks at Bob's two addresses and at her own; Bob has only his own, and the Parano1d one (where the NOID he buys goes) is among them
+      if (r === "alice") {
+        place(bobGrid, bobNoid.box, bobEth.box);
+        place(ownGrid, noidPay.box, ethPay.box);
+      } else place(ownGrid, noidPay.box, bobNoid.box, ethPay.box);
+      // what is given is on the left: the NOID for Alice, the ETH for Bob
+      noid.label.textContent = r === "alice" ? "You give" : "You get";
+      eth.label.textContent = r === "alice" ? "You get" : "You give";
+      nameAmount(noid, "noid");
+      nameAmount(eth, "eth");
+      if (root) root.classList.toggle("is-bob", r === "bob");
       bobNoid.label.textContent = BOB_NOID_LABEL[r] || BOB_NOID_LABEL.alice;
       if (ethPay.hint) ethPay.hint.textContent = ETH_PAYOUT_HINT[r] || ETH_PAYOUT_HINT.alice;
     };
@@ -339,11 +413,13 @@
         if (!pin) optional.open = true;
       }
       lastPin = pin;
+      syncChain();
       syncContractHint();
       syncContractNote();
     };
     const clearInvitation = () => {
       invitation = false;
+      inviteBox.classList.remove("filled");
       noid.control.value = "";
       eth.control.value = "";
       bobEth.control.value = "";
@@ -355,6 +431,7 @@
       lastPin = pinOf("sepolia");
       invNote.hidden = true;
       invNote.textContent = "";
+      syncChain();
       syncContractHint();
       syncContractNote();
     };
@@ -404,6 +481,8 @@
       lastPin = pinOf(profile.control.value);
       invNote.textContent = INVITATION_NOTE;
       invNote.hidden = false;
+      inviteBox.classList.add("filled");
+      syncChain();
       syncContractHint();
       syncContractNote();
       const pin = pinOf(profile.control.value);
@@ -453,20 +532,22 @@
     };
     go.addEventListener("click", submit);
 
-    const node = el(
+    root = el(
       "section",
-      { class: "pg-form", "aria-labelledby": "ns-h" },
+      { class: "pg-form ns", "aria-labelledby": "ns-h" },
       el("div", { class: "card-head" }, el("h1", { id: "ns-h", text: "New swap" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Cancel"))),
-      el("p", { class: "plain", text: "Every value is checked by the program before anything is made. A new swap sends nothing to any chain; coins move only after you approve and deposit." }),
-      el("div", { class: "field" }, invButton, invHint),
-      invNote,
-      el("div", { class: "form-grid" }, role.box, noid.box, eth.box, bobNoid.box, bobEth.box, noidPay.box, ethPay.box),
+      inviteBox,
+      role.box,
+      el("div", { class: "convert" }, noid.box, el("div", { class: "mid", "aria-hidden": "true" }, el("i")), eth.box),
+      bobSec,
+      ownSec,
       el("label", { class: "ack", for: `${F}-remember` }, remember, el("span", { text: " Use these addresses for my next swaps" })),
       el("label", { class: "ack", for: `${F}-single_node_ok` }, single, el("span", {}, " I accept a single node per chain for this swap. ", el("strong", { text: "Never tick this for a swap with someone you do not know:" }), " one node that lies can make the program act on a false chain. Leave it empty unless you control both sides.")),
       optional,
       general,
-      el("div", { class: "row" }, go)
+      el("div", { class: "form-end" }, go, el("p", { class: "plain", text: "Every value is checked by the program before anything is made. A new swap sends nothing to any chain; coins move only after you approve and deposit." }))
     );
+    const node = root;
     return { node, collect, setErrors, submit, controls: { role, profile, version, noid, eth, contract, bobNoid, bobEth, noidPay, ethPay, remember, single, optBlock, hcLead, gas, tip, optional, invButton } };
   }
 
@@ -474,26 +555,26 @@
   const T = (path, label, hint, extra) => ({ path, label, hint, kind: "text", ...extra });
   /** The fields of settings.json (never `v`, never a secret). `alert_url` is write-only (below). */
   const SETTINGS_FIELDS = [
-    { group: "Parano1d node" },
-    T(["noid_rpc"], "Parano1d node address", "This machine only (http://127.0.0.1:…): the node of the Parano1d wallet app."),
+    { group: "Parano1d node", line: "This machine only: the node of the Parano1d wallet app." },
+    T(["noid_rpc"], "Parano1d node address", "An http://127.0.0.1:… address."),
     T(["noid_rpc2"], "Second Parano1d node (optional)", "A second opinion on the chain.", { nullable: true }),
     { path: ["noid_rpc2_remote"], label: "The second Parano1d node is on another machine", kind: "check" },
-    { group: "Ethereum node (Sepolia)" },
+    { group: "Ethereum node (Sepolia)", line: "Sepolia, the public test network." },
     T(["eth", "sepolia", "rpc"], "Sepolia node", "An https:// address."),
     T(["eth", "sepolia", "rpc2"], "Sepolia, second node (optional)", "", { nullable: true }),
     { path: ["eth_rpc2_remote"], label: "The second Ethereum node is on another machine", kind: "check" },
     { path: ["rpc_timeout_s"], label: "Seconds to wait for a node", kind: "int" },
-    { group: "Your addresses (they fill the form of a new swap)" },
+    { group: "Your addresses", line: "They fill the form of a new swap.", one: true },
     T(["noid_payout"], "Your Parano1d address (when you sell NOID: what is left comes back here)", "", { nullable: true }),
     T(["eth_payout"], "Your Ethereum address (the ETH you get, or what is left, goes here)", "", { nullable: true }),
     T(["bob_noid"], "Your Parano1d address for the NOID you buy (when you sell ETH)", "", { nullable: true }),
-    { group: "Updates" },
+    { group: "Updates", line: "The program never installs anything by itself." },
     { path: ["update_check"], label: "Check for a new version", kind: "select", options: [["ask", "Ask me"], ["daily", "Once a day"], ["off", "Never"]] },
     // the closed fold "Advanced": the rehearsal chain and the offer board
-    { group: "Rehearsal chain", advanced: true },
+    { group: "Rehearsal chain", line: "The test chain on this machine.", advanced: true },
     T(["eth", "rehearsal", "rpc"], "Rehearsal node", "The test chain on this machine."),
     T(["eth", "rehearsal", "rpc2"], "Rehearsal, second node (optional)", "", { nullable: true }),
-    { group: "Offer board", advanced: true },
+    { group: "Offer board", line: "Test offers only.", advanced: true },
     { path: ["board", "relays"], label: "Relays, one address per line", kind: "lines", hint: "wss:// addresses." },
     { path: ["board", "lead_blocks"], label: "Blocks of lead before the funding block", kind: "int" },
     { path: ["board", "fund_k"], label: "Funding limit k (optional)", kind: "int", nullable: true },
@@ -528,7 +609,7 @@
     const sections = [];
     for (const spec of SETTINGS_FIELDS) {
       if (spec.group) {
-        sect = { title: spec.group, advanced: spec.advanced === true, grid: el("div", { class: "form-grid" }) };
+        sect = { title: spec.group, line: spec.line || "", advanced: spec.advanced === true, grid: el("div", { class: "form-grid" + (spec.one ? " one" : "") }) };
         sections.push(sect);
         continue;
       }
@@ -575,7 +656,13 @@
       return out;
     };
     const go = el("button", { type: "button", class: "btn primary", id: "st-go", disabled: !H.state.token ? true : null }, "Save settings");
-    const advanced = el("details", { class: "fold", id: "st-advanced" }, el("summary", { text: "Advanced: the rehearsal chain and the offer board" }), ...sections.filter((s) => s.advanced).map((s) => el("fieldset", { class: "pg-set" }, el("legend", { text: s.title }), s.grid)));
+    // a section: its title and one line on the left, its fields on the right (one column under 900 px)
+    let secN = 0;
+    const secOf = (title, line, ...body) => {
+      const id = `st-sec-${++secN}`;
+      return el("section", { class: "set-sec", "aria-labelledby": id }, el("div", { class: "set-head" }, el("h2", { id, text: title }), line ? el("p", { class: "dim", text: line }) : null), el("div", { class: "set-body" }, ...body));
+    };
+    const advanced = el("details", { class: "fold", id: "st-advanced" }, el("summary", { text: "Advanced: the rehearsal chain and the offer board" }), ...sections.filter((s) => s.advanced).map((s) => secOf(s.title, s.line, s.grid)));
     const setErrors = (errors) => {
       const left = placeErrors(errors, by, general);
       // an error inside the fold opens it
@@ -590,6 +677,7 @@
         const r = await request("POST", "/api/settings", collect());
         if (r.ok && r.json && r.json.ok === true) {
           note.textContent = "Saved. A swap that is already made keeps the settings it was made with.";
+          if (H.toast) H.toast("Settings saved");
           if (h && h.saved) await h.saved(r.json.settings || null);
           return r;
         }
@@ -606,15 +694,14 @@
 
     const node = el(
       "section",
-      { class: "pg-form", "aria-labelledby": "st-h" },
+      { class: "pg-form st", "aria-labelledby": "st-h" },
       el("div", { class: "card-head" }, el("h1", { id: "st-h", text: "Settings" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Back to your swaps"))),
       el("p", { class: "plain", text: "These are the program's own settings. Each new swap copies the ones it needs when it is made; changing them later does not change a swap that exists. Nothing secret is kept here." }),
-      ...sections.filter((s) => !s.advanced).map((s) => el("fieldset", { class: "pg-set" }, el("legend", { text: s.title }), s.grid)),
-      el("fieldset", { class: "pg-set" }, el("legend", { text: "Alerts" }), el("p", { class: "plain", text: alertSet ? "An alert address is set. It is not shown." : "No alert address is set." }), el("div", { class: "form-grid" }, alertF.box), alertSet ? el("label", { class: "ack", for: `${F}-alert_remove` }, alertOff, " Remove the alert address") : null),
+      ...sections.filter((s) => !s.advanced).map((s) => secOf(s.title, s.line, s.grid)),
+      secOf("Alerts", alertSet ? "An alert address is set. It is not shown." : "No alert address is set.", el("div", { class: "form-grid one" }, alertF.box), alertSet ? el("label", { class: "ack", for: `${F}-alert_remove` }, alertOff, " Remove the alert address") : null),
       advanced,
       general,
-      note,
-      el("div", { class: "row" }, go)
+      el("div", { class: "form-end" }, go, note)
     );
     return { node, collect, setErrors, submit };
   }
@@ -647,6 +734,7 @@
     vaultNotes,
     topBar,
     swapList,
+    loadingList,
     newSwapForm,
     settingsForm,
     openProgram,

@@ -71,7 +71,7 @@ test("Alice's NOID row: the figure in NOID exactly (trailing zeros removed), the
   assert.equal(rows.length, 2, "NOID and ETH");
   const noid = rows[0];
   const t = squash(textOf(noid));
-  assert.match(t, /^NOID to deposit Send at least 5\.006 NOID Copy amount to this address /);
+  assert.match(t, /^NOID to deposit (seen|not yet) Send at least 5\.006 NOID Copy amount to this address /);
   assert.deepEqual(amt(noid), ["5.006"]);
   assert.ok(all(noid, (n) => cls(n, "leg") && cls(n, "noid")).length === 1, "the coin's colour");
   const c = copies(noid);
@@ -90,7 +90,7 @@ test("Alice's ETH row: the figure is the wei rounded UP to six decimals; the exa
   const box = plainBox("alice");
   const eth = all(box, (n) => cls(n, "deposit-row"))[1];
   const t = squash(textOf(eth));
-  assert.match(t, /^ETH to deposit Send at least 0\.001 ETH Copy amount to this address /);
+  assert.match(t, /^ETH to deposit (seen|not yet) Send at least 0\.001 ETH Copy amount to this address /);
   assert.ok(all(eth, (n) => cls(n, "leg") && cls(n, "eth")).length === 1);
   assert.ok(t.includes("Exact amount needed: 1,000,000,000,000,000 wei (0.001 ETH), for the fee of the reveal. The ETH you get arrives here too and goes to your own address at the end. This key holds 5,000,000,000,000,000 wei now."));
   const short = squash(textOf(all(plainBox("alice", { alice: status("alice", { covered: false }) }), (n) => cls(n, "deposit-row"))[1]));
@@ -126,7 +126,7 @@ test("Bob's ETH row: the figure, the exact line with the amount and the fees of 
   const rows = all(box, (n) => cls(n, "deposit-row"));
   assert.equal(rows.length, 1);
   const t = squash(textOf(box));
-  assert.match(t, /ETH to deposit Send at least 0\.002 ETH Copy amount to this address/);
+  assert.match(t, /ETH to deposit (seen|not yet) Send at least 0\.002 ETH Copy amount to this address/);
   assert.ok(t.includes("Exact amount needed: 2,000,000,000,000,000 wei (0.002 ETH): the 0.001 ETH you lock and the fees of the lock and of a refund. This key holds 5,000,000,000,000,000 wei now."));
   assert.ok(t.includes("Deposit now: your lock is sent as soon as Alice's funding is final, and only once your deposit is seen."));
   assert.doesNotMatch(t, /NOID to deposit|The time left|Deposit before about/);
@@ -167,11 +167,11 @@ test("Alice's clock: no note yet, many blocks left, few left, about to close, cl
   // N = 30: M = 26, the time is the tick's time plus 26 blocks of 20 s, dim
   const far = clockOf({ notes: [FUNDING(30)] });
   assert.equal(far.cls, "dim");
-  assert.equal(far.text, `Deposit before about ${hhmmAt(NOW + 26 * 20)}, so the funding can go in on time. Blocks come at random, so earlier is safer.`);
+  assert.equal(far.text, `Deposit before about ${hhmmAt(NOW + 26 * 20)} , about 9 min from now, so the funding can go in on time. Blocks come at random, so earlier is safer.`);
   // N = 8: M = 4, the same words, attention
   const near = clockOf({ notes: [FUNDING(8, true)] });
   assert.equal(near.cls, "attn");
-  assert.equal(near.text, `Deposit before about ${hhmmAt(NOW + 4 * 20)}, so the funding can go in on time. Blocks come at random, so earlier is safer.`);
+  assert.equal(near.text, `Deposit before about ${hhmmAt(NOW + 4 * 20)} , about 1 min from now, so the funding can go in on time. Blocks come at random, so earlier is safer.`);
   // the edge: M = 5 is attention, M = 6 is not
   assert.equal(clockOf({ notes: [FUNDING(9)] }).cls, "attn");
   assert.equal(clockOf({ notes: [FUNDING(10)] }).cls, "dim");

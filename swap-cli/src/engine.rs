@@ -3863,6 +3863,58 @@ pub fn tick_apply(
     now: u64,
     record: bool,
 ) -> Result<TickOutcome, InvalidTransition> {
+    tick_core(file, noid, eth, now, if record { TickMode::Record } else { TickMode::ReadOnly })
+}
+
+/// How far one tick may change the in-memory file; the caller decides whether to save it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TickMode {
+    /// A read-only `tick`: the same changes are made in memory (events, history entries) and the caller does not save; no intent, no recorded abort.
+    ReadOnly,
+    /// `tick --apply --observe-only`: the facts the observation shows are applied and the caller saves them, but nothing that a decision of the engine
+    /// would record: no intent, no recorded `abort`, no entry that goes with an offered action (see [`tick_observe`]).
+    Observe,
+    /// `tick --apply`.
+    Record,
+}
+
+/// Why `tick --apply --observe-only` must not run on this file: an intent is held, a pending action is recorded, or the history holds an
+/// `intent_decided:` entry (then the caller must run a full `--apply`). Observe-only is for the time before the role has acted. `None`: the file may be observed.
+pub fn observe_only_refusal(file: &SwapFile) -> Option<String> {
+    if let Some(i) = &file.pending_intent {
+        return Some(format!(
+            "observe-only is refused: the file holds an intent ({} since {} unix); run a full `tick --apply`, which holds it or resolves it",
+            i.action, i.decided_at
+        ));
+    }
+    if let Some(a) = file.pending_action.as_ref() {
+        return Some(format!("observe-only is refused: the file records a pending action ({}); run a full `tick --apply`, which holds it or resolves it", a.kind));
+    }
+    // An intent was decided once (resolved or cancelled since): the role has acted, and from then on the full tick is the only writer, so that the
+    // entries and rules that follow a decision (the cancel hold, an abort kept back, the recovery label) are never skipped by a watch.
+    file.history.iter().rev().find_map(|h| h.event.strip_prefix("intent_decided:")).map(|kind| {
+        format!("observe-only is refused: the file's history holds a decided intent ({kind}); once an intent has been decided only a full `tick --apply` writes the file")
+    })
+}
+
+/// The observe-only path of `tick --apply --observe-only`: what [`tick_apply`] does with `record == true`, except everything that a DECISION of the
+/// engine records. The caller saves the file.
+///
+/// Applied, like `--apply`: the events the observation derives (phase moves such as Bob's `received` to `funded` to `funding_final`, an instance
+/// that is gone, a lock seen, a reorg), the log-only facts of the decision (alive at `D`, late lock, a reverted reveal, a close known from the
+/// record alone). Not written: an intent (the printed action is the one a read-only tick prints, its spend parameters withheld), an `abort`, the
+/// history entries that go with an offered action (the producer-concentration override entry, the label of an
+/// adopted recovery instance), the resolution of an intent. A file that holds an intent or a pending action, or whose history shows one was ever
+/// decided, is refused ([`observe_only_refusal`]), so nothing of the ledger is touched.
+pub fn tick_observe(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Result<TickOutcome, String> {
+    if let Some(why) = observe_only_refusal(file) {
+        return Err(why);
+    }
+    tick_core(file, noid, eth, now, TickMode::Observe).map_err(|e| e.to_string())
+}
+
+fn tick_core(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObservation, now: u64, mode: TickMode) -> Result<TickOutcome, InvalidTransition> {
+    let record = mode == TickMode::Record;
     // REVIEW-6 R6-3: first, so this very decision already judges a re-send by the late cutoff.
     note_reverted_reveal(file, eth, now);
     let mut decision = decide(file, noid, eth, now);
@@ -3870,6 +3922,11 @@ pub fn tick_apply(
         file.apply(e, now)?;
     }
     for entry in &decision.log {
+        // Observe-only: an entry that records that an action was OFFERED (a lock past the concentration screen by the operator's flag, a recovery
+        // close for another instance) is written by the full `--apply` tick that offers it, not by one that only watches.
+        if mode == TickMode::Observe && (entry.starts_with(producer_gate::OVERRIDE_HISTORY) || entry.starts_with(RECOVERY_ADOPTED)) {
+            continue;
+        }
         file.log(entry.clone(), now);
     }
     let mut status = IntentStatus::None;

@@ -507,7 +507,8 @@
     }
     if (role === "alice") {
       you.push("Keep the secret sealed. Do not reveal after the reveal cutoff.");
-      if (!["revealed", "done", "refunded", "lost", "aborted", "created", "received"].includes(phaseId)) you.push(`If the swap stops, do nothing until ${dTxt}${inD}, then take the NOID back with the wallet.`);
+      if (ctx.secret_may_be_public === true && (phaseId === "lock_seen" || phaseId === "lock_final")) you.push("The secret may already be public. If you stop now you can lose both legs.");
+      else if (!["revealed", "done", "refunded", "lost", "aborted", "created", "received"].includes(phaseId)) you.push(`If the swap stops, do nothing until ${dTxt}${inD}, then take the NOID back with the wallet.`);
       if (["created", "aborted"].includes(phaseId) && ctx.coins && ctx.coins.instances.length) you.push(`Nothing is done for these coins before ${dTxt}${inD}. After it: the recovery helper in a terminal, the preview first (commands below). This console cannot start it yet.`);
     } else {
       you.push("Stay online until your claim is final.");
@@ -738,16 +739,17 @@
     if (verify) add("Proof", "Equivalence receipt", verify.ok ? "verified (sha256(m) = H and Addr(m) = A)" : "verifier output has no OK line", { plain: true, ok: verify.ok });
     const noid = (tick && tick.noid) || {};
     const eth = (tick && tick.eth) || {};
-    if (noid.instance) add("Parano1d", "Contract instance", `slot ${noid.instance.slot_index}, incarnation ${noid.instance.creation_id}, ${noidText(noid.instance.amount_micronoid)} NOID`, { plain: true, chain: "noid" });
-    if (noid.confirmed_tx) add("Parano1d", `Tracked transaction (confirmed at ${group(noid.confirmed_tx.height)})`, noid.confirmed_tx.txid, { chain: "noid" });
-    for (const p of noid.pending_calls || []) add("Parano1d", "Pending call in the mempool", p.txid, { chain: "noid" });
+    if (noid.instance) add("Parano1d", "Contract instance", `slot ${noid.instance.slot_index}, incarnation ${noid.instance.creation_id}, ${noidText(noid.instance.amount_micronoid)} NOID`, { plain: true, chain: "noid", kind: "instance" });
+    // `kind` names what a receipt is, so that the main view can call it by its plain name (the ticket's Receipts); the labels here are the technical page's
+    if (noid.confirmed_tx) add("Parano1d", `Tracked transaction (confirmed at ${group(noid.confirmed_tx.height)})`, noid.confirmed_tx.txid, { chain: "noid", kind: "noid_tx" });
+    for (const p of noid.pending_calls || []) add("Parano1d", "Pending call in the mempool", p.txid, { chain: "noid", kind: "noid_pending" });
     if (eth.lock) {
-      add("Ethereum", "Lock id", eth.lock.lock_id, { chain: "eth" });
-      add("Ethereum", `Lock transaction (block ${group(eth.lock.block_number)})`, eth.lock.tx_hash, { chain: "eth" });
+      add("Ethereum", "Lock id", eth.lock.lock_id, { chain: "eth", kind: "lock_id" });
+      add("Ethereum", `Lock transaction (block ${group(eth.lock.block_number)})`, eth.lock.tx_hash, { chain: "eth", kind: "lock_tx" });
     }
-    if (eth.claimed) add("Ethereum", `Claim transaction (block ${group(eth.claimed.block_number)})`, eth.claimed.tx_hash, { chain: "eth" });
-    if (eth.refunded) add("Ethereum", `Refund transaction (block ${group(eth.refunded.block_number)})`, eth.refunded.tx_hash, { chain: "eth" });
-    if (eth.pending_preimage) add("Ethereum", "Pending claim transaction", eth.pending_preimage.tx_hash, { chain: "eth" });
+    if (eth.claimed) add("Ethereum", `Claim transaction (block ${group(eth.claimed.block_number)})`, eth.claimed.tx_hash, { chain: "eth", kind: "claim_tx" });
+    if (eth.refunded) add("Ethereum", `Refund transaction (block ${group(eth.refunded.block_number)})`, eth.refunded.tx_hash, { chain: "eth", kind: "refund_tx" });
+    if (eth.pending_preimage) add("Ethereum", "Pending claim transaction", eth.pending_preimage.tx_hash, { chain: "eth", kind: "claim_pending" });
     for (const h of helpers || []) {
       const s = h.summary || {};
       if (h.dry === false && s.txHash) add("Helper output", `${h.kind.replace("eth_", "").replace("_out", "")} result${s.blockNumber ? " (block " + group(s.blockNumber) + ")" : ""}`, s.txHash, { chain: "eth" });
@@ -883,6 +885,8 @@
     ["claim_target", "Claim target"],
     ["d", "D"],
   ];
+  // the chain a mark belongs to (the track it sits on): the reveal rows are Ethereum time, the claim target and D are Parano1d heights
+  const MARK_CHAIN = { reveal_start_by: "eth", t_reveal: "eth", reveal_cutoff: "eth", reveal_resend_cutoff: "eth", claim_target: "noid", d: "noid" };
 
   /** Both locks on one axis that starts at now, or null. Positions are rows' `seconds_left` as they are; the scale is the renderer's. */
   function pictureFor(rows, ctx) {
@@ -900,7 +904,7 @@
     const marks = [];
     for (const [id, short] of MARKS) {
       const r = rows.find((x) => x.id === id);
-      if (!hidden.has(id) && shown(r)) marks.push({ row_id: id, short, at_s: r.seconds_left, approx: !!r.approx, estimate: r.source === "profile-table" });
+      if (!hidden.has(id) && shown(r)) marks.push({ row_id: id, short, chain: MARK_CHAIN[id], at_s: r.seconds_left, approx: !!r.approx, estimate: r.source === "profile-table" });
     }
     if (!marks.length) return null;
     marks.sort((a, b) => a.at_s - b.at_s);
@@ -913,6 +917,186 @@
     const tracks = [track("noid", states[0]), track("eth", states[1])];
     const band = ctx.clock && !ctx.clock.over && ctx.clock.seconds_left > 0 ? { to_s: ctx.clock.seconds_left } : null;
     return { span_s, marks, tracks, band: ctx.stale ? null : band, stale: !!ctx.stale };
+  }
+
+  // ------------------------------------------------------------ where the labels of the picture go (display only)
+  /** The width in px of a label at 12 px: Space Grotesk averages about 6.3 px a character, 6.9 in the medium weight. Wider on purpose: a box may be too wide, never too narrow. */
+  const labelWidth = (text, medium) => Math.ceil(String(text).length * (medium ? 6.9 : 6.3)) + 4;
+
+  /**
+   * Places the labels of the marks around the two tracks so that no two boxes overlap and no leader line runs through a box. items: [{ id, x, w, track }] in time order (x the position
+   * of the mark, w the width of its box, track "noid" | "eth"); geom: { left, right } the limits of a box; fixed: [{ track, x0, x1 }] the words that already sit in row 0 of the inner side of
+   * their track (a track that is not locked says so there). A label goes on the outer side of its track (away from the other track) or the inner side (between them), in a row (0 is the
+   * nearest to the line), starting at its mark or ending at it; the cheapest arrangement with no clash wins (near rows, the outer side and the start first). A leader runs from the line to
+   * a label in a later row, and may not run through a nearer box. Returns { places: [{ id, track, lane, row, anchor, x0, x1, stem }], rows: { noid: { outer, inner }, eth: { outer, inner } } }:
+   * lane "outer" | "inner", anchor "start" | "end" | "clamp" (a box that had to be moved to fit), stem the x of the leader or null. Only positions: it reads no time and decides nothing.
+   */
+  function placeMarks(items, geom, fixed) {
+    const GAP = 8;
+    const REACH = 3;
+    const MAXROW = 6;
+    const BUDGET = 40000;
+    const CROSS = 25;
+    const placed = [];
+    const rows = { noid: { outer: 0, inner: 0 }, eth: { outer: 0, inner: 0 } };
+    for (const f of fixed || []) {
+      placed.push({ band: f.track + "inner", row: 0, x0: f.x0, x1: f.x1, stem: null });
+      rows[f.track].inner = 1;
+    }
+    // null when the box would overlap another in its row (never allowed); else how many leaders would run through a box (allowed only as a last resort, at a high price)
+    const crossings = (c) => {
+      let n = 0;
+      for (const q of placed) {
+        if (q.band !== c.band) continue;
+        if (q.row === c.row && c.x0 < q.x1 + GAP && c.x1 + GAP > q.x0) return null;
+        if (c.stem !== null && q.row < c.row && c.stem > q.x0 - REACH && c.stem < q.x1 + REACH) n++;
+        if (q.stem !== null && q.row > c.row && q.stem > c.x0 - REACH && q.stem < c.x1 + REACH) n++;
+      }
+      return n;
+    };
+    const optionsOf = (it) => {
+      const fit = (x0) => x0 >= geom.left && x0 + it.w <= geom.right;
+      const anchors = [];
+      if (fit(it.x)) anchors.push(["start", it.x, 0]);
+      if (fit(it.x - it.w)) anchors.push(["end", it.x - it.w, 0.5]);
+      anchors.push(["clamp", Math.max(geom.left, Math.min(it.x - it.w / 2, geom.right - it.w)), 6]);
+      const out = [];
+      for (let row = 0; row < MAXROW; row++) for (const lane of ["outer", "inner"]) for (const [anchor, x0, extra] of anchors) out.push({ row, lane, anchor, x0, cost: row * 3 + (lane === "inner" ? 1 : 0) + extra });
+      return out.sort((p, q) => p.cost - q.cost);
+    };
+    const opts = items.map(optionsOf);
+    let best = null;
+    let bestCost = Infinity;
+    let bestCrossed = 0;
+    let nodes = 0;
+    const cur = [];
+    const boxOf = (it, o) => ({ band: it.track + o.lane, row: o.row, x0: o.x0, x1: o.x0 + it.w, stem: o.row > 0 || o.anchor === "clamp" ? it.x : null });
+    const rec = (i, cost, crossed) => {
+      if (i === items.length) {
+        best = cur.slice();
+        bestCost = cost;
+        bestCrossed = crossed;
+        return;
+      }
+      for (const o of opts[i]) {
+        if (cost + o.cost >= bestCost || nodes > BUDGET) break;
+        nodes++;
+        const c = boxOf(items[i], o);
+        const x = crossings(c);
+        if (x === null || cost + o.cost + x * CROSS >= bestCost) continue;
+        placed.push(c);
+        cur.push(o);
+        rec(i + 1, cost + o.cost + x * CROSS, crossed + x);
+        cur.pop();
+        placed.pop();
+      }
+    };
+    rec(0, 0, 0);
+    // no arrangement within the budget (not expected with a handful of marks): one row each, so that no two boxes share a row
+    if (!best) {
+      bestCrossed = 1;
+      best = items.map((it, i) => ({ row: i, lane: "outer", anchor: optionsOf(it)[0].anchor, x0: optionsOf(it)[0].x0 }));
+    }
+    const places = items.map((it, i) => {
+      const o = best[i];
+      const c = boxOf(it, o);
+      rows[it.track][o.lane] = Math.max(rows[it.track][o.lane], o.row + 1);
+      return { id: it.id, track: it.track, lane: o.lane, row: o.row, anchor: o.anchor, x0: c.x0, x1: c.x1, stem: c.stem };
+    });
+    return { places, rows, clean: bestCrossed === 0 };
+  }
+
+  // ------------------------------------------------------------ the two legs of a swap (the ticket)
+  // For each phase of each role: the state of the leg the person gives and of the leg they get, with fixed words and one optional note. The states are the track states of
+  // TRACK_STATE above (the table the picture uses: the first track is NOID, the second ETH), and the refund phases, which the picture does not draw, are added here.
+  // A note that needs a time names the deadline row it comes from ("@back_d" = the NOID's deadline D, "@reveal_by", "@t_reveal"); the caller gives the words of that time.
+  // States: none, sent, pending, final, secret_public, closing, closed, released (back with its owner), unknown. A phase that is not in the table gives "unknown" for both legs.
+  const LEG_WORDS = {
+    alice: {
+      created: [["In your own wallet", "Nothing is locked yet."], ["With Bob", null]],
+      funding_submitted: [["Being locked", "The funding may have been sent. The next readings show it."], ["With Bob", null]],
+      funded: [["Locked, not final yet", "Waiting until it is final."], ["With Bob", null]],
+      funding_final: [["Locked in the swap contract", "@back_d"], ["Bob has not locked yet", null]],
+      lock_seen: [["Locked in the swap contract", "@back_d"], ["Locked by Bob, not final yet", "Waiting until Ethereum finalizes it."]],
+      lock_final: [["Locked in the swap contract", "@back_d"], ["Locked by Bob, final", "@reveal_by"]],
+      reveal_submitted: [["Bob can take it", "The secret is revealed."], ["Your reveal was sent", "Waiting for it to be mined."]],
+      revealed: [["Bob can take it", "The secret is revealed."], ["Paid to you, not final yet", "Waiting until Ethereum finalizes it."]],
+      done: [["Bob can take it", "The secret is revealed."], ["Paid to you", null]],
+      refund_submitted: [["Coming back to you", "The recovery was sent. Waiting for it to be mined."], ["Stayed with Bob", null]],
+      refund_included: [["Coming back to you", "The recovery is in a block. Waiting until it is final."], ["Stayed with Bob", null]],
+      refunded: [["Back with you", "In this swap's wallet, then your own address."], ["Stayed with Bob", null]],
+    },
+    bob: {
+      received: [["In your own wallet", "Nothing is locked yet."], ["With Alice", null]],
+      funded: [["In this swap's own key", "Not locked yet."], ["Locked by Alice, not final yet", "Waiting until it is final."]],
+      funding_final: [["In this swap's own key", "Not locked yet."], ["Locked by Alice, final", "@alice_back"]],
+      lock_submitted: [["Being locked", "Your lock may have been sent. The next readings show it."], ["Locked by Alice, final", "@alice_back"]],
+      locked: [["Locked for Alice", "@bob_back"], ["Locked by Alice, final", "The program collects it once the secret is revealed."]],
+      secret_seen: [["Taken by Alice", "She revealed the secret on Ethereum."], ["Being collected for you", "It can only be paid to your address."]],
+      claim_submitted: [["Taken by Alice", "She revealed the secret on Ethereum."], ["Being collected for you", "Your claim was sent. Waiting for it to be mined."]],
+      claim_included: [["Taken by Alice", "She revealed the secret on Ethereum."], ["Being paid to you", "Your claim is mined. Waiting until it is final."]],
+      done: [["Taken by Alice", null], ["Paid to you", null]],
+      refund_submitted: [["Coming back to you", "The refund was sent. Waiting for it to be mined."], ["Stays with Alice", "@alice_back"]],
+      refund_mined: [["Coming back to you", "The refund is mined, not final yet."], ["Stays with Alice", "@alice_back"]],
+      refunded: [["Back with you", "In this swap's key, then your own address."], ["Stays with Alice", null]],
+    },
+  };
+  // the refund phases are not in TRACK_STATE: the leg that comes back, and the leg that never moved (the first is the one the person gives)
+  const REFUND_STATE = {
+    alice: { refund_submitted: ["pending", "none"], refund_included: ["pending", "none"], refunded: ["released", "none"] },
+    bob: { refund_submitted: ["pending", "final"], refund_mined: ["pending", "final"], refunded: ["released", "final"] },
+  };
+  const UNKNOWN_LEG = Object.freeze({ state: "unknown", words: "Not known", note: null });
+
+  /**
+   * The two legs of this swap as the ticket draws them: { give, get, public } where each leg is { coin, state, words, note } and `public` says whether the secret is public. `view` is a view
+   * (or anything with `phase.id`); a view with no phase, a phase that is not in the tables, or `null` gives "unknown" for both legs, never a locked state. `opts.about(rowId)` returns the
+   * words of a time from a deadline row ("about 16:22") or null; a note whose time is missing says "the deadline" instead of inventing one.
+   */
+  function legsFor(view, role, opts) {
+    const r = role === "bob" ? "bob" : "alice";
+    const about = opts && typeof opts.about === "function" ? opts.about : () => null;
+    const coins = r === "alice" ? ["noid", "eth"] : ["eth", "noid"]; // [give, get]
+    const unknown = () => ({ give: { coin: coins[0], ...UNKNOWN_LEG }, get: { coin: coins[1], ...UNKNOWN_LEG }, public: false });
+    const id = view && view.phase && typeof view.phase.id === "string" ? view.phase.id : null;
+    if (!id || (view.phase && view.phase.known === false)) return unknown();
+    const own = (o, k) => (o && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined);
+    const words = own(LEG_WORDS[r], id);
+    const track = own(TRACK_STATE[r], id) || own(REFUND_STATE[r], id);
+    if (id === "aborted" ? !(view.coins_at_contract && typeof view.coins_at_contract === "object") : !words || !track) return unknown(); // an aborted swap is told only from the view's own coins at the contract
+    // Alice's secret may be public although the phase does not say so yet (a reveal in the mempool, a held reveal, a claim seen on Ethereum): the NOID leg is then open to Bob and the
+    // calming note "comes back to you" is never drawn; what the ETH leg is cannot be told from here
+    if (r === "alice" && view.secret_may_be_public === true && (id === "lock_seen" || id === "lock_final")) {
+      return {
+        give: { coin: coins[0], state: "secret_public", words: "Bob can take it", note: "The secret may already be public. If you stop now you can lose both legs." },
+        get: { coin: coins[1], ...UNKNOWN_LEG },
+        public: true,
+        maybe: true,
+      };
+    }
+    // the states are by track (NOID first, ETH second) in TRACK_STATE; the refund table is by leg (given first)
+    const given = id === "aborted" ? null : own(REFUND_STATE[r], id) ? track : r === "alice" ? [track[0], track[1]] : [track[1], track[0]];
+    const note = (n) => {
+      if (n === null) return null;
+      if (n === "@back_d") return `Comes back to you after ${about("d") || "the deadline"} if the swap stops.`;
+      if (n === "@alice_back") return `Alice can take it back after ${about("d") || "the deadline"}.`;
+      if (n === "@bob_back") return `Comes back to you after ${about("t_reveal") || "the deadline"} if she does not reveal.`;
+      if (n === "@reveal_by") {
+        const t = about("reveal_start_by") || about("reveal_cutoff");
+        return t ? `The reveal is due before ${t}.` : null;
+      }
+      return n;
+    };
+    // an aborted swap, in the card's own words: Alice's NOID at the contract comes back after the deadline; with nothing locked, nothing is at stake
+    if (id === "aborted") {
+      const n = view.coins_at_contract && Array.isArray(view.coins_at_contract.instances) ? view.coins_at_contract.instances.length : 0;
+      if (r === "alice" && n > 0) return { give: { coin: coins[0], state: "pending", words: "Coming back to you", note: note("@back_d") }, get: { coin: coins[1], state: "none", words: "Never locked", note: null }, public: false };
+      return { give: { coin: coins[0], state: "none", words: "In your own wallet", note: "Nothing was locked." }, get: { coin: coins[1], state: "none", words: "Never locked", note: null }, public: false };
+    }
+    const leg = (i) => ({ coin: coins[i], state: given[i], words: words[i][0], note: note(words[i][1]) });
+    const out = { give: leg(0), get: leg(1), public: false };
+    out.public = [out.give.state, out.get.state].some((x) => x === "secret_public" || x === "closing" || x === "closed");
+    return out;
   }
 
   // ------------------------------------------------------------ the model
@@ -991,7 +1175,11 @@
     const amountWei = terms.amount_wei !== null ? terms.amount_wei : lock ? lock.amount_wei : null;
 
     const coins = coinsAtContract(tick);
+    // Alice's secret may be public before the phase says so (a dropped reveal goes back to lock_final): structured tick fields only, no text
+    const ethTick = (tick && tick.eth) || {};
+    const secretMayBePublic = role === "alice" && (phaseId === "lock_seen" || phaseId === "lock_final") && !!(ethTick.pending_preimage || ethTick.claimed || (ethTick.lock && ethTick.lock.claimed) || (intent && intent.status === "held" && intent.intent && intent.intent.action === "reveal_eth"));
     const abort = abortPanel(role, phaseId, {
+      secret_may_be_public: secretMayBePublic,
       d,
       blocks_to_d: est.tip !== null && d !== null ? d - est.tip : null,
       t_reveal: trRow ? trRow.target : null,
@@ -1023,9 +1211,6 @@
     const heldParams = intent && intent.intent && intent.intent.params ? intent.intent.params : null;
     const timeline = phaseId ? timelineFor(role, phaseId) : null;
     const clock = clockFor(dl.rows, commandKind);
-    // Alice's secret may be public before the phase says so (a dropped reveal goes back to lock_final): structured tick fields only, no text
-    const ethTick = (tick && tick.eth) || {};
-    const secretMayBePublic = role === "alice" && (phaseId === "lock_seen" || phaseId === "lock_final") && !!(ethTick.pending_preimage || ethTick.claimed || (ethTick.lock && ethTick.lock.claimed) || (intent && intent.status === "held" && intent.intent && intent.intent.action === "reveal_eth"));
     const phaseView = phaseId ? { id: phaseId, known: !!info, terminal: P.isTerminal(role, phaseId) } : null;
     return {
       role,
@@ -1058,7 +1243,7 @@
           second: !!(tick && tick.eth && tick.eth.second),
           single: !!(tick && tick.eth && tick.eth.single_node_ok),
         },
-        tick: { at: tTick, age_s: tickAge, state: tickAge === null ? "unknown" : tickAge <= OBS_WARN_S ? "ok" : tickAge <= TICK_DEAD_S ? "attn" : "danger", applied: tick ? !!tick.events_applied_to_file : null },
+        tick: { at: tTick, age_s: tickAge, state: tickAge === null ? "unknown" : tickAge <= OBS_WARN_S ? "ok" : tickAge <= TICK_DEAD_S ? "attn" : "danger", applied: tick ? !!tick.events_applied_to_file && tick.observe_only !== true : null },
       },
       status,
       // nothing left to do: a terminal phase, or `done` with no leg left and no step on offer (the board's end screens read this, nothing else decides "over")
@@ -1086,7 +1271,7 @@
             actionable: spending,
             stale: tickAge !== null && tickAge > TICK_STALE_S,
             withheld: !!(act && act.withheld),
-            withheld_note: act && act.withheld ? "A read-only tick withholds a spend's parameters. The watch loop (tick --apply) records the intent first and prints them; wait for the next loop tick." : null,
+            withheld_note: act && act.withheld ? (tick.observe_only === true ? "Observing only: the program records what happens on the chains but decides nothing until you have approved and deposited." : "A read-only tick withholds a spend's parameters. The watch loop (tick --apply) records the intent first and prints them; wait for the next loop tick.") : null,
             reason: act ? act.reason : lastLoop ? lastLoop.reason : null,
             params: act ? act.params : {},
             notes: (tick.notes || []).map(String),
@@ -1107,6 +1292,7 @@
       deadlines: dl.rows,
       deadlines_stale: dl.stale,
       clock,
+      secret_may_be_public: secretMayBePublic,
       picture: pictureFor(dl.rows, { role, phase: phaseView, timeline, clock, stale: dl.stale, secret_may_be_public: secretMayBePublic }),
       lock_by_note: lockByNote(tick, !!phaseId && (P.isTerminal(role, phaseId) || phaseId === "aborted" || finished), tickAge !== null && tickAge > TICK_STALE_S),
       coins_at_contract: coins,
@@ -1165,6 +1351,9 @@
     timelineFor,
     clockFor,
     pictureFor,
+    placeMarks,
+    labelWidth,
+    legsFor,
     abortPanel,
     commandsFor,
     alarmsFor,

@@ -314,7 +314,8 @@ test("rule 4 in the autopilot: it waits for the deposit and the reserve (no dry 
     steps(A, 4);
     assert.equal(A.log.filter((l) => l.script === "wallet-fund.sh").length, 0, "no helper ran");
     assert.match(A.ap.state.alice.waiting_reason, /fee reserve|holds less/);
-    assert.deepEqual(needs(A, "alice"), [], "a short deposit is a wait, not a stop");
+    // a short deposit is a wait, not a stop of a step; since the short-deposit entry (test/simple-short-deposit.test.js) a key that holds a little but not the reserve is also told to the person
+    assert.deepEqual(needs(A, "alice").filter((n) => n.kind !== "deposit"), [], "a short deposit is a wait, not a stop");
     // the deposit arrives: the next status (a poll later) lets it go
     A.wallet.statusOpts = {};
     A.adv(45000);

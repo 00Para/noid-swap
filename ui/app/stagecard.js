@@ -49,6 +49,17 @@
     return { noid, eth };
   }
 
+  /** The two amounts of the swap from the list's summary of it (the program's own give and get, read from run.json): the fallback before the first reading. */
+  function summaryAmounts() {
+    const out = { noid: null, eth: null };
+    const st = H && H.state;
+    const s = st && st.program && Array.isArray(st.program.swaps) ? st.program.swaps.find((x) => x && x.swap === st.swap) : null;
+    for (const h of s ? [s.give, s.get] : []) {
+      if (h && (h.coin === "noid" || h.coin === "eth") && typeof h.text === "string" && /^[0-9][0-9.]*$/.test(h.text)) out[h.coin] = `${trimFrac(h.text)} ${h.coin === "noid" ? "NOID" : "ETH"}`;
+    }
+    return out;
+  }
+
   /** A moment from the view model's own deadline row, never counted anew: `{ unix, passed }`, or null when the row is missing, stale, not relevant or has no countdown. */
   function rowTime(view, id, now) {
     const r = view && Array.isArray(view.deadlines) ? view.deadlines.find((d) => d.id === id) : null;
@@ -61,6 +72,28 @@
 
   const clean = (list) => list.filter(Boolean);
 
+  const upFirst = (t) => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+  /**
+   * The engine's words as the main view says them (display only; Details keeps the engine's own text): the level word the box already shows ("ALERT:", "ALARM:", "ANOMALY:") is dropped, the
+   * heights of the lock-by margin "(lock-by N, tip M)" are left to Details, and "before D" says "before the deadline" (the name the card uses everywhere). Every other fact stays in the sentence.
+   */
+  function plainEngine(text) {
+    const raw = String(text === null || text === undefined ? "" : text);
+    const lead = /^\s*(?:ALERT|ALARM|ANOMALY):\s*/;
+    const t = raw
+      .replace(lead, "")
+      .replace(/\s*\(lock-by \d+, tip \d+\)/g, "")
+      .replace(/\b(before|after|until|by|at) D\b(?!\s*[-+\u2212])/g, "$1 the deadline")
+      .trim();
+    // once the level word is gone the sentence starts with its next word, in capitals; any other text keeps its first letter
+    return lead.test(raw) ? upFirst(t) : t;
+  }
+  /** What a send step is called when the program has no record's label for it: the board's own plain words ("locking your ETH"), else the id as it is. */
+  function stepName(id) {
+    const W = typeof window !== "undefined" && window.NoidBoardView ? window.NoidBoardView.SPEND_WORDS : null;
+    return W && Object.prototype.hasOwnProperty.call(W, id) ? upFirst(W[id]) : String(id || "A step");
+  }
+
   // ------------------------------------------------------------------ plan (data only)
   /**
    * What the card says. input: { payload, role, view, error, now }. `view` is the view model of the swap page (null before its first reading, or when there is none).
@@ -69,11 +102,14 @@
    *   kind       "setup" | "check" | "approve" | "deposit" | "swap" | "done" | "refund" | "abort" | "look"
    *   stage      the index in PROGRESS of the current stage, or -1 (a "look" never marks one)
    *   action     { kind: "none" | "button" | "invitation" | "handover" | "approval" | "deposit" | "spend", ... }
+   *   tone       "act" (the swap waits on the person), "done", "look", or null for a calm stage: it only chooses the card's frame
+   *   picture    { act } when the two locks are drawn on the main view (the Swap stage, a lock seen on either chain, or a lapsed approval), else null
+   *   foot       the card's last line: { doing, stopped, read_age_s } (words from data the page already has), or null when the card says "needs a look"
    *   safety     the boxes that are always open above the headline (data; draw() builds them)
-   *   claims     the boxes the card draws itself: { handover, autopilot, spend }; today's page does not draw them a second time (they carry element ids)
+   *   claims     the boxes the card draws itself: { handover, autopilot, spend, step }; today's page does not draw them a second time (they carry element ids)
    */
   function plan(input) {
-    const m = { drawn: false, kind: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null }, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role };
+    const m = { drawn: false, kind: null, tone: null, foot: null, picture: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null }, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role };
     const Ac = A();
     if (!Ac || !Ac.card) return m;
     const payload = input.payload || null;
@@ -91,6 +127,7 @@
     if (input.error || !payload || !a || payload.readable === false || !role) {
       look(input.error ? `The program did not give this swap: ${input.error}` : !role ? "The role of this swap is not known." : "This swap's folder cannot be read.");
       m.headline = "Something needs a look";
+      m.tone = "look";
       m.forceOpen = true;
       m.lookSig = JSON.stringify(m.reasons);
       return m;
@@ -167,6 +204,8 @@
       m.headline = headline;
       m.status = status;
       m.action = action || { kind: "none" };
+      // the card holds the step's button (or the two files of an invitation): the technical page under Details does not draw it a second time
+      m.claims.step = m.action.kind === "button" || m.action.kind === "invitation";
     };
     const ph = PHASES[role];
     const needApprove = () => {
@@ -287,7 +326,7 @@
         const words = Ac.card.depositWords(a, role);
         // the step waits only for this deposit when Bob's funding is final, or Alice's funding window is running: say so, with the engine's own words about the time or the margin
         const E = window.NoidEngineText;
-        const lbSay = lb ? ` The engine says: ${lb.text}` : "";
+        const lbSay = lb ? ` The engine says: ${plainEngine(lb.text)}` : "";
         let say = role === "alice" ? "The program starts as soon as both deposits are seen." : "Your lock goes out once Alice's funding is final and your deposit is seen.";
         if (role === "bob" && id === "funding_final") say = `Alice's funding is final: your lock waits only for your deposit.${lbSay}`;
         else if (role === "alice" && lb && E && typeof E.fundingBlocksLeft === "function" && E.fundingBlocksLeft(lb.text) !== null && E.fundingBlocksLeft(lb.text) >= 0) say = `The funding waits only for this deposit.${lbSay}`;
@@ -414,9 +453,81 @@
       m.action = { kind: "none" };
       m.claims.handover = false;
       m.claims.spend = false;
+      m.claims.step = false;
       if (m.claims.autopilot && !m.safety.autopilot) m.claims.autopilot = false;
     }
+    // the frame: amber while the swap waits on the person (an action of the card, the approval, the deposit, or a step that needs an answer), mint when it is settled, the alarm colour for a look
+    m.tone = m.kind === "look" ? "look" : m.kind === "done" ? "done" : m.action.kind !== "none" || m.kind === "approve" || m.kind === "deposit" || needs || m.safety.autopilot ? "act" : null;
+    m.foot = m.kind === "look" ? null : footOf(m, a, x, view, on, needs);
+    if (m.kind === "done") m.done = doneFacts(a, role, amt, swept, own);
+    // "The two locks, from now" is on the main view only at the Swap stage, and only once a lock is seen on either chain (a track in a state other than "not locked yet") or while an
+    // approval that lapsed in flight is asked for again (the stage stays Swap): before that it stays in Details. The view model's own picture; nothing is computed here.
+    const pic = view && view.picture;
+    if (m.kind !== "look" && m.stage === STAGE_AT.swap && pic && Array.isArray(pic.tracks) && (m.kind === "approve" || pic.tracks.some((t) => t.state !== "none"))) m.picture = { act: m.tone === "act" };
     return m;
+  }
+
+  /**
+   * The finished swap's summary: what was given and what was got (the two amounts of the swap, each with where it went), and the rows the data supports. The only rows are from an
+   * Ethereum sweep's own result file (the amount left over that it sent, and the fee of that transfer); a row with no data is not made. null when an amount is not known.
+   */
+  function doneFacts(a, role, amt, swept, own) {
+    const G = AMOUNT_RE.exec(String((role === "alice" ? amt.noid : amt.eth) || ""));
+    const T = AMOUNT_RE.exec(String((role === "alice" ? amt.eth : amt.noid) || ""));
+    if (!G || !T) return null;
+    const on = role === "alice" ? ["for Bob, on Parano1d", swept.eth_alice ? "sent to your own Ethereum address" : "in this swap's own Ethereum key"] : ["paid to Alice on Ethereum", own ? "sent to your own Parano1d address" : "on Parano1d"];
+    const rows = [];
+    const sw = ethSweepOf(a, role);
+    if (sw) {
+      const left = ethOf(sw.valueWei);
+      const fee = ethOf(sw.feeWei);
+      if (left) rows.push({ label: "Left over, sent to you", value: sw.payout ? `${left} to ${H.short(sw.payout)}` : left });
+      if (fee) rows.push({ label: "Network fee of that transfer", value: fee });
+    }
+    return { gave: { text: G[0], num: G[1], tic: G[2], on: on[0] }, got: { text: T[0], num: T[1], tic: T[2], on: on[1] }, rows };
+  }
+
+  /** The newest clean Ethereum sweep of this role that has a result file with its own figures: { valueWei, feeWei, payout }, or null. */
+  function ethSweepOf(a, role) {
+    const jobs = ((a && a.jobs) || []).filter((j) => j && j.id === `send-sweep-eth-${role}` && j.state === "done" && j.ok === true);
+    for (let i = jobs.length - 1; i >= 0; i--) {
+      const f = Array.isArray(jobs[i].files) ? jobs[i].files[0] : null;
+      const sw = f && f.summary && f.summary.sweep;
+      if (sw && /^[0-9]+$/.test(String(sw.valueWei)) && /^[0-9]+$/.test(String(sw.feeWei))) return { valueWei: sw.valueWei, feeWei: sw.feeWei, payout: typeof sw.payout === "string" ? sw.payout : null };
+    }
+    return null;
+  }
+
+  const sentence = (t) => {
+    const v = String(t || "").trim();
+    return v ? v.charAt(0).toUpperCase() + v.slice(1) + (/[.!?]$/.test(v) ? "" : ".") : "";
+  };
+
+  /**
+   * The card's last line, from data the page already has: what the program is doing (the approval's own words), or that it is stopped on a step that needs an answer or is still running,
+   * and how old the reading of the chains is. "Nothing for you to do." is added only when the card has no action, no step that needs an answer and no safety box of any kind.
+   */
+  function footOf(m, a, x, view, on, needs) {
+    const Ac = A();
+    const out = { doing: "", stopped: null, read_age_s: null };
+    const busy = a && a.busy && typeof a.busy === "object" ? a.busy : null;
+    if (needs) out.stopped = "Stopped on this step until you answer";
+    else if (busy) {
+      const rec = (a.jobs || []).find((j) => j && j.job === busy.job);
+      const label = (rec && rec.label) || stepName(busy.id);
+      out.stopped = `${label}: ${Number.isFinite(busy.started_at) ? "started " + Ac.card.hhmm(busy.started_at) + ", " : ""}no result yet`;
+    }
+    if (m.kind === "done" || m.kind === "refund" || m.kind === "abort") out.doing = "The transaction ids are under Details, Receipts.";
+    else {
+      out.doing = on ? sentence(x && x.doing) || "The program is driving this swap." : "The program is not driving this swap.";
+      const s = m.safety;
+      const quiet = m.action.kind === "none" && !needs && !out.stopped && !s.loud.length && !s.alarms.length && !s.held && !s.heldIntent && !s.job && !s.lockBy && !s.autopilot && !!(H && H.state && H.state.token) && !Ac.card.pendingLock(a);
+      // (only while the program is driving: when it is not, "nothing for you to do" would be false, the person has to approve)
+      if (quiet && on) out.doing += " Nothing for you to do.";
+    }
+    const tick = view && view.status !== "no-data" && view.header && view.header.tick;
+    if (tick && Number.isFinite(tick.age_s)) out.read_age_s = tick.age_s;
+    return out;
   }
 
   const firstLine = (t) => {
@@ -456,13 +567,37 @@
   // ------------------------------------------------------------------ draw
   const coinText = (s) => String(s).split(/\b(NOID|ETH)\b/).map((p) => (p === "NOID" ? H.el("span", { class: "c-noid", text: p }) : p === "ETH" ? H.el("span", { class: "c-eth", text: p }) : p));
 
+  const ic = (name) => (H && H.icon ? H.icon(name) : null);
+
+  /** "Chains read 4 s ago": the age of the newest reading, from the view model's own figure. */
+  const readText = (age) => `Chains read ${V().fmtDur(age)} ago`;
+
+  function footLine(m) {
+    const f = m.foot;
+    if (!f) return null;
+    const p = H.el("p", { class: "sc-foot" }, H.el("span", { class: "live" + (f.stopped ? " stop" : ""), text: f.stopped || f.doing }));
+    if (f.read_age_s !== null) p.appendChild(H.el("span", { class: "right", text: readText(f.read_age_s) }));
+    return p;
+  }
+
+  /** Once a second, from the page's clock: only the age in the foot, so that it never shows a reading as younger than it is. */
+  function tick(view) {
+    if (typeof document === "undefined" || !view) return;
+    const foot = document.querySelector(".sc-foot");
+    const n = foot ? foot.querySelector(".right") : null;
+    const t = view.status !== "no-data" && view.header && view.header.tick;
+    if (n && t && Number.isFinite(t.age_s)) n.textContent = readText(t.age_s);
+  }
+
   function progress(m) {
     const ol = H.el("ol", { class: "sc-progress", "aria-label": "Progress of this swap" });
     PROGRESS.forEach((name, i) => {
       let st = m.stage < 0 ? "todo" : i < m.stage ? "done" : i === m.stage ? (m.kind === "done" || m.kind === "refund" || m.kind === "abort" ? "done" : "now") : "todo";
       // an approval that lapsed in flight is asked for again: Approve is not done, though the swap is further on
-      if (m.kind === "approve" && i === STAGE_AT.approve && m.stage > i) st = "todo";
-      ol.appendChild(H.el("li", { class: st, "aria-current": st === "now" ? "step" : null }, st === "done" ? H.el("span", { class: "tick", "aria-hidden": "true", text: "✓ " }) : null, name, H.el("span", { class: "sr-only", text: st === "done" ? " (done)" : st === "now" ? " (now)" : " (not yet)" })));
+      // (it is drawn with the "needs you" ring, not hollow, so that the line reads as one rail: the swap is on, and this is what it waits for)
+      const lapsed = m.kind === "approve" && i === STAGE_AT.approve && m.stage > i;
+      if (lapsed) st = "todo";
+      ol.appendChild(H.el("li", { class: st, "aria-current": st === "now" ? "step" : null, dataset: lapsed ? { due: "1" } : null }, st === "done" ? H.el("span", { class: "tick", "aria-hidden": "true", text: "✓ " }) : null, name, H.el("span", { class: "sr-only", text: st === "done" ? " (done)" : st === "now" ? " (now)" : lapsed ? " (needs you)" : " (not yet)" })));
     });
     return ol;
   }
@@ -478,33 +613,36 @@
     }
     const s = m.safety;
     if (s.loud.length) {
-      const box = H.el("div", { class: "loud-notes", role: "alert", "aria-label": "The engine's loud notes, whole" });
-      for (const n of s.loud) box.appendChild(H.el("p", { class: "loud", text: n }));
+      const box = H.el("div", { class: "loud-notes", role: "alert", "aria-label": "The engine's loud notes, in plain words" }, ic("alert"));
+      for (const n of s.loud) box.appendChild(H.el("p", { class: "loud", text: plainEngine(n) }));
       out.push(box);
     }
-    for (const t of s.alarms) out.push(H.el("div", { class: "alarm danger", role: "alert" }, H.el("span", { class: "lv", text: "danger" }), H.el("span", { class: "tx", text: t })));
+    for (const t of s.alarms) out.push(H.el("div", { class: "alarm danger", role: "alert" }, ic("alert"), H.el("span", { class: "lv", text: "Danger" }), H.el("span", { class: "tx", text: plainEngine(t) })));
     if (s.held) {
       out.push(
         H.el(
           "div",
           { class: "alarm warn", role: "alert" },
-          H.el("span", { class: "lv", text: "held" }),
+          ic("alert"),
+          H.el("span", { class: "lv", text: "Held" }),
           H.el("span", { class: "tx" }, H.el("strong", { text: "A step is held, and the engine does not offer it now. " }), H.chip("warn", "do not send it"), " ", "This is the engine's own wording; the step it froze earlier is not offered. If the engine says to cancel it, that is done in a terminal (swap-cli intent FILE --cancel with the same chain flags as tick).", s.held.reason ? H.el("blockquote", { class: "quote lead", "aria-label": "The engine's reason, verbatim", text: s.held.reason }) : null)
         )
       );
     } else if (s.heldIntent) {
-      out.push(H.el("div", { class: "alarm warn", role: "alert" }, H.el("span", { class: "lv", text: "held" }), H.el("span", { class: "tx", text: `A step${s.heldIntent.kind ? " (" + s.heldIntent.kind.replace(/_/g, " ") + ")" : ""} was already decided, and the chain does not show its effect yet. Do not send it again by hand: sending it twice pays twice. The program keeps reading.` })));
+      out.push(H.el("div", { class: "alarm warn", role: "alert" }, ic("alert"), H.el("span", { class: "lv", text: "Held" }), H.el("span", { class: "tx", text: `A step${s.heldIntent.kind ? " (" + s.heldIntent.kind.replace(/_/g, " ") + ")" : ""} was already decided, and the chain does not show its effect yet. Do not send it again by hand: sending it twice pays twice. The program keeps reading.` })));
     }
-    if (s.lockBy) out.push(H.el("div", { class: "alarm warn", role: "alert" }, H.el("span", { class: "lv", text: "lock-by" }), H.el("span", { class: "tx", text: s.lockBy })));
+    if (s.lockBy) out.push(H.el("div", { class: "alarm warn", role: "alert" }, ic("clock"), H.el("span", { class: "lv", text: "Lock-by" }), H.el("span", { class: "tx", text: plainEngine(s.lockBy) })));
     if (s.job) {
-      const box = H.el("div", { class: "alarm danger", role: "alert" }, H.el("span", { class: "lv", text: "last step" }));
+      const box = H.el("div", { class: "alarm danger", role: "alert" }, ic("alert"), H.el("span", { class: "lv", text: "Last step" }));
       const tx = H.el("span", { class: "tx" }, H.el("strong", { text: s.job.label }));
       for (const l of s.job.lines) tx.appendChild(H.el("span", { class: "sc-line", text: l }));
       box.appendChild(tx);
       out.push(box);
     }
+    // a step that needs the person is its own box (the words, the reason and the button are the approval box's own); the rest of the approval box follows, drawn once, as today
+    if (m.claims.autopilot && Ac.needsYouBoxes) for (const n of Ac.needsYouBoxes(m.view, payload)) out.push(n);
     if (s.autopilot && m.kind !== "approve") {
-      const ap = Ac.autopilotBlock(m.view, payload);
+      const ap = Ac.autopilotBlock(m.view, payload, { needs: false });
       if (ap) out.push(ap);
     }
     return out;
@@ -524,17 +662,18 @@
       const join = C.actionButton(a, "join", "Choose Alice's file…", act.first === "join");
       const inv = C.fileButton("invitation", act.first === "invitation" ? "Save an invitation for Alice…" : "Save the invitation again…", act.first === "invitation");
       const note = C.fileNote("invitation");
-      const row = H.el("div", { class: "row" });
-      if (act.first === "join") row.append(join.el, inv);
-      else row.append(inv, join.el);
-      box.appendChild(row);
+      // the two files as two numbered parts (the invitation Alice opens, the swap file she sends back); the buttons are the same ones
+      const invPart = H.el("div", { class: "sc-part" }, A().partTitle(1, "Send Alice an invitation"), A().fileRow("file", "Invitation for Alice", "It holds your terms and your two addresses, so Alice does not type them. It holds no secret. Send it to Alice as a file.", inv));
+      const joinPart = H.el("div", { class: "sc-part" }, A().partTitle(2, "Choose the file Alice sends back"), A().fileRow("open", "Alice's swap file", "The program checks it against your own terms. Nothing is sent.", join.el));
+      if (act.first === "join") box.append(joinPart, invPart);
+      else box.append(invPart, joinPart);
       if (join.why) box.appendChild(H.el("p", { class: "why dim", text: join.why }));
       if (note) box.appendChild(note);
     } else if (act.kind === "handover") {
       const n = Ac.handoverBlock(m.view, payload);
       if (n) box.appendChild(n);
     } else if (act.kind === "approval") {
-      const n = Ac.autopilotBlock(m.view, payload);
+      const n = Ac.autopilotBlock(m.view, payload, { needs: false });
       if (n) box.appendChild(n);
     } else if (act.kind === "deposit") {
       const n = C.depositCompact(payload, m.role);
@@ -548,10 +687,19 @@
     return box.children.length ? box : null;
   }
 
+  /** The done card's two blocks (for the eye; a sentence is for a screen reader) and the rows under them. */
+  function doneBlock(d) {
+    const side = (x, caption, c) => H.el("div", { class: `side ${c}` }, H.el("span", { class: "k", text: caption }), H.el("span", { class: "v" }, H.coinGlyph ? H.coinGlyph(c) : null, H.el("span", { class: "num", text: x.num }), H.el("span", { class: "tic", text: x.tic })), H.el("span", { class: "on", text: x.on }));
+    const coinOf = (x) => (x.tic === "NOID" ? "noid" : "eth");
+    const box = H.el("div", { class: "sc-act sc-done" }, H.el("p", { class: "sr-only", text: `You gave ${d.gave.text}. You got ${d.got.text}.` }), H.el("div", { class: "convert done", "aria-hidden": "true" }, side(d.gave, "You gave", coinOf(d.gave)), H.el("div", { class: "mid" }, H.el("i", {})), side(d.got, "You got", coinOf(d.got))));
+    if (d.rows.length) box.appendChild(H.el("dl", { class: "facts left" }, ...d.rows.map((r) => H.el("div", {}, H.el("dt", { text: r.label }), H.el("dd", { text: r.value })))));
+    return box;
+  }
+
   /** The card of a plan, as one element, or null when the plan is not drawn. */
   function draw(m, payload) {
     if (!m || !m.drawn) return null;
-    const root = H.el("div", { class: "sc-in" + (m.kind === "look" ? " look" : "") });
+    const root = H.el("div", { class: "sc-in" + (m.tone ? " " + m.tone : "") });
     const safety = payload && payload.actions ? safetyBoxes(m, payload) : [];
     if (safety.length) {
       const wrap = H.el("div", { class: "sc-safety" });
@@ -559,16 +707,101 @@
       root.appendChild(wrap);
     }
     root.appendChild(progress(m));
-    root.appendChild(H.el("h2", { class: "sc-head", id: "pg-headline" }, coinText(m.headline)));
+    root.appendChild(H.el("h2", { class: "sc-head", id: "pg-headline" }, m.tone === "done" ? ic("check") : null, coinText(m.headline)));
     root.appendChild(H.el("p", { class: "sc-status" + (m.kind === "look" ? " look" : ""), role: "status" }, coinText(m.status)));
     if (m.kind === "look" && m.reasons.length) {
       const ul = H.el("ul", { class: "sc-reasons", "aria-label": "Why" });
       for (const r of m.reasons) ul.appendChild(H.el("li", { text: r }));
       root.appendChild(ul);
     }
+    if (m.kind === "done" && m.done) root.appendChild(doneBlock(m.done));
     const act = payload && payload.actions ? actionArea(m, payload) : null;
     if (act) root.appendChild(act);
+    const foot = footLine(m);
+    if (foot) root.appendChild(foot);
     return root;
+  }
+
+  // ------------------------------------------------------------------ the ticket: the two legs of this swap
+  const LINE_OF = { none: "none", sent: "sent", pending: "pending", final: "final", secret_public: "final", closing: "pending", closed: "settled", released: "released", unknown: "none" };
+  const AMOUNT_RE = /^([0-9][0-9.,]*) (NOID|ETH)$/;
+  const groupHex = (hex) => (/^[0-9a-f]{16}$/.test(hex) ? hex.match(/.{4}/g).join(" ") : String(hex));
+
+  /**
+   * The ticket beside the card: what the person gives and what they get, each with the state of its lock in words and as a line (from the view model's legsFor, which reads the same
+   * track states as the picture), where the coins go, the check line once it was compared, and one line of trust. When the swap is done it is "Receipts" instead. A card that needs a look
+   * shows both legs as "Not known". Returns the elements to put in #pg-ticket (an array), or null when the card is not drawn. Display only: it reads, it decides nothing.
+   */
+  function drawTicket(m, payload) {
+    if (!m || !m.drawn || !payload || !payload.actions || !m.role) return null;
+    const Ac = A();
+    const role = m.role;
+    const a = payload.actions;
+    const now = typeof H.nowS === "function" ? H.nowS() : 0;
+    const view = m.view || null;
+    if (m.kind === "done" && view && Array.isArray(view.receipts)) return receiptsTicket(view, role, a);
+    const aboutRow = (id) => {
+      const t = rowTime(view, id, now);
+      return t && !t.passed ? about(t) : null;
+    };
+    // a card that needs a look draws the legs as unknown, except when the view says the secret may be public (a held reveal): then the ticket must not stay silent about the NOID
+    const legs = (m.kind === "look" && !(view && view.secret_may_be_public === true)) || !V().legsFor ? null : V().legsFor(view, role, { about: aboutRow });
+    const L = legs || (V().legsFor ? V().legsFor(null, role) : null);
+    if (!L) return null;
+    const amts = amounts(payload, view && view.header ? view : null);
+    // the terms are known from the start: before the first reading the swap's summary (the list's own give and get) says them; no figure is ever made up
+    const sum = summaryAmounts();
+    amts.noid = amts.noid || sum.noid;
+    amts.eth = amts.eth || sum.eth;
+    const leg = (l, caption) => {
+      const c = l.coin;
+      const m2 = AMOUNT_RE.exec(String((c === "noid" ? amts.noid : amts.eth) || ""));
+      return H.el(
+        "div",
+        { class: `tk-leg ${c}` },
+        H.el("p", { class: "k" }, H.el("span", { text: caption }), H.el("span", { text: c === "noid" ? "on Parano1d" : "on Ethereum" })),
+        m2 ? H.el("p", { class: "v" }, H.coinGlyph ? H.coinGlyph(c) : null, H.el("span", { class: "num", text: m2[1] }), H.el("span", { class: "tic", text: m2[2] })) : null,
+        H.el("div", { class: `lockline ${LINE_OF[l.state] || "none"}`, "aria-hidden": "true" }),
+        H.el("p", { class: "st" }, l.state === "closed" ? ic("check") : null, H.el("span", { text: l.words })),
+        l.note ? H.el("p", { class: "note", text: l.note }) : null
+      );
+    };
+    const out = [leg(L.give, "You give"), H.el("div", { class: "tk-key" + (L.public ? " public" : "") }, H.el("i", { "aria-hidden": "true" }), L.public ? H.el("span", { text: L.maybe ? "secret may be public" : "secret revealed" }) : null), leg(L.get, "You get")];
+    // where the coins go, and the check line once the two sides compared it
+    const rows = [];
+    const x = (a.autopilot && a.autopilot[role]) || null;
+    const p = x && x.payouts;
+    const mine = role === "alice" ? { label: "Your ETH goes to", addr: p && p.eth, what: "your Ethereum address" } : { label: "Your NOID goes to", addr: p && p.noid, what: "your Parano1d address" };
+    if (typeof mine.addr === "string" && mine.addr) rows.push(H.el("div", {}, H.el("dt", { text: mine.label }), H.el("dd", {}, H.copyButton(mine.addr, mine.what))));
+    const cl = Ac.card.checkLineOf(a, role);
+    if (cl.hex && a.line_match && a.line_match.hex === cl.hex) rows.push(H.el("div", {}, H.el("dt", { text: "Check line" }), H.el("dd", {}, H.el("span", { class: "mono", text: groupHex(cl.hex) }), H.el("span", { class: "sub", text: `compared with ${role === "alice" ? "Bob" : "Alice"}` }))));
+    if (rows.length) out.push(H.el("dl", { class: "facts" }, ...rows));
+    out.push(H.el("p", { class: "tk-trust", text: "Non-custodial: your coins are held by this swap's own wallet and contracts, never by a third party." }));
+    return out;
+  }
+
+  // what a receipt is called on the main view, by its kind and the role (the technical page under Details keeps the engine's labels)
+  const RECEIPT_NAME = {
+    alice: { noid_tx: "Your funding, on Parano1d", lock_id: "Bob's lock id, on Ethereum", lock_tx: "Bob's lock, on Ethereum", claim_tx: "Your reveal, on Ethereum", refund_tx: "Bob's refund, on Ethereum", claim_pending: "Your reveal (not mined yet), on Ethereum", noid_pending: "A call on Parano1d (not mined yet)", instance: "Your NOID in the swap contract" },
+    bob: { noid_tx: "Your claim, on Parano1d", lock_id: "Your lock id, on Ethereum", lock_tx: "Your lock, on Ethereum", claim_tx: "Alice's claim, on Ethereum", refund_tx: "Your refund, on Ethereum", claim_pending: "Alice's claim (not mined yet), on Ethereum", noid_pending: "A call on Parano1d (not mined yet)", instance: "Alice's NOID in the swap contract" },
+  };
+
+  /** The finished swap: the transaction ids the chains showed (the page's receipts of the two chains), each under its plain name, shortened with a copy button (the ids are whole on the button). */
+  function receiptsTicket(view, role, a) {
+    const names = RECEIPT_NAME[role] || RECEIPT_NAME.alice;
+    const items = view.receipts.filter((r) => r && r.chain && !r.plain && (r.group === "Parano1d" || r.group === "Ethereum"));
+    const rows = items.map((r) => ({ label: (r.kind && Object.prototype.hasOwnProperty.call(names, r.kind) && names[r.kind]) || r.label, value: r.value }));
+    // the sweep that sent what was left to the person's own address, from its own result file
+    for (const j of ((a && a.jobs) || []).filter((x) => x && x.id === `send-sweep-eth-${role}` && x.state === "done" && x.ok === true)) {
+      const f = Array.isArray(j.files) ? j.files[0] : null;
+      const tx = f && f.summary && f.summary.txHash;
+      if (typeof tx === "string" && /^0x[0-9a-fA-F]{64}$/.test(tx) && !rows.some((r) => r.value === tx)) rows.push({ label: "Sweep to your address, on Ethereum", value: tx });
+    }
+    const out = [H.el("h2", { text: "Receipts" })];
+    if (rows.length) out.push(H.el("dl", { class: "facts" }, ...rows.map((r) => H.el("div", {}, H.el("dt", { text: r.label }), H.el("dd", {}, H.copyButton(r.value, r.label))))));
+    else out.push(H.el("p", { class: "note", text: "Nothing to show yet: receipts appear as the chains show transactions." }));
+    out.push(H.el("p", { class: "tk-trust", text: "Each id can be looked up on its chain. The full list, with heights, is under Details." }));
+    return out;
   }
 
   window.NoidStage = {
@@ -577,6 +810,10 @@
     },
     plan,
     draw,
+    drawTicket,
+    plainEngine,
+    stepName,
+    tick,
     PROGRESS,
   };
 })();

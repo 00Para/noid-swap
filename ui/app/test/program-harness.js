@@ -104,12 +104,13 @@ function loopKit(env, tickFn, o = {}) {
   const { createWatch } = require("../lib/steps/watch");
   const calls = [];
   const pending = [];
-  const kit = { calls, created: 0, loops: [] };
+  const kit = { calls, created: 0, loops: [], observed: [] }; // observed: the roles of the observe-only ticks asked for (their call has args [])
   const watchOpts = {
     tick: async (ctx, role, opts) => {
       const args = opts && Array.isArray(opts.args) ? [...opts.args] : null;
       calls.push({ role, args });
-      if (tickFn) return tickFn(ctx, role, args, calls.length);
+      if (opts && opts.observeOnly === true) kit.observed.push(role);
+      if (tickFn) return tickFn(ctx, role, args, calls.length, opts);
       return { code: 0, stdout: `[${role}] tick exit 0 at 12:00:00\napplied: ${args && args.includes("--apply") ? "True" : "False"} phase_after: created\n`, stderr: "", files: [] };
     },
     // the pause between two ticks: ends by itself after pauseMs, or at once when a test calls kit.next()

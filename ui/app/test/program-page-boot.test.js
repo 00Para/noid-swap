@@ -117,7 +117,11 @@ test("program mode: an empty list shows the first-start guide with the live Para
   const t = textOf(empty.byId("pg-root"));
   assert.match(t, /Before your first swap/);
   assert.match(t, /The Parano1d wallet app is open on this computer and in sync\.\s+Parano1d: connected/);
-  assert.match(t, /No swaps yet\. Make one with New swap/);
+  // the empty state is a heading and one sentence (it was one paragraph)
+  const emptyBox = empty.byId("pg-root").all((n) => n.className.split(/\s+/).includes("pg-empty"))[0];
+  assert.ok(emptyBox, "the empty state is drawn");
+  assert.equal(emptyBox.querySelector("h2").textContent, "No swaps yet");
+  assert.equal(emptyBox.querySelector("p").textContent, "Make one with New swap, or use the offer board if it is on.");
   assert.equal(empty.byId("pg-root").all((n) => n.tag === "a").length, 0);
   const full = await programPage();
   assert.doesNotMatch(textOf(full.byId("pg-root")), /Before your first swap/);
@@ -132,6 +136,7 @@ test("program mode: the New swap button is disabled with the server's reason in 
   // clicking a disabled button does nothing
   await nb.click();
   assert.equal(page.byId("pg-root").querySelector("h1").textContent, "Your swaps");
+  assert.equal(page.document.title, "Your swaps · No1d Swap");
   assert.match(page.text("pg-root"), /recovery code is not confirmed yet/i);
   const ok = await programPage();
   assert.equal(ok.byId("pg-new").disabled, false);
@@ -217,9 +222,10 @@ test("program mode: opening a swap reads /api/run?swap=ID with the key; the swap
   assert.equal(page.byId("op-view").hidden, false);
   assert.equal(page.byId("pg-swapbar").hidden, false);
   const bar = page.text("pg-swapbar");
-  assert.match(bar, /← Your swaps/);
-  assert.match(bar, /You sell NOID/);
-  assert.match(bar, /Back up the whole run folder .* keep your recovery code/);
+  assert.match(bar, /Your swaps/);
+  assert.match(bar, /You sell 5 NOID for 0.001 ETH/); // the swap's name, with no role chip after it
+  assert.doesNotMatch(bar, /Back up the whole run folder/, "the advice is inside Details, not above the card");
+  assert.match(page.text("pg-details-body").replace(/\s+/g, " ").trim(), /^Back up the whole run folder .* keep your recovery code/);
   assert.doesNotMatch(bar, /back up the swap file/i);
   // the first screen of a swap with no tick: the steps of this swap, no install, no terms
   const steps = page.text("start");
@@ -228,7 +234,7 @@ test("program mode: opening a swap reads /api/run?swap=ID with the key; the swap
   assert.match(steps, /Prepare the swap file/);
   assert.doesNotMatch(steps, /Install the helpers|Enter the terms|env\.local/);
   // back to the list
-  await btnWith(page.byId("pg-swapbar"), "← Your swaps").click();
+  await btnWith(page.byId("pg-swapbar"), "Your swaps").click();
   await page.flush();
   assert.equal(page.byId("pg-root").hidden, false);
   assert.equal(page.byId("op-view").hidden, true);
@@ -246,7 +252,9 @@ test("program mode: every POST of a swap's page carries the swap id (the action,
   assert.ok(!all.some((t) => /Install helpers|Check object|check-object|Settings for this run|Write env\.local\.sh/.test(t)), "no install, no check-object, no env.local form: " + all.join(" | "));
   assert.ok(root.all((n) => n.attrs.id === "f-role").length === 0, "the terminal settings form is not built");
   // the first screen's main button runs the table's setup action again
-  const go = page.byId("next-action").all((n) => n.tag === "button" && n.className.includes("primary"))[0];
+  // (the stage card holds it; under Details there is no second button)
+  const go = page.byId("pg-card").all((n) => n.tag === "button" && n.className.includes("primary"))[0];
+  assert.equal(page.byId("pg-details").all((n) => n.tag === "button" && n.className.includes("primary")).length, 0, "no amber button under Details");
   assert.match(textOf(go), /Try again/);
   await go.click();
   await page.flush();

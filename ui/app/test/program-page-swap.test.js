@@ -61,9 +61,13 @@ test("Alice's first screen: a clean wallet step moves the next step to Prepare; 
   const jobs = [F.job("setup"), F.job("wallet-setup-alice")];
   const page = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs, wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } } }));
   assert.match(squash(page.text("next-action")), /Prepare the swap file Step 2 of 2, your step/);
-  assert.match(squash(page.text("start")), /Back up the whole run folder \(the swap file and run\.json are in it\) and keep your recovery code/);
+  assert.match(squash(page.text("pg-details-body")), /Back up the whole run folder \(the swap file and run\.json are in it\) and keep your recovery code/);
   assert.doesNotMatch(squash(page.text("start")), /back (it|the swap file) up|Back up the swap file/i);
-  await btnWith(page.byId("next-action"), "Prepare the swap file").click();
+  // the stage card holds the button; Details keeps no second one, no strip with a button and no list of steps
+  assert.equal(btnWith(page.byId("pg-details"), "Prepare the swap file"), null, "no second Prepare button under Details");
+  assert.equal(page.byId("start").all((n) => n.attrs.id === "h-steps").length, 0, "the list of steps is not drawn again");
+  assert.equal(page.byId("next-action").hidden, true);
+  await btnWith(page.byId("pg-card"), "Prepare the swap file").click();
   await page.flush();
   assert.deepEqual(page.posted[0], ["/api/action", { id: "prepare", swap: F.SWAP_A }]);
 
@@ -80,11 +84,12 @@ test("Alice's first screen: a clean wallet step moves the next step to Prepare; 
 test("Bob's first screen: his Ethereum key by itself, then choose and check Alice's file; the button posts the table's join (the program opens the file dialog), nothing about a path", async () => {
   const page = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-bob")], wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, status: null } } } }));
   const t = squash(page.text("start"));
-  for (const w of ["Make this swap's own Ethereum key", "Choose and check Alice's file"]) assert.ok(t.includes(w), w);
+  assert.ok(!t.includes("Make this swap's own Ethereum key"), "the list of steps is not drawn again under Details: the stage card holds the step");
+  assert.match(squash(page.text("pg-card")), /Send Alice your invitation/);
   assert.doesNotMatch(t, /Start the watch|Deposit the ETH|Set up/);
   assert.match(squash(page.text("next-action")), /Choose and check Alice's file Step 2 of 2, your step/);
-  assert.match(squash(page.text("next-action")), /First save the invitation below and send it to Alice\. When her file \(alice\.bundle\.json\) arrives, choose it here/);
-  await btnWith(page.byId("next-action"), "Choose Alice's file…").click();
+  assert.equal(btnWith(page.byId("pg-details"), "Choose Alice's file…"), null, "the stage card holds the button, not Details");
+  await btnWith(page.byId("pg-card"), "Choose Alice's file…").click();
   await page.flush();
   assert.deepEqual(page.posted[0], ["/api/action", { id: "join", swap: F.SWAP_B }], "no path, no file name in the request: the program's dialog decides");
 });
@@ -112,9 +117,11 @@ test("the swap page with a tick: today's view, the run controls in the program's
   assert.match(panel, /Tick Alice \(read-only\)/);
   assert.doesNotMatch(panel, /Tick Bob/, "a swap has one role: the other role's tick is not offered");
   assert.doesNotMatch(panel, /Install helpers|Check object file/);
-  assert.match(panel, /Back up the whole run folder/);
+  assert.doesNotMatch(panel, /Back up the whole run folder/, "the advice is the first line of Details, not repeated in the run controls");
+  assert.equal((page.text("pg-details-body").match(/Back up the whole run folder/g) || []).length, 1, "said once under Details");
   assert.match(squash(page.text("swap-head")), /You sell NOID|Alice|NOID/);
-  assert.match(page.document.title, /Alice, .*No1d Swap/);
+  assert.equal(page.document.title, "You sell 5 NOID for 0.001 ETH · No1d Swap", "the swap's plain label and the product, never the engine's phase");
+  assert.doesNotMatch(page.document.title, /lock_final|funding_final|created|Alice,/);
   // the footer note speaks of the program, not of a terminal or WSL
   assert.match(page.text("foot-note"), /never shows a secret, a key, a passphrase or a recovery code/);
   assert.doesNotMatch(page.text("foot-note"), /WSL|terminal|console's own/);
@@ -131,7 +138,7 @@ test("a step that can send and is still running past its time: the page says so 
   const page = await openSwap(F.SWAP_A, (r) => ({ ...tickPayload(r), server_now: NOW, actions: { ...tickPayload(r).actions, busy } }));
   const banner = page.byId("alarms").all((n) => n.attrs.id === "banner-hung")[0];
   assert.ok(banner, "the banner is drawn");
-  assert.match(squash(textOf(banner)), /Still running after 25 minutes: do not start another action; quitting now counts as may have been sent\.$/);
+  assert.match(squash(textOf(banner)), /Still running after 25 minutes: do not start another action; quitting now counts as may have been sent. Never send this step again outside the program: the same coins could go twice.$/);
   assert.equal(banner.attrs.role, "alert");
   // the page's own sentence when only the minutes come, or only the clock and the time limit
   const mins = await openSwap(F.SWAP_A, (r) => ({ ...tickPayload(r), actions: { ...tickPayload(r).actions, busy: { id: "send-lock", started_at: NOW - 25 * 60 - 5, overdue: true, overdue_minutes: 25 } } }));
