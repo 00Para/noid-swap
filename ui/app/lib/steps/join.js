@@ -280,7 +280,7 @@ function join(ctx, bundlePath) {
       } catch {
         /* not empty or already gone */
       }
-      say(`the swap file holds the Ethereum key (${P.bob_eth}), sealed, with the payout address; the standalone key file was deleted. BACK UP the whole run folder ${ctx.runDir} (the swap file, run.json and passphrase.txt together: the key exists nowhere else, and the swap file cannot be opened without its passphrase)`);
+      say(`the swap file holds the Ethereum key (${P.bob_eth}), sealed, with the payout address; the standalone key file was deleted. BACK UP the whole run folder ${ctx.runDir} and keep your recovery code (the swap file and run.json; the key exists nowhere else; the swap file opens only with the passphrase that comes from the recovery code)`);
       const st = await C.runChild(ctx, { tool: "swapCli", args: ["status", BOB_FILE] });
       for (const l of String(st.stdout).split("\n")) if (/"(phase|profile|variant|deadline_height|lock_by_height)"/.test(l)) say(l);
       say("== next: nothing is locked yet; start the watch loop for bob; the lock is offered by the tool only after Alice's funding is final (the watch loop)");

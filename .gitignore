@@ -47,3 +47,10 @@ env.local.sh
 
 # a Windows shell cache that a tool sometimes drops into the working directory
 %SystemDrive%/
+
+# The desktop program's build (step 4.8, hosted runner only): the staged tree, the swap-cli program placed beside it, the
+# installers, the build tools
+desktop/stage/
+desktop/stage-bin/
+desktop/dist/
+desktop/node_modules/

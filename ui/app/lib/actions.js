@@ -29,9 +29,10 @@ const { redactDeep } = require("./secrets");
 const { checkDryRun } = require("./dryrun");
 const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, expectedAmount } = require("./gate");
 const { envLocalWallet, parseWalletStatus } = require("./walletrun");
-const { classifySpendExit } = require("./exitcodes");
+const { classifySpendExit, classifyStepExit, NOT_SENT } = require("./exitcodes");
 const { productionReason } = require("./production");
 const { boardRun: boardRunOf } = require("./board/runmode");
+const { STEP_OF, TERMINAL_ONLY } = require("./stepexec");
 
 /** Own-property lookup: an id such as "__proto__" or "constructor" is not a spend. */
 const SPENDS = new Proxy(SPEND_TABLE, { get: (t, k) => (typeof k === "string" && Object.prototype.hasOwnProperty.call(t, k) ? t[k] : undefined) });
@@ -171,7 +172,16 @@ function defaultRepoLiveDir(repoRoot = path.resolve(__dirname, "..", "..", "..")
   return p.replace(/\\/g, "/");
 }
 
-function validateActionsConfig(cfg) {
+function validateActionsConfig(cfg, o = {}) {
+  // PROGRAM MODE (a step executor is given): no WSL field may be present, and the folders are exactly the run folder and its pub/ (the audit log's folder)
+  if (o.program === true) {
+    const errs = [];
+    for (const k of ["distro", "binDir", "runDir", "runNumber", "repoLiveDir"]) if (cfg[k] !== undefined && cfg[k] !== null) errs.push(`program mode: ${k} must be absent (the steps run in this process, not through WSL helpers)`);
+    const d = cfg.runDirs;
+    if (!Array.isArray(d) || d.length !== 2 || typeof d[0] !== "string" || !path.isAbsolute(d[0]) || d[1] !== path.join(d[0], "pub")) errs.push("program mode: runDirs must be [run folder, run folder/pub]");
+    if (cfg.role !== undefined && cfg.role !== null) errs.push("program mode: the role is run.json's, not a configuration value");
+    return errs;
+  }
   const errors = validateConfig(cfg);
   if (cfg.role !== undefined && cfg.role !== null && !ROLES.includes(cfg.role)) errors.push("--role: alice, bob or both");
   if (!Number.isInteger(cfg.runNumber) || !RUN_RE.test(String(cfg.runNumber))) errors.push("the run number must be a whole number, 1 to 9999 (--run-number N, or a run folder named live-run-N)");
@@ -299,9 +309,20 @@ class ActionRunner {
    * @param {{audit:object, exec?:Function, spawnDetached?:Function, now?:()=>number, readRunFn?:Function, env?:object}} deps
    */
   constructor(cfg, deps) {
-    const errors = validateActionsConfig(cfg);
+    // PROGRAM MODE (piece 4, step 4.5): `deps.executor` (lib/stepexec.js) runs a table entry as a step in this process, `deps.settingsSource` (lib/settingsource.js)
+    // answers the run's role, mode and production state from run.json. Without them this is the terminal console, byte for byte as before.
+    this.executor = deps.executor || null;
+    this.settingsSource = deps.settingsSource || null;
+    this.programMode = !!this.executor;
+    if (this.programMode && !this.settingsSource) throw new Error("program mode needs a settings source (run.json) beside the step executor");
+    if (!this.programMode && this.settingsSource) throw new Error("a settings source is for program mode: give the step executor too");
+    this.program = deps.program || null; // the program object (version, tools); the autopilot's approval binds it
+    this.toolHasher = deps.toolHasher || null;
+    this.nodeGate = deps.nodeGate || null; // () => { ok, why }: the program's Parano1d node has answered since the start
+    this.refusedNoted = new Map(); // program mode: "id|tag" -> ms of the last audit line of such a refusal (not written again within 60 s)
+    const errors = validateActionsConfig(cfg, { program: this.programMode });
     if (errors.length) throw new Error(errors.join("; "));
-    this.cfg = { ...cfg, repoLiveDir: cfg.repoLiveDir || defaultRepoLiveDir() };
+    this.cfg = this.programMode ? { ...cfg } : { ...cfg, repoLiveDir: cfg.repoLiveDir || defaultRepoLiveDir() };
     this.audit = deps.audit;
     this.runLock = deps.runLock || null; // the RunLock of this console (server.js); null in unit tests
     this.exec = deps.exec || execFile;
@@ -365,17 +386,79 @@ class ActionRunner {
   }
 
   command(id, txHash, extra = {}) {
+    if (this.programMode) {
+      // No command line exists in program mode: the "command" is the name of the step and the hash it replaces. It is what the dry run is bound to (the gate compares it).
+      const e = BY_ID.get(id);
+      if (!e) throw Object.assign(new Error(`unknown action id: ${JSON.stringify(String(id).slice(0, 40))}`), { status: 400 });
+      if (txHash !== undefined && txHash !== null && !TX_RE.test(txHash)) throw new Error("the transaction hash to replace must be 0x + 64 lower-case hex");
+      const scriptName = e.script ? (Object.prototype.hasOwnProperty.call(WALLET_SCRIPT, e.script.name) ? WALLET_SCRIPT[e.script.name] : e.script.name) : null;
+      return { file: null, args: [], env: {}, display: `step ${id}${txHash ? ` replacing ${txHash}` : ""}`, entry: e, script: scriptName };
+    }
     return buildActionCommand(id, this.cfg, { ...extra, txHash, env: this.env, wallet: this.walletRun().use_swap_wallet === true });
   }
 
-  /** What env.local.sh says about the run's mode and the payout addresses (lib/walletrun.js); read again on every call (a few lines of a small file). */
+  /** What env.local.sh says about the run's mode and the payout addresses (lib/walletrun.js); read again on every call (a few lines of a small file). In program mode: run.json. */
   walletRun() {
+    if (this.settingsSource) return this.settingsSource.walletRun();
     return envLocalWallet(this.runFolder());
   }
 
-  /** What the run folder says about the board (lib/board/runmode.js): `{ on, declared, file, ambiguous }`; read again on every call. */
+  /** What the run folder says about the board (lib/board/runmode.js): `{ on, declared, file, ambiguous }`; read again on every call. In program mode: run.json's handover. */
   boardRun() {
+    if (this.settingsSource) return this.settingsSource.boardRun();
     return boardRunOf(this.runFolder());
+  }
+
+  /** The role this runner drives: terminal mode: the console's `--role` (alice, bob, both or null); program mode: run.json's role (alice, bob, or null when it cannot be read). */
+  curRole() {
+    return this.settingsSource ? this.settingsSource.role() : this.cfg.role;
+  }
+
+  /**
+   * null when this runner may run the table entry for its role, else the reason. Terminal mode: roleBlock (null and "both" let everything through). Program mode: the role
+   * must be alice or bob and the entry's own role must be it (design 12.4); the only entries a swap without run.json may run are the board's two offline checks in a slot.
+   */
+  roleBlockFor(entry) {
+    if (this.settingsSource) return this.settingsSource.roleBlock(entry);
+    return roleBlock(entry, this.cfg.role);
+  }
+
+  /**
+   * Program mode: a refusal of the step executor's checks (run.json, production, role, folder guard, vault, recovery code) is 409 with an audit line (not written again for the
+   * same reason and entry within 60 s: the timer's own attempts would fill the log). Nothing has started.
+   */
+  assertProgram(e, o = {}) {
+    if (!this.programMode) return;
+    const c = this.executor.precheck(e, { sender: o.sender === true });
+    if (c.ok) return;
+    if (!o.quiet) this.noteProgramRefusal(e, c.tag);
+    throw Object.assign(new Error(c.why), { status: c.status || 409 });
+  }
+
+  noteProgramRefusal(e, tag) {
+    const key = `${e.id}|${tag}`;
+    const at = this.now();
+    if (at - (this.refusedNoted.get(key) || 0) < 60 * 1000) return;
+    if (this.refusedNoted.size > 200) this.refusedNoted.clear();
+    this.refusedNoted.set(key, at);
+    try {
+      this.audit.append({ action: e.id, role: e.role || null, phase: "refused", result: `refused: ${tag}` });
+    } catch {
+      /* the refusal stands without its line */
+    }
+  }
+
+  /** Program mode: may the timer and the autopilot act on this swap now? `{ ok, why }` (the executor's checks for the swap's own tick, and the program's node has answered). */
+  programReady() {
+    if (!this.programMode) return { ok: true, why: null };
+    const role = this.curRole();
+    const c = this.executor.precheck({ id: `tick-${role || "alice"}`, group: "tick", role: role || undefined }, { sender: false });
+    if (!c.ok) return { ok: false, why: c.why };
+    if (this.nodeGate) {
+      const g = this.nodeGate();
+      if (!g || g.ok !== true) return { ok: false, why: (g && g.why) || "waiting for the Parano1d node to answer" };
+    }
+    return { ok: true, why: null };
   }
 
   /** The board part of the gate's context: undefined for a run that is not a board run, else `{ on, ambiguous, facts }` (the host's facts, or null when no host runs here). */
@@ -472,6 +555,16 @@ class ActionRunner {
 
   /** The reason text when this run folder is a production run (the console only shows it), else null. `run` is a readRun result, read when not given. */
   productionBlock(run) {
+    if (this.settingsSource) {
+      // program mode fails closed: run.json says production, cannot be read safely or fails its schema (every action refused), or the run's terms or a tick say production
+      try {
+        const why = this.settingsSource.productionReason();
+        if (why) return why;
+        return productionReason(run || this.readRunFn(this.cfg.runDirs, this.nowS()), null);
+      } catch {
+        return "the production check could not be made: every action is refused.";
+      }
+    }
     try {
       return productionReason(run || this.readRunFn(this.cfg.runDirs, this.nowS()), this.runFolder());
     } catch {
@@ -493,7 +586,7 @@ class ActionRunner {
 
   describe(prodReason) {
     const wr = this.walletRun();
-    return [...TABLE, ...(wr.use_swap_wallet || wr.ambiguous ? WALLET_TABLE : [])].map((e) => {
+    return [...TABLE.filter((e) => !(this.programMode && (TERMINAL_ONLY.has(e.id) || e.mode === "classic"))), ...(wr.use_swap_wallet || wr.ambiguous ? WALLET_TABLE : [])].map((e) => {
       let display = null;
       try {
         display = this.command(e.id, e.args.includes("{TX?}") ? "0x" + "0".repeat(64) : null).display;
@@ -502,7 +595,7 @@ class ActionRunner {
         display = null;
       }
       const modeWhy = modeBlock(e, wr);
-      return { id: e.id, group: e.group, role: e.role || null, label: e.label, note: e.note, command: display, blocked: prodReason || (modeWhy ? null : roleBlock(e, this.cfg.role)) || null, ...(e.mode ? { mode: e.mode, mode_blocked: modeWhy } : {}) };
+      return { id: e.id, group: e.group, role: e.role || null, label: e.label, note: e.note, command: display, blocked: prodReason || (modeWhy ? null : this.roleBlockFor(e)) || null, ...(e.mode ? { mode: e.mode, mode_blocked: modeWhy } : {}) };
     });
   }
 
@@ -689,7 +782,7 @@ class ActionRunner {
     const spends = {};
     const production = this.productionBlock(run);
     for (const s of Object.values(SPENDS)) {
-      if (roleBlock(s, this.cfg.role)) {
+      if (this.roleBlockFor(s)) {
         spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, other_machine: true };
         continue;
       }
@@ -747,11 +840,12 @@ class ActionRunner {
     const cfg = this.cfg;
     return {
       enabled: true,
-      run_number: cfg.runNumber,
-      role: cfg.role || "both",
+      run_number: this.programMode ? null : cfg.runNumber,
+      role: this.programMode ? this.curRole() : cfg.role || "both",
+      program_mode: this.programMode,
       table: this.describe(production),
       production: production ? { text: production } : null,
-      busy: this.busy ? { id: this.busy.id, job: this.busy.job, started_at: Math.floor(this.busy.started_ms / 1000) } : null,
+      busy: this.busy ? { id: this.busy.id, job: this.busy.job, started_at: Math.floor(this.busy.started_ms / 1000), ...this.busyWarning() } : null,
       jobs: this.jobs.slice(-8).map((j) => ({ ...j })),
       watch: { ...this.watchView(run) },
       // set only for a console that was started before its run folder existed: the page says so and offers nothing but the install step
@@ -854,10 +948,11 @@ class ActionRunner {
     const wr = this.walletRun();
     if (!wr.use_swap_wallet || wr.ambiguous) return null;
     if (this.busy) return null;
+    if (this.programMode && !this.programReady().ok) return null;
     const nowMs = this.now();
     let run = null;
     for (const role of ["alice", "bob"]) {
-      if (roleBlock({ id: "wallet-status", role }, this.cfg.role)) continue;
+      if (this.roleBlockFor({ id: "wallet-status", role })) continue;
       if (nowMs - (this.walletPollMark[role] || 0) < WALLET_POLL_MS) continue;
       const id = `wallet-status-${role}`;
       const dir = this.runFolder();
@@ -890,6 +985,14 @@ class ActionRunner {
   }
 
   watchView(run) {
+    if (this.programMode) {
+      // the loop is a timer of this program (lib/stepexec.js): there is no process to ask WSL about
+      const ws = this.executor.watchStatus();
+      const role = this.curRole();
+      const mtime = role && run && run.roles && run.roles[role] ? run.roles[role].loop_mtime : null;
+      const age = typeof mtime === "number" ? this.nowS() - mtime : null;
+      return { started_here: ws.running === true, pid: null, checked_at: this.nowS(), loop_file_age_s: age, some_loop_running: age !== null && age <= WATCH_FRESH_S, in_process: true, ticks: ws.ticks, last_end: ws.last_end || null };
+    }
     this.refreshWatch();
     // only the roles this console drives count: a loop file of the other role (another machine's, or an old copy) says nothing about this machine
     const mine = this.cfg.role === "alice" || this.cfg.role === "bob" ? [this.cfg.role] : ["alice", "bob"];
@@ -907,6 +1010,7 @@ class ActionRunner {
 
   /** Asks WSL whether the loop this console started is alive; cached, one at a time, never while an action runs. */
   refreshWatch(force = false) {
+    if (this.programMode) return;
     if (!this.pollWatch && !force) return;
     if (this.watch.checking || (!force && this.now() - this.watch.checked_ms < WATCH_CACHE_MS)) return;
     if (this.busy && !force) return;
@@ -955,8 +1059,19 @@ class ActionRunner {
     const e = BY_ID.get(id);
     if (!e) throw Object.assign(new Error(`unknown action id: ${JSON.stringify(String(id).slice(0, 40))}`), { status: 400 });
     if (e.group === "spend") throw Object.assign(new Error("a spending action needs the confirmation flow (POST /api/spend)"), { status: 400 });
-    const blocked = roleBlock(e, this.cfg.role);
-    if (blocked) throw Object.assign(new Error(blocked), { status: 403 });
+    if (this.programMode && TERMINAL_ONLY.has(id)) {
+      this.noteProgramRefusal(e, "terminal_only");
+      throw Object.assign(new Error("this step belongs to the terminal console: the program does not run it"), { status: 409 });
+    }
+    if (this.programMode && !meta.poll) this.assertNotProduction(id); // a production run.json is said to be one (403) before its role is asked
+    const blocked = this.roleBlockFor(e);
+    if (blocked) {
+      if (this.programMode) {
+        if (!meta.poll) this.noteProgramRefusal(e, "role");
+        throw Object.assign(new Error(blocked), { status: 409 });
+      }
+      throw Object.assign(new Error(blocked), { status: 403 });
+    }
     // a board-only entry is started by the board host alone (its private token), never by a request
     if (e.hostOnly && meta.host !== this.hostToken) throw Object.assign(new Error(`${id} is a step of the offer board: only the board starts it`), { status: 403 });
     // in a board run the board drives the steps that make the swap files, in its own order: a click on one of them is refused
@@ -972,6 +1087,7 @@ class ActionRunner {
     this.assertNotProduction(id);
     this.assertMode(e);
     if (this.walletRun().ambiguous && (e.group === "dry" || e.id === "prepare" || e.id === "join")) this.assertMode({ id, role: e.role, mode: "wallet" });
+    this.assertProgram(e, { sender: false, quiet: !!meta.poll });
     this.preflight(id);
     let run = null;
     let txHash = null;
@@ -987,19 +1103,19 @@ class ActionRunner {
         }
       }
     }
-    if (id === "install") {
+    if (id === "install" && !this.programMode) {
       const w = this.watchView(this.readRunFn(this.cfg.runDirs, this.nowS()));
       if (w.started_here || w.some_loop_running) throw Object.assign(new Error("a watch loop is running: install.sh rewrites the helpers it calls. Stop the loop first"), { status: 409 });
       if (this.swapFilesExist()) throw Object.assign(new Error("this run already has swap files: do not replace the frozen helpers mid-swap"), { status: 409 });
     }
-    if (id === "watch-start") {
+    if (id === "watch-start" && !this.programMode) {
       const w = this.watchView(this.readRunFn(this.cfg.runDirs, this.nowS()));
       if (w.started_here || w.some_loop_running) throw Object.assign(new Error("a watch loop seems to be running already (its loop file was updated recently); a second one doubles the ticks"), { status: 409 });
     }
     // join.sh takes the bundle from the run folder; only when the run folder has no file of that name and the public copy folder has a good one is that file's path
     // (built from this console's own configuration) its one argument
     let bundleFromPublic = false;
-    if (id === "join") {
+    if (id === "join" && !this.programMode) {
       const jf = this.joinView();
       bundleFromPublic = !jf.run_bundle && !!(jf.public_bundle && jf.public_bundle.ok && jf.public_arg);
     }
@@ -1012,14 +1128,22 @@ class ActionRunner {
     const spend = SPENDS[id];
     const e = BY_ID.get(id);
     if (!spend || !e) throw Object.assign(new Error(`unknown spend id: ${JSON.stringify(String(id).slice(0, 40))}`), { status: 400 });
-    const blocked = roleBlock(e, this.cfg.role);
-    if (blocked) throw Object.assign(new Error(blocked), { status: 403 });
+    if (this.programMode) this.assertNotProduction(id);
+    const blocked = this.roleBlockFor(e);
+    if (blocked) {
+      if (this.programMode) {
+        this.noteProgramRefusal(e, "role");
+        throw Object.assign(new Error(blocked), { status: 409 });
+      }
+      throw Object.assign(new Error(blocked), { status: 403 });
+    }
     this.assertLock(id);
     const nowMs = this.now();
     const run = this.readRunFn(this.cfg.runDirs, Math.floor(nowMs / 1000));
     this.assertNotProduction(id, run);
     if (spend.walletOnly) this.assertMode(e); // a wallet-only spend is refused in a classic run; the funding (both modes) runs the helper of the run's mode
     else if (this.walletRun().ambiguous) this.assertMode({ id, role: spend.role, mode: "wallet" });
+    this.assertProgram(e, { sender: true });
     this.preflight(id);
     const replaceTx = this.replaceTxFor(spend, run);
     if (spend.replace && !replaceTx) {
@@ -1163,6 +1287,11 @@ class ActionRunner {
       }
     };
 
+    if (this.programMode) {
+      this.runStep(e, rec, meta, finish);
+      return { ...rec };
+    }
+
     if (e.id === "watch-start") {
       try {
         const child = this.spawnDetached(cmd.file, cmd.args, { env: cmd.env, detached: true, stdio: "ignore", windowsHide: true, shell: false });
@@ -1186,6 +1315,49 @@ class ActionRunner {
       finish(Object.assign(err, { code: err.code || "SPAWN" }), "", "");
     }
     return { ...rec };
+  }
+
+  /**
+   * Program mode: runs the entry as a step through the executor and settles the job from its result. The step's code is its own (null = may have been sent); a rejected promise
+   * is a null too. A running step is never abandoned: `busy` stays until it settles (`busyWarning` tells the page when it is past its time).
+   */
+  runStep(e, rec, meta, finish) {
+    const x = {};
+    if (meta.replaceTx) x.tx = meta.replaceTx;
+    if (typeof meta.bundlePath === "string") x.bundlePath = meta.bundlePath;
+    let p;
+    try {
+      p = Promise.resolve(this.executor.run(e, x));
+    } catch (err) {
+      p = Promise.reject(err);
+    }
+    const settle = (res, threw) => {
+      const r = res && typeof res === "object" ? res : {};
+      const code = Number.isInteger(r.code) ? r.code : null;
+      Object.defineProperty(rec, "_files", { value: Array.isArray(r.files) ? r.files.slice() : [], enumerable: false, writable: true, configurable: true });
+      Object.defineProperty(rec, "_refused", { value: r.refused === true, enumerable: false, writable: true, configurable: true });
+      const err = code === 0 ? null : Object.assign(new Error(code === null ? (r.refused ? String(r.why || "refused before the step started").slice(0, 200) : threw ? "the step stopped on an internal error: it may have been sent" : "the step ended without a code: it may have been sent") : `exit ${code}`), { code });
+      finish(err, r.stdout || "", r.stderr || "");
+    };
+    p.then(
+      (res) => settle(res, false),
+      () => settle(null, true),
+    ).catch((err) => {
+      rec.error = `${rec.error || ""} (the job could not be settled: ${(err && err.code) || "error"})`.trim();
+      if (this.busy && this.busy.job === rec.job) this.busy = null;
+    });
+  }
+
+  /** The page's warning for a running action past its time (program mode): never a kill of a spend, only the words. `{}` before that. */
+  busyWarning() {
+    if (!this.programMode || !this.busy) return {};
+    const e = BY_ID.get(this.busy.id);
+    const limit = e && e.timeout ? e.timeout : 3 * MIN;
+    const elapsed = this.now() - this.busy.started_ms;
+    if (elapsed <= limit) return {};
+    const minutes = Math.floor(elapsed / MIN);
+    const sender = e && (e.group === "spend" || /^board-sign-/.test(e.id));
+    return { overdue: true, overdue_minutes: minutes, warning: `still running after ${minutes} minutes: do not start another action; ${sender ? "quitting now counts as may have been sent" : "it is stopped by the program after its time limit"}` };
   }
 
   /** After a job: the result file(s) it wrote, the transaction hash, and (for a dry run) the stored record. */
@@ -1233,7 +1405,15 @@ class ActionRunner {
       rec.sent_line = /^wallet-(?:fund|recover|sweep): outcome sent$/m.test(String(stdout || ""));
     }
     if (e.group === "spend") {
-      cls = classifySpendExit(rec.script || e.script.name, { exitCode: rec.exit_code, timedOut: rec.timed_out, signal: rec.signal, stdout: String(stdout || ""), stderr: String(stderr || ""), hasResult: walletText ? false : !!main });
+      if (this.programMode) {
+        // a step is judged by its own code and fixed lines (exitcodes.js classifyStepExit, Appendix B), never by classifySpendExit; the executor's own refusal happened before the step
+        const so = STEP_OF[e.id];
+        cls = rec._refused
+          ? { outcome: NOT_SENT, nothing_sent: true, secret_may_be_public: false, why: "the program refused it before the step started", source: null }
+          : classifyStepExit(so ? so.step : "", { code: rec.exit_code, stdout: String(stdout || ""), files: rec._files || [], kind: so ? so.kind : undefined });
+        // a lock, a reveal or a refund that ended in code 1 (live.js's own error, or its key could not be emitted): the page says what to do (spec 5.A.10)
+        if (rec.exit_code === 1 && /^send-(?:lock|reveal|refund-eth)/.test(e.id)) rec.advice = "Look at the result. If it has no `sent:` line, cancel the intent, then try again.";
+      } else cls = classifySpendExit(rec.script || e.script.name, { exitCode: rec.exit_code, timedOut: rec.timed_out, signal: rec.signal, stdout: String(stdout || ""), stderr: String(stderr || ""), hasResult: walletText ? false : !!main });
       rec.outcome = cls.outcome;
       rec.nothing_sent = cls.nothing_sent;
       rec.waiting = cls.waiting === true;
@@ -1328,7 +1508,7 @@ class ActionRunner {
    * that fund.sh refused before it wrote a marker does not close the acknowledgement.
    */
   acknowledgeFunding() {
-    const blocked = roleBlock({ id: "funded", role: "alice" }, this.cfg.role);
+    const blocked = this.roleBlockFor({ id: "funded", role: "alice" });
     if (blocked) throw Object.assign(new Error(blocked), { status: 403 });
     this.assertNotProduction("funded-ack");
     const wrun = this.walletRun();

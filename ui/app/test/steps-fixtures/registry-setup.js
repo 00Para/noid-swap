@@ -1,6 +1,7 @@
 "use strict";
 // Registry entries of step 4.3 (setup steps): the same shape as the entries of registry.js (see rules.js). The tools are the stubs; no network (ctx.rpcPost is
 // a function here, never the real post), no shell. `exports` names the step of lib/steps/index.js an entry covers (steps-rules.test.js). Join needs a stub that makes the file named by --out (stub-swap-cli-setup.js).
+const fs = require("fs");
 const path = require("path");
 const steps = require("../../lib/steps");
 const { KEY_CANARY } = require("./rules");
@@ -22,6 +23,9 @@ const rpcDown = async () => {
 };
 const withRpc = (ctx, rpcPost) => ({ ...ctx, rpcPost });
 const withSetupStub = (ctx) => ({ ...ctx, tools: { ...ctx.tools, swapCli: [process.execPath, path.join(__dirname, "stub-swap-cli-setup.js")] } });
+// 4.6: setup asks the vault (ctx.getPassphrase) and refuses a folder that holds an old passphrase.txt; the harness makes one by default
+const noOldPassphraseFile = (h) => fs.rmSync(path.join(h.runDir, "passphrase.txt"), { force: true });
+const vaultCtx = (h) => ({ ...h.ctx, getPassphrase: () => h.passphrase });
 const noPass = (ctx) => ({ ...ctx, getPassphrase: () => {
   throw new Error("no passphrase (run setup first)");
 } });
@@ -71,14 +75,15 @@ module.exports = [
     settings: { deploy_block: 12345 },
     passphraseFor: [],
     codes: [0, 2],
-    prepare: () => {},
+    prepare: noOldPassphraseFile, // 4.6: the passphrase comes from the vault; an old passphrase.txt is refused
     scenario: () => ({}),
     run: (ctx) => steps.setup(withRpc(ctx, rpcDown)),
-    wx: ["passphrase.txt", "eth-deploy-block.txt"],
+    wx: ["eth-deploy-block.txt"],
     cases: [
-      { label: "ordinary (deploy_block given)", expect: 0 },
-      { label: "no log start can be chosen (the node does not answer)", expect: 2, settings: { deploy_block: null } },
-      { label: "the other role's swap file is in the folder", expect: 2, prepare: (h) => h.swapFile("bob") },
+      { label: "ordinary (deploy_block given)", expect: 0, ctx: vaultCtx },
+      { label: "no log start can be chosen (the node does not answer)", expect: 2, settings: { deploy_block: null }, ctx: vaultCtx },
+      { label: "the other role's swap file is in the folder", expect: 2, prepare: (h) => { noOldPassphraseFile(h); h.swapFile("bob"); }, ctx: vaultCtx },
+      { label: "an old passphrase file is in the folder", expect: 2, prepare: () => {}, ctx: vaultCtx },
     ],
   },
   {

@@ -1,0 +1,7 @@
+{
+  "name": "no1d-swap-eth-runtime",
+  "private": true,
+  "dependencies": {
+    "ethers": "6.17.0"
+  }
+}

@@ -19,7 +19,9 @@
   /** A time of day as hours and minutes, in this computer's own time (the page's clock helper when it has no shorter one). */
   const hm = (unix) => (typeof H.hm === "function" ? H.hm(unix) : H.clock(unix));
   const mono = (text, cls) => el("span", { class: "mono" + (cls ? " " + cls : ""), text });
-  const KEY_LOST = "This page lost its key. Open the start address printed in the terminal again.";
+  const KEY_LOST_TERMINAL = "This page lost its key. Open the start address printed in the terminal again.";
+  const KEY_LOST_PROGRAM = "This page lost its key. Close this window and open the program again.";
+  let KEY_LOST = KEY_LOST_TERMINAL;
   /** A small stroked icon (the same 16-unit drawings the mock screens use): "clock", "check", "alert", "return", "stop", "info". Decorative. */
   function icon(kind) {
     if (typeof document === "undefined" || typeof document.createElementNS !== "function") return el("span", { class: "bd-ic", "aria-hidden": "true" });
@@ -44,7 +46,9 @@
   }
 
   async function post(path, body) {
-    const r = await fetch(path, { method: "POST", cache: "no-store", headers: { "content-type": "application/json", "x-swap-token": H.state.token || "" }, body: JSON.stringify(body) });
+    // program mode: every request names its swap
+    const sent = H.state.swap ? { ...body, swap: H.state.swap } : body;
+    const r = await fetch(path, { method: "POST", cache: "no-store", headers: { "content-type": "application/json", "x-swap-token": H.state.token || "" }, body: JSON.stringify(sent) });
     const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
     return { ok: r.ok, status: r.status, json: j };
   }
@@ -667,6 +671,7 @@
   window.NoidBoard = {
     init(helpers) {
       H = helpers;
+      KEY_LOST = H.state && H.state.program ? KEY_LOST_PROGRAM : KEY_LOST_TERMINAL;
     },
     /** Draws the board's screens (or hides them when the console has no board). Returns true when they are shown. */
     render: renderInto,

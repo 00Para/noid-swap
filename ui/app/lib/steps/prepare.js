@@ -148,7 +148,7 @@ function prepare(ctx) {
     } catch {
       /* not empty or already gone */
     }
-    out.say(`== the swap file holds the NOID swap wallet (${P.alice_noid}) and the Ethereum key (${P.alice_eth}), sealed, with the payout addresses; the standalone key files were deleted. BACK UP the whole run folder ${ctx.runDir} (the swap file, run.json and passphrase.txt together: the keys exist nowhere else, and the swap file cannot be opened without its passphrase)`);
+    out.say(`== the swap file holds the NOID swap wallet (${P.alice_noid}) and the Ethereum key (${P.alice_eth}), sealed, with the payout addresses; the standalone key files were deleted. BACK UP the whole run folder ${ctx.runDir} and keep your recovery code (the swap file and run.json; the keys exist nowhere else; the swap file opens only with the passphrase that comes from the recovery code)`);
 
     // the check line comes from the tool; the other machine compares it with the one its join prints
     const bcl = errLines.find((l) => CHECK_RE.test(l));

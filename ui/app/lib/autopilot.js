@@ -29,6 +29,8 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { pathCandidates } = require("./runfolder");
+const runsettings = require("./runsettings");
+const { TOOL_KEYS, stepCodeHash } = require("./toolhash");
 const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES } = require("./gate");
 const E = require("./enginetext");
 
@@ -226,11 +228,117 @@ class Autopilot {
     return h.digest("hex");
   }
 
+  /** Program mode: is this the program's autopilot (run.json, the steps), not the terminal console's? */
+  programMode() {
+    return this.actions.programMode === true;
+  }
+
+  /** null when this autopilot drives the role, else the reason. Terminal: the console's --role. Program: only the role of the swap's run.json (the "both" and null cases do not exist). */
+  roleBlockedFor(role) {
+    const a = this.actions;
+    if (a.programMode) {
+      const r = a.curRole();
+      if (r === role) return null;
+      return r ? `this swap is ${r}'s: the ${role} side is not driven here` : "this swap has no readable role in run.json: nothing is driven";
+    }
+    return roleBlocked(a.cfg.role, role);
+  }
+
+  /**
+   * PROGRAM MODE's approval hash (spec 5.A.5, design 12.3): every item of the terminal hash but env.local.sh and the helpers, plus the canonical bytes of run.json, the program's
+   * version, the nine tool files, one hash over the step code, the wallet-run facts and the handover. An input that cannot be read gives null (nothing is in force): the word
+   * "none" never enters this hash. `o.fresh`: every file is read again, the metadata cache not consulted (`authorize`, right before an automatic spend).
+   */
+  programTermsHash(run, o = {}) {
+    const a = this.actions;
+    const p = a.program;
+    const hasher = a.toolHasher;
+    const t = run && run.terms;
+    if (!p || !hasher || !t) return null;
+    const eth = t.eth || {};
+    let settings;
+    try {
+      settings = runsettings.load(a.runFolder());
+    } catch {
+      return null;
+    }
+    let runJson;
+    try {
+      runJson = sha256(runsettings.canonicalBytes(settings));
+    } catch {
+      return null;
+    }
+    if (typeof p.version !== "string" || !p.version) return null;
+    let files;
+    try {
+      files = p.toolFiles();
+    } catch {
+      return null;
+    }
+    const tool = [];
+    for (const k of TOOL_KEYS) {
+      const f = files && files[k];
+      if (typeof f !== "string") return null;
+      const h = hasher.sha256File(f, { fresh: o.fresh === true });
+      if (typeof h !== "string") return null;
+      tool.push([`${k}_sha256`, h]);
+    }
+    // `codeFiles` is a list (spec I1); the shell's program object gives a function that returns it: both are read
+    let codeList;
+    try {
+      codeList = typeof p.codeFiles === "function" ? p.codeFiles() : p.codeFiles;
+    } catch {
+      return null;
+    }
+    const code = stepCodeHash(codeList, hasher, { fresh: o.fresh === true });
+    if (!code) return null;
+    const objectSha = a.objectSha(run);
+    const items = [
+      ["contract_root", t.contract_root ?? null],
+      ["amount_micronoid", t.amount_micronoid ?? null],
+      ["amount_wei", eth.amount_wei ?? null],
+      ["chain_id", eth.chain_id ?? null],
+      ["htlc_contract", eth.contract ?? null],
+      ["alice_receiver", eth.alice_receiver ?? null],
+      ["bob_sender", eth.bob_sender ?? null],
+      ["alice_noid", t.alice_noid ?? null],
+      ["bob_noid", t.bob_noid ?? null],
+      ["hashlock", t.hashlock ?? null],
+      ["deadline_height", t.deadline_height ?? null],
+      ["h_create", t.h_create ?? null],
+      ["profile", t.profile ?? null],
+      ["contract_version", t.contract_version ?? null],
+      ["lock_kind", eth.lock_kind ?? null],
+      ["variant", t.variant ?? null],
+      ["claim_authority", t.claim_authority ?? null],
+      ["max_fee_micronoid", t.max_fee_micronoid ?? null],
+      ["code_hash", eth.code_hash ?? null],
+      ["object_sha256", objectSha || null],
+      ["consistent", t.consistent === true],
+      ["run_json_sha256", runJson],
+      ["program_version", p.version],
+      ...tool,
+      ["step_code_sha256", code],
+      // every program run is a wallet run: the mode and the two payout addresses (they decide where the leftovers go) are bound by run.json's own bytes above and named here
+      ["use_swap_wallet", true],
+      ["noid_payout", settings.noid_payout],
+      ["eth_payout", settings.eth_payout],
+    ];
+    const br = a.boardRun();
+    if (br.on) {
+      const id = a.board && typeof a.board.identity === "function" ? a.board.identity() : null;
+      if (!id || !id.offer_id || !id.peer_key) return null;
+      items.push(["handover", "board"], ["offer_note_id", id.offer_id], ["peer_key", id.peer_key]);
+    }
+    return sha256(JSON.stringify(items));
+  }
+
   /**
    * The hash an approval is bound to, from the terms of THIS snapshot of the run (the one `startSpend` evaluates) and from the files read now. Null when
    * the terms are not readable or a file cannot be read: nothing is then in force.
    */
-  termsHash(run) {
+  termsHash(run, o = {}) {
+    if (this.programMode()) return this.programTermsHash(run, o);
     const t = run && run.terms;
     if (!t) return null;
     const eth = t.eth || {};
@@ -278,16 +386,18 @@ class Autopilot {
   }
 
   /** `{exists, in_force, terms_changed, file, hash, why}` for a role against this run snapshot. Recomputed on every use. */
-  approvalState(role, run) {
+  approvalState(role, run, o = {}) {
     if (this.forcedOff.has(role)) return { exists: true, in_force: false, terms_changed: false, file: null, hash: null, why: "the approval file could not be removed; this console does not use it" };
     const f = this.readFile(role);
     if (!f.exists) return { exists: false, in_force: false, terms_changed: false, file: null, hash: null, why: "no approval" };
     const v = f.value;
     if (!v || typeof v !== "object" || v.v !== FILE_VERSION || v.role !== role || typeof v.terms_sha256 !== "string") return { exists: true, in_force: false, terms_changed: false, file: null, hash: null, why: "the approval file is not one this console wrote" };
-    const hash = this.termsHash(run);
+    const hash = this.termsHash(run, o);
     if (!hash) return { exists: true, in_force: false, terms_changed: true, file: v, hash: null, why: "the terms cannot be read now" };
     const same = hash === v.terms_sha256;
-    return { exists: true, in_force: same, terms_changed: !same, file: v, hash, why: same ? null : "the terms changed since the approval" };
+    // program mode: an approval that went out of force because the program's version changed says so ("approve again after an update")
+    const version = this.programMode() && !same && typeof v.program_version === "string" && this.actions.program && v.program_version !== this.actions.program.version;
+    return { exists: true, in_force: same, terms_changed: !same, file: v, hash, version_changed: !!version, why: same ? null : version ? "the program was updated since the approval: approve again after an update" : "the terms changed since the approval" };
   }
 
   // ------------------------------------------------------------------ the funding statements (amendment B)
@@ -311,7 +421,8 @@ class Autopilot {
    */
   authorize(token, spend, run, nowMs) {
     if (token !== this.token || !spend || spend.replace) return null;
-    const ap = this.approvalState(spend.role, run);
+    // every input is hashed again right before an automatic spend: no cache (program mode); the terminal hash has no cache to bypass
+    const ap = this.approvalState(spend.role, run, { fresh: true });
     if (!ap.in_force || !ap.file || ap.file.role !== spend.role) return null;
     if (this.blocking(spend.role, spend.id)) return null;
     // a wallet run's funding needs no funding statements of the 300 s window; its one statement (Bob's check line) is part of the approval itself
@@ -385,7 +496,7 @@ class Autopilot {
       } else if (r.phase === "end") {
         open.delete(sp.id);
         const res = String(r.result || "");
-        if (/^ok \(exit 0\)/.test(res) || /^refused, nothing sent\b/.test(res) || (RERUN_KINDS.has(sp.kind) && /^may have been sent, the same bytes may be sent again\b/.test(res))) out.delete(sp.id);
+        if (/^ok \(exit 0\)/.test(res) || /^refused, nothing sent\b/.test(res) || (!this.programMode() && RERUN_KINDS.has(sp.kind) && /^may have been sent, the same bytes may be sent again\b/.test(res))) out.delete(sp.id);
         else out.set(sp.id, { reason: `${sp.label}: the audit log says it ended "${res.slice(0, 100)}", so it may have been sent`, at: Date.parse(r.t) });
       }
     }
@@ -438,7 +549,7 @@ class Autopilot {
   /** The common refusals of every route: this console's role, the run lock, a production run. */
   guard(role) {
     const a = this.actions;
-    const blocked = roleBlocked(a.cfg.role, role);
+    const blocked = this.roleBlockedFor(role);
     if (blocked) throw bad(403, blocked);
     a.assertLock("autopilot");
     const nowMs = this.now();
@@ -488,6 +599,7 @@ class Autopilot {
       funding_statements_at: role === "alice" && !wallet ? iso(nowMs) : null,
       console_pid_start: `${(l && l.pid) || process.pid}@${(l && l.started) || iso(nowMs)}`,
       needs_you: [],
+      ...(this.programMode() && a.program ? { program_version: a.program.version } : {}), // not part of the hash's meaning: it lets the page say "approve again after an update"
     };
     // the audit line first: when it cannot be written nothing is approved
     try {
@@ -565,7 +677,7 @@ class Autopilot {
     const nowMs = this.now();
     for (const role of ROLES) {
       try {
-        const blocked = roleBlocked(this.actions.cfg.role, role);
+        const blocked = this.roleBlockedFor(role);
         if (blocked) {
           out[role] = { available: false, on: false, reason: blocked };
           continue;
@@ -581,6 +693,7 @@ class Autopilot {
           on: !!ap.in_force,
           approved_at: ap.file && ap.file.approved_at ? Math.floor(Date.parse(ap.file.approved_at) / 1000) : null,
           terms_changed: !!(ap.exists && ap.terms_changed),
+          ...(this.programMode() ? { version_changed: !!ap.version_changed, why: ap.in_force ? null : ap.why || null } : {}),
           doing: ap.in_force ? st.doing : null,
           waiting_reason: ap.in_force ? st.waiting_reason : null,
           needs_you: ap.exists ? this.needViews(role) : [],
@@ -614,9 +727,17 @@ class Autopilot {
     try {
       const a = this.actions;
       if (this.pending.length) this.settleJobs();
-      const roles = ROLES.filter((r) => !roleBlocked(a.cfg.role, r) && this.hasApproval(r));
+      const roles = ROLES.filter((r) => !this.roleBlockedFor(r) && this.hasApproval(r));
       if (!roles.length) return;
       if (a.busy) return;
+      if (a.programMode) {
+        // the program's own conditions (the key store is open, the folder is private, the node has answered since the start): until they hold, nothing is started
+        const g = a.programReady();
+        if (!g.ok) {
+          for (const r of roles) this.state[r] = { doing: null, waiting_reason: g.why };
+          return;
+        }
+      }
       const nowMs = this.now();
       const run = a.readRunFn(a.cfg.runDirs, Math.floor(nowMs / 1000));
       const prod = a.productionBlock(run);
@@ -711,7 +832,8 @@ class Autopilot {
     }
     const fr = factsReady(spend, ctx.gate);
     if (!fr.ok) {
-      const stop = fr.reasons.find((r) => STOP_REASONS.has(r.code) || (r.code === "latched" && spend.kind !== "claim_noid" && !(walletRun && RERUN_KINDS.has(spend.kind))));
+      // program mode: a step that may have been sent is never run again by itself, not even where the step says the same bytes would go (spec 5.A.10)
+      const stop = fr.reasons.find((r) => STOP_REASONS.has(r.code) || (r.code === "latched" && spend.kind !== "claim_noid" && !(walletRun && RERUN_KINDS.has(spend.kind) && !this.programMode())));
       if (stop) {
         const e = this.raise(role, spend.id, stop.code, stop.text);
         st.doing = "stopped: needs you";
@@ -848,7 +970,7 @@ class Autopilot {
       return;
     }
     // a wallet helper whose answer is "may have been sent, and the same command sends the SAME recorded bytes": not a stop; the step is run again on a later tick
-    if (rec.rerun_safe === true && RERUN_KINDS.has(spend.kind)) {
+    if (rec.rerun_safe === true && RERUN_KINDS.has(spend.kind) && !this.programMode()) {
       this.state[role] = { doing: `the tool could not tell whether it was sent: running ${spend.label} again on a later tick (it sends the same bytes)`, waiting_reason: null };
       return;
     }

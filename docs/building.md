@@ -2,7 +2,8 @@
 
 Short version: a GitHub workflow (`.github/workflows/build.yml`) builds `swap-cli` for Windows, macOS and Linux on
 GitHub's own machines, runs the offline tests, prints the sha256 of each program and attaches the programs as build
-artifacts. The point is that you can get a program whose build you can read, instead of trusting one built on a private
+artifacts. Since step 4.8 it also packs the desktop program (an installer for Windows x64 and a disk image for macOS Apple
+Silicon, both unsigned) and starts each on a clean machine (see "The desktop program" below; that part has not run yet). The point is that you can get a program whose build you can read, instead of trusting one built on a private
 machine.
 
 **Status: the workflow ran three times (run 1 at the public commit `111f72d`, run 2 at `fed3c64`, run 3 at `cbb1bf5`).**
@@ -36,15 +37,17 @@ Each job does this, in order:
 4. Installs the native tools the chain's source needs: a C compiler, CMake and libclang.
 5. Builds the program: `cargo build --release --locked` in `swap-cli`. `--locked` means the exact versions in
    `Cargo.lock` are used or the build fails.
-6. Runs the tests: `cargo test --locked --no-fail-fast` in `swap-cli`; then installs `eth/`'s locked packages (`npm ci`; the
-   console's server loads `ethers` from there) and runs `node --test "ui/app/test/*.test.js"` for the operator console
-   (Node 24).
+6. Installs `eth/`'s locked packages (`npm ci`) and compiles the contracts (`npx hardhat compile`, solc 0.8.24), runs the
+   tests `cargo test --locked --no-fail-fast` in `swap-cli`, runs the two code-hash tests of `params.rs` again with their output
+   shown and fails the job if either was skipped (they pass silently when no compiled contract exists; since step 4.8 one
+   exists), then runs `node --test "ui/app/test/*.test.js"` for the operator console (Node 24; its server loads `ethers` from
+   `eth/`).
 7. Prints the sha256 of the program, writes it to a `.sha256` file and to the job summary, and uploads the program, the
    `.sha256` file and a `BUILD-INFO.txt` (commit, chain source commit, compiler version, test results) as the artifact
    `swap-cli-windows-x86_64`, `swap-cli-macos-aarch64` or `swap-cli-linux-x86_64`.
 
 A fourth job runs the Ethereum side's tests (`npm ci`, `npx hardhat test` in `eth`) on Linux only. It takes about nine
-minutes.
+minutes. Two more jobs, `desktop` and `desktop-startup`, follow them (next section).
 
 Every step is strict on every system. Until run 3 the Windows `swap-cli` test step was allowed to fail without failing the
 job, because those tests had never been run there; run 3 showed them passing, and the flag `tests_may_fail` in the file is
@@ -130,11 +133,71 @@ GitHub's machines and the toolchain they download. A program you build yourself 
   downloaded program"); the digest GitHub lists for each artifact is that of the zip archive, not of the program.
 - After this run the Windows test step was made strict (`tests_may_fail: false`).
 
+## The desktop program (step 4.8; written, not run yet)
+
+Written 2026-11-18 from the build specification and tested offline only (`node --test "desktop/test/*.test.js"`). **No hosted run
+has executed these two jobs.** The first run will show what the notes under "Not verified" could not.
+
+Two jobs, each on Windows (`windows-latest`, x64) and macOS (`macos-14`, Apple Silicon). Nothing is signed, notarized or
+published: the jobs use no secret and upload build artifacts only; the build-provenance step is the one place with write
+permissions (`id-token`, `attestations`, on that job only).
+
+**`desktop`** (needs the `swap-cli` and `eth` jobs, so nothing is packed from a commit whose tests failed). In order:
+
+1. Checks out, sets up Node 24, installs `eth/`'s locked packages, compiles the contracts.
+2. Runs `node --test "desktop/test/*.test.js"` (strict).
+3. Downloads this run's `swap-cli` artifact (program, `.sha256`, `BUILD-INFO.txt`).
+4. `make-runtime-lock.js --check`: `desktop/runtime/package-lock.json` is exactly what `eth/package-lock.json` gives for `ethers` 6.17.0
+   (same versions, same `resolved` addresses and `integrity` hashes; made offline).
+5. `codehash-check.js`: keccak256 of each compiled contract equals the constant compiled into `swap-cli/src/params.rs` of the same
+   commit; the poseidon constant is the recorded `f510d2a3...3ff3`; `BUILD-INFO.txt` names this commit.
+6. Installs the build tools (`npm ci --ignore-scripts` in `desktop/`; see the lock note below).
+7. `stage.js stage`: lays the program out in `desktop/stage/` (the layout mirrors the repository, so `live.js` and the console find
+   their files unchanged): the desktop modules, the console without tests, `live.js` and every local file it requires, the two
+   compiled contracts, the three Rust files `poseidon2b.js` reads, and `swap-cli` (checked against its `.sha256` file) beside it.
+8. `npm ci --omit=dev --ignore-scripts` in `stage/eth`, then `stage.js check`: `ethers` resolves for `live.js` and for the console, and
+   exactly the locked packages are installed. The code-hash check runs again on the staged copy.
+9. Packs twice with `electron-builder` (`--publish never`). Pass 1 only unpacks; `stage.js manifest` then hashes every file under
+   `app.asar.unpacked/` and `bin/` of what the builder really placed and writes `runtime-manifest.json`; pass 2 stores it inside
+   `app.asar` and makes the installer. (Two passes, because the builder may leave out files such as READMEs or type files, and the
+   manifest must list what is really there.)
+10. Checks the packed program: `stage.js verify-packed` (the unpacked files equal the manifest, and the manifest inside `app.asar` is
+    the one written), the code-hash check on the unpacked contracts, and `fuses-check.js` on the program's binary.
+11. Writes `SHA256SUMS.txt` and `DESKTOP-BUILD-INFO.txt`, attests the installer's build provenance, and uploads the artifact
+    `desktop-windows-x86_64` or `desktop-macos-aarch64` (installer, sha256 file, build info, manifest).
+
+**`desktop-startup`** (needs `desktop`; a fresh machine of each kind): checks the installer against its sha256 file; installs it
+(Windows: `/S`, per user, to `%LOCALAPPDATA%\Programs\No1d Swap`; macOS: attaches the disk image and copies the app); starts the
+program with `--self-test` (a hidden window on a temporary data folder, no vault, nothing can act) and requires its JSON line
+(`startup-check.js selftest`: page loaded, no Parano1d node, 401 without the token, hardened web preferences, exit code 0);
+reads the fuses of the installed binary; checks the installed files against the manifest; runs offline `live.js` commands (an
+address from a key on the stdin pipe, a message signature, a verification, a `keygen --stdout` piped back in) once under the
+program's own binary with `ELECTRON_RUN_AS_NODE=1` and once under Node 24 and requires equal answers; on Windows plants
+`%LOCALAPPDATA%\No1d Swap\runs\x\run.json`, runs the uninstaller and requires that the program is gone and the planted file is not.
+
+Fuses required (`fuses-check.js` reads the fuse wire out of the binary itself, no package): RunAsNode on, EnableCookieEncryption
+on, EnableNodeOptionsEnvironmentVariable off, EnableNodeCliInspectArguments off, EnableEmbeddedAsarIntegrityValidation on,
+OnlyLoadAppFromAsar on, LoadBrowserProcessSpecificV8Snapshot off, GrantFileProtocolExtraPrivileges off.
+
+Download names: `No1d-Swap-<version>-win-x64.exe` and `No1d-Swap-<version>-mac-arm64.dmg`. To check one: compare its sha256 with
+`SHA256SUMS.txt` (and with the value in the run's job summary), and verify the provenance with
+`gh attestation verify <installer> --repo <owner>/<repo>`. The programs are not signed: Windows shows "Windows protected your PC"
+(More info, Run anyway); macOS refuses to open it until Privacy and Security, "Open Anyway". The asar integrity fuse and the runtime
+manifest are damage checks, not a defence against a program running as the same user.
+
+**`desktop/package-lock.json` is not committed.** Nothing could make it without the network, so until it exists the job runs
+`npm install --ignore-scripts` on the exactly pinned build tools (their own dependencies are not locked), warns, and uploads the
+lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either one); from then on the job runs `npm ci`.
+
+**The runtime lock** (`desktop/runtime/package-lock.json`) is made offline by `node desktop/scripts/make-runtime-lock.js` from
+`eth/package-lock.json`; after any change of `eth/package-lock.json` run it again and commit the result (the job and a test check it).
+
 ## What is not built
 
 - The zkVM prover and its proofs (`equiv/`). The proof-free lock kind (`poseidon`) needs neither a proof nor a receipt, so
   nothing here builds the guest, the host or the receipts. The `sha256` lock kind needs them and is outside this workflow.
-- An installer, a signed or notarized program, a package for any system.
+- A signed or notarized program, and a package for Linux. The desktop program has a Windows x64 installer and a macOS Apple
+  Silicon disk image only (Electron's key store on Linux may fall back to basic text, which the program refuses).
 - The chain's own node and wallet (`vendor/parano1d` is built only as far as `swap-cli` depends on it).
 - Bitcoin tests (`btc/`) and the Rust harness (`parano1d/harness`) are not run separately. The harness is compiled as a
   dependency of `swap-cli`.
@@ -146,6 +209,18 @@ GitHub's machines and the toolchain they download. A program you build yourself 
   there (see the table below).
 - The three actions (checkout, setup-node, upload-artifact) are pinned to full commit ids, looked up on 2026-11-17; that
   each id is the release its comment names was not checked a second way.
+- **Two more actions, pinned from the build specification and not looked up, must be checked before the first run of the desktop
+  jobs:** `actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093` (comment: v4.3.0) and
+  `actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8` (comment: v4.2.2). For each: open the repository's release
+  page for the tag, confirm the full commit id behind the tag, and change both the id and the comment if they differ. A test
+  (`desktop/test/workflow.test.js`) pins the five ids, so change it together with the workflow.
+- The two desktop jobs (above) have not run. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
+  `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
+  flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the
+  program starts on a clean machine; that the Windows binary (a GUI-subsystem program) shows its output to `Start-Process` redirection
+  and passes its stdin and stdout pipes under `ELECTRON_RUN_AS_NODE`; that the macOS app starts after the fuses change (the builder is
+  expected to reset the ad-hoc signature on arm64; if the app is killed at start, add an ad-hoc `codesign` step); and that the
+  uninstaller behaves as written.
 
 ### Code that only works on Unix, and what the tool does on Windows
 

@@ -1,0 +1,91 @@
+# electron-builder configuration for the desktop program (step 4.8). Used only by the hosted build
+# (.github/workflows/build.yml, job "desktop"); nothing here runs on a private machine.
+#
+# The program is laid out by desktop/scripts/stage.js into desktop/stage/ (the app folder below) and the swap-cli
+# program of the same run into desktop/stage-bin/ (copied to resources/bin). Nothing is signed: there is no identity
+# and no certificate, and the workflow uses no secrets. Nothing is published: the workflow passes --publish never and
+# uploads build artifacts only.
+
+# Neutral reverse-DNS identifier: it names no person (build spec section 11, point 22). The owner may change it
+# before the first release; an installed program is keyed by it.
+appId: no1d.swap.desktop
+productName: No1d Swap
+copyright: Copyright (c) 2026 00
+
+directories:
+  app: stage
+  output: dist
+
+# The sources are packed into app.asar (its integrity is checked by a fuse). The children of the program need real
+# files: live.js and its packages (eth/), and the three Rust files poseidon2b.js reads (equiv/), so they stay unpacked
+# next to the asar in app.asar.unpacked/. The unpacked files and bin/ are covered by runtime-manifest.json.
+asar: true
+asarUnpack:
+  - eth/**
+  - equiv/**
+
+# swap-cli, from this run's swap-cli job, lands in resources/bin/.
+extraResources:
+  - from: stage-bin
+    to: bin
+
+# One installer name for each platform, without spaces (the sha256 file and the build provenance name it).
+artifactName: No1d-Swap-${version}-${os}-${arch}.${ext}
+
+# The packages are already in place (npm ci --omit=dev --ignore-scripts in stage/eth); no native module is rebuilt.
+npmRebuild: false
+nodeGypRebuild: false
+buildDependenciesFromSource: false
+
+# No update files, no publishing: the program only notifies (desktop/lib/updates.js).
+publish: null
+
+# Fuses are switches flipped inside the program's own binary. desktop/scripts/fuses-check.js reads them back from the
+# built program and from the installed one and requires exactly these values.
+#   runAsNode on: live.js runs under the program's own binary with ELECTRON_RUN_AS_NODE=1.
+#   the NODE_OPTIONS variable and the inspect switches off: nothing can inject code or open a debugger from outside.
+#   asar integrity and "only load from asar" on: a changed app.asar does not start.
+electronFuses:
+  runAsNode: true
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  loadBrowserProcessSpecificV8Snapshot: false
+  grantFileProtocolExtraPrivileges: false
+
+# Windows x64, NSIS, installed for the current user only (no administrator rights).
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  # The program is not signed: no certificate is configured, so none is used (signing is off by default).
+
+nsis:
+  oneClick: true
+  perMachine: false
+  allowElevation: false
+  runAfterFinish: false
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  # An uninstall never deletes run folders or the vault (they live under %LOCALAPPDATA%\No1d Swap, outside the install folder).
+  deleteAppDataOnUninstall: false
+  differentialPackage: false
+
+# macOS Apple Silicon, a disk image. Not signed and not notarized: the system asks the user to open it by hand.
+# On arm64 the builder resets the ad-hoc signature after the fuses are flipped; the start-up test proves it starts.
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  category: public.app-category.finance
+
+dmg:
+  sign: false
+  writeUpdateInfo: false

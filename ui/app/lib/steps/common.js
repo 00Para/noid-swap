@@ -10,6 +10,14 @@
  *
  * Nothing is sent from this file. A step that does send (4.4) returns code 2 or 3 ("nothing sent") only before the first child that can sign
  * or send has started; see README.md in this folder.
+ *
+ * Two context fields of the program (step 4.5, lib/stepexec.js sets them; a step test may set them too):
+ *   ctx.signal  an AbortSignal. startTool kills the child it started when the signal aborts (the same kill as the time limit) and the step returns its usual
+ *               "did not finish" result. The program gives it ONLY to entries that send nothing (never to a spend or a signing step): a step that started a
+ *               sender is never abandoned.
+ *   ctx.notify  (kind) => void, kind "alert" | "alarm". alertHook and alarmHook call it each time they fire (an ALERT line; an ALARM line that passes its latch),
+ *               BEFORE any POST and whether or not settings.alert_url is set. It carries no text of the tick. The ALERT / ALARM latch rules do not change.
+ * childEnv sets ETH_RPC_URL only when ctx.settings is an object with a string eth_rpc, so board-verify can run in a board slot before run.json exists.
  */
 
 const fs = require("fs");
@@ -201,7 +209,8 @@ function childEnv(ctx, kind, opts = {}) {
   if (process.platform === "win32") env.USERPROFILE = home;
   env.NOID_SWAP_HOME = path.join(home, ".noid-swap");
   if (kind === "liveJs") {
-    env.ETH_RPC_URL = ctx.settings.eth_rpc;
+    // Only when the run's settings carry a node address: board-verify runs in a board slot before run.json exists (ctx.settings is then null) and is offline.
+    if (ctx.settings && typeof ctx.settings === "object" && typeof ctx.settings.eth_rpc === "string") env.ETH_RPC_URL = ctx.settings.eth_rpc;
     for (const [k, v] of Object.entries(ctx.tools.liveJsEnv || {})) {
       if (BANNED_CHILD_ENV.test(k)) throw new Error(`tools.liveJsEnv may not set ${k}`);
       env[k] = String(v);
@@ -336,24 +345,35 @@ function startTool(ctx, spec) {
         finish(code, signal);
       });
     });
-    if (spec.limitMs > 0) {
-      limitTimer = setTimeout(() => {
-        timedOut = true;
+    // The same kill for the time limit and for `ctx.signal` (the program stops a hung step that sends nothing: ctx.signal is never given to a step that sends).
+    const killNow = () => {
+      if (finished || timedOut) return;
+      timedOut = true;
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      killTimer = setTimeout(() => {
         try {
-          child.kill();
+          child.kill("SIGKILL");
         } catch {
           /* already gone */
         }
-        killTimer = setTimeout(() => {
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            /* already gone */
-          }
-        }, 1000);
-        killTimer.unref();
-      }, spec.limitMs);
+      }, 1000);
+      killTimer.unref();
+    };
+    if (spec.limitMs > 0) {
+      limitTimer = setTimeout(killNow, spec.limitMs);
       limitTimer.unref();
+    }
+    const sig = ctx.signal && typeof ctx.signal.addEventListener === "function" ? ctx.signal : null;
+    if (sig) {
+      if (sig.aborted) killNow();
+      else {
+        sig.addEventListener("abort", killNow, { once: true });
+        child.once("close", () => sig.removeEventListener("abort", killNow));
+      }
     }
   });
   return { child, done };
@@ -958,6 +978,19 @@ function defaultAlertPost(url, message) {
   });
 }
 
+/**
+ * `ctx.notify(kind)` (the program's operating-system notification, a fixed text per kind; program mode only): called each time a hook fires, BEFORE any POST,
+ * whether or not an alert URL is set. It carries no line of a tick. Never throws.
+ */
+function notifyHook(ctx, kind) {
+  if (typeof ctx.notify !== "function") return;
+  try {
+    ctx.notify(kind);
+  } catch {
+    /* a notification cannot stop a loop */
+  }
+}
+
 async function send(ctx, message) {
   const post = ctx.alertPost || defaultAlertPost;
   try {
@@ -973,12 +1006,13 @@ async function send(ctx, message) {
  * once. A failed send is kept in runDir/alert-pending ("TRIES|MESSAGE") and tried again on every later call, up to 20 times. Never throws, never reports the URL.
  */
 async function alertHook(ctx, text) {
-  if (!ctx.settings.alert_url) return;
+  const hasUrl = !!ctx.settings.alert_url;
+  if (!hasUrl && typeof ctx.notify !== "function") return;
   try {
     const pend = path.join(ctx.runDir, "alert-pending");
     let v = null;
     try {
-      if (fs.statSync(pend).size > 0) v = fs.readFileSync(pend, "utf8").replace(/\n+$/, "");
+      if (hasUrl && fs.statSync(pend).size > 0) v = fs.readFileSync(pend, "utf8").replace(/\n+$/, "");
     } catch {
       v = null;
     }
@@ -999,7 +1033,8 @@ async function alertHook(ctx, text) {
         : `noid-swap run ${ctx.runNumber}: an alert was raised; look at the loop log`;
       if (seen.has(msg)) continue;
       seen.add(msg);
-      if (!(await send(ctx, msg))) fs.writeFileSync(path.join(ctx.runDir, "alert-pending"), `1|${msg}\n`, { mode: 0o600 });
+      notifyHook(ctx, "alert");
+      if (hasUrl && !(await send(ctx, msg))) fs.writeFileSync(path.join(ctx.runDir, "alert-pending"), `1|${msg}\n`, { mode: 0o600 });
     }
   } catch {
     /* nothing here may stop a loop */
@@ -1013,7 +1048,8 @@ async function alertHook(ctx, text) {
  * again. A complete tick (it printed its `applied:` line) that no longer shows a kind re-arms it. Never throws.
  */
 async function alarmHook(ctx, role, text) {
-  if (!ctx.settings.alert_url) return;
+  const hasUrl = !!ctx.settings.alert_url;
+  if (!hasUrl && typeof ctx.notify !== "function") return;
   const r = role === "alice" || role === "bob" ? role : "bob";
   try {
     let complete = false;
@@ -1039,7 +1075,8 @@ async function alarmHook(ctx, role, text) {
       } catch {
         continue;
       }
-      if (!(await send(ctx, msg))) fs.rmSync(latch, { force: true });
+      notifyHook(ctx, "alarm");
+      if (hasUrl && !(await send(ctx, msg))) fs.rmSync(latch, { force: true });
     }
     if (complete) {
       if (!sawLate) fs.rmSync(path.join(ctx.runDir, `alarm-sent-${r}-late`), { force: true });

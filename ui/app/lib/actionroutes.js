@@ -18,11 +18,12 @@ const ACTION_POSTS = new Set(["/api/action", "/api/spend", "/api/autopilot", "/a
 
 const bad = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
 
-function handleActionPost(p, body, { actions, runDir, board }) {
+function handleActionPost(p, body, { actions, runDir, board, startMeta }) {
   switch (p) {
     case "/api/action": {
       if (typeof body.id !== "string") throw bad(400, 'body must be {"id": "..."}');
-      const job = actions.startAction(body.id);
+      // startMeta is made by the server only (program mode: the file the shell's dialog chose for join); nothing of it comes from a request
+      const job = actions.startAction(body.id, startMeta && typeof startMeta === "object" ? { ...startMeta } : {});
       return { status: 202, body: { accepted: true, job } };
     }
     case "/api/spend": {

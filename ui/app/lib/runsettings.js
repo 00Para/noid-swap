@@ -498,10 +498,12 @@ function write(runDir, obj, { create = false } = {}) {
 }
 
 /** Settings for a new swap: `fields` holds every key but `v` and `run_id`, which are filled here (a fresh random id). Validated; throws RunSettingsError. */
-function newSettings(fields) {
+function newSettings(fields, { runId } = {}) {
   if (!plain(fields)) throw new RunSettingsError("the settings are not an object");
   if (Object.prototype.hasOwnProperty.call(fields, "v") || Object.prototype.hasOwnProperty.call(fields, "run_id")) throw new RunSettingsError("v and run_id are filled by the program, not given");
-  const o = { v: 1, run_id: crypto.randomBytes(16).toString("hex"), ...fields };
+  // `runId` (the program's own option, never a field): the id the run folder was already named by (the offer board makes the folder first). Same shape as a made one.
+  if (runId !== undefined && (typeof runId !== "string" || !RUN_ID.test(runId))) throw new RunSettingsError("runId: 32 lower-case hexadecimal characters");
+  const o = { v: 1, run_id: runId !== undefined ? runId : crypto.randomBytes(16).toString("hex"), ...fields };
   refuseIfInvalid(o);
   return Object.freeze(ordered(o));
 }

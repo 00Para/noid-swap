@@ -24,6 +24,9 @@ function harness(o) {
 test.after(() => {
   for (const h of H) h.cleanup();
 });
+// 4.6: the passphrase comes from the vault (ctx.getPassphrase), never from a file; setup only asks for it once to see that the vault is ready
+const VAULT_PASS = "vault-derived-passphrase-0123456789abcdef0123456789abcdef0123456789abcdef";
+const withVault = (ctx) => ({ ...ctx, getPassphrase: () => VAULT_PASS });
 const rel = (h) => h.files().map((f) => f.rel.replace(/\\/g, "/")).sort();
 const j = (o) => `${JSON.stringify(o, null, 2)}\n`;
 const SETUP_STUB = path.join(__dirname, "steps-fixtures", "stub-swap-cli-setup.js");
@@ -52,7 +55,7 @@ async function runSetup(map, settings = {}, o = {}) {
   const h = harness({ passphrase: null, settings: { role: "alice", eth_rpc: "http://e1", ...settings } });
   const log = [];
   if (o.prepare) o.prepare(h);
-  const r = await steps.setup({ ...h.ctx, rpcPost: rpcMap(map, log) });
+  const r = await steps.setup(withVault({ ...h.ctx, rpcPost: rpcMap(map, log) }));
   return { h, r, log, start: h.read("eth-deploy-block.txt") };
 }
 
@@ -64,8 +67,8 @@ test("(s13) setup: the log start is the finalized block (0x1d4c0 = 120000) minus
   assert.match(r.stderr, /log start 117600 \(finalized block minus 2400/);
   assert.match(r.stdout, /eth log start: 117600 \(chosen now from the node/);
   assert.match(r.stdout, /eth from block 117600\)/, "the run line shows the start");
-  assert.ok(h.exists("passphrase.txt"), "the passphrase is made");
-  assert.deepEqual(r.files, ["passphrase.txt", "eth-deploy-block.txt"]);
+  assert.ok(!h.exists("passphrase.txt"), "no passphrase file is made (the vault gives the passphrase)");
+  assert.deepEqual(r.files, ["eth-deploy-block.txt"]);
   assert.deepEqual(C.fromBlockFlags(h.ctx).flags, ["--eth-from-block", "117600"], "from_block_flags passes it on");
 });
 test("(s13) setup: eth_start_margin 0 gives the finalized block itself; a margin larger than the block gives 0", async () => {
@@ -107,12 +110,13 @@ test("(s13) setup: with two nodes the LOWER start wins whichever node it is, and
   const bad = await runSetup({ "http://e1 finalized": blk("0x1d4c0") }, { eth_rpc2: "http://e2" });
   assert.deepEqual([bad.r.code, bad.start], [2, null]);
 });
-test("(s13) setup: an unreadable node: exit 2, no start file, the message names deploy_block, 'setup stopped' is said; the passphrase file was already made (as the helper)", async () => {
+test("(s13) setup: an unreadable node: exit 2, no start file, the message names deploy_block, 'setup stopped' is said; the folders made before the log start stay (as the helper); no passphrase file", async () => {
   const { h, r, start } = await runSetup({});
   assert.deepEqual([r.code, start], [2, null]);
   assert.match(r.stderr, /deploy_block/);
   assert.match(r.stderr, /setup stopped: no log start/);
-  assert.ok(h.exists("passphrase.txt"));
+  assert.ok(!h.exists("passphrase.txt"));
+  assert.ok(fs.statSync(path.join(h.runDir, "pub")).isDirectory());
 });
 test("(s13) setup: an explicit deploy_block wins and the node is not asked; one that is not a whole number is refused", async () => {
   const { r, log, start } = await runSetup({ "http://e1 finalized": blk("0x1d4c0") }, { deploy_block: 12095751 });
@@ -144,41 +148,58 @@ test("(s13) setup: a keyed node URL never appears in the result or in any file",
   for (const f of h.files()) assert.ok(!f.bytes.toString("latin1").includes("KEY-SECRET"), f.rel);
 });
 
-test("setup makes the folders, the passphrase (40 characters of the base64 alphabet without / + =, mode 600) and keeps both on a second run", async () => {
+test("setup makes the folders and says the passphrase comes from the key store; no passphrase file is ever made; a second run keeps the log start", async () => {
   const { h, r } = await runSetup({}, { deploy_block: 7 });
   assert.equal(r.code, 0);
-  assert.match(r.stdout, /passphrase: new/);
-  const p = h.read("passphrase.txt");
-  assert.match(p, /^[A-Za-z0-9]{40}$/);
+  assert.match(r.stdout, /passphrase: from the key store/);
+  assert.ok(!r.stdout.includes(VAULT_PASS) && !r.stderr.includes(VAULT_PASS), "the value is never printed");
+  assert.ok(!h.exists("passphrase.txt"), "no passphrase.txt");
   for (const d of ["bob", "rec", "pub"]) assert.ok(fs.statSync(path.join(h.runDir, d)).isDirectory(), d);
   if (process.platform !== "win32") {
-    assert.equal(fs.statSync(path.join(h.runDir, "passphrase.txt")).mode & 0o777, 0o600);
     for (const d of ["", "bob", "rec", "pub"]) assert.equal(fs.statSync(path.join(h.runDir, d)).mode & 0o077, 0, `${d || "run folder"} is owner-only`);
   }
-  const again = await steps.setup({ ...h.ctx, rpcPost: async () => { throw new Error("no"); } });
+  const again = await steps.setup(withVault({ ...h.ctx, rpcPost: async () => { throw new Error("no"); } }));
   assert.equal(again.code, 0);
-  assert.match(again.stdout, /passphrase: kept/);
-  assert.equal(h.read("passphrase.txt"), p);
+  assert.match(again.stdout, /passphrase: from the key store/);
+  assert.ok(!h.exists("passphrase.txt"));
   assert.equal(h.read("eth-deploy-block.txt"), "7\n");
+  for (const f of h.files()) assert.ok(!f.bytes.toString("latin1").includes(VAULT_PASS), f.rel);
 });
-test("setup: an empty passphrase file is made again, a passphrase file that is not a plain file is refused, so is a start file that is not one", async () => {
-  const a = harness({ passphrase: "", settings: { role: "alice", deploy_block: 3 } });
-  a.write("passphrase.txt", "");
-  assert.equal((await steps.setup(a.ctx)).code, 0);
-  assert.match(a.read("passphrase.txt"), /^[A-Za-z0-9]{40}$/);
+test("setup asks the vault for the passphrase once and keeps nothing: a vault that is not ready is exit 2 and nothing is made", async () => {
+  const h = harness({ passphrase: null, settings: { role: "alice", deploy_block: 3 } });
+  let asked = 0;
+  const ok = await steps.setup({ ...h.ctx, getPassphrase: () => { asked++; return VAULT_PASS; } });
+  assert.equal(ok.code, 0);
+  assert.equal(asked, 1, "asked once");
+  const n = harness({ passphrase: null, settings: { role: "alice", deploy_block: 3 } });
+  const r = await steps.setup({ ...n.ctx, getPassphrase: () => { throw new Error("the vault is not open yet"); } });
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /the vault is not open yet/);
+  assert.deepEqual(rel(n), [], "no folder was made");
+});
+test("setup refuses a folder that still holds an old passphrase.txt (a file of any kind, even an empty one): exit 2, nothing made, the file is not touched; a start file that is not a plain file is refused too", async () => {
+  const a = harness({ passphrase: "old-clear-passphrase", settings: { role: "alice", deploy_block: 3 } });
+  const ra = await steps.setup(withVault(a.ctx));
+  assert.equal(ra.code, 2);
+  assert.match(ra.stderr, /an old passphrase file is here .*import the folder instead/);
+  assert.equal(a.read("passphrase.txt"), "old-clear-passphrase\n");
+  assert.deepEqual(rel(a), ["passphrase.txt"]);
+  const e = harness({ passphrase: "", settings: { role: "alice", deploy_block: 3 } });
+  e.write("passphrase.txt", "");
+  assert.equal((await steps.setup(withVault(e.ctx))).code, 2);
   const b = harness({ passphrase: null, settings: { role: "alice", deploy_block: 3 } });
   fs.mkdirSync(path.join(b.runDir, "passphrase.txt"));
-  const rb = await steps.setup(b.ctx);
+  const rb = await steps.setup(withVault(b.ctx));
   assert.equal(rb.code, 2);
-  assert.match(rb.stderr, /passphrase\.txt is not a plain file/);
+  assert.match(rb.stderr, /an old passphrase file is here/);
   const c = harness({ passphrase: null, settings: { role: "alice", deploy_block: 3 } });
   fs.mkdirSync(path.join(c.runDir, "eth-deploy-block.txt"));
-  assert.equal((await steps.setup(c.ctx)).code, 2);
+  assert.equal((await steps.setup(withVault(c.ctx))).code, 2);
 });
 test("setup refuses a folder that holds the other role's swap file (design 12.4): exit 2, nothing made", async () => {
   const h = harness({ passphrase: null, settings: { role: "alice", deploy_block: 3 } });
   h.swapFile("bob");
-  const r = await steps.setup(h.ctx);
+  const r = await steps.setup(withVault(h.ctx));
   assert.equal(r.code, 2);
   assert.match(r.stderr, /one role's files/);
   assert.deepEqual(rel(h), ["bob/bob.swap.json"]);
@@ -448,7 +469,7 @@ test("(s18 p1) prepare: once the swap file shows the wallet, the key and the pay
   const { r } = await runPrepare(h);
   assert.ok(!h.exists("wallet-setup/noid-wallet.json") && !h.exists("wallet-setup/eth-key.json"));
   assert.ok(!h.exists("wallet-setup"), "the empty folder is removed");
-  assert.match(r.stdout, /BACK UP the whole run folder .* \(the swap file, run\.json and passphrase\.txt together: the keys exist nowhere else/);
+  assert.match(r.stdout, /BACK UP the whole run folder .* and keep your recovery code \(the swap file and run\.json; the keys exist nowhere else; the swap file opens only with the passphrase that comes from the recovery code\)/);
   assert.match(r.stdout, /Bob joins with the bundle/);
   assert.equal(h.read("alice.bundle.json"), `${BUNDLE}\n`);
   assert.equal(h.read("pub/alice.bundle.json"), `${BUNDLE}\n`);
@@ -918,7 +939,7 @@ test("(s18) join: once the swap file shows the key and the payout the standalone
   const h = joinHarness();
   const r = await runJoin(h);
   assert.ok(!h.exists("wallet-setup/eth-key.json") && !h.exists("wallet-setup"));
-  assert.match(r.stdout, /the swap file holds the Ethereum key \(0x[0-9a-f]{40}\), sealed, with the payout address; the standalone key file was deleted\. BACK UP the whole run folder .* \(the swap file, run\.json and passphrase\.txt together/);
+  assert.match(r.stdout, /the swap file holds the Ethereum key \(0x[0-9a-f]{40}\), sealed, with the payout address; the standalone key file was deleted\. BACK UP the whole run folder .* and keep your recovery code \(the swap file and run\.json; the key exists nowhere else; the swap file opens only with the passphrase that comes from the recovery code\)/);
   assert.match(r.stdout, new RegExp(`your Ethereum address:  ${BOB_ETH}`));
   assert.equal(argvOf(h, "--eth-sender"), BOB_ETH);
 });

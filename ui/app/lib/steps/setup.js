@@ -1,21 +1,22 @@
 "use strict";
 /*
- * The run folder of a new swap (scripts/live/setup.sh): the folder and bob/, rec/, pub/ inside it (owner-only), the swap's passphrase file (until the key
- * store of step 4.6 exists), and the Ethereum log start (eth-deploy-block.txt). Sends nothing, runs no tool.
+ * The run folder of a new swap (scripts/live/setup.sh): the folder and bob/, rec/, pub/ inside it (owner-only), and the Ethereum log start
+ * (eth-deploy-block.txt). Sends nothing, runs no tool. The swap's passphrase is NOT made here any more (step 4.6): it comes from the program's vault
+ * (`ctx.getPassphrase`, derived from the install secret and the run id); setup only checks that the vault gives one (exit 2 when it is not ready) and
+ * refuses a folder that still holds an old `passphrase.txt` (import the folder instead: desktop/lib/migrate.js).
  *
  * Log start: a non-empty eth-deploy-block.txt is kept; else settings.deploy_block; else, when a swap file is already in the folder, none is chosen (a fresh
  * guess could lie AFTER a lock that is already on chain); else the finalized block of the configured Ethereum node(s) minus the margin (common.js
  * defaultEthFromBlock; fails closed: exit 2 and no file).
  *
- * Exit code: 0; 2 a setting or the folder is wrong, the other role's swap file is here, or no log start could be chosen (nothing else is done for the log
- * start; the folder and the passphrase file made before it stay, as in the helper).
+ * Exit code: 0; 2 a setting or the folder is wrong, the other role's swap file is here, an old passphrase.txt is here, the vault gives no passphrase, or no
+ * log start could be chosen (nothing else is done for the log start; the folders made before it stay, as in the helper).
  *
  * Also holds the few small helpers the other three setup steps share (`lexists`, `showText`, `refuseOtherRoleFile`, `jsonField`).
  */
 
 const fs = require("fs");
 const path = require("path");
-const crypto = require("crypto");
 const C = require("./common");
 
 /** True when the path exists, a symbolic link included (bash `[ -e P ] || [ -L P ]`). */
@@ -70,30 +71,6 @@ function ownerOnlyDir(dir, what) {
   }
 }
 
-const B64_DROP = /[/+=\n]/g;
-
-/**
- * UNTIL STEP 4.6 (the key store): the swap's passphrase is a file, made as setup.sh made it: 48 random bytes in base64 without "/", "+" and "=", the first
- * 40 characters, mode 0o600; a non-empty file is kept. Step 4.6 removes this function and the file (the passphrase comes from the key store then).
- * Returns "new" or "kept". A file that is not a plain file is refused (Refusal 2).
- */
-function makePassphraseFileUntilKeyStore(runDir) {
-  const file = path.join(runDir, "passphrase.txt");
-  let existing = false;
-  try {
-    const st = fs.lstatSync(file);
-    if (!st.isFile()) throw new C.Refusal(2, `${file} is not a plain file: remove it by hand. Nothing more was done`);
-    if (st.size > 0) return "kept";
-    existing = true; // an empty file is made again, as `[ ! -s ]` did
-  } catch (e) {
-    if (e instanceof C.Refusal) throw e;
-  }
-  let pass = "";
-  while (pass.length < 40) pass = crypto.randomBytes(48).toString("base64").replace(B64_DROP, "").slice(0, 40);
-  fs.writeFileSync(file, pass, { flag: existing ? "w" : "wx", mode: 0o600 });
-  return "new";
-}
-
 /** The digits of a kept eth-deploy-block.txt for the run line, else a short stand-in. */
 function keptStart(file) {
   const t = C.readTextCapped(file, 4096);
@@ -110,13 +87,15 @@ function setup(ctx) {
     const s = ctx.settings;
     if (s.role !== "alice" && s.role !== "bob") throw new C.Refusal(2, "run.json role must be alice or bob");
     refuseOtherRoleFile(ctx);
+    // an old passphrase file means a run folder of the bash helpers: the program does not adopt it here (a clear passphrase must not stay on disk)
+    const oldPass = path.join(ctx.runDir, "passphrase.txt");
+    if (lexists(oldPass)) throw new C.Refusal(2, `an old passphrase file is here (${oldPass}): import the folder instead (the import seals the passphrase and deletes the file). Nothing was done`);
+    // the passphrase comes from the vault: it must be ready (asked once; the value is not kept)
+    C.needPassphrase(ctx);
     // the run folder and the three folders in it
     ownerOnlyDir(ctx.runDir, "the run folder");
     for (const d of ["bob", "rec", "pub"]) ownerOnlyDir(path.join(ctx.runDir, d), `its ${d} folder`);
-    // the passphrase file (step 4.6 removes this)
-    const pass = makePassphraseFileUntilKeyStore(ctx.runDir);
-    if (pass === "new") out.file("passphrase.txt");
-    out.say(`passphrase: ${pass}`);
+    out.say("passphrase: from the key store");
     // the log start
     const startFile = path.join(ctx.runDir, "eth-deploy-block.txt");
     let startState = null;
@@ -162,4 +141,4 @@ function setup(ctx) {
   });
 }
 
-module.exports = { setup, lexists, showText, jsonField, refuseOtherRoleFile, ownerOnlyDir, makePassphraseFileUntilKeyStore };
+module.exports = { setup, lexists, showText, jsonField, refuseOtherRoleFile, ownerOnlyDir };

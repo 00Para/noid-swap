@@ -742,3 +742,118 @@ Low points, written down and not fixed:
 - A person who asks for the offers list in the middle of a swap sees the list with Take off; the offer of the swap in play is only in the "Your swap" place.
 - The page's `offerOf` drops an offer silently; the count "N open now" is of the offers the page could draw.
 - Only an Alice's preview scenarios exist; the Bob screens are covered by the page tests with made-up payloads and by the host tests, not by a preview.
+
+## Program mode (piece 4, step 4.5, server part)
+
+Bottom line: the desktop shell calls `startProgramServer(program)` (`server.js`) and gets a second kind of console. Every action runs a step of `lib/steps` **in-process**
+(`lib/stepexec.js`), a swap's settings are its `run.json` (`lib/settingsource.js`), the watch loop is a timer of the program, and several swaps run side by side
+(`lib/swapset.js`): one folder `<runs>/<swap id>/` is one swap with its own action runner, autopilot, audit log (`pub/ui-audit.jsonl`), run lock, step executor and (for a
+board slot) board host. **Terminal mode** (`node ui/app/server.js ...`, WSL helpers, `env.local.sh`) is unchanged: `ActionRunner` takes `deps.executor` and
+`deps.settingsSource`, and without them it is today's code.
+
+| File | What |
+|---|---|
+| `server.js` | `startProgramServer(program, deps)` -> `{ scheme, token, swapSet, handler, mark, maxBody, stop }` since 4.9 (no port; see "Program mode on the private scheme"; before 4.9 it listened on 127.0.0.1 port 0), prints nothing; the same Host, Origin, same-origin, token and CSP checks as terminal mode |
+| `lib/swapset.js` | `SwapSet`: `scan`, `open` (the folder rules), `create(fields)` (the new-swap form), `createBoardSlot(role)`, `list`, `atStake`, `tick` (the 3 s timer), `stopAll` |
+| `lib/stepexec.js` | `createStepExecutor`: table id to step (`resolve`), `precheck` (the checks before every entry), `run`, the in-process watch (`watchStart`, `watchStop`, `watchStatus`, `supervise`) |
+| `lib/settingsource.js` | the run.json answers the runner asks instead of `env.local.sh`: `role`, `walletRun`, `boardRun`, `productionReason`, `roleBlock` |
+| `lib/programsettings.js` | `<data>/settings.json` v1 (strict, no secret), `view` (addresses cut, alert URL as `"set"`), `merge`, `save` |
+| `lib/toolhash.js` | the nine tool files and the step code, hashed with a metadata cache for views; `fresh: true` reads every byte again |
+| `lib/exitcodes.js` | `classifyStepExit(step, { code, stdout, files, kind })` (Appendix B); `classifySpendExit` and `EXIT_TABLE` are the bash helpers' and unchanged |
+
+**Rules (each has a test, `test/program-*.test.js`).**
+- Before every entry, in this order, a refusal is 409 with an audit line (not repeated within 60 s) and no step is called: run.json loads and is not production; the role rule;
+  the folder guard (read fresh before a spend through the program's `folderGuardFresh` / `folderGuard(dir, { fresh: true })`, cached 10 s otherwise); the vault is open (and
+  for funding, locks and wallet setup the recovery code is confirmed); then the run lock (the runner's own `verify`).
+- The role is run.json's, `alice` or `bob`; a missing or unreadable role refuses every entry; the other role's entries and a folder holding the other role's swap file are refused.
+  The only entries a board slot (no run.json yet) runs are `board-verify-addresses` and `board-verify-checked`.
+- A spend step's result is read by `classifyStepExit`, never `classifySpendExit`: a rejected promise is code null (may have been sent; the reveal: the secret may be public), a 2 or 3
+  counts as "nothing sent" only with the step's own fixed line, and a send result file in the step's files turns it back into "may have been sent". A running spend is never abandoned
+  (no signal, no kill); past the entry's time limit the payload shows `busy.warning`. A step that sends nothing gets `ctx.signal` and is aborted at the limit.
+- `install`, `check-object` and `/api/funded` are terminal-only (409 / 404). The program refuses a production run folder (read-only, every action 403).
+- The autopilot's approval (`Autopilot.programTermsHash`) binds every item of the terminal hash but `env.local.sh` and `bin/`, plus the canonical bytes of run.json, the program's version,
+  the nine tool files and one hash over the step code; an input that cannot be read gives null and nothing is in force (the word "none" never enters the hash). `authorize` hashes every
+  input again, bypassing the cache. A step that may have been sent stops the autopilot for that swap (needs you), even where the step says the same bytes would go.
+- No secret in an API answer, audit line, job record or notification: the step asks the vault for the passphrase per call; the executor keeps none.
+
+**The two context fields** `ctx.signal` and `ctx.notify` of `steps/common.js`: `startTool` kills its child when the signal aborts; `alertHook` and `alarmHook` call `ctx.notify("alert" | "alarm")`
+each time they fire, before any POST, with or without an alert URL (the latch rules do not change). `childEnv` sets `ETH_RPC_URL` only when `ctx.settings` has a string `eth_rpc`.
+
+**API** (all `/api/` requests keep the token, Host, Origin and CSP checks): `GET /api/program`, `GET /api/run?swap=ID`, `POST /api/action|spend|autopilot|board|helper` with `"swap": ID`
+(a missing or malformed id is 400, an unknown one 404), `POST /api/newswap {fields}` -> `{ ok, swap }` or 422 `{ ok:false, errors }`, `GET|POST /api/settings`, `POST /api/program/open {what}`,
+`POST /api/board/slot {role}`. `join` asks the shell's dialog for the bundle file (`program.chooseBundleFile`); no file is 409.
+
+**Board slot.** `createBoardSlot(role)` makes `runs/<id>/` with `board-slot.json`, `written-by.json` and `vault-check.json`; the host writes `run.json` itself (`BoardHost.writeRunJson`,
+`runsettings.newSettings(fields, { runId })`) and Alice's order is run.json, `setup`, the balance check, her wallet. One slot at a time (an idle slot is replaced; an ended slot with no swap
+file and no wallet is moved to `runs/.ended/`, never deleted). The host needs the vault's sealer for its keys (`deps.boardSealer`); without it the host does not start in program mode.
+
+**Low points (left).** `needs_you` of a swap counts this process's spend jobs that may have been sent until a later clean job of the same step; after a restart only the autopilot's own
+stop entries remain. `/api/program` rescans `runs/` at most every 5 s. A refused folder is listed with its reason but has no runner (its actions answer 409). The board settings carry three keys
+beyond the spec (`profile`, `contract_version`, `pinned_htlc`). The node gate of the autopilot reads `ok_since_start` of the program's node status.
+
+**After the independent read of 4.5 (2026-11-18).** Its one must-fix is fixed: a settings body with a key named `__proto__`, `constructor` or `prototype` could change
+`Object.prototype` for the whole server, because `merge` walked the body's own keys before `validate` ran. Now every program-mode POST body is parsed with a reviver that refuses
+those three names at any depth (400, nothing done), and `programsettings.merge` refuses them again (`ProgramSettingsError`, 422 from `/api/settings`); two tests in
+`test/program-server.test.js` fail without the fix. Its first low point is fixed too: the autopilot form (ticks and typed amount) belongs to one swap and one role and is
+forgotten when you leave the swap, so swap B no longer opens with swap A's statements ticked (`test/autopilot-page.test.js`).
+
+**Low points of that read (left, for the final pass).**
+- Code-1 advice for lock, reveal and refund says "cancel the intent, then try again", but program mode has no cancel-intent action, and a missing `sent:` line does not prove that
+  nothing was broadcast. `live.js`'s lock records stop a second lock, so no coin is at risk; the advice should say what to look at in the program.
+- After a restart `needs_you` misses a manual spend that may have been sent (only the autopilot's own stop entries and this process's jobs are read); the latch still blocks a re-send.
+  `RERUN_SAFE` jobs are not counted.
+- The view shows an approval in force from cached tool hashes while `authorize` (fresh) refuses each pass after a file changed with its metadata kept: safe, but the screen says "on".
+- An ALERT line notifies on every tick while it persists (by the spec; one operating-system notification every 30 s).
+- A non-spend step killed at its limit can leave half-made files (`wallet-setup-*`, `prepare`, `join`) that the steps then refuse; the program has no terminal to clean them.
+- `POST /api/settings` over a broken `settings.json` merges into the defaults and saves over the file, with no copy kept.
+- The board host's `noid_rpc` pattern refuses `http://[::1]:9601`, which `programsettings` accepts.
+- `/api/demo` and `/api/demo/scenarios` are still served in program mode (behind the token).
+- Error texts and step output on the page carry absolute paths of the data folder, which contain the account's name (a risk for shared screenshots).
+- `pub/` is made with `mkdirSync(recursive)`, which follows a link made by a program of the same user.
+- The window does not block reload yet; a reload loses the token (integration).
+- `program.codeFiles` hashes `<rootDir>/ui/app/lib/...`: integration must check it is the copy the server loads.
+- Test gaps: no program-mode test of a restart after a start line with no end line; "the WSL path is never reached" is shown for one funding plus the static test, not every entry.
+- `stop()` waits for each watch's current tick, so quitting can wait up to one tick's limit.
+
+## Program mode on the private scheme (step 4.9)
+
+`startProgramServer(program, deps)` no longer listens. It resolves to `{ scheme: "no1d", token, swapSet, handler, mark, maxBody, stop }`:
+`handler(req, res)` is the program mode's request function (what `programRequestHandler` returns), `mark(req)` marks a request as one
+that came through the desktop shell's scheme adapter, `maxBody` is the adapter's ceiling for a request body (the largest route limit,
+16384). The shell gives these to `desktop/lib/scheme.js`; the server opens no socket and prints nothing.
+
+- Terminal mode (`node ui/app/server.js ...`) is unchanged: same listener, `hostOk` and `originOk` as before, same policy header, same
+  tests. Only its request function got a name (`requestHandler`, also kept as `server.requestHandler`) and `send` got an optional
+  policy argument. Program mode's handler is a separate function (as it already was), so there is no shared "createRequestHandler";
+  the two routes differ and sharing one function would have changed terminal mode.
+- In program mode: a request without the adapter's mark is refused (403) before anything else; the Host must be exactly `app`
+  (`schemeHostOk`); a POST needs `Origin: no1d://app` exactly and a `Sec-Fetch-Site`, when sent, of `same-origin` (`schemeOriginOk`);
+  a GET on `/api/` is refused when `Sec-Fetch-Site` is cross-site or the Origin is another (`crossSiteRead` with the scheme origin).
+  The per-start token stays as the second lock on every `/api/` request. After `stop()` the handler answers a fixed 503.
+- Every answer of program mode carries the policy `default-src no1d://app; style-src no1d://app; script-src no1d://app;
+  connect-src no1d://app; img-src no1d://app data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'` (terminal mode keeps
+  `'self'`). The body caps (512 bytes, 4096 for a new swap, 16384 for settings) and the refusal of the keys `__proto__`, `constructor`
+  and `prototype` anywhere in a body are unchanged.
+- Tests: `test/server-scheme.test.js` (the security checks through the real adapter: pure checks, token, address and Host, Origin,
+  same-origin reads, the policy on every status, the pages, secret paths, reserved keys and caps, one action route, one spend route, a
+  static check that no socket is opened). `test/program-harness.js`'s client now goes through the adapter (`request(srv, token, ...)`
+  takes the started server, not a port); every assertion of `program-server.test.js` is still made (the Host-header cases became
+  "another address of the scheme is refused by the adapter" and "the handler refuses a Host that is not app"; the loopback-bound test
+  became "no listening socket is made" and "the handler refuses an unmarked request").
+
+**Low points of 4.9 (left).**
+
+- The adapter reads a whole request body into memory (at most 16384 bytes) before the handler runs; the handler's own streaming reader
+  then sees it at once. Fine for these routes, not for large uploads.
+- `Sec-Fetch-Site` is accepted when absent (as in terminal mode); the Origin on a POST and the token are what bind a write.
+- The old terminal-mode console pages (`/console`, `/app.js`, `/styles.css`) are still not served in program mode.
+
+**Deviations from the build specification, section 9.**
+
+1. `createRequestHandler(state)` as one function for both modes was not done: terminal mode's handler (an inline arrow inside
+   `createServer`) became the named `requestHandler` without any other change, and program mode keeps `programRequestHandler`. Reason:
+   the spec's other rule, that terminal mode must not change behaviour, and the two functions serve different routes and checks.
+2. `startProgramServer` also returns `mark` and `maxBody` (besides `handler`), because the adapter, which lives in `desktop/`, has to be
+   able to mark requests with a Symbol private to the server module, and the ceiling of the largest route is the server's to name.
+3. A hold in the self-test through an environment variable (`NO1D_SELFTEST_HOLD_SECONDS`) was added so the hosted job can look for
+   listening sockets while the program is up; the spec's acceptance did not say how.

@@ -2,7 +2,9 @@
    Reads /api/run (a run folder) or /api/demo (fixtures). It never sends anything to a chain; the only POST it can
    make is /api/helper (a read-only helper), and only when the server was started with --allow-run-readonly and the
    page was opened with the printed #token=… URL. With --allow-actions, actions.js adds the fixed action buttons and the
-   confirmed spends (see README: the actions mode). */
+   confirmed spends (see README: the actions mode).
+   Program mode (the desktop program): the page asks /api/program first; when it answers, the page shows the top bar, the list of swaps, the new-swap form, the settings screen and,
+   for one swap, today's swap page with every request carrying that swap's id. A 404 means the terminal console and nothing below changes. */
 (() => {
   "use strict";
   const V = window.NoidView;
@@ -24,6 +26,13 @@
     runResult: null,
     running: null,
     view: null,
+    // program mode (null in the terminal console)
+    program: null, // the /api/program answer
+    swap: null, // the swap id of the page shown (sent with every request)
+    screen: "list", // "list" | "swap" | "new" | "settings"
+    pgForm: null, // the form of the new-swap or settings screen, built once per visit
+    pgMsg: null, // a line above the list: { kind, text }
+    barSig: "",
   };
 
   // ------------------------------------------------------------ DOM helpers
@@ -105,7 +114,11 @@
     // every /api request carries the per-start key (the server answers 401 without it, GETs included)
     const r = await fetch(url, { cache: "no-store", ...init, headers: { ...(state.token ? { "x-swap-token": state.token } : {}), ...((init && init.headers) || {}) } });
     const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(j.error || `HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return j;
   }
 
@@ -119,6 +132,7 @@
   }
 
   async function load(force) {
+    if (state.program) return loadProgram(force);
     try {
       if (state.mode === "demo") {
         const q = new URLSearchParams({ scenario: state.demo.scenario, role: state.role || "alice", step: String(state.demo.step), flags: state.demo.flags.join(",") });
@@ -135,6 +149,41 @@
     }
     // A poll that changed nothing must not rebuild the page (it would drop keyboard focus and text selection).
     const sig = state.error ? "error:" + state.error : signature();
+    if (!force && sig === state.lastSig) return;
+    state.lastSig = sig;
+    render();
+  }
+
+  // ------------------------------------------------------------ program mode: data
+  /** The role of the swap on show: the program's own word for it (the swap's run.json), never a guess and never a switch. */
+  function chooseProgramRole() {
+    const s = ((state.program && state.program.swaps) || []).find((x) => x && x.swap === state.swap);
+    const fromPayload = state.payload && (state.payload.role === "alice" || state.payload.role === "bob") ? state.payload.role : null;
+    const r = fromPayload || (s && (s.role === "alice" || s.role === "bob") ? s.role : null);
+    state.role = r;
+    state.roleChosen = true;
+    return r;
+  }
+
+  async function loadProgram(force) {
+    try {
+      state.program = await getJson("/api/program");
+      state.error = null;
+    } catch (e) {
+      state.error = e.message || String(e);
+    }
+    if (state.screen === "swap" && state.swap) {
+      try {
+        state.payload = await getJson("/api/run?swap=" + encodeURIComponent(state.swap));
+        state.skew = (state.payload.server_now || state.payload.generated_at || 0) - Math.floor(Date.now() / 1000);
+        state.fetchedAt = Date.now();
+        state.error = null;
+        if (!chooseProgramRole()) state.error = "The role of this swap is not known, so nothing of it is shown or run.";
+      } catch (e) {
+        state.error = e.message || String(e);
+      }
+    }
+    const sig = [window.NoidProgram.signature(state.program), state.screen, state.swap || "", state.error || "", state.pgMsg ? state.pgMsg.text : "", state.screen === "swap" && state.payload && !state.error ? signature() : ""].join("|");
     if (!force && sig === state.lastSig) return;
     state.lastSig = sig;
     render();
@@ -902,6 +951,14 @@
 
   function renderEmpty() {
     const p = state.payload;
+    if (state.program) {
+      for (const id of ["swap-head", "next-action", "timeline", "picture", "explain", "deadlines", "abort", "receipts", "history"]) clear($(id));
+      clear($("alarms"));
+      addBanners($("alarms"));
+      if (window.NoidActions) window.NoidActions.renderPanel(null);
+      $("swap-head").appendChild(el("div", { class: "empty" }, el("h2", { text: "This swap cannot be shown" }), el("p", { class: "plain", text: state.error ? `The program did not give it: ${state.error}` : "The swap's folder cannot be read." }), el("button", { type: "button", class: "btn", onclick: () => goScreen("list") }, "Back to your swaps")));
+      return;
+    }
     for (const id of ["swap-head", "next-action", "timeline", "picture", "explain", "deadlines", "abort", "receipts", "history"]) clear($(id));
     clear($("alarms"));
     addBanners($("alarms"));
@@ -915,6 +972,7 @@
   /** Which first screen applies, from the payload only (actions.js decides): "start" while the console drives Alice and nothing of her swap exists yet, "join" for Bob in the
    *  same state, else null. */
   function startKind() {
+    if (state.program) return null; // program mode has its own first screen (renderProgramStartScreen)
     if (!(state.mode === "run" && !state.error && state.payload && window.NoidActions)) return null;
     const A = window.NoidActions;
     if (A.start && A.start.noSwapStarted(state.payload, state.role)) return "start";
@@ -932,6 +990,180 @@
     else window.NoidActions.renderStart(state.payload);
     window.NoidActions.renderPanel(state.payload, { folded: true });
     document.title = kind === "join" ? "Join a swap, No1d Swap" : "Start a swap, No1d Swap";
+  }
+
+  // ------------------------------------------------------------ program mode: screens
+  function renderProgramStartScreen() {
+    state.view = null;
+    for (const id of ["swap-head", "timeline", "picture", "explain", "deadlines", "abort", "receipts", "history"]) clear($(id));
+    addBanners(clear($("alarms")));
+    window.NoidActions.program.renderStart(state.payload, state.role);
+    window.NoidActions.renderPanel(state.payload, { folded: true });
+    document.title = "Your swap, No1d Swap";
+  }
+
+  const phaseLabel = (role, id) => {
+    const i = P && P.phaseInfo ? P.phaseInfo(role, id) : null;
+    return i && i.label ? i.label : String(id);
+  };
+
+  /** What the bar's menu and the list's buttons ask for. */
+  function progHandlers() {
+    return {
+      go: goScreen,
+      refresh: () => load(true),
+      open: (what) => askProgram(what),
+      openSwap,
+      openBoard: openSwap,
+      board: makeBoardSlot,
+      openProgram: askProgram,
+    };
+  }
+
+  async function askProgram(what) {
+    const r = await window.NoidProgram.openProgram(what);
+    state.pgMsg = r.ok ? null : { kind: "danger", text: `The program did not open that: ${r.error}` };
+    state.lastSig = null;
+    render();
+  }
+
+  async function makeBoardSlot(role) {
+    const r = await window.NoidProgram.makeSlot(role);
+    if (r.ok) {
+      await load(true);
+      await openSwap(r.swap);
+    } else {
+      state.pgMsg = { kind: "danger", text: `The board swap was not made: ${r.error}` };
+      state.lastSig = null;
+      render();
+    }
+  }
+
+  function leaveSwap() {
+    state.swap = null;
+    state.payload = null;
+    state.view = null;
+    state.error = null;
+    state.runResult = null;
+    if (window.NoidActions && window.NoidActions.clearStart) window.NoidActions.clearStart();
+    if (window.NoidBoard && window.NoidBoard.reset) window.NoidBoard.reset();
+  }
+
+  async function openSwap(id) {
+    state.pgForm = null;
+    state.pgMsg = null;
+    leaveSwap();
+    state.swap = id;
+    state.screen = "swap";
+    await load(true);
+  }
+
+  async function goScreen(screen) {
+    state.pgMsg = null;
+    state.pgForm = null;
+    leaveSwap();
+    const PG = window.NoidProgram;
+    if (screen === "new") {
+      const ns = (state.program && state.program.new_swap_allowed) || { ok: false };
+      if (ns.ok) {
+        const st = await PG.loadSettings(); // only to fill the form: a failure leaves the fields empty
+        state.pgForm = PG.newSwapForm(state.program, st.ok ? st.settings : null, {
+          created: async (id) => {
+            await load(true);
+            await openSwap(id);
+          },
+          cancel: () => goScreen("list"),
+        });
+        state.screen = "new";
+      } else state.screen = "list";
+    } else if (screen === "settings") {
+      const st = await PG.loadSettings();
+      if (st.ok) {
+        state.pgForm = PG.settingsForm(st.settings, { saved: async () => load(true), cancel: () => goScreen("list") });
+        state.screen = "settings";
+      } else {
+        state.pgMsg = { kind: "danger", text: `The settings could not be read: ${st.error}` };
+        state.screen = "list";
+      }
+    } else state.screen = "list";
+    state.lastSig = null;
+    render();
+    const h = $("pg-root").querySelector("h1");
+    if (h && h.focus) {
+      h.setAttribute("tabindex", "-1");
+      h.focus();
+    }
+  }
+
+  function renderProgramBar() {
+    const bar = $("pg-bar");
+    if (!bar) return;
+    const sig = window.NoidProgram.signature(state.program) + "|" + state.screen;
+    if (sig === state.barSig) return;
+    state.barSig = sig;
+    const old = bar.querySelector(".pg-menu");
+    const wasOpen = !!(old && old.open);
+    clear(bar);
+    bar.hidden = !state.program;
+    if (!state.program) return;
+    bar.appendChild(window.NoidProgram.topBar(state.program, { screen: state.screen }, progHandlers()));
+    const m = bar.querySelector(".pg-menu");
+    if (m && wasOpen) m.open = true;
+  }
+
+  function renderSwapBar() {
+    const bar = clear($("pg-swapbar"));
+    const s = ((state.program && state.program.swaps) || []).find((x) => x && x.swap === state.swap) || null;
+    bar.hidden = false;
+    const row = el("div", { class: "pg-swapbar-in" }, el("button", { type: "button", class: "btn sm", onclick: () => goScreen("list") }, "← Your swaps"), s ? el("strong", { class: "pg-label", text: s.label || "A swap" }) : null, s ? chip("quiet", window.NoidProgram.roleWords(s.role)) : null);
+    bar.appendChild(row);
+    if (s && s.refused) bar.appendChild(el("div", {}, el("p", { class: "alarm danger", role: "alert" }, el("span", { class: "lv", text: "read only" }), el("span", { class: "tx", text: `This swap's folder is read only: ${s.refused}. Nothing can be run from here.` }))));
+    bar.appendChild(el("div", {}, el("p", { class: "margin-line dim", text: "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough." })));
+  }
+
+  function renderProgramScreen() {
+    const root = $("pg-root");
+    if (state.pgForm && state.screen !== "list") {
+      // a form is built once per visit and kept in place: a poll must not drop what is being typed
+      if (root.firstChild !== state.pgForm.node) {
+        clear(root);
+        root.appendChild(state.pgForm.node);
+      }
+      document.title = state.screen === "new" ? "New swap, No1d Swap" : "Settings, No1d Swap";
+      return;
+    }
+    clear(root);
+    if (state.pgMsg) root.appendChild(el("p", { class: state.pgMsg.kind === "danger" ? "attn" : "plain", role: "alert", text: state.pgMsg.text }));
+    if (!state.program) {
+      root.appendChild(el("p", { class: "attn", role: "alert", text: `The program did not answer: ${state.error || "no answer"}` }));
+      return;
+    }
+    if (state.error) root.appendChild(el("p", { class: "attn", role: "alert", text: `The last read failed: ${state.error}` }));
+    root.appendChild(window.NoidProgram.swapList(state.program, progHandlers()));
+    document.title = "Your swaps, No1d Swap";
+  }
+
+  function renderProgram() {
+    renderProgramBar();
+    const swapScreen = state.screen === "swap";
+    $("pg-root").hidden = swapScreen;
+    $("pg-swapbar").hidden = !swapScreen;
+    $("swap-head").hidden = !swapScreen;
+    $("files").hidden = true;
+    if (!swapScreen) {
+      $("op-view").hidden = true;
+      $("bd-root").hidden = true;
+      $("board-line").hidden = true;
+      state.view = null;
+      renderProgramScreen();
+      return;
+    }
+    $("op-view").hidden = false;
+    renderSwapBar();
+    renderBoardLine();
+    const boardShown = renderBoardScreens();
+    renderOperatorPage();
+    if (boardShown && window.NoidBoard.title) document.title = window.NoidBoard.title();
   }
 
   // ------------------------------------------------------------ main render
@@ -985,6 +1217,10 @@
   }
 
   function render() {
+    if (state.program) {
+      renderProgram();
+      return;
+    }
     renderBoardLine();
     const boardShown = renderBoardScreens();
     renderOperatorPage();
@@ -993,9 +1229,15 @@
   }
 
   function renderOperatorPage() {
-    renderStrip();
-    renderDemoBar();
-    renderFiles();
+    if (!state.program) {
+      renderStrip();
+      renderDemoBar();
+      renderFiles();
+    }
+    if (state.program && state.payload && !state.error && window.NoidActions && window.NoidActions.program.startKind(state.payload, state.role)) {
+      renderProgramStartScreen();
+      return;
+    }
     const kind = startKind();
     if (kind) {
       renderStartScreen(kind);
@@ -1054,17 +1296,31 @@
     }
     const qs = new URLSearchParams(location.search);
     $("refresh").addEventListener("click", () => load(true));
+    // Program mode is decided by the program's own answer: /api/program answers 200 with the list of swaps. Any other answer (the terminal console says 404) is the terminal console.
     try {
-      state.health = await getJson("/api/health");
-    } catch (e) {
-      state.error = e.message;
+      const prog = await getJson("/api/program");
+      if (prog && typeof prog === "object" && Array.isArray(prog.swaps)) state.program = prog;
+    } catch {
+      /* the terminal console: nothing changes */
+    }
+    if (state.program) {
+      document.body.classList.add("program");
+      window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel });
+    } else {
+      try {
+        state.health = await getJson("/api/health");
+      } catch (e) {
+        state.error = e.message;
+      }
     }
     const op = (state.health && state.health.operator) || {};
-    state.mode = qs.has("demo") || op.start_in_demo ? "demo" : "run";
-    if (qs.get("scenario")) state.demo.scenario = qs.get("scenario");
-    if (qs.get("step")) state.demo.step = Number(qs.get("step")) || 0;
-    if (qs.get("flags")) state.demo.flags = qs.get("flags").split(",").filter(Boolean);
-    if (qs.get("role") === "alice" || qs.get("role") === "bob") {
+    state.mode = !state.program && (qs.has("demo") || op.start_in_demo) ? "demo" : "run";
+    if (state.program) {
+      // no demo and no role switch in program mode: every swap has its own role
+    } else if (qs.get("scenario")) state.demo.scenario = qs.get("scenario");
+    if (!state.program && qs.get("step")) state.demo.step = Number(qs.get("step")) || 0;
+    if (!state.program && qs.get("flags")) state.demo.flags = qs.get("flags").split(",").filter(Boolean);
+    if (!state.program && (qs.get("role") === "alice" || qs.get("role") === "bob")) {
       state.role = qs.get("role");
       state.roleChosen = true;
     }
@@ -1072,7 +1328,8 @@
     if (window.NoidActions) {
       window.NoidActions.init({ el, chip, copyButton, short, clock, dayClock, nowS, state, reload: load, rerender: () => { state.lastSig = null; render(); } });
       const foot = $("foot-note");
-      if (foot && op.actions_enabled) foot.textContent = "Actions mode: this page can run the fixed helpers of scripts/live through WSL. Anything that sends to a chain needs a fresh dry run, the engine's tick naming that step and a typed confirmation, and every action is written to the audit log. It still never opens a *.swap.json, a key file or a passphrase, and never shows the secret or a transaction opening.";
+      if (foot && state.program) foot.textContent = "This page shows what the program reads from a swap's run folder and from the chains. It never shows a secret, a key, a passphrase or a recovery code: those are shown and typed only in the program's own windows. Everything that moves coins needs a dry run, the engine's decision and a typed confirmation, and every action is written to the swap's audit log.";
+      else if (foot && op.actions_enabled) foot.textContent = "Actions mode: this page can run the fixed helpers of scripts/live through WSL. Anything that sends to a chain needs a fresh dry run, the engine's tick naming that step and a typed confirmation, and every action is written to the audit log. It still never opens a *.swap.json, a key file or a passphrase, and never shows the secret or a transaction opening.";
     }
     await load();
     setInterval(() => {

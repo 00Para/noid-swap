@@ -144,6 +144,48 @@ test("off: a labelled amount input, one tick per statement, and a Turn on button
   }
 });
 
+test("the form belongs to one swap and one role: another swap, the other role or leaving the swap opens it empty", () => {
+  const A = "a".repeat(32);
+  const B = "b".repeat(32);
+  state.payload = payload(AP(), AP());
+  const fill = () => {
+    const box = NA.autopilotBlock(bobView(), state.payload);
+    const input = box.all((x) => x.tag === "input" && x.attrs.type === "text")[0];
+    input.value = "0.001 ETH";
+    input.fire("input");
+    for (const t of box.all((x) => x.tag === "input" && x.attrs.type === "checkbox")) {
+      t.checked = true;
+      t.fire("change");
+    }
+    assert.equal(buttons(box).find((b) => /Turn on/.test(b.textContent)).disabled, false);
+  };
+  const isEmpty = (view) => {
+    const box = NA.autopilotBlock(view, state.payload);
+    const input = box.all((x) => x.tag === "input" && x.attrs.type === "text")[0];
+    const ticks = box.all((x) => x.tag === "input" && x.attrs.type === "checkbox");
+    return input.value === "" && ticks.length > 0 && ticks.every((c) => !c.checked) && buttons(box).find((b) => /Turn on/.test(b.textContent)).disabled === true;
+  };
+  try {
+    state.swap = A;
+    fill();
+    assert.equal(isEmpty(bobView()), false, "the same swap keeps its form across a redraw");
+    state.swap = B;
+    assert.equal(isEmpty(bobView()), true, "swap B does not inherit swap A's ticks or amount");
+    state.swap = A;
+    assert.equal(isEmpty(bobView()), true, "and coming back to A does not bring them back");
+    fill();
+    state.payload = payload(AP({ statements: STMT }), AP());
+    assert.equal(isEmpty({ role: "alice", phase: { id: "funding_final", terminal: false } }), true, "the other role starts empty");
+    state.payload = payload(AP(), AP());
+    fill();
+    NA.clearStart();
+    assert.equal(isEmpty(bobView()), true, "leaving the swap forgets the form");
+  } finally {
+    delete state.swap;
+    NA.clearStart();
+  }
+});
+
 test("off for Alice: the button stays off until the engine offers the funding, and she is told why", () => {
   const four = [...STMT, { id: "no_pending_funding", text: "No funding of this contract is pending." }, { id: "bob_check_matches", text: "Bob's check line matches mine." }];
   state.payload = payload(AP({ expected_typed: "10 NOID", statements: four, funding_offered: false }), AP());

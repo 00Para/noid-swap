@@ -93,4 +93,70 @@ function classifySpendExit(script, o) {
   return { outcome: NOT_SENT, nothing_sent: true, secret_may_be_public: false, why: row.why, source: row.source };
 }
 
-module.exports = { EXIT_TABLE, classifySpendExit, NOT_SENT, MAY_HAVE_SENT, SECRET_PUBLIC_REVERTED, OK, WAITING, RERUN_SAFE };
+/*
+ * PROGRAM MODE (piece 4, step 4.5): how the console reads the result of a spend STEP of ui/app/lib/steps (not a bash helper). The step returns
+ * { code, stdout, files }: `code` is its documented code or null ("may have been sent"), `files` the files it wrote in the run folder. The rule of
+ * design 12.6: a 2 or a 3 counts as "nothing sent" only when the step's own fixed line `<label> REFUSED, nothing sent` is in its output; a 4 or a 6
+ * of a wallet step only with its own `<label> exit N (swap-cli wallet SUB, outcome X)` line; and any of them reads as "may have been sent" when the
+ * step's files hold the result file of a real send (never a "-dry-" one). A code that is not a row here, and a null, is "may have been sent" (for
+ * the reveal: "the secret may be public"). STEP_ROWS has one explicit row for every code of steps/spendcommon.js CODE_TABLE; a test pins it.
+ * classifySpendExit and EXIT_TABLE above are the bash helpers' and stay as they are.
+ */
+const STEP_LABELS = { lock: "lock", reveal: "reveal", claim: "claim", refundEth: "refund", walletFund: "wallet-fund", walletRecover: "wallet-recover", walletSweep: "wallet-sweep", boardSign: "board-sign" };
+const WALLET_SUB = { walletFund: "fund", walletRecover: "recover", walletSweep: "sweep" };
+// row kinds: ok | may | R (nothing sent if the step printed its REFUSED line) | Rm (the same; else may) | rev (the reveal mined and reverted) | W4 (waiting, with its exit-4 line) | W6 (rerun-safe, with its exit-6 line)
+const STEP_ROWS = {
+  lock: { 0: "ok", 1: "may", 2: "R", 3: "R", null: "may" },
+  reveal: { 0: "ok", 1: "may", 2: "R", 3: "rev", null: "may" },
+  claim: { 0: "ok", 1: "may", 2: "R", null: "may" },
+  refundEth: { 0: "ok", 1: "may", 2: "R", null: "may" },
+  walletFund: { 0: "ok", 1: "may", 2: "R", 3: "R", 4: "W4", 6: "W6", null: "may" },
+  walletRecover: { 0: "ok", 1: "may", 2: "R", 3: "R", 4: "W4", 6: "W6", null: "may" },
+  walletSweep: { 0: "ok", 1: "may", 2: "R", 3: "R", 4: "W4", 6: "W6", null: "may" },
+  walletSweepEth: { 0: "ok", 1: "may", 2: "R", 3: "R", 4: "may", 6: "may", null: "may" },
+  boardSign: { 0: "ok", 2: "R", 3: "Rm", null: "may" }, // code 1 is not a code of the step: it reads as may-have-sent like any code without a row
+};
+// the files of a REAL send of a step: a result file that a dry run never leaves ("-dry-" names are not these)
+const SEND_FILE = /^(?:eth-lock-\d+\.json|eth-claim\.json|eth-refund-\d+\.json|eth-sweep-(?:alice|bob)-\d+\.json)$/;
+const escRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * @param {string} step "lock" | "reveal" | "claim" | "refundEth" | "walletFund" | "walletRecover" | "walletSweep" | "boardSign"
+ * @param {{code:number|null, stdout?:string, files?:string[], kind?:string}} o  kind: "noid" | "eth" for walletSweep
+ * @returns {{outcome:string, nothing_sent:boolean, secret_may_be_public:boolean, why:string, source:null, waiting?:boolean, rerun_safe?:boolean}}
+ */
+function classifyStepExit(step, o) {
+  const secret = step === "reveal";
+  const may = (why) => ({ outcome: MAY_HAVE_SENT, nothing_sent: false, secret_may_be_public: secret, why, source: null });
+  if (!Object.prototype.hasOwnProperty.call(STEP_LABELS, step) || !o || typeof o !== "object") return may("no outcome was read");
+  const label = STEP_LABELS[step];
+  const table = step === "walletSweep" && o.kind === "eth" ? STEP_ROWS.walletSweepEth : STEP_ROWS[step];
+  const code = Number.isInteger(o.code) ? o.code : null;
+  if (code === null) return may("the step ended without a code (killed, timed out, could not be started, or it failed after it started the command that sends)");
+  const rowKey = String(code);
+  const row = Object.prototype.hasOwnProperty.call(table, rowKey) ? table[rowKey] : "may";
+  const stdout = String(o.stdout || "");
+  const files = Array.isArray(o.files) ? o.files.map((f) => String(f).split("/").pop()) : [];
+  const sentResult = files.some((f) => SEND_FILE.test(f));
+  if (row === "ok") return { outcome: OK, nothing_sent: false, secret_may_be_public: false, why: "exit 0", source: null };
+  if (row === "may") return may(`code ${code} is not a code ${label} documents as "nothing sent"`);
+  if (row === "rev") return { outcome: SECRET_PUBLIC_REVERTED, nothing_sent: false, secret_may_be_public: true, why: "the claim was MINED AND REVERTED: it paid nobody and the SECRET IS PUBLIC", source: null };
+  if (row === "R" || row === "Rm") {
+    if (!new RegExp(`^${escRe(label)} REFUSED, nothing sent\\b`, "m").test(stdout)) return may(`code ${code} without the line ${label} prints for it`);
+    if (sentResult) return may(`code ${code}, but the step's files hold the result of a send`);
+    return { outcome: NOT_SENT, nothing_sent: true, secret_may_be_public: false, why: `refused, nothing sent (${label} code ${code})`, source: null };
+  }
+  const sub = WALLET_SUB[step];
+  if (row === "W4") {
+    if (!new RegExp(`^${escRe(label)} exit 4 \\(swap-cli wallet ${sub}, outcome (hold|done)\\)$`, "m").test(stdout)) return may("code 4 without the line the step prints for it");
+    if (sentResult) return may("code 4, but the step's files hold the result of a send");
+    return { outcome: WAITING, nothing_sent: true, waiting: true, secret_may_be_public: false, why: "nothing was sent by this run: the tool says to wait, or that the step is already done", source: null };
+  }
+  if (row === "W6") {
+    if (!new RegExp(`^${escRe(label)} exit 6 \\(swap-cli wallet ${sub}, outcome maybe_sent\\)$`, "m").test(stdout)) return may("code 6 without the line the step prints for it");
+    return { outcome: RERUN_SAFE, nothing_sent: false, rerun_safe: true, secret_may_be_public: false, why: "the transaction MAY have been sent; running the step again sends the same recorded bytes", source: null };
+  }
+  return may("no row for this code");
+}
+
+module.exports = { EXIT_TABLE, classifySpendExit, classifyStepExit, STEP_ROWS, STEP_LABELS, NOT_SENT, MAY_HAVE_SENT, SECRET_PUBLIC_REVERTED, OK, WAITING, RERUN_SAFE };

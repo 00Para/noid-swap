@@ -16,12 +16,19 @@ ctx = {
   runDir,          // absolute path of the run folder
   settings,        // the validated run.json object (spec section 6)
   tools: { swapCli: [argv...], liveJs: [argv...], liveJsEnv: {}, ethDir, curl },   // absolute paths, argv prefixes, nothing looked up in PATH
-  getPassphrase,   // () => string; throws when there is none; `passphraseFromFile(runDir)` reads runDir/passphrase.txt (4.6 replaces it)
+  getPassphrase,   // () => string; throws when there is none. In the program: the vault's `passphraseFor(runDir, run id)` (4.6, see "Passphrase and recovery" below); `passphraseFromFile(runDir)` (reads runDir/passphrase.txt) is for tests and the terminal only
   home,            // default os.userInfo().homedir (the account database, as live.js reads it)
   now,             // () => ms (default Date.now)
   runNumber,       // the N of messages and file names
 }
 ```
+
+Two fields of the program (step 4.5; `lib/stepexec.js` sets them, a step test may set them too; the header of `common.js` says the same):
+- `ctx.signal`: an AbortSignal. `startTool` kills the child it started when the signal aborts (the same kill as the time limit) and the step returns its usual
+  "did not finish" result. The program gives it ONLY to entries that send nothing (never to a spend or a signing step): a step that started a sender is never abandoned.
+- `ctx.notify`: `(kind) => void`, kind `"alert"` or `"alarm"`. `alertHook` and `alarmHook` call it each time they fire (an ALERT line; an ALARM line that passes its latch),
+  BEFORE any POST and whether or not `settings.alert_url` is set. It carries no text of the tick. The ALERT / ALARM latch rules do not change.
+- `childEnv` sets `ETH_RPC_URL` only when `ctx.settings` is an object with a string `eth_rpc`, so `board-verify` can run in a board slot before run.json exists.
 
 Test-only fields, never set by the program: `ctx.stubEnv` (variables added to every child; the stubs learn their log and scenario paths from it),
 `ctx.parentEnv` (replaces `process.env` as the source of the allow-list), `ctx.rpcPost(url, body, timeoutMs)` (the Ethereum JSON-RPC call of the log
@@ -169,7 +176,7 @@ swap's wallet keys and its swap file, so each refuses before it writes anything 
 
 | Helper | Step | Exit codes |
 |---|---|---|
-| `setup.sh` | `setup(ctx)` | 0; 2 a setting or the folder is wrong, the other role's swap file is in the folder, a start or passphrase file is not a plain file, or no log start could be chosen (the folder and the passphrase file made before it stay) |
+| `setup.sh` | `setup(ctx)` | 0; 2 a setting or the folder is wrong, the other role's swap file is in the folder, an old `passphrase.txt` is in the folder, the vault gives no passphrase, a start file is not a plain file, or no log start could be chosen (the folders made before it stay) |
 | `wallet-setup.sh ROLE [--dry-run]` | `walletSetup(ctx, role, { dryRun })` | 0; 2 not this run's role, other role's swap file, no passphrase, a tool missing, the wallet-setup folder cannot be made (nothing made); 3 the swap file, the addresses file or half-made wallet files exist (nothing made), or a step failed (its own words are shown, the files made so far stay, the addresses file is not written) |
 | `prepare.sh` (poseidon, wallet run) | `prepare(ctx)` | 0; 2 a setting, a tool or a wallet file is wrong; 3 Alice's swap file exists (nothing written, the sealed files untouched); 5 the node gave no usable tip; 6 no bundle came out, or the new swap file does not show the wallet, key and payouts the setup made (the sealed files are KEPT) |
 | `join.sh [BUNDLE]` (poseidon, wallet run) | `join(ctx, bundlePath)` | 0; 2 a setting, a tool or an argument is wrong; 3 Bob's swap file exists; 4 alice.bundle.json exists with other content; 6 no usable bundle; 8 new-bob failed; 9 new-bob exited 0 but its file, check line or digest line is wrong; 10 the swap file does not show the key and payout the setup made (the sealed key file is KEPT) |
@@ -178,10 +185,12 @@ Nothing here ever sends to a chain, so the rule "2 or 3 only before the first ch
 files were made, as in the helpers, and each message says what is on disk. The role of the run is enforced (2, nothing started) and so is design 12.4's "a run
 folder that holds the other role's swap file is refused".
 
-**Passphrase.** `setup` still makes `passphrase.txt` exactly as `setup.sh` did (48 random bytes in base64 without `/ + =`, the first 40 characters, mode 0600, a
-non-empty file is kept), in ONE function, `makePassphraseFileUntilKeyStore` in `setup.js`. Step 4.6 removes that function and the file. The passphrase goes to
-`swap-cli` only, and only to the commands that need it: `wallet new`, `ethkey new`, `ethkey emit`, `new-alice`, `new-bob` (the helpers exported it into the whole
-script, so `wallet address`, `ethkey address` and `status` had it in `prepare.sh` and `join.sh`; they do not now). `live.js` never gets it.
+**Passphrase (4.6).** No step makes or reads a passphrase file any more. `ctx.getPassphrase()` is the vault's `passphraseFor(runDir, run id)`: a value derived from the
+install secret and the run id (next section). `setup` asks for it once to see that the vault is ready (exit 2 when it is not), prints `passphrase: from the key store` (never
+the value), and refuses (2, nothing made) a folder that still holds an old `passphrase.txt`: that is a run folder of the bash helpers, and the program's import
+(`desktop/lib/migrate.js`) seals its passphrase and deletes the clear file. The passphrase goes to `swap-cli` only, and only to the commands that need it: `wallet new`,
+`ethkey new`, `ethkey emit`, `new-alice`, `new-bob` (the helpers exported it into the whole script, so `wallet address`, `ethkey address` and `status` had it in
+`prepare.sh` and `join.sh`; they do not now). `live.js` never gets it.
 
 **Keys.** `walletSetup` runs `live.js keygen --stdout | swap-cli ethkey new`: `ethkey new` is started with a pipe for its stdin and keygen gets that pipe as its own
 stdout (the other way round from `runPipeline`), then the parent ends it. No JavaScript reads the key. The address check is `runPipeline` (`ethkey emit` into
@@ -218,20 +227,19 @@ stdout (the other way round from `runPipeline`), then the parent ends it. No Jav
 characters), 18 for `walletSetup`, `prepare` and the wallet paths of `join`; each name says which. One entry per step in `steps-fixtures/registry-setup.js` puts them
 under the cross-step rules. `steps-fixtures/stub-swap-cli-setup.js` is the stub of `stub-lib.js` plus `writeOut` (the file named by `--out`, which `new-bob` makes). Real
 child processes on Windows carried the two key pipes (keygen into `ethkey new`, `ethkey emit` into `address`); Linux and macOS run the same tests in CI. Not testable on
-the Windows machine: folder and file modes (skipped) and a symbolic-link bundle (this user may not make links). Each registry entry names the step it covers (`exports: ["join"]`), which `steps-rules.test.js` reads to be sure no exported step escapes the rules.
+the Windows machine: folder and file modes (skipped) and a symbolic-link bundle (this user may not make links). Each registry entry names the step it covers (`exports: ["join"]`), which `steps-rules.test.js` reads to be sure no exported step escapes the rules. Step 4.6 changed the passphrase-file cases of `setup` in `steps-setup.test.js` and the `setup` entry of
+`registry-setup.js` (the passphrase comes from `ctx.getPassphrase`; a folder with a `passphrase.txt` is refused) and the two back-up texts of `prepare` and `join`; nothing else of these tests changed.
 
 **After the independent read.** Three points were fixed: `prepare` and `join` say to back up the whole run folder (the swap file cannot be opened without
-`passphrase.txt`); `walletSetup` shows no address before the addresses file is written, not even inside a tool's error text (a deposit to an address
+its passphrase, which 4.6 derives from the recovery code); `walletSetup` shows no address before the addresses file is written, not even inside a tool's error text (a deposit to an address
 that a restart's advice would delete is lost); the migration of `env.local.sh` requires every one of Bob's terms to be assigned, his swap file or not
 (run.json has no defaults, so a default written there would later pass as his agreement; the writers of step 4.5 must take his terms only from his
 form or the offer he approved).
 
 **Low points (left, with the step that should take them).**
-- `join` and `walletSetup` ask for the passphrase at the start and hold it across the step; with a key store (4.6) ask right before the command.
+- `join` and `walletSetup` ask for the passphrase at the start and hold it across the step. Accepted in 4.5/4.6: the program derives it per call and never stores it.
 - When deleting the standalone sealed files fails, there is a warning, but the closing line still says they were deleted.
 - A failed rename leaves `pub/.alice.bundle.<pid>.tmp`; a stale `pub/alice.bundle.json` from an earlier attempt stays beside the warning.
-- `setup` makes a new passphrase when `passphrase.txt` is missing even if a swap file or sealed wallet files are already in the folder (bash too);
-  it should refuse (4.5).
 - `loadWalletAddresses` ignores the `ROLE=` line; `prepare` and `join` could refuse a file of the other role.
 - `defaultRpcPost`'s limit is an idle-socket limit, not a total one as `curl -m` was; a node that drips bytes can hold the step.
 - No child has a time limit (as in bash); the console (4.5) owns stopping a hung step.
@@ -240,10 +248,74 @@ form or the offer he approved).
 - Alice's `bundle check:` line is printed without checking its shape (the board uses `boardDigest`).
 - For 4.5: the board host skips `prepare`/`join` when the swap file exists; a stop after a refused `prepare` (6) or `join` (9, 10) but before the
   host records it hands over the digest of a refused file on restart. The step should leave a marker, or the host record before it acts.
-- The hashlock registry moves from the WSL home to the Windows home; until the migration imports the old `hashlocks.txt`, a bundle joined by the
-  bash helper is not refused by the program's `new-bob`, and the other way round.
+- The hashlock registry moves from the WSL home to the Windows home: the import of an old run folder (4.6) appends the old `hashlocks.txt` lines when the person gives the old `.noid-swap` folder; when they do not, the new run folder's `import.json` says "the old lock records were not imported".
 - When `wallet new` printed no readable address, `noid-wallet.json` exists but is not listed in `files`.
 - Bob's own `eth_payout` is not among the terms printed for him to check before `new-bob` (bash prints the same list).
+
+## Passphrase and recovery (4.6)
+
+The swap file keeps its format: `swap-cli` seals the swap's secrets with a passphrase (Argon2id and XChaCha20-Poly1305). What changes is where the passphrase comes from.
+There is no `passphrase.txt`. One **install secret** S (32 random bytes, made at the program's first start) is sealed by the system key store (Windows DPAPI, macOS Keychain) behind a port
+(`desktop/lib/vault.js`), and every passphrase is derived from it:
+
+```
+K(L, R)       = HMAC-SHA256(key = S, message = ASCII("no1d-swap/v1/" + L + "/" + R))     L: swap-passphrase | board | migrated-passphrase     R: the run id
+passphrase(R) = lower-case hex of K("swap-passphrase", R)                               64 characters, the SWAP_PASSPHRASE of swap-cli
+```
+
+The run id is the `run_id` of `run.json` (32 lower-case hex characters), never the folder's name, so a moved folder still opens. An imported swap (a folder of the bash helpers) keeps its OLD
+passphrase: it is sealed into `passphrase.sealed` in the run folder under `K("migrated-passphrase", R)` (AES-256-GCM, the label, the run id and the file name bound as additional data), and
+`passphraseFor` returns that instead of the derived one. `vault-check.json` in each run folder (16 hex characters of an HMAC of S) tells which installation made it: another installation's folder
+is refused with a sentence, not opened with a wrong passphrase. The board's messaging keys (`board-keys.json`) are sealed the same way (label `board`).
+
+**The recovery code** is S written for a person: 35 bytes (`01`, S, a CRC-16) as 56 characters of Crockford base32 in 14 groups of 4. It is shown once at the first start, in a window of the
+program (never on the console page or through its API), and three groups of it must be typed back before any new swap. Restoring on a new machine is: the code, plus the run folders.
+
+**By hand, without the program** (a person who has the code and a run folder, and a `swap-cli`):
+
+```sh
+RUN_ID=$(node -e 'console.log(JSON.parse(require("fs").readFileSync("run.json","utf8")).run_id)')
+SECRET_HEX=$(node desktop/tools/recovery.js secret)          # reads the recovery code from stdin, prints the 64-hex secret
+printf '%s' "no1d-swap/v1/swap-passphrase/$RUN_ID" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$SECRET_HEX
+# then: SWAP_PASSPHRASE=<that hex> swap-cli <command> ...
+```
+
+`node desktop/tools/recovery.js passphrase <run folder>` does the last part itself, and opens `passphrase.sealed` when the folder has one (an imported swap). The code is read from standard input
+only, never from an argument. The test vectors are in `desktop/test/derive.test.js` and `recoverycode.test.js` (the secret `00 01 ... 1f`, which is public: never use it for a real install).
+
+**Restore rules** (fix round 1). The vault decides from what is on disk, not only from memory. With run folders present (`runs/*`, `runs/.ended/*`, `runs/.importing/*`) and no sealed secret, the
+first start makes NO new secret: the vault is `locked` with "restore with your recovery code". A restore never replaces a secret that a run folder still uses (also when the vault is locked: the
+current key check is read from `vault/key-check.json`), and an old secret file is renamed aside (`install-secret.v1.<ms>.old`), never deleted. The import refuses a `passphrase.txt` that holds a
+carriage return, a NUL or non-UTF-8 bytes (bash passed such a file on exactly; a wrong guess would delete the only copy) and strips trailing newlines only.
+
+**Low points (4.6)** (from the independent read; "fixed" = fixed in fix round 1, the rest are left for the final pass with my view).
+1. Restore with the vault's own code did not mark the code confirmed: fixed.
+2. Restore's reference checks skipped `runs/.ended/*` and `runs/.importing/*`: fixed (they count now).
+3. A restore over a fresh unused secret orphans `vault/board-invite.sealed`: left; the invite is entered again, and it controls no coins.
+4. `runChecks` and `runCheckOf` used different shape rules: fixed (one shape).
+5. `passphraseFor` derives when `passphrase.sealed` is missing even in an imported folder (`import.json` present): left; nothing is lost, the error is only misleading; the console server could read `import.json` for a sharper text.
+6. The back-up text names the swap file and run.json, not `passphrase.sealed`: left; the text says "the whole run folder", which holds it; a wording change touches the pinned test regexes.
+7. By-hand recipe gaps (working folders, the installed-binary form, openssl's `SHA2-256(stdin)= ` prefix): left for `desktop/README.md` and the help, where the integrator copies it; the prefix is cut with `awk '{print $NF}'`.
+8. The openssl line gives the wrong passphrase for an imported folder: left; to be written next to it ("imported folder: use `recovery.js passphrase <folder>`").
+9. The recipe puts the secret hex in openssl's argument vector: left; `recovery.js passphrase` avoids it and is the advised form; the hex only shows in the process list of a machine whose owner typed the code.
+10. The by-hand section is not yet in `desktop/README.md` or the help: left to the integration of the shell (its README and help).
+    Points 7 to 10 were answered at integration (2026-11-18): `desktop/README.md`, section "By hand, without the program", gives the advised form (`recovery.js passphrase`, the code on standard input, both kinds of folder) with absolute folder variables, names the program's own `swap-cli`, keeps the openssl form only as a check (the prefix cut with `awk`, its two limits said), and the help points to it.
+11. The secret window has no `askChoice`: left; an import whose role neither a swap file nor `UI_ROLE` tells refuses with a sentence (the shell to add the method).
+12. A failed `unlinkSync` removed the new folder without checking the file: fixed (the new folder stays when the file is already gone, with a warning).
+13. A crash between the rename and the delete of the original's `passphrase.txt` leaves both, and a re-import makes a second folder: left; the note is written after the delete; a pre-delete marker would close it (small, not needed at rest).
+14. The old folder's `board-keys.json` stays plain in the original: left (spec seals the copy only; a messaging key controls no coins).
+15. `hashlocks.txt` is appended in place: left (spec says the append flag); a partial last line reads as no match.
+16. A registry line `<hash> <x>` with a junk second field is dropped as "not matching": left; `swap-cli` also reads it as matching no role, so it never protected anything.
+17. `normalise` folded `ß` to `SS`: fixed (ASCII letters only).
+18. Copies of S in `Buffer.from(S)` for the key store and the hex string in `keystore-electron.js` are not zero-filled: left; JavaScript strings cannot be wiped, and the key store call needs the bytes.
+19. The CREATOR OWNER flag check splits flags into pairs without checking them: left; harmless, the trustee check still applies.
+20. `makeOwnerOnlyDir` runs `icacls /inheritance:r` on the data folder at every start: left; it repairs loosened ACLs silently (a reader of the log would want a note, there is no log).
+21. `stepexec.js` falls back to the folder id when `run_id` is missing (the server's code); the set enforces `run_id` equals the folder name, so it is harmless; the rule says refuse.
+22. `askNewPassphrase` compares before NFC normalisation: left; the unsafe direction does not exist (two equal-looking entries are refused, never accepted wrongly).
+23. `steps-setup.test.js` changed beyond the passphrase-file cases (every setup test passes `withVault`): accepted; the harness makes a `passphrase.txt` the new setup refuses.
+
+What the key store protects and what it does not: it stops another user account, a stolen disk and a copied run folder. It does not stop a program that runs as the same user (it can ask the key
+store, or read a child's environment): the same limit the passphrase file had.
 
 ## Spend steps (4.4)
 

@@ -53,6 +53,8 @@ const { handleActionPost, ACTION_POSTS } = require("./lib/actionroutes");
 const { RunLock, LazyRunLock } = require("./lib/runlock");
 const { Autopilot, STEP_MS } = require("./lib/autopilot");
 const { BoardHost } = require("./lib/board/host");
+const { SwapSet, ID_RE: SWAP_ID_RE } = require("./lib/swapset");
+const programsettings = require("./lib/programsettings");
 
 const APP_DIR = __dirname;
 const UI_DIR = path.join(APP_DIR, "..");
@@ -303,13 +305,24 @@ async function collectAll(sources) {
   return { generated_at: nowS(), swaps };
 }
 
-function send(res, status, body, type = "application/json; charset=utf-8") {
+const CSP_TERMINAL = "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'";
+// Program mode (step 4.9): the page and the API are served on a private scheme; the same policy with 'self' written out as that origin.
+const SCHEME_NAME = "no1d";
+const SCHEME_HOST = "app";
+const SCHEME_ORIGIN = `${SCHEME_NAME}://${SCHEME_HOST}`;
+const CSP_SCHEME = CSP_TERMINAL.replace(/'self'/g, SCHEME_ORIGIN);
+
+function send(res, status, body, type, csp) {
+  return sendWith(csp || CSP_TERMINAL, res, status, body, type);
+}
+
+function sendWith(csp, res, status, body, type = "application/json; charset=utf-8") {
   const data = typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body, null, 2);
   res.writeHead(status, {
     "content-type": type,
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
-    "content-security-policy": "default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'none'; base-uri 'none'",
+    "content-security-policy": csp,
     "cross-origin-resource-policy": "same-origin",
     "referrer-policy": "no-referrer",
   });
@@ -395,11 +408,11 @@ function resolveDir(dir) {
 }
 
 /** Reads from another site or another origin are refused when the actions mode is on (browsers send these headers on every fetch). */
-function crossSiteRead(req) {
+function crossSiteRead(req, ownOrigin = `http://${req.headers.host}`) {
   const sfs = req.headers["sec-fetch-site"];
   if (sfs !== undefined && sfs !== "same-origin" && sfs !== "none") return true;
   const origin = req.headers.origin;
-  return origin !== undefined && origin !== `http://${req.headers.host}`;
+  return origin !== undefined && origin !== ownOrigin;
 }
 
 function formInfo(opts, actions) {
@@ -511,7 +524,8 @@ function createServer(opts) {
       throw new Error(`--board: ${e.message}`);
     }
   }
-  const server = http.createServer(async (req, res) => {
+  // The request function of terminal mode, a plain (req, res) handler. Program mode has its own, programRequestHandler below, for the private scheme.
+  const requestHandler = async (req, res) => {
     try {
       if (!hostOk(req)) return send(res, 403, { error: "unexpected Host header: this console answers on 127.0.0.1 / localhost only" });
       const url = new URL(req.url, "http://localhost");
@@ -611,7 +625,9 @@ function createServer(opts) {
     } catch (e) {
       return send(res, 500, { error: (e && e.message) || String(e) });
     }
-  });
+  };
+  const server = http.createServer(requestHandler);
+  server.requestHandler = requestHandler;
   server.sources = sources;
   server.swapsConfig = swaps;
   server.runToken = runToken;
@@ -690,6 +706,282 @@ function main() {
   process.on("SIGTERM", stop);
 }
 
-module.exports = { createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig };
+// ====================================================================================================================================================
+// PROGRAM MODE (piece 4, step 4.5): the desktop shell calls startProgramServer(program). Steps run in-process (lib/stepexec.js), settings come from each swap's run.json,
+// several swaps run side by side (lib/swapset.js), and every request that acts names a swap id. Terminal mode above is unchanged.
+// ====================================================================================================================================================
+
+// The operator page and what it loads: the same files as terminal mode, without the old chain console (/console, app.js, styles.css) and its API.
+const PROGRAM_STATIC = Object.fromEntries(Object.entries(STATIC).filter(([p]) => !["/console", "/app.js", "/styles.css"].includes(p)));
+const OPEN_WHAT = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
+const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384 };
+const FORM_PROFILE_VIEW = Object.fromEntries(Object.entries(FORM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18 }]));
+
+function programNodeStatus(program) {
+  const fallback = { noid: { state: "error", tip: null, chain_checked: false, ok_since_start: false, checked_at: null }, eth: { state: "error", chain_id: null, endpoints: 0, checked_at: null } };
+  try {
+    const s = typeof program.nodeStatus === "function" ? program.nodeStatus() : null;
+    return s && typeof s === "object" ? s : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** The answer of GET /api/program (spec I9). Nothing secret: no key, no address, no node URL. */
+function programPayload(program, swapSet) {
+  swapSet.scanIfStale();
+  const vault = program.vault;
+  let ready = { ok: false, why: "the vault cannot be read" };
+  let confirmed = false;
+  let allowed = { ok: false, why: "the vault cannot be read" };
+  try {
+    ready = vault.ready();
+    confirmed = vault.recoveryConfirmed() === true;
+    allowed = vault.newSwapAllowed();
+  } catch {
+    /* the fixed words above stand */
+  }
+  const ps = swapSet.programSettings();
+  const slot = swapSet.slotSwap();
+  let update = { state: "none", latest: null, url: null };
+  try {
+    const u = typeof program.updateStatus === "function" ? program.updateStatus() : null;
+    if (u && typeof u === "object") update = { state: String(u.state || "none"), latest: u.latest || null, url: u.url || null };
+  } catch {
+    /* none */
+  }
+  return {
+    version: program.version,
+    network: "test",
+    node: programNodeStatus(program),
+    vault: { ready: !!(ready && ready.ok), recovery_confirmed: confirmed, why: ready && ready.ok ? null : (ready && ready.why) || null },
+    new_swap_allowed: { ok: !!(allowed && allowed.ok), why: allowed && allowed.ok ? null : (allowed && allowed.why) || null },
+    swaps: swapSet.list(),
+    board: { enabled: !!(ps && ps.board.relays.length >= 2), slot: slot ? slot.id : null },
+    update,
+    form: { profiles: FORM_PROFILE_VIEW, roles: ["alice", "bob"] },
+  };
+}
+
+/** GET /api/run?swap=ID: today's run payload for one swap (no path of the data folder in it). */
+function programRunPayload(swapSet, swap) {
+  const now = nowS();
+  const program = { swap: swap.id, refused: swap.refused || null, read_only: !!swap.readOnly, board_error: swap.boardError || null, summary: swapSet.summary(swap) };
+  if (!swap.runner) return { mode: "run", server_now: now, role: null, program, runner: { enabled: false, items: [] }, actions: { enabled: false }, board: null };
+  const run = readRun([swap.dir, swap.pub], now);
+  const role = swap.settingsSource.role();
+  if (run.roles && role) run.roles = { ...run.roles, [role === "alice" ? "bob" : "alice"]: null };
+  const strip = (f) => (f ? { name: f.name } : null);
+  // the run folder's own path stays out of the payload: the two folders are named by what they are
+  const { dirs, wsl: _wsl, ...rest } = run;
+  void _wsl;
+  const dirNames = ["this swap's folder", "this swap's pub folder"];
+  return {
+    mode: "run",
+    server_now: now,
+    role,
+    ...rest,
+    dirs: (dirs || []).map((d, i) => ({ path: dirNames[i] || "a folder of this swap", readable: d.readable, error: d.error ? "cannot be read" : null })),
+    object_file: strip(run.object_file),
+    bundle_file: strip(run.bundle_file),
+    commands: { bin: null, linux_run: null },
+    runner: { enabled: true, items: swap.runner.describe() },
+    actions: swap.runner.view(run),
+    board: swap.board ? swap.board.view() : null,
+    program,
+  };
+}
+
+// What marks a request as one that came through the scheme adapter (step 4.9). Private to this module: the adapter gets `mark` from startProgramServer, nothing
+// the page sends (a header, a path, a body) can create this property on the request object.
+const FROM_ADAPTER = Symbol("no1d.scheme-adapter");
+
+/** Scheme mode: the Host of a request is exactly "app" (the adapter writes it from the URL; a Host header of the page never gets here). */
+function schemeHostOk(req) {
+  return req.headers.host === SCHEME_HOST;
+}
+
+/** Scheme mode, a POST: an Origin of exactly no1d://app, and Sec-Fetch-Site (when sent) same-origin. */
+function schemeOriginOk(req) {
+  if (req.headers.origin !== SCHEME_ORIGIN) return false;
+  const sfs = req.headers["sec-fetch-site"];
+  return sfs === undefined || sfs === "same-origin";
+}
+
+/** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
+function programRequestHandler(program, swapSet, getServer) {
+  const send = (res, status, body, type) => sendWith(CSP_SCHEME, res, status, body, type); // every answer of program mode carries the scheme's policy
+  const swapOf = (id, res) => {
+    if (typeof id !== "string" || !SWAP_ID_RE.test(id)) {
+      send(res, 400, { error: "swap must be a swap id: 32 lower-case hexadecimal characters" });
+      return null;
+    }
+    const swap = swapSet.get(id);
+    if (!swap) {
+      send(res, 404, { error: "no such swap" });
+      return null;
+    }
+    return swap;
+  };
+  return async (req, res) => {
+    try {
+      if (req[FROM_ADAPTER] !== true) return send(res, 403, { error: "this console answers through the program's own channel only" });
+      if (!schemeHostOk(req)) return send(res, 403, { error: "unexpected Host header: this console answers on its own address only" });
+      const url = new URL(req.url, "http://localhost");
+      const p = url.pathname;
+      const server = getServer();
+      if (server.stopped) return send(res, 503, { error: "the program is closing" });
+
+      if (req.method === "POST") {
+        if (!p.startsWith("/api/")) return send(res, 404, { error: "not found" });
+        if (!schemeOriginOk(req)) return send(res, 403, { error: "cross-origin or missing Origin" });
+        if (!tokenOk(server, req)) return send(res, 403, { error: "missing or wrong token" });
+        if (!/^application\/json\b/i.test(String(req.headers["content-type"] || ""))) return send(res, 415, { error: "application/json required" });
+        let body;
+        try {
+          body = JSON.parse((await readBody(req, PROGRAM_BODY_MAX[p] || 512)) || "{}", (k, v) => {
+            // a key that names an object's prototype is refused anywhere in the body (it could change every object of the server)
+            if (k === "__proto__" || k === "constructor" || k === "prototype") throw Object.assign(new Error("the body names a reserved key"), { status: 400 });
+            return v;
+          });
+        } catch (e) {
+          return send(res, e.status || 400, { error: e.status ? e.message : "body is not JSON" });
+        }
+        if (!body || typeof body !== "object" || Array.isArray(body)) return send(res, 400, { error: "body must be a JSON object" });
+        try {
+          if (p === "/api/newswap") {
+            const id = swapSet.create(body.fields);
+            return send(res, 200, { ok: true, swap: id });
+          }
+          if (p === "/api/settings") {
+            const cur = programsettings.loadSafe(program.dataDir);
+            let merged;
+            try {
+              merged = programsettings.merge(cur.settings, body.settings && typeof body.settings === "object" && !Array.isArray(body.settings) ? body.settings : body);
+            } catch (e) {
+              if (e instanceof programsettings.ProgramSettingsError) return send(res, 422, { ok: false, errors: { settings: e.message } });
+              throw e;
+            }
+            const errs = programsettings.validate(merged);
+            if (Object.keys(errs).length) return send(res, 422, { ok: false, errors: errs });
+            programsettings.save(program.dataDir, merged);
+            return send(res, 200, { ok: true, settings: programsettings.view(merged) });
+          }
+          if (p === "/api/program/open") {
+            if (typeof body.what !== "string" || !OPEN_WHAT.has(body.what)) return send(res, 400, { error: `what must be one of ${[...OPEN_WHAT].join(", ")}` });
+            if (typeof program.open !== "function") return send(res, 409, { error: "the program has no window for that here" });
+            try {
+              await program.open(body.what);
+            } catch {
+              return send(res, 500, { error: "that window could not be opened" });
+            }
+            return send(res, 200, { ok: true });
+          }
+          if (p === "/api/board/slot") {
+            const id = swapSet.createBoardSlot(body.role);
+            return send(res, 200, { ok: true, swap: id });
+          }
+          if (!(ACTION_POSTS.has(p) || p === "/api/helper") || p === "/api/funded") return send(res, 404, { error: "not found" });
+          // the actions: the swap is named, never a path
+          const swap = swapOf(body.swap, res);
+          if (!swap) return;
+          if (p === "/api/helper") return send(res, 403, { error: "the read-only helper runner is replaced by the actions (POST /api/action): one runner, one busy flag, one audit log" });
+          if (!swap.runner) return send(res, 409, { error: swap.refused || "this folder is not open" });
+          let startMeta;
+          if (p === "/api/action" && body.id === "join") {
+            let file = null;
+            try {
+              file = typeof program.chooseBundleFile === "function" ? await program.chooseBundleFile(swap.id) : null;
+            } catch {
+              file = null;
+            }
+            if (typeof file !== "string" || !file) return send(res, 409, { error: "no file chosen: nothing was started" });
+            startMeta = { bundlePath: file };
+          }
+          const out = handleActionPost(p, body, { actions: swap.runner, runDir: swap.dir, board: swap.board, startMeta });
+          return send(res, out.status || 200, out.body);
+        } catch (e) {
+          if (e && e.errors && p === "/api/newswap") return send(res, e.status || 422, { ok: false, errors: e.errors });
+          return send(res, e.status || 400, { error: e.message, reasons: e.reasons || undefined, errors: e.errors || undefined });
+        }
+      }
+
+      if (req.method !== "GET" && req.method !== "HEAD") return send(res, 405, { error: "GET and POST only" });
+      if (p.startsWith("/api/") && crossSiteRead(req, SCHEME_ORIGIN)) return send(res, 403, { error: "cross-site read refused" });
+      if (p.startsWith("/api/") && !tokenOk(server, req)) return send(res, 401, { error: "missing or wrong token" });
+
+      if (PROGRAM_STATIC[p]) {
+        const [file, type] = PROGRAM_STATIC[p];
+        return send(res, 200, fs.readFileSync(path.join(APP_DIR, file)), type);
+      }
+      if (p === "/tokens.css") {
+        const f = path.join(UI_DIR, "tokens.css");
+        if (!fs.existsSync(f)) return send(res, 404, "/* ui/tokens.css not present */", "text/css; charset=utf-8");
+        return send(res, 200, fs.readFileSync(f), "text/css; charset=utf-8");
+      }
+      if (p === "/api/program") return send(res, 200, programPayload(program, swapSet));
+      if (p === "/api/run") {
+        const swap = swapOf(url.searchParams.get("swap"), res);
+        if (!swap) return;
+        return send(res, 200, programRunPayload(swapSet, swap));
+      }
+      if (p === "/api/settings") {
+        const cur = programsettings.loadSafe(program.dataDir);
+        return send(res, 200, { ok: true, settings: programsettings.view(cur.settings), problem: cur.ok ? null : cur.why });
+      }
+      if (p === "/api/demo") {
+        const q = url.searchParams;
+        const flags = (q.get("flags") || "").split(",").filter((f) => DEMO_FLAGS.includes(f));
+        const step = q.get("step");
+        return send(res, 200, demoPayload({ scenario: q.get("scenario") || "happy", role: q.get("role") || "alice", step: /^\d+$/.test(step || "") ? Number(step) : step || 0, flags }));
+      }
+      if (p === "/api/demo/scenarios") return send(res, 200, { scenarios: scenarioList(), flags: DEMO_FLAGS });
+      return send(res, 404, { error: "not found" });
+    } catch (e) {
+      // the text of an unexpected error may name a path or a value: only a fixed sentence leaves
+      return send(res, 500, { error: "the program could not answer this request" });
+    }
+  };
+}
+
+/**
+ * Starts the program's console server (spec I2, step 4.9). Opens NO port: the page and the API are answered through the private scheme `no1d://app`, by the
+ * adapter of desktop/lib/scheme.js, which calls `handler(req, res)` with a request it has marked through `mark`. Prints nothing: no URL, no token on stdout.
+ * @param {object} program the shell's program object (spec I1)
+ * @param {object} [deps] tests only: { steps, now, exec, spawnDetached, boardDeps, watchOpts, timerMs (0: no timer) }
+ * @returns {Promise<{scheme:"no1d", token:string, swapSet:SwapSet, handler:(req:object,res:object)=>Promise<void>, mark:(req:object)=>object, maxBody:number, stop:()=>Promise<void>}>}
+ */
+async function startProgramServer(program, deps = {}) {
+  if (!program || typeof program !== "object" || !program.vault || typeof program.runsDir !== "string") throw new Error("startProgramServer: a program object is needed");
+  const swapSet = new SwapSet({ program, deps });
+  const token = crypto.randomBytes(24).toString("hex");
+  const state = { runToken: token, stopped: false };
+  const handler = programRequestHandler(program, swapSet, () => state);
+  swapSet.scan();
+  swapSet.emitStake();
+  let timer = null;
+  if (deps.timerMs !== 0) {
+    timer = setInterval(() => swapSet.tick(), deps.timerMs || STEP_MS);
+    timer.unref();
+  }
+  let stopped = null;
+  const stop = () => {
+    if (!stopped) {
+      state.stopped = true;
+      stopped = (async () => {
+        if (timer) clearInterval(timer);
+        await swapSet.stopAll();
+      })();
+    }
+    return stopped;
+  };
+  const mark = (req) => {
+    Object.defineProperty(req, FROM_ADAPTER, { value: true, enumerable: false, configurable: false, writable: false });
+    return req;
+  };
+  return { scheme: SCHEME_NAME, token, swapSet, handler, mark, maxBody: Math.max(...Object.values(PROGRAM_BODY_MAX)), stop };
+}
+
+module.exports = { createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig, startProgramServer, schemeHostOk, schemeOriginOk, SCHEME_ORIGIN, CSP_SCHEME };
 
 if (require.main === module) main();

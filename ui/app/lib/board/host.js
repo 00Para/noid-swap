@@ -35,6 +35,7 @@ const { KeyStore } = require("./keys");
 const { readHandover, writeHandover } = require("./handoverfile");
 const { pathCandidates } = require("../runfolder");
 const { validateForm, writeEnvLocal, decimalToInt, PROFILES } = require("../swapform");
+const runsettings = require("../runsettings");
 const { ethAddressProblem, noidAddressProblem } = require("../walletrun");
 const { listFiles } = require("../actions");
 const { sweepReady } = require("../gate");
@@ -188,7 +189,13 @@ class BoardHost {
     this.writeFn = d.writeHandover || writeHandover;
     this.readTipFn = d.readTip || (this.settings.noid_rpc ? () => defaultReadTip(this.settings.noid_rpc) : null);
     this.dir = this.actions.runFolder();
-    this.keys = new KeyStore(this.dir);
+    // PROGRAM MODE (step 4.5): the run has run.json, not env.local.sh; the steps replace the helpers (no install); the messaging keys are sealed by the vault's sealer when one is given
+    // (d.boardSealer: lib/board/keys.js takes it as `{ sealer }`); d.runId is the id of the run folder (the slot) and d.runJsonBase(profile) the node and fee settings of the program's own settings.
+    this.programMode = this.actions.programMode === true;
+    this.runId = d.runId || null;
+    this.runJsonBase = typeof d.runJsonBase === "function" ? d.runJsonBase : null;
+    if (this.programMode && !d.boardSealer) throw new Error("board settings: in the program the board's keys are sealed by the vault (no sealer was given)");
+    this.keys = new KeyStore(this.dir, { sealer: d.boardSealer || null });
     if (this.settings.invite_secret && !this.keys.invite()) this.keys.setInvite(this.settings.invite_secret);
     this.policy = O.makePolicy({ allowedProfiles: [this.settings.profile], pinnedHtlc: this.settings.pinned_htlc, minPowBits: this.settings.min_pow_bits, allowLocalTest: this.settings.allow_local_test });
     this.pool = null;
@@ -355,6 +362,12 @@ class BoardHost {
   assertFreshRun() {
     if (this.hs) throw Object.assign(new Error("this console already carries a swap (one open offer or take per app)"), { status: 409 });
     if (this.actions.swapFilesExist()) throw Object.assign(new Error("this run folder already has swap files: start the board on a fresh run folder"), { status: 409 });
+    if (this.programMode) {
+      // program mode: a fresh board slot holds no run.json (the host writes it when the handover reaches that point) and no swap file
+      if (this.actions.productionBlock()) throw Object.assign(new Error("the board does not run on a production run"), { status: 403 });
+      if (this.exists("run.json")) throw Object.assign(new Error("this run folder already has a run.json: the board writes it on a fresh board slot"), { status: 409 });
+      return;
+    }
     const wr = this.actions.walletRun();
     const br = this.actions.boardRun();
     if (br.ambiguous || wr.ambiguous) throw Object.assign(new Error("env.local.sh cannot be read as a board run"), { status: 409 });
@@ -885,6 +898,22 @@ class BoardHost {
     const h = this.hs;
     if (h.flags.run_ready) return;
     const fl = h.flags;
+    // program mode (spec 5.A.8): no install step. Bob: run.json from the offer and his own settings, then setup. Alice: her run.json needs Bob's verified addresses, so her run
+    // folder work (run.json, then setup) is queued by taskWalletSetup("alice") when they are in; here there is nothing for her to do yet.
+    if (this.programMode) {
+      const steps = this.role === "bob" ? [{ fn: () => this.writeEnv({}), skip: () => fl.env_written }, { action: "setup", skip: () => fl.setup_done || this.exists("eth-deploy-block.txt") }] : [];
+      this.addTask({
+        name: "run_folder",
+        steps,
+        done: (outs, fail) => {
+          if (fail) return void this.failToBoard(fail, "helper");
+          if (this.role === "bob") fl.setup_done = true;
+          fl.run_ready = true;
+          this.persist();
+        },
+      });
+      return;
+    }
     const steps = [
       { action: "install", skip: () => fl.installed || this.binReady() },
       { fn: () => {
@@ -915,6 +944,7 @@ class BoardHost {
   writeEnv(extra) {
     const h = this.hs;
     if (h.flags.env_written) return;
+    if (this.programMode) return this.writeRunJson(extra);
     const t = h.offer.terms;
     const s = this.settings;
     const fields = {
@@ -961,6 +991,69 @@ class BoardHost {
     this.persist();
   }
 
+  /**
+   * PROGRAM MODE's `writeEnv`: this swap's run.json, made from the offer's terms, the user's own settings and the program's node settings (spec 5.A.8). It goes through
+   * runsettings.newSettings(fields, { runId }) and write(dir, obj, { create: true }): the schema refuses anything that is not a test-network wallet run, and a run.json is never
+   * replaced. Bob's terms are the offer he took (never the bundle); Alice's own two values from Bob's message are checked once more against everything else the file says.
+   * `extra` carries them. A value that does not pass is a stop of the board (nothing is cleaned), the reason a code only.
+   */
+  writeRunJson(extra) {
+    const h = this.hs;
+    if (h.flags.env_written) return;
+    if (!this.runId || !this.runJsonBase) throw new BoardStop("bad_value");
+    const t = h.offer.terms;
+    const s = this.settings;
+    const chain = PROFILES[t.profile] ? PROFILES[t.profile].chain : null;
+    const own = this.role === "alice" ? { noid_payout: s.noid_payout, bob_noid: extra.bob_noid, bob_eth: extra.bob_eth } : { noid_payout: s.noid_payout || null, bob_noid: s.bob_noid, bob_eth: null };
+    const strings = [t.profile, t.lock, t.variant, t.htlc, s.eth_payout, own.noid_payout, own.bob_noid, own.bob_eth, String(t.noid), String(t.wei)];
+    // a value is rejected, never cleaned: no padding, no whitespace, no quote, no newline reaches the schema
+    for (const v of strings) if (typeof v === "string" && (v !== v.trim() || /[\s'"`$\\;|&<>(){}\u0000-\u001f]/.test(v))) throw new BoardStop("bad_value");
+    if (!/^[1-9]\d{0,19}$/.test(String(t.noid)) || !/^[1-9]\d{0,19}$/.test(String(t.wei))) throw new BoardStop("bad_amount");
+    if (this.role === "alice") {
+      // the two values of the message, once more against everything else this file says (amendment C)
+      if (lc(own.bob_eth) === lc(t.htlc) || lc(own.bob_eth) === lc(s.eth_payout) || own.bob_noid === own.noid_payout) throw new BoardStop("bad_value");
+    }
+    let base;
+    try {
+      base = this.runJsonBase(t.profile);
+    } catch {
+      throw new BoardStop("bad_value");
+    }
+    const fields = {
+      ...base,
+      role: this.role,
+      profile: t.profile,
+      chain_id: chain,
+      contract: t.htlc,
+      lock_kind: t.lock,
+      variant: t.variant,
+      contract_version: Number(t.cv),
+      amount_micronoid: String(t.noid),
+      amount_wei: String(t.wei),
+      alice_noid: null,
+      bob_noid: own.bob_noid,
+      alice_eth: null,
+      bob_eth: own.bob_eth,
+      noid_payout: own.noid_payout,
+      eth_payout: s.eth_payout,
+      hc_lead: s.lead_blocks,
+      handover: "board",
+    };
+    let settings;
+    try {
+      settings = runsettings.newSettings(fields, { runId: this.runId });
+    } catch (e) {
+      this.note("run.json refused", ((e && e.problems) || []).map((p) => String(p).split(":")[0]).join(",").slice(0, 100));
+      throw new BoardStop("bad_value");
+    }
+    // the line first: when it cannot be written, the file is not written either
+    this.actions.audit.append({ action: "board", role: this.role, phase: "start", result: "writing run.json", detail: `profile ${t.profile}` });
+    runsettings.write(resolveDir(this.dir), settings, { create: true });
+    this.actions.audit.append({ action: "board", role: this.role, phase: "end", result: "run.json written", detail: null });
+    h.flags.env_written = true;
+    this.persist();
+  }
+
   readWalletAddresses() {
     for (const c of pathCandidates(this.dir)) {
       let text;
@@ -994,6 +1087,8 @@ class BoardHost {
     if (role === "alice") {
       const b = this.m.snapshot().bob;
       steps.push({ fn: () => this.writeEnv({ bob_noid: b.noid, bob_eth: b.eth }), skip: () => h.flags.env_written });
+      // program mode: Alice's setup needs her run.json, which needs Bob's verified addresses: so it comes right after it (spec 5.A.8; the terminal order ran setup first)
+      if (this.programMode) steps.push({ action: "setup", skip: () => h.flags.setup_done || this.exists("eth-deploy-block.txt") });
       // a screen before Alice makes anything: Bob's address must hold the amount and a reserve (amendment D: a screen, not a guarantee)
       steps.push({ action: "board-balance", tolerate: true, skip: () => !!fromFile() });
       steps.push({ fn: (outs) => this.checkCounterparty(outs[outs.length - 1]), skip: () => !!fromFile() });
@@ -1009,6 +1104,7 @@ class BoardHost {
         }
         const res = fromFile();
         if (!res) return void this.failToBoard({ failed: true }, "helper");
+        if (this.programMode) h.flags.setup_done = true;
         h.results[key] = res;
         this.persist();
         feed(res);

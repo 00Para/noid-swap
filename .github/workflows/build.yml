@@ -3,7 +3,10 @@
 # What this builds and how to check a download: docs/building.md.
 #
 # Ran three times (docs/building.md): run 3 was the first in which every job passed, the native Windows
-# build and its tests included.
+# build and its tests included. Since step 4.8 two more jobs follow the first two: "desktop" packs the desktop program
+# (a Windows x64 installer and a macOS Apple Silicon disk image, unsigned), "desktop-startup" installs each on a clean
+# machine and starts it. Nothing is published and nothing is signed: the jobs upload build artifacts and a build
+# provenance statement only.
 #
 # No secrets are used. The chain's source (vendor/parano1d) is part of this repository and the build uses it as
 # it is; a separate step clones upstream at one fixed commit and checks that the two trees are identical. The zkVM
@@ -11,8 +14,10 @@
 #
 # No cache in this first version: it is simpler, and there is nothing that could be poisoned.
 #
-# The three actions below are pinned to the full commit id of a release, with the tag in a comment (a tag can be
-# moved, a commit id cannot). The ids were looked up on 2026-11-17.
+# Every action below is pinned to the full commit id of a release, with the tag in a comment (a tag can be
+# moved, a commit id cannot). The ids of checkout, setup-node and upload-artifact were looked up on 2026-11-17; those of
+# download-artifact and attest-build-provenance (new with the desktop jobs) are written from the build specification and
+# must be checked against the release pages before the first run (docs/building.md lists them).
 
 name: build
 
@@ -164,6 +169,18 @@ jobs:
         working-directory: swap-cli
         run: cargo build --release --locked
 
+      # Step 4.8: the contracts are compiled BEFORE swap-cli's tests, so that the two tests that compare the code hashes compiled into
+      # swap-cli (params.rs) with the compiled contracts run instead of skipping (a test that finds no artifact passes and prints
+      # "SKIPPED"). eth/'s locked packages are installed here for that; the console's tests below use them too (ui/app/lib/eth.js).
+      - name: Install eth/'s locked packages (the contract compile and the console's server need them)
+        working-directory: eth
+        run: npm ci --no-audit --no-fund
+
+      # If the native solc download is blocked, hardhat.config.js falls back to the npm solc package (same version).
+      - name: Compile the contracts (solc 0.8.24)
+        working-directory: eth
+        run: npx hardhat compile
+
       # Strict on every system (matrix.tests_may_fail is false everywhere since run 3; it stays as a switch). Tests that
       # use `sh`, symlinks, file modes or directory sync are compiled only on Unix (cfg(unix)), so they do not run on
       # Windows at all (docs/building.md lists them).
@@ -173,14 +190,28 @@ jobs:
         working-directory: swap-cli
         run: cargo test --locked --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/swap-cli-test.log"
 
-      # The operator console has no package manager and no build step, but its server loads ethers from eth/node_modules (ui/app/lib/eth.js),
-      # so eth/'s locked packages are installed first (run 1 failed without them). Strict on every system: the console's tests pass on Windows
-      # (where it runs today), and the tests that need a Windows host (a console with WSL helpers over real C:\ folders) skip elsewhere with
-      # that reason (ui/app/test/actions-fixtures.js, WSL_HOST_ONLY).
-      - name: Install eth/'s locked packages (the console's server needs ethers)
-        working-directory: eth
-        run: npm ci --no-audit --no-fund
+      # The two code-hash tests of params.rs pass silently when the artifact is missing. Run them again with their output shown (the build is
+      # already there) and fail on a "SKIPPED" line or when either does not report ok. Strict on every system.
+      - name: Check that the two code-hash tests ran and were not skipped
+        working-directory: swap-cli
+        run: |
+          log="$RUNNER_TEMP/code-hash-tests.log"
+          cargo test --locked code_hash -- --nocapture --test-threads=1 2>&1 | tee "$log"
+          if grep -q 'SKIPPED:' "$log"; then
+            echo "::error title=code-hash tests::a code-hash test was skipped because the compiled contract is missing"
+            exit 1
+          fi
+          for t in htlc_code_hash_is_the_local_artifacts_runtime_code_hash htlc_poseidon_v2_code_hash_is_the_local_artifacts_runtime_code_hash; do
+            if ! grep -Eq "^test ([A-Za-z0-9_]+::)*$t \.\.\. ok[[:space:]]*$" "$log"; then
+              echo "::error title=code-hash tests::the test $t did not report ok"
+              exit 1
+            fi
+          done
 
+      # The operator console has no package manager and no build step, but its server loads ethers from eth/node_modules (ui/app/lib/eth.js),
+      # so eth/'s locked packages are installed (run 1 failed without them; since step 4.8 that happens before the swap-cli tests, above).
+      # Strict on every system: the console's tests pass on Windows (where it runs today), and the tests that need a Windows host (a console
+      # with WSL helpers over real C:\ folders) skip elsewhere with that reason (ui/app/test/actions-fixtures.js, WSL_HOST_ONLY).
       - name: Test the operator console
         id: console
         run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/console-test.tap" "ui/app/test/*.test.js"
@@ -287,3 +318,465 @@ jobs:
           [ -n "$body" ] || body="no failing test was named in the output (see the log)"
           body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
           echo "::error title=eth tests (linux)::$body"
+
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  # Step 4.8: the desktop program. One installer per platform, built from this commit only: Windows x64 (NSIS, installed for the current
+  # user, no administrator rights) and macOS Apple Silicon (a disk image). Neither is signed or notarized. The program ships this run's
+  # swap-cli, the compiled contracts (whose code hash is compared with the constants compiled into swap-cli), and the runtime package
+  # `ethers` installed from a lock file made offline from eth/package-lock.json (desktop/runtime/).
+  #
+  # Nothing is published and nothing is signed: this job uploads build artifacts and a build provenance statement, nothing else, and
+  # uses no secret of the repository. The permissions below are for this job only (the provenance statement needs the two writes).
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  desktop:
+    name: desktop program (${{ matrix.platform }})
+    needs: [swap-cli, eth]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+            stage_platform: win
+            # pass 1 only unpacks (the manifest is made from what the builder really placed); pass 2 makes the installer
+            dir_args: "--win --x64 --dir"
+            builder_args: "--win nsis --x64"
+            installer_glob: "No1d-Swap-*-win-x64.exe"
+            resources: "dist/win-unpacked/resources"
+            binary: "dist/win-unpacked/No1d Swap.exe"
+          - os: macos-14
+            platform: macos-aarch64
+            stage_platform: mac
+            dir_args: "--mac --arm64 --dir"
+            builder_args: "--mac dmg --arm64"
+            installer_glob: "No1d-Swap-*-mac-arm64.dmg"
+            resources: "dist/mac-arm64/No1d Swap.app/Contents/Resources"
+            binary: "dist/mac-arm64/No1d Swap.app"
+    env:
+      # The build never looks for a signing identity (there is none; nothing is signed).
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Git settings (keep LF, allow long paths)
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      # TO PIN: actions/checkout v4 (same pin as above)
+      - name: Check out this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # TO PIN: actions/setup-node v4 (same pin as above)
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      - name: Read the program's version
+        run: echo "VERSION=$(node -p "require('./desktop/package.json').version")" >> "$GITHUB_ENV"
+
+      # eth/'s locked packages are needed for two things only: compiling the contracts (hardhat) and the tests that run live.js. The program
+      # itself gets its own, smaller install of `ethers` below.
+      - name: Install eth/'s locked packages
+        working-directory: eth
+        run: npm ci --no-audit --no-fund
+
+      # If the native solc download is blocked, hardhat.config.js falls back to the npm solc package (same version).
+      - name: Compile the contracts (solc 0.8.24)
+        working-directory: eth
+        run: npx hardhat compile
+
+      # The logic of the desktop program, with a fake Electron (no window is opened here), and the scripts of this job. Strict.
+      - name: Test the desktop program's modules and scripts
+        run: node --test --test-reporter=spec "desktop/test/*.test.js"
+
+      # TO PIN: actions/download-artifact v4. The swap-cli artifact of THIS run (uploaded by the swap-cli job): the program, its .sha256 file
+      # and BUILD-INFO.txt.
+      - name: Download this run's swap-cli
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: swap-cli-${{ matrix.platform }}
+          path: swap-cli-dist
+
+      - name: Check the runtime lock file against eth/package-lock.json
+        run: node desktop/scripts/make-runtime-lock.js --check
+
+      # The code that ships is the code swap-cli accepts: keccak256 of each compiled contract equals the constant in params.rs of THIS commit,
+      # the poseidon constant is the one docs/poseidon-leg.md records, and swap-cli's BUILD-INFO names this commit.
+      - name: Check the contract code hashes against swap-cli's constants
+        run: node desktop/scripts/codehash-check.js --artifacts eth/artifacts --params swap-cli/src/params.rs --build-info swap-cli-dist/BUILD-INFO.txt --expect-commit "$GITHUB_SHA"
+
+      # The build tools, at the exact versions of desktop/package.json. Scripts are not run (the Electron program is downloaded by
+      # electron-builder itself). With a committed desktop/package-lock.json this is `npm ci`; without one the first run makes it and uploads
+      # it below, to be committed (nothing can make it offline).
+      - name: Install the build tools (electron-builder)
+        id: tools
+        working-directory: desktop
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --ignore-scripts --no-audit --no-fund
+            echo "lock_generated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=desktop lock::desktop/package-lock.json is not committed: the build tools were installed at their exact pinned versions, but their own dependencies were not locked. Commit the lock from the uploaded artifact."
+            npm install --ignore-scripts --no-audit --no-fund
+            echo "lock_generated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stage the program (desktop/stage, desktop/stage-bin)
+        run: node desktop/scripts/stage.js stage --repo . --out desktop/stage --bin-out desktop/stage-bin --swap-cli-dir swap-cli-dist --platform "${{ matrix.stage_platform }}"
+
+      # ethers and its packages, from the lock made offline: the same versions and integrity hashes as eth/package-lock.json.
+      - name: Install the runtime packages in the stage (npm ci --omit=dev --ignore-scripts)
+        working-directory: desktop/stage/eth
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+      - name: Check the stage (ethers resolves, exactly the locked packages, nothing extra)
+        run: node desktop/scripts/stage.js check --out desktop/stage
+
+      - name: Check the contract code hashes again on the staged copy
+        run: node desktop/scripts/codehash-check.js --artifacts desktop/stage/eth/artifacts --params swap-cli/src/params.rs
+
+      # Pass 1 only unpacks the program. The runtime manifest (every file under app.asar.unpacked/ and bin/ with its sha256) is made from
+      # what the builder really placed there, then stored inside app.asar by pass 2, so the program can check itself at start.
+      - name: Pack the program, pass 1 (unpacked, to read what the builder placed)
+        working-directory: desktop
+        run: npx --no-install electron-builder ${{ matrix.dir_args }} --publish never
+
+      - name: Write the runtime manifest
+        run: node desktop/scripts/stage.js manifest --resources "desktop/${{ matrix.resources }}" --out desktop/stage/runtime-manifest.json --version "$VERSION" --commit "$GITHUB_SHA"
+
+      - name: Pack the program, pass 2 (the installer)
+        working-directory: desktop
+        run: |
+          rm -rf dist
+          npx --no-install electron-builder ${{ matrix.builder_args }} --publish never
+
+      - name: Check the packed program (manifest, asar, code hashes, fuses)
+        run: |
+          node desktop/scripts/stage.js verify-packed --resources "desktop/${{ matrix.resources }}" --manifest desktop/stage/runtime-manifest.json --asar "desktop/${{ matrix.resources }}/app.asar"
+          node desktop/scripts/codehash-check.js --artifacts "desktop/${{ matrix.resources }}/app.asar.unpacked/eth/artifacts" --params swap-cli/src/params.rs
+          node desktop/scripts/fuses-check.js --binary "desktop/${{ matrix.binary }}"
+
+      - name: Collect the installer, its sha256 and the build info
+        id: collect
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          INSTALLER_GLOB: ${{ matrix.installer_glob }}
+        run: |
+          cd desktop/dist
+          shopt -s nullglob
+          found=($INSTALLER_GLOB)
+          if [ "${#found[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one installer matching $INSTALLER_GLOB, found ${#found[@]}"
+            ls -la
+            exit 1
+          fi
+          name="${found[0]}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name" > SHA256SUMS.txt
+          else
+            shasum -a 256 "$name" > SHA256SUMS.txt
+          fi
+          cp ../stage/runtime-manifest.json runtime-manifest.json
+          {
+            echo "platform: $PLATFORM"
+            echo "commit: $GITHUB_SHA"
+            echo "run: $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT"
+            echo "program version: $VERSION"
+            echo "chain source commit: $VENDOR_COMMIT"
+            echo "node: $(node -v)"
+            echo "electron: $(node -p "require('../node_modules/electron/package.json').version")"
+            echo "electron-builder: $(node -p "require('../node_modules/electron-builder/package.json').version")"
+            echo "installer: $name"
+            echo "unsigned: yes (no certificate, no notarization)"
+          } > DESKTOP-BUILD-INFO.txt
+          cat DESKTOP-BUILD-INFO.txt
+          echo "sha256:"
+          cat SHA256SUMS.txt
+          {
+            echo "### desktop program, $PLATFORM"
+            echo ""
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- installer: \`$name\`"
+            echo "- sha256: \`$(cut -d' ' -f1 SHA256SUMS.txt)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "installer=desktop/dist/$name" >> "$GITHUB_OUTPUT"
+
+      # TO PIN: actions/attest-build-provenance (full commit id, checked before the first run). It ties the installer's bytes to this
+      # workflow run and this commit; no personal identity is involved.
+      - name: Build provenance of the installer
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.collect.outputs.installer }}
+
+      # TO PIN: actions/upload-artifact v4 (same pin as above)
+      - name: Upload the installer, its sha256 file, the build info and the manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: |
+            ${{ steps.collect.outputs.installer }}
+            desktop/dist/SHA256SUMS.txt
+            desktop/dist/DESKTOP-BUILD-INFO.txt
+            desktop/dist/runtime-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      # Only when desktop/package-lock.json was not committed: the lock this run made, to be committed (then this step and the install
+      # fallback above are no longer used).
+      - name: Upload the build tools' lock file (only when it was not committed)
+        if: steps.tools.outputs.lock_generated == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-lock-${{ matrix.platform }}
+          path: desktop/package-lock.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  # Step 4.8: the start-up test. A fresh machine of each kind installs the program the desktop job made and starts it with --self-test
+  # (a switch that opens a hidden window on a temporary data folder, opens no vault and can act on nothing). Besides the start it checks the
+  # fuses of the installed binary, that live.js gives the same answers under the program's own binary as under plain Node (a key goes in
+  # through the stdin pipe), and, on Windows, that the uninstaller leaves a run folder in place.
+  # ---------------------------------------------------------------------------------------------------------------------------------
+  desktop-startup:
+    name: desktop start-up (${{ matrix.platform }})
+    needs: desktop
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-14
+            platform: macos-aarch64
+
+    steps:
+      # TO PIN: actions/checkout v4 (same pin as above). Only the scripts of desktop/scripts are used from it.
+      - name: Check out this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # TO PIN: actions/setup-node v4 (same pin as above)
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+
+      # TO PIN: actions/download-artifact v4 (same pin as in the desktop job)
+      - name: Download the installer
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: pkg
+
+      - name: Check the installer against its sha256 file
+        shell: bash
+        working-directory: pkg
+        run: |
+          ls -la
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum -c SHA256SUMS.txt
+          else
+            shasum -a 256 -c SHA256SUMS.txt
+          fi
+
+      # ---- Windows: install for the current user, start, check, uninstall -------------------------------------------------------
+      - name: Install silently (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem "pkg/No1d-Swap-*-win-x64.exe" | Select-Object -First 1).FullName
+          if (-not $installer) { throw "no installer in the artifact" }
+          $p = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "the installer exited with code $($p.ExitCode)" }
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\No1d Swap"
+          $exe = Join-Path $dir "No1d Swap.exe"
+          if (-not (Test-Path $exe)) { throw "the program is not at $exe after the install" }
+          "INSTALL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Get-ChildItem $dir | Format-Table Name, Length
+
+      # The binary is a GUI-subsystem program, so its output is redirected to files by Start-Process and read back.
+      # The program opens no TCP port: its page and API are served on a private scheme inside the program. To prove it from outside, the self-test is
+      # kept running for 15 seconds after its checks (NO1D_SELFTEST_HOLD_SECONDS), with its window and its scheme handler up, and every process of the program is
+      # asked for its listening sockets about twice a second meanwhile. Any listener fails the step; so does a check that saw the program too few times.
+      - name: Start the installed program with --self-test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "selftest.out"
+          $err = Join-Path $env:RUNNER_TEMP "selftest.err"
+          # One query of all listening sockets per sample, filtered by the program's process ids (one query per process is slow).
+          function Get-Listeners([int[]]$ids) { @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ids -contains [int]$_.OwningProcess }) }
+          # A check that cannot see a known listener proves nothing: open one in this shell and require the same query to see it.
+          $ctl = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $ctl.Start()
+          $seen = @(Get-Listeners @($PID))
+          $ctl.Stop()
+          if ($seen.Count -eq 0) { throw "the listening-socket check did not see a known listener: it cannot prove the program has none" }
+          Write-Host "the check sees a known listener: port $($seen[0].LocalPort)"
+          $env:NO1D_SELFTEST_HOLD_SECONDS = "15"
+          $p = Start-Process -FilePath $env:EXE -ArgumentList "--self-test" -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
+          $null = $p.Handle
+          $deadline = (Get-Date).AddSeconds(90)
+          $samples = 0
+          $listening = @()
+          while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
+            $ids = @(Get-Process -Name "No1d Swap" -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+            if ($ids.Count -gt 0) {
+              $samples++
+              foreach ($c in (Get-Listeners $ids)) { $listening += "process $($c.OwningProcess) listens on $($c.LocalAddress):$($c.LocalPort)" }
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $p.HasExited) { $p.Kill($true); throw "the self-test did not finish within 90 seconds" }
+          $code = $p.ExitCode
+          Write-Host "exit code: $code"
+          Write-Host "--- stdout"; Get-Content $out -ErrorAction SilentlyContinue
+          Write-Host "--- stderr (first 40 lines)"; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -First 40
+          node desktop/scripts/startup-check.js selftest --file $out --exit-code $code
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Write-Host "listening sockets looked at $samples times"
+          if ($listening.Count -gt 0) { $listening | Select-Object -Unique | ForEach-Object { Write-Host "::error::$_" }; throw "the program opened a TCP port" }
+          if ($samples -lt 5) { throw "the listening sockets were looked at only $samples times: the check proves nothing" }
+          Write-Host "no listening TCP port of the program"
+
+      - name: Check the fuses and the installed files (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node desktop/scripts/fuses-check.js --binary $env:EXE
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          node desktop/scripts/stage.js verify-packed --resources (Join-Path $env:INSTALL_DIR "resources") --manifest pkg/runtime-manifest.json
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: live.js under the program's binary and under Node must agree (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          node desktop/scripts/startup-check.js parity --electron $env:EXE --live-js (Join-Path $env:INSTALL_DIR "resources\app.asar.unpacked\eth\scripts\live.js")
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      # A run folder planted under the data folder must survive the uninstall. The uninstaller copies itself and finishes after it returns,
+      # so the program file is waited for.
+      - name: The uninstaller leaves a planted run folder in place (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $planted = Join-Path $env:LOCALAPPDATA "No1d Swap\runs\x\run.json"
+          New-Item -ItemType Directory -Force (Split-Path $planted) | Out-Null
+          Set-Content -Path $planted -Value "{}"
+          $un = Get-ChildItem $env:INSTALL_DIR -Filter "Uninstall*.exe" | Select-Object -First 1
+          if (-not $un) { throw "no uninstaller in the install folder" }
+          Start-Process -FilePath $un.FullName -ArgumentList "/S" -Wait | Out-Null
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $env:EXE) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 2 }
+          if (Test-Path $env:EXE) { throw "the uninstaller did not remove the program" }
+          if (-not (Test-Path $planted)) { throw "the uninstaller deleted a run folder" }
+          Write-Host "program removed, planted run folder kept"
+
+      # ---- macOS: attach the disk image, copy the app, start, check -------------------------------------------------------------
+      - name: Copy the app out of the disk image (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(ls pkg/No1d-Swap-*-mac-arm64.dmg | head -n 1)"
+          mnt="$RUNNER_TEMP/dmg"
+          mkdir -p "$mnt" "$RUNNER_TEMP/app"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+          cp -R "$mnt/No1d Swap.app" "$RUNNER_TEMP/app/"
+          hdiutil detach "$mnt"
+          echo "APP=$RUNNER_TEMP/app/No1d Swap.app" >> "$GITHUB_ENV"
+
+      # The program opens no TCP port (see the Windows step): the self-test is kept up for 15 seconds after its checks, and the program's processes (the main
+      # one and its children) are asked for listening sockets once a second meanwhile.
+      - name: Start the app with --self-test (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          out="$RUNNER_TEMP/selftest.out"
+          err="$RUNNER_TEMP/selftest.err"
+          # lsof exits 1 whenever one of the processes it is asked about has no listener (every Electron helper), even when it
+          # printed another one's listener: the check reads what lsof prints, never its exit status.
+          listeners() { lsof -nP -iTCP -sTCP:LISTEN -a -p "$1" 2>/dev/null; :; }
+          # A check that cannot see a known listener proves nothing: start one, ask for it together with a process that has
+          # none (this shell), and require it to be seen.
+          python3 -m http.server 0 --bind 127.0.0.1 > /dev/null 2>&1 &
+          ctl=$!
+          seen=""
+          for _ in $(seq 1 20); do
+            seen="$(listeners "$ctl,$$")"
+            if [ -n "$seen" ]; then break; fi
+            sleep 0.5
+          done
+          kill "$ctl"
+          if [ -z "$seen" ]; then
+            echo "::error::the listening-socket check did not see a known listener: it cannot prove the program has none"
+            exit 1
+          fi
+          echo "the check sees a known listener:"; echo "$seen"
+          export NO1D_SELFTEST_HOLD_SECONDS=15
+          "$APP/Contents/MacOS/No1d Swap" --self-test > "$out" 2> "$err" &
+          pid=$!
+          samples=0
+          listening=""
+          for _ in $(seq 1 90); do
+            kill -0 "$pid" 2>/dev/null || break
+            pids="$pid"
+            # pgrep exits 1 when the program has no child yet, which is an answer here, not a failure
+            if kids="$(pgrep -P "$pid" | paste -sd, -)" && [ -n "$kids" ]; then pids="$pid,$kids"; fi
+            samples=$((samples + 1))
+            found="$(listeners "$pids")"
+            if [ -n "$found" ]; then listening="$listening$found$(printf '\n')"; fi
+            sleep 1
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            kill -9 "$pid"
+            echo "::error::the self-test did not finish within 90 seconds"
+            exit 1
+          fi
+          code=0
+          wait "$pid" || code=$?
+          echo "exit code: $code"
+          echo "--- stdout"; cat "$out"
+          echo "--- stderr (first 40 lines)"; head -n 40 "$err"
+          node desktop/scripts/startup-check.js selftest --file "$out" --exit-code "$code"
+          echo "listening sockets looked at $samples times"
+          if [ -n "$listening" ]; then
+            echo "$listening"
+            echo "::error::the program opened a TCP port"
+            exit 1
+          fi
+          if [ "$samples" -lt 5 ]; then
+            echo "::error::the listening sockets were looked at only $samples times: the check proves nothing"
+            exit 1
+          fi
+          echo "no listening TCP port of the program"
+
+      - name: Check the fuses and the installed files (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          node desktop/scripts/fuses-check.js --binary "$APP"
+          node desktop/scripts/stage.js verify-packed --resources "$APP/Contents/Resources" --manifest pkg/runtime-manifest.json
+
+      - name: live.js under the program's binary and under Node must agree (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: node desktop/scripts/startup-check.js parity --electron "$APP/Contents/MacOS/No1d Swap" --live-js "$APP/Contents/Resources/app.asar.unpacked/eth/scripts/live.js"
