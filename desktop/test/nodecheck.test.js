@@ -199,11 +199,11 @@ test("overlapping checks share one run", async () => {
   assert.equal(n, 1);
 });
 
-test("mainnet opening (2026-11-20): production is chain 1 in the node check, and the version is 0.1.5", () => {
+test("mainnet opening (2026-11-20): production is chain 1 in the node check, and the version is 0.1.6", () => {
   const nc = require("../lib/nodecheck");
   assert.equal(nc.CHAIN_IDS.production, 1);
   assert.equal(nc.CHAIN_IDS.sepolia, 11155111);
-  assert.equal(require("../package.json").version, "0.1.5");
+  assert.equal(require("../package.json").version, "0.1.6");
 });
 
 // ---------------------------------------------------------------- the base fee (launch spec 5.1)

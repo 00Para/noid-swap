@@ -1218,3 +1218,32 @@ Program mode (and only program mode) now acts on `production`: Ethereum mainnet,
 - **Fees.** The approval's deposit row is "Kept back for fees" (what is not used comes back with the sweep), not a second "Network fees"; the done card says the amounts are the swap itself and where the fees came from, and Alice's sweep row is "Reached your address".
 - **Above half of the blocks**, Bob's lock line on the Check stage adds a sentence in the warning style: more than half means someone who controls most of the mining can take both sides; nothing is refused by it.
 - **Smaller points.** The full stop after a whole address stays with its last group; display copies of amounts are grouped (the typed line keeps the digits the field accepts); the compare tick sits next to its label; the record-close button has a hairline edge, its not-final refusal says "Try again once it is final.", and after "Recorded." the dialog hides its label; the rate row is joined with "; "; the list's "Read only" is a warn chip; the new-swap form's estimate on a test network with no gas price uses the default cap of 1 gwei and says so; the network names are shorter so the select fits at 380 px; "Approved HH:MM" without seconds in program mode.
+
+## The top bar at every width (2026-11-23)
+
+With four status chips (the network tag, Parano1d, Ethereum and the mainnet endpoints) the bar's one row was wider than the page between about 560 and 1,100 px, and the
+chips were drawn under Refresh and Menu. Now: a node chip shows only its name beside the dot while the node is fine ("connected") or not asked for ("not checked", a hollow
+dot); the state words stay for a screen reader and in the title, and a node that needs a look keeps its words in sight (`program.js` `barChip`; the first-start guide keeps
+the full words). From 560 px the bar is a grid whose status cell wraps inside itself, right-aligned, while the mark, "Your swaps", Refresh and Menu keep their places;
+from 560 to 979 px the status has its own row under them; under 400 px the gaps are tighter and under 360 px the mark stands without the word mark. Checked by a
+measurement at 14 widths from 1,440 to 320 px with three and four chips, on a test network and on mainnet, calm and with every node in fault: no element of the bar
+drawn over another, nothing past its edge, no sideways scroll. Tests: console 1780 (1777 pass, 3 skip), desktop 623 (620 pass, 3 skip).
+
+## The approval's typed amount survives a redraw (2026-11-23, run 23)
+
+On the PC in run 23, the typed "5 NOID" of the approval kept vanishing. The page redraws a swap whenever its payload changes, which is about every 30 s while the
+chains move, and every redraw called `clearStart()`, which also emptied the approval form (the typed amount and the ticks) and dropped the cursor. Now `clearStart()`
+empties the form only when the person leaves the swap (`clearStart({ leaving: true })` from the page's leaveSwap); the form is still keyed by swap and role, so another
+swap or role opens empty; and a redraw while the person types in the field puts the cursor back where it was. Checked in a real browser by typing one key every 1.5 s
+while the page redrew: the old code ended with an empty field, no focus and two ticks undone; the new code keeps "5 NOID", the cursor and every tick. Test:
+`test/fix-round-1.test.js` "run 23" (fails on the old code). Console 1781 (1778 pass, 3 skip), desktop 623 (620 pass, 3 skip).
+
+## A mainnet payout is never taken from a test network (2026-11-23, run 23)
+
+In a rehearsal on Ethereum mainnet the new-swap form filled the Ethereum payout from Settings, and that saved address had been used on Sepolia, a test network. The person did not notice, and the swap was made with a test address as its mainnet payout. Now the settings note the network the saved address was last used on (`eth_payout_profile`: `sepolia`, `rehearsal`, `production` or `null`). A swap that is made with "Use these addresses for my next swaps" writes it, and an address typed in the Settings screen has no known network, so `null`; the page never sets it. An older settings file without the key loads as `null`.
+
+On a test network the form fills the saved address as before. On Ethereum mainnet it fills it only when the address was used on mainnet; otherwise the field stays empty and a short line under it says "Enter your Ethereum mainnet address. The one saved in Settings was used on a test network, or its network is not known." The field follows the network chosen until the person types in it, and what is typed is never rewritten. The history line under the field compares against the saved address only when that address may be used on the chosen network. This is a screen against a slip, not a check of the address: the typed address still gets its read-back, its checksum rule and the compare tick. The tests are in `ui/app/test/payout-network.test.js`.
+
+Going back from 0.1.6 to 0.1.5: the older version does not know the new key and refuses the settings file ("not a setting of this version"), as with `limits_read_version` before it, so no new swap starts there until the key is removed from the file. Running swaps are not affected.
+
+The review of 0.1.6 also tied the kept approval form (the section above, "The approval's typed amount survives a redraw") to the facts it was filled on: the swap, the role, the run, the check line, the line match and the amount asked for. A change of any of them empties the form; the server's binding of the approval to its terms is unchanged.

@@ -44,6 +44,19 @@
 
   /** The chip of one node in words (the top bar and the first-start guide draw the same one). */
   const nodeChip = (name, w) => w.state === "idle" ? H.chip("idle", name === "Ethereum" ? "Mainnet: not checked" : `${name}: not checked`) : H.chip(w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn", `${name}: ${w.word}`);
+  /**
+   * The top bar's chip of one node: the same words, in two parts. While the node is fine (connected) or not asked for (not checked), only its name is drawn beside the
+   * dot and the state stays for a screen reader and in the title; a node that needs a look keeps its words in sight. The bar then fits one row with four chips.
+   */
+  const barChip = (name, w) => {
+    const idle = w.state === "idle";
+    const level = idle ? "idle" : w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn";
+    const label = idle && name === "Ethereum" ? "Mainnet" : name;
+    const word = idle ? "not checked" : w.word;
+    const calm = level === "ok" || level === "idle";
+    // the name is the chip's own text and the state one span after it, so the chip's text is exactly "Name: state" (no space before the colon)
+    return H.el("span", { class: `chip ${level} node-chip`, title: `${label}: ${word}`, text: label }, H.el("span", { class: calm ? "node-state sr-only" : "node-state", text: `: ${word}` }));
+  };
 
   const activeCount = (swaps) => (Array.isArray(swaps) ? swaps.filter((s) => s && s.active === true).length : 0);
 
@@ -134,7 +147,7 @@
       { class: "wrap pg-bar-in" },
       el("div", { class: "pg-brand" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 22, height: 22 }), el("span", { class: "wordmark", "aria-label": "No1d Swap" }, "No1d", el("i", { class: "dia", "aria-hidden": "true" }), "Swap")),
       el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" && !limitsOpen ? "page" : null, onclick: () => goTo("list") }, el("span", { class: "lbl", text: "Your swaps" }), el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
-      el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, nodeChip("Parano1d", nodes.noid), nodeChip("Ethereum", nodes.eth), nodes.mainnet ? nodeChip("Mainnet", nodes.mainnet) : null),
+      el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, barChip("Parano1d", nodes.noid), barChip("Ethereum", nodes.eth), nodes.mainnet ? barChip("Mainnet", nodes.mainnet) : null),
       el("div", { class: "pg-tools" }, el("button", { type: "button", class: "btn ghost icon", "aria-label": "Refresh", onclick: () => h.refresh() }, ic("refresh"), el("span", { class: "sr-only", text: "Refresh" })), menu)
     );
   }
@@ -476,6 +489,7 @@
   const NO_PIN_HINT = "This network has no contract of the program's own: type the one you agreed on.";
   const INVITATION_NOTE = "Filled from Bob's invitation. Check every value against what you agreed with Bob; nothing is made until you press Make the swap.";
   const CONTRACT_NOTE = "This contract is not the program's own for this network. Use it only if you agreed on it with Bob.";
+  const ETH_MAINNET_HINT = "Enter your Ethereum mainnet address. The one saved in Settings was used on a test network, or its network is not known.";
   const ETH_PAYOUT_HINT = {
     alice: "The ETH you get is sent here at the end, with anything left over. Use your own wallet, not an exchange deposit address.",
     bob: "What is left of this swap's ETH is sent here at the end. Use your own wallet, not an exchange deposit address.",
@@ -525,6 +539,13 @@
     const bobEth = reg("bob_eth", field(F, "bob_eth", "Bob's Ethereum address", textInput(F, "bob_eth", "", "0x…"), "The address Bob's tool shows after it makes his key for this swap.", "code"));
     const noidPay = reg("noid_payout", field(F, "noid_payout", "Your Parano1d address for what is left", textInput(F, "noid_payout", S.noid_payout, "o1…"), "If the swap does not go through, your NOID comes back to this address.", "code"));
     const ethPay = reg("eth_payout", field(F, "eth_payout", "Your Ethereum address", textInput(F, "eth_payout", S.eth_payout, "0x…"), ETH_PAYOUT_HINT.alice, "code"));
+    // R23-1: on Ethereum mainnet the saved address fills the field only when it was used on mainnet (a settings file with no network noted means "not known": never filled in)
+    const ethSaved = str(S.eth_payout);
+    const ethSavedUsable = (p) => ethSaved !== "" && (p !== "production" || S.eth_payout_profile === "production");
+    const ethMainnetHint = el("p", { class: "hist new", id: "ns-eth_payout-mainnet-hint", role: "status", hidden: true, text: ETH_MAINNET_HINT });
+    ethPay.box.appendChild(ethMainnetHint);
+    ethPay.control.setAttribute("aria-describedby", `${ethPay.control.getAttribute("aria-describedby") || ""} ns-eth_payout-mainnet-hint`.trim());
+    let ethFilled = ethSaved; // what the program last put in the field: a value that differs from it was typed (or pasted) by the person and stays
     const bobGrid = el("div", { class: "form-grid" }, bobNoid.box, bobEth.box);
     const ownGrid = el("div", { class: "form-grid" }, noidPay.box, ethPay.box);
     const bobSec = el("section", { class: "ns-sec", "aria-labelledby": "ns-h-bob" }, el("h2", { id: "ns-h-bob", text: "Bob's addresses" }), bobGrid);
@@ -576,6 +597,16 @@
       chainEth.textContent = PROFILE_ON[profile.control.value] || PROFILE_ON.sepolia;
       chainEth.className = "on" + (profile.control.value === "production" ? " real" : ""); // on mainnet the words are in the ink colour, not the quiet one
     };
+    // the saved Ethereum address follows the network until the person types in the field
+    const syncEthPayout = (fill = true) => {
+      const usable = ethSavedUsable(profile.control.value);
+      if (fill && val(ethPay.control) === ethFilled) {
+        ethFilled = usable ? ethSaved : "";
+        ethPay.control.value = ethFilled;
+      }
+      const cur = val(ethPay.control);
+      ethMainnetHint.hidden = !(profile.control.value === "production" && ethSaved !== "" && !usable && (cur === "" || sameAddr(cur, ethSaved)));
+    };
     const applyRole = (r) => {
       bobEth.box.hidden = r !== "alice";
       noidPay.box.hidden = r !== "alice";
@@ -606,6 +637,7 @@
       syncChain();
       syncContractHint();
       syncContractNote();
+      syncEthPayout();
     };
     const clearInvitation = () => {
       invitation = false;
@@ -621,6 +653,7 @@
       lastPin = pinOf("sepolia");
       invNote.hidden = true;
       invNote.textContent = "";
+      syncEthPayout();
       syncChain();
       syncContractHint();
       syncContractNote();
@@ -638,6 +671,7 @@
     role.control.addEventListener("change", onRole);
     profile.control.addEventListener("change", onNetwork);
     for (const ev of ["input", "change"]) {
+      ethPay.control.addEventListener(ev, () => syncEthPayout(false)); // typing only redraws the hint; the program never rewrites what is being typed
       bobNoid.control.addEventListener(ev, () => {
         bobTyped = true;
       });
@@ -669,6 +703,7 @@
       bobEth.control.value = str(f.bob_eth);
       bobTyped = false;
       invitation = true;
+      syncEthPayout();
       lastPin = pinOf(profile.control.value);
       invNote.textContent = INVITATION_NOTE;
       invNote.hidden = false;
@@ -740,7 +775,7 @@
       { key: "bob_noid", f: bobNoid, kind: "noid", own: (r) => r === "bob", active: () => true, remembered: () => str(S.bob_noid), readback: true },
       { key: "bob_eth", f: bobEth, kind: "eth", own: () => false, active: (r) => r === "alice", remembered: () => "", readback: true },
       { key: "noid_payout", f: noidPay, kind: "noid", own: () => true, active: (r) => r === "alice", remembered: () => str(S.noid_payout), readback: true },
-      { key: "eth_payout", f: ethPay, kind: "eth", own: () => true, active: () => true, remembered: () => str(S.eth_payout), readback: true },
+      { key: "eth_payout", f: ethPay, kind: "eth", own: () => true, active: () => true, remembered: () => (ethSavedUsable(profile.control.value) ? ethSaved : ""), readback: true },
       { key: "contract", f: contract, kind: "eth", own: () => false, active: () => true, remembered: () => "", readback: false, noTick: true },
     ];
     for (const a of ADDR) {

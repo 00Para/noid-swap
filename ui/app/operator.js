@@ -1253,7 +1253,8 @@
     state.view = null;
     state.error = null;
     state.runResult = null;
-    if (window.NoidActions && window.NoidActions.clearStart) window.NoidActions.clearStart();
+    // leaving a swap forgets its approval form (the typed amount and the ticks); a redraw of the same swap keeps it
+    if (window.NoidActions && window.NoidActions.clearStart) window.NoidActions.clearStart({ leaving: true });
     if (window.NoidBoard && window.NoidBoard.reset) window.NoidBoard.reset();
   }
 

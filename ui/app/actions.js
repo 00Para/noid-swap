@@ -1316,8 +1316,9 @@
       return box;
     }
     if (f.terms_changed) box.appendChild(H.el("p", { class: "attn", role: "alert", text: isProgram() && f.terms_changed_why === "program_version" ? "The program was updated since you approved, so automatic steps are off. Approve again after an update, once the terms look right." : isProgram() ? "The terms, the settings of this swap, the program or one of its tools changed since you approved, so automatic steps are off. Check the terms, then approve again if they are right." : "The terms changed since you approved (or a file they are bound to did), so the autopilot is off. Check the terms, then approve again if they are right." }));
-    // the ticks and the typed amount belong to one swap and one role: another swap (or the other role) opens with an empty form
-    const apKey = `${H.state.swap || ""}|${f.role}`;
+    // the ticks and the typed amount belong to one swap, one role, one run, one check line, one line match and one amount: a change of any of them empties the form
+    const apA = (payload && payload.actions) || {};
+    const apKey = [H.state.swap || "", f.role, (apA.form && apA.form.run_number) || "", checkLineOf(apA, f.role).hex || "", f.line_match ? 1 : 0, f.expected_typed || ""].join("|");
     if (ui.ap.key !== apKey) ui.ap = { key: apKey, typed: "", ticks: {}, cmp: {} };
     const cmpCtx = { ticks: [], onTick: null };
     const lines = prog ? plainLines(f, payload, view) : [];
@@ -1363,6 +1364,19 @@
     }
     if (limits === "read") box.appendChild(H.el("details", { class: "deposit-details fact-fold limits-link" }, H.el("summary", { text: LT().LINK_TEXT }), LT().card(H.el, lf, { level: 3 })));
     const input = H.el("input", { type: "text", id: "ap-typed", autocomplete: "off", spellcheck: "false", "aria-describedby": "ap-typed-hint", placeholder: f.expected_typed || "", value: ui.ap.typed });
+    // a redraw while the person types in this field (the chains move about every 30 s) puts the cursor back where it was, so the next key lands in the field
+    {
+      const doc = typeof document !== "undefined" ? document : null;
+      const was = doc && doc.activeElement && doc.activeElement.id === "ap-typed" ? doc.activeElement : null;
+      if (was) {
+        const at = typeof was.selectionStart === "number" ? [was.selectionStart, was.selectionEnd] : null;
+        setTimeout(() => {
+          if (!input.isConnected || typeof input.focus !== "function") return;
+          input.focus({ preventScroll: true });
+          if (at && typeof input.setSelectionRange === "function") input.setSelectionRange(at[0], at[1]);
+        }, 0);
+      }
+    }
     const ticks = f.statements.map((st) => {
       // the line match of the run folder pre-ticks the line statement (still asked, still required); a person's own un-tick is kept
       if (f.line_match && (st.id === "bob_check_matches" || st.id === "alice_check_matches") && ui.ap.ticks[st.id] === undefined) ui.ap.ticks[st.id] = true;
@@ -1806,10 +1820,13 @@
     start.classList.toggle("terms-next", termsNext);
   }
 
-  /** Empties the start screen's own section (the swap page is showing). */
-  function clearStart() {
-    // leaving a swap forgets its autopilot form (ticks and typed amount)
-    ui.ap = { typed: "", ticks: {}, cmp: {} };
+  /**
+   * Empties the start screen's own section (the swap page is showing). The page calls it at EVERY redraw of a swap page, so it must not touch the approval form: what the
+   * person typed and ticked stays until they leave the swap (`opts.leaving`, from the page's leaveSwap). Another swap or role opens with an empty form anyway (the form is keyed
+   * by swap and role in autopilotBlock). Before 0.1.6 it emptied the form at every redraw, about every 30 s while the chains moved, and the typed "5 NOID" vanished (run 23).
+   */
+  function clearStart(opts) {
+    if (opts && opts.leaving) ui.ap = { typed: "", ticks: {}, cmp: {} };
     const s = $("start");
     if (s) {
       empty(s);

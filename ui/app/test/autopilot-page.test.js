@@ -178,11 +178,11 @@ test("the form belongs to one swap and one role: another swap, the other role or
     assert.equal(isEmpty({ role: "alice", phase: { id: "funding_final", terminal: false } }), true, "the other role starts empty");
     state.payload = payload(AP(), AP());
     fill();
-    NA.clearStart();
+    NA.clearStart({ leaving: true });
     assert.equal(isEmpty(bobView()), true, "leaving the swap forgets the form");
   } finally {
     delete state.swap;
-    NA.clearStart();
+    NA.clearStart({ leaving: true });
   }
 });
 
@@ -304,11 +304,11 @@ test("the line statement is pre-ticked only when the page has the line match, ca
   const again = NA.autopilotBlock(bobView(), state.payload);
   assert.equal(again.all((x) => x.tag === "input" && x.attrs.id === "ap-stmt-alice_check_matches")[0].checked, false);
   // without the line match nothing is pre-ticked
-  NA.clearStart();
+  NA.clearStart({ leaving: true });
   state.payload = { actions: { enabled: true, production: null, autopilot: { alice: AP(), bob: AP({ statements: stmts }) } } };
   const none = NA.autopilotBlock(bobView(), state.payload);
   assert.equal(none.all((x) => x.tag === "input" && x.attrs.type === "checkbox").every((t) => !t.checked), true);
-  NA.clearStart();
+  NA.clearStart({ leaving: true });
 });
 
 test("the signature carries what the simple start draws: gets_text, the board flag, the line match, the check line, the first steps and the watch mode", () => {

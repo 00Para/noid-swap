@@ -293,3 +293,57 @@ test("low: the chip warn keeps its colour in a box, the dead rules are gone, the
   const src = fs.readFileSync(path.join(APP, "stagecard.js"), "utf8");
   assert.ok(!/\baboutT\b/.test(src));
 });
+
+// ---------------------------------------------------------------- run 23: the typed amount survives a redraw
+test("run 23: the approval's typed amount and ticks survive the redraw a moving chain makes (before 0.1.6 each redraw emptied them); leaving the swap forgets them", async () => {
+  let tip = 281000;
+  const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: LM, tick: { tip: tip } }));
+  const boxes = () => page.byId("pg-card").all((n) => n.tag === "input" && n.attrs.type === "checkbox");
+  for (const c of boxes()) {
+    c.checked = true;
+    await c.fire("change");
+  }
+  const typed = page.byId("ap-typed");
+  typed.value = "5 NOI";
+  await typed.fire("input");
+  // the chains move: a new tip makes a new payload, so the page redraws the card
+  for (let i = 0; i < 3; i++) {
+    tip += 1;
+    await page.intervals[0].f();
+    await page.flush();
+  }
+  const again = page.byId("ap-typed");
+  assert.notEqual(again, typed, "the card was drawn again (the test makes a real redraw)");
+  assert.equal(again.attrs.value === undefined ? again.value : again.attrs.value, "5 NOI", "what was typed is still in the field");
+  assert.ok(boxes().length > 0 && boxes().every((c) => c.checked === true || c.attrs.checked !== undefined), "the ticks are kept");
+  // leaving the swap forgets the form; coming back opens it empty
+  await btnWith(page.byId("pg-swapbar"), "Your swaps").click();
+  await page.flush();
+  const rows = page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"));
+  await rows[0].click();
+  await page.flush();
+  const back = page.byId("ap-typed");
+  assert.equal(back.attrs.value === undefined ? back.value || "" : back.attrs.value, "", "a swap opened again starts with an empty field");
+});
+
+test("run 23 review: a change of the amount inside the same swap empties the kept form (the typed amount never outlives the terms it was typed for)", async () => {
+  let tip = 281000;
+  let typedWant = null;
+  const page = await openSwap(F.SWAP_A, (r) => {
+    const p = cardPayload(r, { line_match: LM, tick: { tip: tip } });
+    const ap = p.actions && p.actions.autopilot && p.actions.autopilot[r];
+    if (ap && typedWant) ap.expected_typed = typedWant;
+    return p;
+  });
+  const typed = page.byId("ap-typed");
+  typed.value = "5 NOI";
+  await typed.fire("input");
+  typedWant = "6 NOID";
+  tip += 1;
+  await page.intervals[0].f();
+  await page.flush();
+  const again = page.byId("ap-typed");
+  assert.ok(again, "the approval form is still drawn");
+  assert.equal(again.attrs.placeholder, "6 NOID", "the new amount is the one asked for");
+  assert.equal(again.attrs.value === undefined ? again.value || "" : again.attrs.value, "", "the amount changed: what was typed is gone");
+});

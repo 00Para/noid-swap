@@ -1181,6 +1181,8 @@ function rememberAddresses(program, swapSet, id) {
       put("bob_noid", rs.bob_noid);
       put("eth_payout", rs.eth_payout);
     } else return false;
+    // the network this address is used on (R23-1): the form fills it on mainnet only when it was used there
+    if (typeof rs.eth_payout === "string" && rs.eth_payout !== "") next.eth_payout_profile = typeof rs.profile === "string" ? rs.profile : null;
     if (Object.keys(programsettings.validate(next)).length) return false;
     programsettings.save(program.dataDir, next);
     return true;

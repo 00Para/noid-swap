@@ -622,6 +622,25 @@ body.program .wrap, body.program .foot { max-width: 1040px; }
 .pg-status .chip.quiet { height: 22px; padding: 0 var(--s2); gap: 0; border: 1px solid var(--rule-2); border-radius: 4px; font-size: 12px; line-height: 1; color: var(--quiet); }
 .pg-status .chip.quiet::before { display: none; }
 .pg-tools { display: flex; align-items: center; gap: var(--s1); flex: none; }
+/* the top bar's node chips: the name beside the dot; the state words stay in sight only when a node needs a look (program.js barChip) */
+.pg-status .node-chip { gap: 0; }
+.pg-status .node-chip::before { margin-right: 6px; }
+.pg-status .chip.idle::before { background: none; box-shadow: inset 0 0 0 1px var(--ghost); }
+/* the bar never draws one thing under another, whatever the width and the words: from 560 px it is a grid whose status cell wraps inside itself (right-aligned) while
+   the mark, "Your swaps", Refresh and Menu keep their places; under 980 px the status gets a row of its own below them */
+.pg-bar-in { height: auto; min-height: 56px; flex-wrap: wrap; row-gap: 0; }
+.pg-status { flex-wrap: wrap; justify-content: flex-end; row-gap: var(--s1); }
+@media (min-width: 560px) {
+  .pg-bar-in { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand swaps status tools"; column-gap: var(--s5); }
+  .pg-brand { grid-area: brand; }
+  .pg-swaps-btn { grid-area: swaps; }
+  .pg-status { grid-area: status; margin-left: 0; padding: var(--s2) 0; }
+  .pg-tools { grid-area: tools; }
+}
+@media (min-width: 560px) and (max-width: 979px) {
+  .pg-bar-in { grid-template-areas: "brand swaps . tools" "status status status status"; }
+  .pg-status { padding: 0 0 var(--s3); }
+}
 .btn.icon { width: 32px; min-height: 32px; padding: 0; }
 .pg-menu { position: relative; }
 .pg-menu > summary { list-style: none; }
@@ -637,10 +656,20 @@ body.program .wrap, body.program .foot { max-width: 1040px; }
   .pg-bar-in { gap: var(--s3); }
   .pg-status { gap: var(--s2); }
   .pg-status .chip { font-size: 0; gap: 0; }
+  .pg-status .node-chip::before { margin-right: 0; }
   .pg-status .chip.quiet { display: none; }
   .pg-swaps-btn .lbl { display: none; }
   .pg-menu > summary > span { display: none; }
   .pg-brand .wordmark { font-size: 15px; }
+}
+/* the narrowest phones: tighter gaps so the bar's one row still holds the dots, Refresh and Menu */
+@media (max-width: 399px) {
+  .pg-bar-in { gap: var(--s2); }
+  .pg-status { gap: 6px; }
+}
+/* under 360 px the mark stands alone (the word mark is the window title's name too) */
+@media (max-width: 359px) {
+  .pg-brand .wordmark { display: none; }
 }
 body.program main { padding-top: var(--s5); padding-bottom: var(--s8); }
 .pg { margin-top: 0; min-width: 0; }

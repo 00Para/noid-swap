@@ -55,6 +55,7 @@ function defaults() {
     alert_url: null,
     noid_payout: null,
     eth_payout: null,
+    eth_payout_profile: null,
     bob_noid: null,
     board: { relays: [], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0, profile: "sepolia", contract_version: "1", pinned_htlc: {} },
     update_check: "ask",
@@ -153,7 +154,7 @@ function validate(o) {
     if (!(k in errs)) errs[k] = why;
   };
   if (!plain(o)) return { "": "the settings are not an object" };
-  const allowed = ["v", "noid_rpc", "noid_rpc2", "noid_rpc2_remote", "eth", "eth_rpc2_remote", "rpc_timeout_s", "alert_url", "noid_payout", "eth_payout", "bob_noid", "board", "update_check", "limits_read_version"];
+  const allowed = ["v", "noid_rpc", "noid_rpc2", "noid_rpc2_remote", "eth", "eth_rpc2_remote", "rpc_timeout_s", "alert_url", "noid_payout", "eth_payout", "eth_payout_profile", "bob_noid", "board", "update_check", "limits_read_version"];
   for (const k of Object.keys(o)) if (!allowed.includes(k)) bad(k, "not a setting of this version");
   for (const k of allowed) if (!Object.prototype.hasOwnProperty.call(o, k)) bad(k, "missing");
   if (Object.keys(errs).length) return errs;
@@ -198,6 +199,8 @@ function validate(o) {
   addr("noid_payout", o.noid_payout, "noid");
   addr("eth_payout", o.eth_payout, "eth");
   addr("bob_noid", o.bob_noid, "noid");
+  // the network the saved Ethereum address was used on (R23-1): null is "not known", which on Ethereum mainnet means the address is never filled in by itself
+  if (o.eth_payout_profile !== null && !(typeof o.eth_payout_profile === "string" && Object.prototype.hasOwnProperty.call(PROFILES, o.eth_payout_profile))) bad("eth_payout_profile", `one of ${Object.keys(PROFILES).join(", ")}, or null`);
   // R6: the program version whose "Limits and risks" card the person has read (page sequencing only: nothing checks it)
   if (o.limits_read_version !== null && (typeof o.limits_read_version !== "string" || !/^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/.test(o.limits_read_version))) bad("limits_read_version", "a version like 0.1.5, or null");
   if (!UPDATE_CHECK.includes(o.update_check)) bad("update_check", `one of ${UPDATE_CHECK.join(", ")}`);
@@ -229,6 +232,8 @@ function parseValid(text) {
   const o = strictParse(text);
   // a settings.json written before the limits card has no `limits_read_version`: it means "not read yet"
   if (plain(o) && !Object.prototype.hasOwnProperty.call(o, "limits_read_version")) o.limits_read_version = null;
+  // a settings.json written before R23-1 has no `eth_payout_profile`: the network of the saved address is not known
+  if (plain(o) && !Object.prototype.hasOwnProperty.call(o, "eth_payout_profile")) o.eth_payout_profile = null;
   if (plain(o) && plain(o.eth) && !Object.prototype.hasOwnProperty.call(o.eth, "production")) o.eth.production = { rpc: PRODUCTION_ETH_RPC, rpc2: PRODUCTION_ETH_RPC2 };
   const errs = validate(o);
   const keys = Object.keys(errs);
@@ -375,8 +380,11 @@ function merge(stored, patch) {
     } else if (k === "board" && plain(p.board)) out.board = { ...out.board, ...p.board };
     else if (k === "noid_rpc" || k === "noid_rpc2") out[k] = keepUrl(out[k], p[k]);
     else if (k === "alert_url") out.alert_url = p.alert_url === "set" ? out.alert_url : p.alert_url;
+    else if (k === "eth_payout_profile") continue; // set only with the address it belongs to (below, and by the swap that remembers it), never by the page
     else out[k] = p[k];
   }
+  // a changed Ethereum address typed in the settings has no known network: it is not filled in by itself on mainnet
+  if (Object.prototype.hasOwnProperty.call(p, "eth_payout") && p.eth_payout !== stored.eth_payout) out.eth_payout_profile = null;
   return out;
 }
 
