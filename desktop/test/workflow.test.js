@@ -217,6 +217,16 @@ test("start-up test: sha256 check first, the self-test, the fuses, the installed
   const mac = steps.filter((s) => /\(macOS\)$/.test(s.name));
   assert.equal(win.length, 5);
   assert.equal(mac.length, 4);
+  // a one-click install for the current user goes to Programs\<package name> (build run 8 looked in Programs\No1d Swap)
+  const pkgName = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf8")).name;
+  assert.equal(pkgName, "no1d-swap");
+  assert.ok(steps[idx(/Install silently \(Windows\)/)].run.includes(`Join-Path $env:LOCALAPPDATA "Programs\\${pkgName}"`));
+  assert.ok(!/"Programs\\No1d Swap"/.test(text), "no step looks for the program in Programs\\No1d Swap");
+  // every Windows step turns a thrown error into an annotation, and none ends on a bare exit 1
+  for (const s of win) {
+    assert.match(s.run, /trap \{ Write-Host "::error::\$\(\$_\.Exception\.Message\)"; break \}/, s.name);
+    assert.ok(!/\{ exit 1 \}/.test(s.run), s.name);
+  }
   assert.ok(win.every((s) => s.if === "runner.os == 'Windows'"));
   assert.ok(mac.every((s) => s.if === "runner.os == 'macOS'"));
   const all = (list) => list.map((s) => s.run).join("\n");

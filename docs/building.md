@@ -167,7 +167,7 @@ permissions (`id-token`, `attestations`, on that job only).
     `desktop-windows-x86_64` or `desktop-macos-aarch64` (installer, sha256 file, build info, manifest).
 
 **`desktop-startup`** (needs `desktop`; a fresh machine of each kind): checks the installer against its sha256 file; installs it
-(Windows: `/S`, per user, to `%LOCALAPPDATA%\Programs\No1d Swap`; macOS: attaches the disk image and copies the app); starts the
+(Windows: `/S`, per user, to `%LOCALAPPDATA%\Programs\no1d-swap`, the package name; macOS: attaches the disk image and copies the app); starts the
 program with `--self-test` (a hidden window on a temporary data folder, no vault, nothing can act) and requires its JSON line
 (`startup-check.js selftest`: page loaded, no Parano1d node, 401 without the token, hardened web preferences, exit code 0);
 reads the fuses of the installed binary; checks the installed files against the manifest; runs offline `live.js` commands (an
@@ -252,6 +252,12 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   app: `codesign --verify --strict --deep`, the fuses, the manifest, the self-test (`page_script` true, `page_post` 403), no
   listening port over 15 seconds, and the five `live.js` parity cases. Its node check said `ok` where a clean machine says
   `not_running`, because that Mac runs a Parano1d node of its own; the hosted job runs on a clean machine.
+- Run 8 (`b861879`) was the first whose Windows desktop job passed: the desktop tests, the installer, the manifest and the fuses of the
+  packed program. Its Windows start-up job stopped at the install step, which looked for the program in
+  `%LOCALAPPDATA%\Programs\No1d Swap`. A one-click installer for the current user names that folder after the package name
+  (`no1d-swap`); electron-builder takes the product name only for an assisted or a per-machine install. The step now looks in
+  `Programs\no1d-swap`, and every Windows step of the start-up job turns a thrown error into an annotation, so the next failure
+  can be read without a login.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

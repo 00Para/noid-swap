@@ -620,17 +620,24 @@ jobs:
           fi
 
       # ---- Windows: install for the current user, start, check, uninstall -------------------------------------------------------
+      # A one-click installer for the current user puts the program in Programs\<the package name of desktop/package.json>: the builder
+      # takes the product name for the folder only in an assisted or a per-machine install (a hosted run that looked in Programs\No1d Swap failed).
       - name: Install silently (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # A thrown error becomes an annotation, readable without a login.
+          trap { Write-Host "::error::$($_.Exception.Message)"; break }
           $installer = (Get-ChildItem "pkg/No1d-Swap-*-win-x64.exe" | Select-Object -First 1).FullName
           if (-not $installer) { throw "no installer in the artifact" }
           $p = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "the installer exited with code $($p.ExitCode)" }
-          $dir = Join-Path $env:LOCALAPPDATA "Programs\No1d Swap"
+          $dir = Join-Path $env:LOCALAPPDATA "Programs\no1d-swap"
           $exe = Join-Path $dir "No1d Swap.exe"
-          if (-not (Test-Path $exe)) { throw "the program is not at $exe after the install" }
+          if (-not (Test-Path $exe)) {
+            $found = @(Get-ChildItem (Join-Path $env:LOCALAPPDATA "Programs") -Recurse -Filter "No1d Swap.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+            throw "the program is not at $exe after the install (found: $(if ($found.Count) { $found -join '; ' } else { 'nothing' }))"
+          }
           "INSTALL_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "EXE=$exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Get-ChildItem $dir | Format-Table Name, Length
@@ -643,6 +650,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # A thrown error becomes an annotation, readable without a login.
+          trap { Write-Host "::error::$($_.Exception.Message)"; break }
           $out = Join-Path $env:RUNNER_TEMP "selftest.out"
           $err = Join-Path $env:RUNNER_TEMP "selftest.err"
           # One query of all listening sockets per sample, filtered by the program's process ids (one query per process is slow).
@@ -674,7 +683,7 @@ jobs:
           Write-Host "--- stdout"; Get-Content $out -ErrorAction SilentlyContinue
           Write-Host "--- stderr (first 40 lines)"; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -First 40
           node desktop/scripts/startup-check.js selftest --file $out --exit-code $code
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { throw "the self-test is not as required (exit code $code): $((Get-Content $out -ErrorAction SilentlyContinue | Select-Object -First 1))" }
           Write-Host "listening sockets looked at $samples times"
           if ($listening.Count -gt 0) { $listening | Select-Object -Unique | ForEach-Object { Write-Host "::error::$_" }; throw "the program opened a TCP port" }
           if ($samples -lt 5) { throw "the listening sockets were looked at only $samples times: the check proves nothing" }
@@ -684,17 +693,21 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # A thrown error becomes an annotation, readable without a login.
+          trap { Write-Host "::error::$($_.Exception.Message)"; break }
           node desktop/scripts/fuses-check.js --binary $env:EXE
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { throw "the installed program's fuses are not as required (fuses-check.js, see the log)" }
           node desktop/scripts/stage.js verify-packed --resources (Join-Path $env:INSTALL_DIR "resources") --manifest pkg/runtime-manifest.json
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { throw "the installed files are not what the manifest lists (stage.js verify-packed, see the log)" }
 
       - name: live.js under the program's binary and under Node must agree (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # A thrown error becomes an annotation, readable without a login.
+          trap { Write-Host "::error::$($_.Exception.Message)"; break }
           node desktop/scripts/startup-check.js parity --electron $env:EXE --live-js (Join-Path $env:INSTALL_DIR "resources\app.asar.unpacked\eth\scripts\live.js")
-          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($LASTEXITCODE -ne 0) { throw "live.js gave other answers under the program's binary than under Node (startup-check.js parity, see the log)" }
 
       # A run folder planted under the data folder must survive the uninstall. The uninstaller copies itself and finishes after it returns,
       # so the program file is waited for.
@@ -702,6 +715,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # A thrown error becomes an annotation, readable without a login.
+          trap { Write-Host "::error::$($_.Exception.Message)"; break }
           $planted = Join-Path $env:LOCALAPPDATA "No1d Swap\runs\x\run.json"
           New-Item -ItemType Directory -Force (Split-Path $planted) | Out-Null
           Set-Content -Path $planted -Value "{}"

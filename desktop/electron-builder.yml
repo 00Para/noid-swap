@@ -63,7 +63,8 @@ electronFuses:
   loadBrowserProcessSpecificV8Snapshot: false
   grantFileProtocolExtraPrivileges: false
 
-# Windows x64, NSIS, installed for the current user only (no administrator rights).
+# Windows x64, NSIS, installed for the current user only (no administrator rights), to %LOCALAPPDATA%\Programs\no1d-swap:
+# a one-click install for the current user names its folder after the package name of desktop/package.json, not the product name.
 win:
   target:
     - target: nsis
