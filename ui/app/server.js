@@ -1356,7 +1356,7 @@ async function offerPostRoute(program, swap, offers, p, body, swapSet) {
         const pre = prepareInvitation(program, swap);
         if (pre.err) return pre.err;
         v = await offers.republish({ dir, code: invitation.encodeCode(pre.settings, pre.key) });
-      } else v = await offers.setStatus({ dir, status });
+      } else v = await offers.setStatus({ dir, status, withdraw: status === "closed" && body.withdraw === true });
       try {
         swap.audit.append({ action: "offer-status", role: "bob", phase: "note", result: `offer ${status}: ${v.accepted} of ${v.total} relays took it` });
       } catch {

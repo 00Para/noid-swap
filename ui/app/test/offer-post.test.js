@@ -254,7 +254,7 @@ test("the posting key is fresh per offer, is not any swap key, never leaves the 
   assert.equal(pubs.size, 3);
   // the sidecar read back holds no swap material: the keys of the file are fixed
   const st = op.readState(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith("no1d-offer-")).map((n) => path.join(os.tmpdir(), n)).find((d) => fs.existsSync(path.join(d, op.FILE))));
-  assert.deepEqual(Object.keys(st).sort(), ["accepted", "created_at", "d", "error", "expires_at", "last_created_at", "mark_taken", "note", "pub", "published_status", "secret", "status", "v"].concat(st.attempted_at !== undefined ? ["attempted_at"] : []).sort());
+  assert.deepEqual(Object.keys(st).sort(), ["accepted", "created_at", "d", "error", "expires_at", "last_created_at", "mark_taken", "note", "pub", "published_status", "secret", "status", "v"].concat(st.ids !== undefined ? ["ids"] : []).concat(st.attempted_at !== undefined ? ["attempted_at"] : []).sort());
 });
 
 test("taken and closed notes replace the open one by (pubkey, d): the newest wins, the status notes carry no invitation and still pass the port", async () => {
@@ -485,11 +485,12 @@ test("routes: the preview sends nothing, the post needs its digest, the payload 
     assert.ok(!run.text.includes(st.secret), "the key is never in the page's payload");
     assert.ok(!/no1dinv1:/.test(JSON.stringify(run.body.program.offer_post)), "nor the code");
 
-    r = await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed" });
+    r = await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed", withdraw: true });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.offer.status, "closed");
-    assert.equal(pub.sent.length, 2);
+    assert.equal(pub.sent.length, 3, "the closed note, then the deletion request");
     assert.equal(one(pub.sent[1], "status"), "closed");
+    assert.equal(pub.sent[2].kind, 5);
     r = await api("POST", "/api/offerpost/status", { swap: b.id, status: "bogus" });
     assert.equal(r.status, 400);
     const notes = srv.swapSet.get(b.id).audit.all().filter((x) => /^offer-/.test(x.action));
@@ -675,4 +676,195 @@ test("low 3: a status note sent after the offer has expired does not extend its 
   assert.equal(v.expires_at, expires);
   assert.equal(v.expired, true);
   assert.ok(Number(pub.sent[1].tags.find((t) => t[0] === "expiration")[1]) > pub.sent[1].created_at, "the note itself still carries a valid expiry");
+});
+
+// ------------------------------------------------------------------------------------------------ the deletion request on Withdraw (NIP-09)
+const tagsOf = (ev, k) => ev.tags.filter((x) => x[0] === k);
+
+test("withdraw: after the closed note a kind 5 deletion is sent, signed with the posting key, naming every recorded note id and the offer's address", async () => {
+  const pub = stub();
+  const dir = tmpDir();
+  const clock = { now: NOW };
+  const { p } = poster(pub, clock);
+  const o = { code: CODE, note: "n", markTaken: true };
+  await p.post({ dir, ...o, confirm: confirmFor(o) });
+  clock.now = NOW + 5;
+  await p.setStatus({ dir, status: "taken" });
+  clock.now = NOW + 10;
+  const v = await p.setStatus({ dir, status: "closed", withdraw: true });
+  assert.equal(pub.sent.length, 4);
+  const [open, taken, closed, del] = pub.sent;
+  assert.equal(one(closed, "status"), "closed", "the closed note goes first");
+  assert.equal(del.kind, 5);
+  assert.equal(del.content, "withdrawn");
+  assert.equal(del.pubkey, open.pubkey, "the same posting key");
+  assert.ok(note.verifyEvent(del), "the signature verifies");
+  assert.deepEqual(tagsOf(del, "e").map((x) => x[1]).sort(), [open.id, taken.id, closed.id].sort());
+  assert.deepEqual(tagsOf(del, "a"), [["a", "32871:" + open.pubkey + ":" + one(open, "d")]]);
+  assert.equal(del.tags.length, 4);
+  assert.match(v.delete_line, /asked to delete the offer \(3 of 3 took the request\)\. They may keep copies\./);
+  const st = op.readState(dir);
+  assert.equal(st.ids.length, 3);
+  assert.equal(fs.statSync(path.join(dir, op.FILE)).size < 8192, true);
+});
+
+test("withdraw: the deletion is sent only on an explicit withdrawal, never with taken, never by the automatic close, and the id list has a cap", async () => {
+  const pub = stub();
+  const dir = tmpDir();
+  const clock = { now: NOW };
+  const { p } = poster(pub, clock);
+  const o = { code: CODE, note: "", markTaken: true };
+  await p.post({ dir, ...o, confirm: confirmFor(o) });
+  await p.setStatus({ dir, status: "taken" });
+  assert.equal(pub.sent.filter((e) => e.kind === 5).length, 0, "taken sends no deletion");
+  // the automatic close (an offer open on the board while the swap ended) is not a withdrawal by the person
+  const dir2 = tmpDir();
+  await p.post({ dir: dir2, ...o, confirm: confirmFor(o) });
+  assert.equal(p.autoClose({ dir: dir2 }), true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(pub.sent.filter((e) => e.kind === 5).length, 0, "the automatic close sends no deletion");
+  assert.equal(pub.sent.filter((e) => e.kind === 32871 && one(e, "status") === "closed").length, 1);
+  // the list of ids is capped
+  const dir3 = tmpDir();
+  await p.post({ dir: dir3, ...o, confirm: confirmFor(o) });
+  for (let i = 0; i < 30; i++) {
+    clock.now = NOW + 1 + i;
+    await p.setStatus({ dir: dir3, status: "taken" });
+  }
+  assert.equal(op.readState(dir3).ids.length, 20);
+});
+
+test("withdraw: a failed deletion never blocks or undoes the closed note and shows one short line; a throwing publisher is the same", async () => {
+  for (const mode of ["none", "throw"]) {
+    const sent = [];
+    const publish = async (ev) => {
+      sent.push(ev);
+      if (ev.kind === 5) {
+        if (mode === "throw") throw new Error("the relays could not be reached");
+        return { accepted: 0, total: 3 };
+      }
+      return { accepted: 3, total: 3 };
+    };
+    const clock = { now: NOW };
+    const p = op.createPoster({ publish, now: () => clock.now });
+    const dir = tmpDir();
+    const o = { code: CODE, note: "", markTaken: true };
+    await p.post({ dir, ...o, confirm: confirmFor(o) });
+    clock.now = NOW + 5;
+    const v = await p.setStatus({ dir, status: "closed", withdraw: true });
+    assert.equal(v.status, "closed");
+    assert.equal(v.published_status, "closed", "the closed note stands");
+    assert.equal(sent.at(-1).kind, 5);
+    assert.match(v.delete_line, /request to delete the offer was not accepted by any relay\. The offer is still marked withdrawn\./);
+  }
+});
+
+test("withdraw: the route asks for the deletion on a closed status only, and the card asks first and says that relays may keep copies", async () => {
+  const env = makeEnv();
+  try {
+    const pub = stub();
+    const b = bobWithKey(env);
+    const { api } = await env.start({ offerPublisher: pub });
+    const pv = (await api("POST", "/api/offerpost/preview", { swap: b.id, note: "", mark_taken: false })).body.preview;
+    await api("POST", "/api/offerpost/post", { swap: b.id, note: "", mark_taken: false, digest: pv.digest });
+    await api("POST", "/api/offerpost/status", { swap: b.id, status: "taken" });
+    assert.equal(pub.sent.filter((e) => e.kind === 5).length, 0);
+    await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed", withdraw: true });
+    assert.equal(pub.sent.filter((e) => e.kind === 5).length, 1);
+  } finally {
+    await env.cleanup();
+  }
+  const posted = { status: "open", pending: false, expired: false, accepted: 3, total: 3, expires_at: 2_000_000_000, mark_taken: false, delete_line: null };
+  const calls = [];
+  const page = await loadPage({
+    fetch: F.router({
+      "GET /api/program": () => ({ status: 200, body: F.prog() }),
+      "GET /api/run": () => ({ status: 200, body: F.runPayload("bob", { jobs: [F.job("setup"), F.job("wallet-setup-bob")], wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, key_address: BOB_ETH, status: null } } }, program: { swap: null, own_noid: null, offer_post: { can_post: false, why: null, network: "sepolia", relays: [...op.RELAYS], expiry_hours: 24, note_max: 140, posted } } }) }),
+      "POST /api/offerpost/status": (u, b) => (calls.push(b), { status: 200, body: { ok: true, offer: { status: "closed" } } }),
+    }),
+  });
+  const rows = page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"));
+  await rows[1].click();
+  await page.flush();
+  const btn = (id) => page.byId("pg-card").all((n) => n.attrs.id === id)[0];
+  await btn("offer-withdraw").click();
+  await page.flush();
+  assert.deepEqual(calls, [], "the first click only asks");
+  assert.match(textOf(page.byId("pg-card")), /asks the three public relays to delete it\. Relays may keep copies\./);
+  await btn("offer-withdraw-confirm").click();
+  await page.flush();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].status, "closed");
+});
+
+// ------------------------------------------------------------------------------------------------ the withdraw flag and the confirm line (review points)
+test("withdraw: the deletion needs the explicit flag the confirm click sends; a retry of a pending closed note and a bare closed status send none", async () => {
+  const env = makeEnv();
+  try {
+    const pub = stub();
+    const b = bobWithKey(env);
+    const { api } = await env.start({ offerPublisher: pub });
+    const pv = (await api("POST", "/api/offerpost/preview", { swap: b.id, note: "", mark_taken: false })).body.preview;
+    await api("POST", "/api/offerpost/post", { swap: b.id, note: "", mark_taken: false, digest: pv.digest });
+    await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed" });
+    assert.equal(pub.sent.filter((e) => e.kind === 5).length, 0, "closed without the flag: no deletion");
+    await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed", withdraw: "yes" });
+    assert.equal(pub.sent.filter((e) => e.kind === 5).length, 0, "only the boolean true counts");
+    await api("POST", "/api/offerpost/status", { swap: b.id, status: "closed", withdraw: true });
+    assert.equal(pub.sent.filter((e) => e.kind === 5).length, 1);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+async function offerCardPage(getPosted, calls) {
+  const page = await loadPage({
+    fetch: F.router({
+      "GET /api/program": () => ({ status: 200, body: F.prog() }),
+      "GET /api/run": () => ({ status: 200, body: F.runPayload("bob", { jobs: [F.job("setup"), F.job("wallet-setup-bob")], wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, key_address: BOB_ETH, status: null } } }, program: { swap: null, own_noid: null, offer_post: { can_post: false, why: null, network: "sepolia", relays: [...op.RELAYS], expiry_hours: 24, note_max: 140, posted: getPosted() } } }) }),
+      "POST /api/offerpost/status": (u, b) => (calls.push(b), { status: 200, body: { ok: true, offer: { status: "closed" } } }),
+    }),
+  });
+  const rows = page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"));
+  await rows[1].click();
+  await page.flush();
+  return page;
+}
+
+test("the card: Try again on a pending closed note sends no withdraw flag; the confirm click sends it", async () => {
+  const calls = [];
+  let posted = { status: "closed", published_status: "open", pending: true, expired: false, accepted: 0, total: 3, expires_at: 2_000_000_000, mark_taken: false, delete_line: null, error: "x" };
+  const page = await offerCardPage(() => posted, calls);
+  const btn = (id) => page.byId("pg-card").all((n) => n.attrs.id === id)[0];
+  await btn("offer-again").click();
+  await page.flush();
+  assert.deepEqual(calls, [{ swap: F.SWAP_B, status: "closed" }], "a retry carries no flag");
+  posted = { ...posted, status: "open", published_status: "open", pending: false, accepted: 3, error: null };
+  await page.intervals[0].f();
+  await page.flush();
+  await btn("offer-withdraw").click();
+  await page.flush();
+  await btn("offer-withdraw-confirm").click();
+  await page.flush();
+  assert.deepEqual(calls[1], { swap: F.SWAP_B, status: "closed", withdraw: true });
+});
+
+test("the card: the confirm line goes with its buttons when the offer stops being open (marked taken while it shows)", async () => {
+  const calls = [];
+  let posted = { status: "open", published_status: "open", pending: false, expired: false, accepted: 3, total: 3, expires_at: 2_000_000_000, mark_taken: true, delete_line: null };
+  const page = await offerCardPage(() => posted, calls);
+  const text = () => textOf(page.byId("pg-card"));
+  await page.byId("pg-card").all((n) => n.attrs.id === "offer-withdraw")[0].click();
+  await page.flush();
+  assert.match(text(), /asks the three public relays to delete it/);
+  posted = { ...posted, status: "taken", published_status: "taken" };
+  await page.intervals[0].f();
+  await page.flush();
+  assert.doesNotMatch(text(), /asks the three public relays to delete it/);
+  // and it does not come back when the state is open again later
+  posted = { ...posted, status: "open", published_status: "open" };
+  await page.intervals[0].f();
+  await page.flush();
+  assert.doesNotMatch(text(), /asks the three public relays to delete it/);
+  assert.ok(page.byId("pg-card").all((n) => n.attrs.id === "offer-withdraw")[0], "the plain button is back");
 });

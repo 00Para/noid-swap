@@ -29,6 +29,8 @@ const invitation = require("./invitation");
 const { PINNED_CONTRACT } = require("./swapform");
 
 const OFFER_KIND = 32871;
+const DELETE_KIND = 5; // NIP-09, sent only when the person withdraws an offer
+const MAX_IDS = 20; // the ids of the notes this key published for this offer, kept for the deletion
 const BOARD_TAG = "no1d-swap-web-v1";
 const RELAYS = Object.freeze(["wss://nos.lol", "wss://relay.primal.net", "wss://relay.snort.social"]);
 const MIN_POW_BITS = 16;
@@ -169,6 +171,15 @@ function buildEvent({ secret, d, status, code, note: cleanNoteText, now, expires
   return ev;
 }
 
+/** The NIP-09 deletion of this offer: kind 5, an "e" tag for every note id recorded and the "a" tag of the addressable offer, signed with the same posting key. Asks; a relay may keep copies. */
+function buildDeleteEvent({ secret, pub, d, ids, now }) {
+  if (!/^[0-9a-f]{32}$/.test(d)) no(500, "the offer's id is not 32 hex characters");
+  const tags = [...ids.filter((x) => /^[0-9a-f]{64}$/.test(x)).map((x) => ["e", x]), ["a", `${OFFER_KIND}:${pub}:${d}`]];
+  const ev = note.finalizeEvent({ kind: DELETE_KIND, created_at: now, tags, content: "withdrawn" }, secret);
+  if (Buffer.byteLength(JSON.stringify(ev), "utf8") > EVENT_MAX_BYTES) no(500, "the deletion is larger than expected");
+  return ev;
+}
+
 // ------------------------------------------------------------------------------------------------ the sidecar
 function fileOf(dir) {
   return path.join(dir, FILE);
@@ -203,6 +214,13 @@ function writeState(dir, st) {
   }
 }
 
+/** The short line about the deletion request of a withdrawn offer, or null while none was made. */
+function deleteLine(st) {
+  if (st.delete_accepted > 0) return `The relays were asked to delete the offer (${st.delete_accepted} of ${RELAYS.length} took the request). They may keep copies.`;
+  if (st.delete_error) return "The request to delete the offer was not accepted by any relay. The offer is still marked withdrawn.";
+  return null;
+}
+
 /** The page's view of a stored state: no key, no code. */
 function viewOf(st, now) {
   if (!st) return null;
@@ -218,6 +236,7 @@ function viewOf(st, now) {
     error: st.error || null,
     note: st.note || "",
     pending: st.status !== (st.published_status || null),
+    delete_line: st.status === "closed" ? deleteLine(st) : null,
   };
 }
 
@@ -242,7 +261,8 @@ function createPoster(o) {
       err = (e && e.message ? String(e.message) : "the relays could not be reached").slice(0, 120);
     }
     const accepted = res && Number.isInteger(res.accepted) ? res.accepted : 0;
-    const next = { ...st, last_created_at: ev.created_at, accepted, error: accepted > 0 ? null : err || "No relay accepted the offer.", attempted_at: nowS() };
+    const ids = [...(Array.isArray(st.ids) ? st.ids : []).filter((x) => typeof x === "string"), ...(typeof ev.id === "string" ? [ev.id] : [])].filter((x, i, a) => a.indexOf(x) === i).slice(-MAX_IDS);
+    const next = { ...st, ids, last_created_at: ev.created_at, accepted, error: accepted > 0 ? null : err || "No relay accepted the offer.", attempted_at: nowS() };
     if (accepted > 0) next.published_status = st.status;
     writeState(dir, next);
     return next;
@@ -275,7 +295,7 @@ function createPoster(o) {
   }
 
   /** A newer note with the same key and `d`: taken or closed (also the retry of one that no relay accepted). */
-  function setStatus({ dir, status }) {
+  function setStatus({ dir, status, withdraw }) {
     return guard(dir, async () => {
       if (status !== "taken" && status !== "closed") no(400, "status must be taken or closed");
       const old = readState(dir);
@@ -287,7 +307,26 @@ function createPoster(o) {
       const st = { ...old, status }; // the shown life stays the open note's: a status note never extends it
       const secret = Buffer.from(old.secret, "hex");
       const ev = buildEvent({ secret, d: old.d, status, now: createdAt, expiresAt });
-      const out = await send(dir, st, ev);
+      let out = await send(dir, st, ev);
+      // an explicit withdrawal (the person's click, never "taken", never automatic) also asks the relays to delete the offer; a failure here touches nothing else
+      if (status === "closed" && withdraw === true) {
+        try {
+          const del = buildDeleteEvent({ secret, pub: old.pub, d: old.d, ids: out.ids || [], now: Math.max(nowS(), createdAt) });
+          let res = null;
+          let derr = null;
+          try {
+            res = await publish(del);
+          } catch (e) {
+            derr = (e && e.message ? String(e.message) : "the relays could not be reached").slice(0, 120);
+          }
+          const dacc = res && Number.isInteger(res.accepted) ? res.accepted : 0;
+          const next = { ...out, delete_accepted: dacc, delete_error: dacc > 0 ? null : derr || "No relay accepted the deletion." };
+          writeState(dir, next);
+          out = next;
+        } catch {
+          /* the deletion is a courtesy: the closed note stands */
+        }
+      }
       return viewOf(out, nowS());
     });
   }
@@ -360,4 +399,4 @@ function relayPublisher(deps = {}) {
   };
 }
 
-module.exports = { OFFER_KIND, BOARD_TAG, RELAYS, MIN_POW_BITS, EXPIRY_S, NOTE_MAX, FILE, SPECS, OfferPostError, sanitizeDisplayText, cleanNote, termsOf, previewOf, digestOf, buildEvent, readState, viewOf, createPoster, relayPublisher };
+module.exports = { OFFER_KIND, BOARD_TAG, RELAYS, MIN_POW_BITS, EXPIRY_S, NOTE_MAX, FILE, SPECS, OfferPostError, sanitizeDisplayText, cleanNote, termsOf, previewOf, digestOf, buildEvent, buildDeleteEvent, DELETE_KIND, readState, viewOf, createPoster, relayPublisher };

@@ -219,6 +219,7 @@
         li("For a real swap on Ethereum mainnet: real ETH and real NOID, at most 1 ETH and 20,000 NOID per swap. Start small. For a test swap: Sepolia test ETH in that wallet. It has no value and is free from a Sepolia faucet; search for \"Sepolia faucet\", as they change often. If you sell NOID, a little is enough: it pays one fee."),
         li("If you sell NOID: the NOID to swap and a little more for the fee, in the Parano1d wallet app. If you sell ETH: the ETH to swap and a little more for two fees."),
         li("The amounts, agreed with the other person. The one who sells ETH makes the swap first and sends the other an invitation file."),
+        li("To find a partner: offers are posted and seen on the offers board, https://no1dswap.github.io/. Only the one who sells ETH (Bob) posts, with Post an offer on this page and then Post to the offers board on the swap card. The one who sells NOID (Alice) copies a code from the board and pastes it into New swap."),
         li("About an hour with both computers on and awake.")
       )
     );
@@ -275,7 +276,7 @@
     const v = vaultNotes(prog);
     const noKey = !(H.state && H.state.token);
     const root = el("section", { class: "pg-list", "aria-labelledby": "pg-h-swaps" });
-    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn", id: "pg-practice", onclick: () => h.go("practice") }, "Practice swap"), el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
+    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn", id: "pg-practice", onclick: () => h.go("practice") }, "Practice swap"), el("button", { type: "button", class: "btn", id: "pg-post-offer", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new", { offer: true }) }, "Post an offer"), el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
     if (noKey) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: KEY_LOST_PROGRAM }));
     else if (!ns.ok) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: ns.why || "A new swap cannot start now." }));
     const notice = noticeBox(prog && prog.update);
@@ -496,6 +497,7 @@
   const PIN_HINT = "The program's own contract on this network. Change it only if you and the other person agreed on another one; the program checks the contract's code before any lock.";
   const NO_PIN_HINT = "This network has no contract of the program's own: type the one you agreed on.";
   const INVITATION_NOTE = "Filled from Bob's invitation. Check every value against what you agreed with Bob; nothing is made until you press Make the swap.";
+  const OFFER_LINE = "You have ETH and want NOID. Fill this in; then press Post to the offers board on your swap card.";
   const CONTRACT_NOTE = "This contract is not the program's own for this network. Use it only if you agreed on it with Bob.";
   const ETH_MAINNET_HINT = "Enter your Ethereum mainnet address. The one saved in Settings was used on a test network, or its network is not known.";
   const ETH_PAYOUT_HINT = {
@@ -708,6 +710,19 @@
     }
     applyRole("alice");
     bobNoid.control.value = prefillBobNoid("alice");
+    // "Post an offer" on the start page opens this same form with the side set to Bob; the line goes when the side is changed
+    const offerLine = el("p", { class: "plain", id: "ns-offer-line", role: "note", hidden: true, text: OFFER_LINE });
+    if (h && h.offer === true) {
+      role.control.value = "bob";
+      curRole = "bob";
+      applyRole("bob");
+      bobNoid.control.value = prefillBobNoid("bob");
+      offerLine.hidden = false;
+      role.box.appendChild(offerLine);
+      role.control.addEventListener("change", () => {
+        offerLine.hidden = role.control.value !== "bob";
+      });
+    }
 
     const setErrors = (errors) => {
       const left = placeErrors(errors, by, general);
@@ -1346,7 +1361,26 @@
   };
   const offerPreview = (swap, note, markTaken) => offerCall("/api/offerpost/preview", { swap, note, mark_taken: markTaken === true });
   const offerPost = (swap, note, markTaken, digest) => offerCall("/api/offerpost/post", { swap, note, mark_taken: markTaken === true, digest });
-  const offerStatus = (swap, status) => offerCall("/api/offerpost/status", { swap, status });
+  const offerStatus = (swap, status, withdraw) => offerCall("/api/offerpost/status", withdraw === true ? { swap, status, withdraw: true } : { swap, status });
+  // swaps begun with "Post an offer": their card puts the offers-board block first until an offer is posted (a memory of this page, kept for the session)
+  const offerFirst = new Set();
+  const OFFER_KEY = "no1d.offerFirst";
+  const readOfferKeys = () => {
+    try {
+      const v = JSON.parse(window.sessionStorage.getItem(OFFER_KEY) || "[]");
+      return Array.isArray(v) ? v.filter((x) => typeof x === "string").slice(-50) : [];
+    } catch {
+      return [];
+    }
+  };
+  const markOfferFirst = (id) => {
+    if (typeof id !== "string" || !id) return;
+    offerFirst.add(id);
+    try {
+      window.sessionStorage.setItem(OFFER_KEY, JSON.stringify([...new Set([...readOfferKeys(), id])].slice(-50)));
+    } catch {}
+  };
+  const isOfferFirst = (id) => typeof id === "string" && !!id && (offerFirst.has(id) || readOfferKeys().includes(id));
   async function loadSettings() {
     const r = await request("GET", "/api/settings");
     // R3: the payout history comes beside the settings; it is kept here for the new-swap form that is built next (it is never part of the settings, so it is never posted back)
@@ -1381,6 +1415,8 @@
     offerPreview,
     offerPost,
     offerStatus,
+    markOfferFirst,
+    isOfferFirst,
     loadSettings,
     request,
     SETTINGS_FIELDS,

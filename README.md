@@ -11,6 +11,8 @@ logs of every real run.
 
 Documentation: https://00para.github.io/noid-swap-docs/
 
+**What's new in 0.2.1:** a "Post an offer" button on the start page, and Withdraw offer now asks the relays to delete the offer.
+
 **What's new in 0.2.0:**
 
 - Back up a swap and restore it on another computer (sealed file, new approval, one computer only).

@@ -1168,6 +1168,7 @@ body.program.on-practice .foot { display: none; }
 .pr-opt input { flex: none; margin: 4px 0 0; }
 .pr-opt .t { display: grid; gap: 2px; min-width: 0; }
 .pr-wait .left { font-family: var(--mono); }
+.sc-offer-first { margin-top: 0; margin-bottom: var(--s3); padding: var(--s3); border: 1px solid var(--rule-2); border-left: 3px solid var(--accent, currentColor); border-radius: 6px; }
 .sc-backup { margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--rule); display: grid; gap: var(--s2); }
 .sc-backup-head { font-size: 14px; font-weight: 600; margin: 0; }
 .sc-backup-msg { font-size: 13px; color: var(--warn); }

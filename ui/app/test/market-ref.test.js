@@ -282,7 +282,16 @@ test("static: the fetcher is the only module of this feature that touches the ne
   assert.deepEqual([...fe.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]).sort(), ["./marketref", "https"]);
   assert.ok(!/writeFile|appendFile|createWriteStream|setHeader|cookie|User-Agent/i.test(fe));
   // the page never fetches the snapshot itself: its address is in no page file
-  for (const f of ["program.js", "actions.js", "operator.js", "index.html"]) assert.ok(!/no1dswap\.github\.io|market\.json/.test(fs.readFileSync(path.join(__dirname, "..", f), "utf8")), f);
+  // (program.js names the offers board in one line of the first-start guide, as plain text: the market file and any fetch of the site stay out of it)
+  for (const f of ["program.js", "actions.js", "operator.js", "index.html"]) {
+    const src = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+    assert.ok(!/market\.json/.test(src), f);
+    // program.js may name the board once, in the guide line; with that exact string removed the host must be gone (so a later fetch from it fails here)
+    const GUIDE = "offers are posted and seen on the offers board, https://no1dswap.github.io/. Only the one";
+    const rest = f === "program.js" ? src.replace(GUIDE, "") : src;
+    if (f === "program.js") assert.ok(src.includes(GUIDE), "the guide line is there");
+    assert.ok(!/no1dswap\.github\.io/.test(rest), f);
+  }
 });
 
 // ------------------------------------------------------------------ the server

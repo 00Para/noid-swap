@@ -1144,7 +1144,10 @@
   const offerUi = new Map();
   const OFFER_SAY = "Your offer and a new posting key go to three public relays. The relays see your IP address. Anyone can read it. Nothing secret is sent.";
 
+  let offerFirstNow = false;
+  const WITHDRAW_SAY = "This marks your offer withdrawn and asks the three public relays to delete it. Relays may keep copies. Nothing secret is sent.";
   function offerBlock(payload) {
+    offerFirstNow = false;
     const o = payload && payload.program && payload.program.offer_post && typeof payload.program.offer_post === "object" ? payload.program.offer_post : null;
     const PG = window.NoidProgram;
     if (!o || !PG || typeof PG.offerPreview !== "function") return null;
@@ -1152,7 +1155,10 @@
     const noKey = !(H.state && H.state.token);
     if (!offerUi.has(swapId)) offerUi.set(swapId, { note: "", mark: true, preview: null, busy: false, msg: "" });
     const st = offerUi.get(swapId);
-    const wrap = H.el("section", { class: "sc-backup sc-offer", id: "sc-offer", "aria-label": "Offers board" });
+    // a swap begun with "Post an offer" and not yet posted: the block is drawn first and highlighted
+    const first = typeof PG.isOfferFirst === "function" && PG.isOfferFirst(swapId) && o.can_post === true && !(o.posted && !o.posted.expired);
+    offerFirstNow = first;
+    const wrap = H.el("section", { class: "sc-backup sc-offer" + (first ? " sc-offer-first" : ""), id: "sc-offer", "aria-label": "Offers board" });
     const hm = (sec) => fmtBackupClock(new Date(sec * 1000).toISOString());
     const tested = o.network === "sepolia" ? " (a test network)" : "";
 
@@ -1196,16 +1202,36 @@
           });
           row.appendChild(again);
         }
-        if (p.status === "open" || (p.pending && p.status !== "closed")) {
-          const w = H.el("button", { type: "button", class: "btn sm", id: "offer-withdraw", disabled: noKey || st.busy ? true : null }, "Withdraw offer");
-          w.addEventListener("click", async () => {
-            await run(() => PG.offerStatus(swapId, "closed"));
-            await after();
-          });
-          row.appendChild(w);
+        const openBranch = p.status === "open" || (p.pending && p.status !== "closed");
+        if (!openBranch) st.confirmWithdraw = false;
+        if (openBranch) {
+          if (st.confirmWithdraw) {
+            wrap.appendChild(H.el("p", { class: "plain stop-rule", id: "offer-withdraw-say", text: WITHDRAW_SAY }));
+            const yes = H.el("button", { type: "button", class: "btn sm primary", id: "offer-withdraw-confirm", disabled: noKey || st.busy ? true : null }, "Withdraw offer");
+            yes.addEventListener("click", async () => {
+              st.confirmWithdraw = false;
+              await run(() => PG.offerStatus(swapId, "closed", true));
+              await after();
+            });
+            const back = H.el("button", { type: "button", class: "btn sm ghost", id: "offer-withdraw-back", disabled: st.busy ? true : null }, "Back");
+            back.addEventListener("click", () => {
+              st.confirmWithdraw = false;
+              draw();
+            });
+            row.appendChild(yes);
+            row.appendChild(back);
+          } else {
+            const w = H.el("button", { type: "button", class: "btn sm", id: "offer-withdraw", disabled: noKey || st.busy ? true : null }, "Withdraw offer");
+            w.addEventListener("click", () => {
+              st.confirmWithdraw = true;
+              draw();
+            });
+            row.appendChild(w);
+          }
         }
         if (row.children.length) wrap.appendChild(row);
         if (p.status === "open" && !p.pending) wrap.appendChild(H.el("p", { class: "plain dim", text: p.mark_taken ? "The program marks it taken when Alice's funding is seen." : "It is not marked taken by itself: withdraw it when you have your partner." }));
+        if (p.delete_line) wrap.appendChild(H.el("p", { class: "plain dim", text: p.delete_line }));
         if (st.msg) wrap.appendChild(H.el("p", { class: "attn", role: "alert", text: st.msg }));
         return;
       }
@@ -1215,6 +1241,7 @@
         return;
       }
       wrap.appendChild(H.el("h3", { class: "sc-backup-head", text: `Post to the offers board${tested}` }));
+      if (first && !st.preview) wrap.appendChild(H.el("p", { class: "plain", text: "You began this swap with Post an offer. Press the button below to post it." }));
       if (!st.preview) {
         wrap.appendChild(H.el("p", { class: "plain", text: "Optional. The public offers board (no1dswap.github.io) lists offers so that a counterparty can find yours. You do not need it if you already have someone to swap with." }));
         wrap.appendChild(H.el("p", { class: "plain dim", text: "This uses the network, and only when you confirm on the next step." }));
@@ -1506,11 +1533,19 @@
     }
     if (m.kind === "done" && m.done) root.appendChild(doneBlock(m.done));
     const act = payload && payload.actions ? actionArea(m, payload) : null;
+    const ob = payload && payload.actions ? offerBlock(payload) : null;
+    const obFirst = !!ob && offerFirstNow;
+    if (ob && obFirst) root.appendChild(ob);
     if (act) root.appendChild(act);
     const bk = payload && payload.actions ? backupBlock(payload) : null;
     if (bk) root.appendChild(bk);
-    const ob = payload && payload.actions ? offerBlock(payload) : null;
-    if (ob) root.appendChild(ob);
+    if (ob && !obFirst) root.appendChild(ob);
+    // once per swap, bring the highlighted block into view
+    const ost = obFirst ? offerUi.get((H.state && H.state.swap) || "") : null;
+    if (ost && !ost.scrolled) {
+      ost.scrolled = true;
+      if (typeof ob.scrollIntoView === "function") Promise.resolve().then(() => ob.scrollIntoView({ block: "nearest" }));
+    }
     const rc = recordCloseArea(m, payload);
     if (rc) root.appendChild(rc);
     const foot = footLine(m);

@@ -15,10 +15,11 @@ const ITEMS = [
   /^For a real swap on Ethereum mainnet: real ETH and real NOID, at most 1 ETH and 20,000 NOID per swap\. Start small\. For a test swap: Sepolia test ETH in that wallet\. It has no value and is free from a Sepolia faucet; search for "Sepolia faucet", as they change often\. If you sell NOID, a little is enough: it pays one fee\.$/,
   /^If you sell NOID: the NOID to swap and a little more for the fee, in the Parano1d wallet app\. If you sell ETH: the ETH to swap and a little more for two fees\.$/,
   /^The amounts, agreed with the other person\. The one who sells ETH makes the swap first and sends the other an invitation file\.$/,
+  /^To find a partner: offers are posted and seen on the offers board, https:\/\/no1dswap\.github\.io\/\./,
   /^About an hour with both computers on and awake\.$/,
 ];
 
-test("guide: an empty list shows the heading, the intro, six numbered steps and the closing line", async () => {
+test("guide: an empty list shows the heading, the intro, seven numbered steps and the closing line", async () => {
   const page = await listPage();
   const root = page.byId("pg-root");
   const guide = root.all((n) => n.className.split(/\s+/).includes("pg-guide"))[0];
@@ -28,7 +29,7 @@ test("guide: an empty list shows the heading, the intro, six numbered steps and 
   const ol = guide.querySelector("ol");
   assert.ok(ol, "a real ordered list");
   const items = ol.children.map((li) => textOf(li).replace(/\s+/g, " ").trim());
-  assert.equal(items.length, 6);
+  assert.equal(items.length, 7);
   ITEMS.forEach((re, i) => assert.match(items[i], re, `step ${i + 1}`));
   const emptyBox = root.all((n) => n.className.split(/\s+/).includes("pg-empty"))[0];
   assert.ok(emptyBox, "the empty state is drawn above the guide");
@@ -76,7 +77,8 @@ test("guide: no link anywhere in it (no anchor, no address)", async () => {
   const page = await listPage();
   const guide = page.byId("pg-root").all((n) => n.className.split(/\s+/).includes("pg-guide"))[0];
   assert.equal(guide.all((n) => n.tag === "a" || Object.prototype.hasOwnProperty.call(n.attrs, "href")).length, 0);
-  assert.doesNotMatch(textOf(guide), /https?:\/\/|www\./i);
+  // the offers board address is named as plain text (one line says where offers are posted); nothing else
+  assert.doesNotMatch(textOf(guide).replace("https://no1dswap.github.io/", ""), /https?:\/\/|www\./i);
 });
 
 test("guide: a list with a swap on it has no guide and no empty-list line", async () => {

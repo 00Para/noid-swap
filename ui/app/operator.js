@@ -1361,7 +1361,7 @@
     }
   }
 
-  async function goScreen(screen) {
+  async function goScreen(screen, opts) {
     state.pgMsg = null;
     state.pgForm = null;
     leaveSwap();
@@ -1372,8 +1372,11 @@
       const ns = (state.program && state.program.new_swap_allowed) || { ok: false };
       if (ns.ok) {
         const st = await PG.loadSettings(); // only to fill the form: a failure leaves the fields empty
+        const fromOffer = !!(opts && opts.offer === true);
         state.pgForm = PG.newSwapForm(state.program, st.ok ? st.settings : null, {
+          offer: fromOffer,
           created: async (id) => {
+            if (fromOffer && typeof PG.markOfferFirst === "function") PG.markOfferFirst(id);
             await load(true);
             await openSwap(id);
           },
