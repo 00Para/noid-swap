@@ -1670,7 +1670,10 @@ impl HashlockRegistry {
             f.sync_all().map_err(io_err)?;
             drop(f);
             std::fs::rename(&tmp, &self.path).map_err(io_err)?;
-            sync_dir(&self.path).map_err(io_err)
+            // the directory entry is only durable once the directory is synced (the function exists on unix only, as at the other renames)
+            #[cfg(unix)]
+            sync_dir(parent_dir(&self.path)).map_err(io_err)?;
+            Ok(())
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
