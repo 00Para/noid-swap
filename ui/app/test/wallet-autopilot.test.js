@@ -381,6 +381,48 @@ test("rule 8: a sweep the tool refuses ('lock still open', 'instance not closed'
   }
 });
 
+test("rule 8, an empty NOID wallet (rehearsal 4.10): the NOID sweep's refused dry run waits on the sweep timer and the Ethereum sweep goes on, with no stop", () => {
+  const A = makeWallet({ role: "alice", behaviour: { wallet: { sweepNoidDryExit: 3 } } });
+  try {
+    A.loop("alice");
+    A.runner.walletPoll();
+    A.tick("alice", "fund_noid");
+    assert.equal(A.approve("alice", { statements: OK_STATEMENTS }).status, 200);
+    A.adv(10000);
+    // the funding spent the wallet's one coin with no change, the swap ended: the watch loop has stopped, so no newer tick comes by itself
+    put(A, "alice", endedTick("done"));
+    A.loop("alice");
+    steps(A, 8);
+    assert.ok(dry(A, "wallet-sweep.sh", "noid --dry-run") >= 1, "the NOID sweep's dry run was tried");
+    assert.equal(real(A, "wallet-sweep.sh", "noid"), 0, "a NOID sweep whose dry run was refused is never sent");
+    assert.equal(dry(A, "wallet-sweep.sh", "eth alice --dry-run"), 1, "the Ethereum sweep's dry run ran");
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "the Ethereum sweep went on");
+    assert.deepEqual(needs(A, "alice"), [], "no stop");
+    assert.equal(A.ap.refusals.get("send-sweep-noid"), undefined, "not counted as a refusal");
+    // within 5 minutes the NOID sweep's dry run is not tried again, even on new ticks; nothing else is sent
+    const tried = dry(A, "wallet-sweep.sh", "noid --dry-run");
+    for (let i = 0; i < 3; i++) {
+      A.adv(60000);
+      put(A, "alice", endedTick("done"));
+      A.loop("alice");
+      steps(A, 3);
+    }
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), tried);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "the Ethereum sweep is not sent twice");
+    assert.match(A.ap.state.alice.waiting_reason || "", /may be nothing left to sweep/);
+    // after 5 minutes it is tried again, on a newer tick, and still never sent
+    A.adv(300000);
+    put(A, "alice", endedTick("done"));
+    A.loop("alice");
+    steps(A, 4);
+    assert.ok(dry(A, "wallet-sweep.sh", "noid --dry-run") > tried, "tried again after the timer");
+    assert.equal(real(A, "wallet-sweep.sh", "noid"), 0);
+    assert.deepEqual(needs(A, "alice"), []);
+  } finally {
+    A.cleanup();
+  }
+});
+
 test("an Ethereum sweep that live.js broadcast and did not finish (exit 6 without the safe-to-repeat line) is a stop: it may have been sent and is not re-run", () => {
   const A = makeWallet({ role: "alice", behaviour: { wallet: { exits: { "wallet-sweep.sh:eth alice": 6 } } } });
   try {

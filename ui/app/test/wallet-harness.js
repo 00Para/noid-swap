@@ -118,6 +118,8 @@ function makeWallet(o = {}) {
       if (kind === "noid") {
         const d = { target: WNP, payout: WNP, settings: WNP, amount: 100000, ...wb.sweepDry };
         const head = [`wallet-sweep: payout_swap_file ${d.payout}`, `wallet-sweep: payout_settings ${d.settings}`];
+        // an empty swap wallet: the tool refuses the dry run itself (swap-cli wallet sweep, exit 3), as in rehearsal 4.10
+        if (dry && wb.sweepNoidDryExit) return done(wb.sweepNoidDryExit, "error: refused: the wallet holds no plain coin worth more than the fee of spending it\n");
         if (dry) return done(0, [...head, "wallet-sweep: outcome dry_run", `wallet-sweep: target ${d.target}`, `wallet-sweep: amount_micronoid ${d.amount}`, "wallet-sweep: fee_micronoid 6000", "wallet-sweep: inputs 1", `wallet-sweep: txid ${WTX}`, "wallet-sweep: summary x", `dry run: would sweep ${d.amount} micro-NOID once to the payout address; nothing was written or sent`].join("\n") + "\n");
         if (code === 0) write("wallet-swept-noid.marker", `2026-11-17T10:00:00Z\ntxid ${WTX}\n`);
         const outcome = code === 0 ? "sent" : code === 6 ? "maybe_sent" : code === 4 ? "hold" : null;

@@ -823,7 +823,7 @@ class Autopilot {
       const waiting = AUTO_ORDER.map((id) => SPEND_TABLE[id]).find((s) => s.role === role && ctxs.get(s.id).relevant);
       if (waiting) {
         st.doing = `waiting: ${waiting.label}`;
-        st.waiting_reason = `The tool refused it (it is not ready yet); it is tried again in ${Math.max(1, Math.ceil(((this.timedWait.get(waiting.id) || 0) - nowMs) / 60000))} min.`;
+        st.waiting_reason = `The tool did not accept this yet (it may not be ready, or there may be nothing left to sweep). It is tried again in ${Math.max(1, Math.ceil(((this.timedWait.get(waiting.id) || 0) - nowMs) / 60000))} min.`;
         return false;
       }
       st.doing = "waiting for the engine to offer your next step";
@@ -872,6 +872,9 @@ class Autopilot {
       const tickNow = typeof ctx.tick.now === "number" ? ctx.tick.now : null;
       const mark = this.dryMark.get(spend.id);
       if (failed && mark !== undefined && tickNow !== null && tickNow <= mark) {
+        // a sweep whose dry run failed (an empty NOID wallet: "no plain coin worth more than the fee of spending it") waits on the sweep timer like a
+        // refused sweep, so the next sweep is not held back behind it: rehearsal 4.10 left Alice's ETH in her key because the NOID sweep came first
+        if (SWEEP_IDS.has(spend.id)) this.timedWait.set(spend.id, nowMs + SWEEP_RETRY_MS);
         st.doing = `waiting: ${spend.label}`;
         st.waiting_reason = `${fr.ignored[0].text} The next dry run waits for a newer tick.`;
         return false;
