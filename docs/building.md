@@ -264,6 +264,11 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   printed as its `failed` line with no dialog, every stage is written to stderr with its time, the line comes before the stop and
   the stop is bounded (`desktop/README.md`, "Self-test"). The step waits 240 seconds and, when the program does not finish, shows
   its output and names the last stage it reached in the annotation, on both systems.
+- Run 11 (`d09975e`): the self-test now ended by itself, with exit code 1, but `selftest.out` held no line at all, and the stderr
+  lines are in the log only. The output of a packed GUI program may not reach a redirect on Windows. The self-test now also writes
+  its stage lines and its line to the file `NO1D_SELFTEST_REPORT` names, the Windows step judges the result from that file, and both
+  of its errors carry the last stage, the line and the number of lines that reached stdout. An error no step handled, which before
+  ended the self-test with code 1 and no words, is now its line.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

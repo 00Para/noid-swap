@@ -228,6 +228,15 @@ test("start-up test: sha256 check first, the self-test, the fuses, the installed
   assert.match(winSelf, /AddSeconds\(240\)/);
   assert.ok(winSelf.indexOf("Get-Content $out") < winSelf.indexOf("did not finish within 240 seconds"), "Windows: the output is printed before the timeout's error");
   assert.match(winSelf, /Where-Object \{ \$_ -like "self-test: \*" \}/);
+  // Windows: the program also writes its lines to a report file, and the result is judged from it (build run 11: exit code 1, selftest.out empty);
+  // both errors carry the last stage, the line and how many lines reached stdout
+  assert.match(winSelf, /\$env:NO1D_SELFTEST_REPORT = \$report/);
+  assert.ok(winSelf.indexOf("$env:NO1D_SELFTEST_REPORT") < winSelf.indexOf("Start-Process"), "the report file is named before the program starts");
+  assert.match(winSelf, /startup-check\.js selftest --file \$report --exit-code \$code/);
+  assert.ok(!/startup-check\.js selftest --file \$out/.test(winSelf));
+  assert.match(winSelf, /did not finish within 240 seconds \(\$summary\)/);
+  assert.match(winSelf, /is not as required \(exit code \$code; \$summary\)/);
+  assert.match(winSelf, /stdout lines: \$outLines/);
   const macSelf = steps[idx(/Start the app with --self-test \(macOS\)/)].run;
   assert.match(macSelf, /seq 1 240/);
   const macTimeout = macSelf.slice(macSelf.indexOf('if kill -0 "$pid"'));

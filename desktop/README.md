@@ -105,6 +105,13 @@ checks is written to stderr as `self-test: <stage> at <seconds since start> s`; 
 writes none. The line is printed before the program stops, and the stop gets at most 10 s (`STOP_MS`) before the program exits anyway,
 so a stop that hangs cannot hide the result.
 
+When `NO1D_SELFTEST_REPORT` names an absolute path, the self-test also appends every stage line and its result line to that file, because
+the output of a packed GUI program may not reach a redirect on Windows; the hosted Windows job judges the result from that file. A
+relative path is ignored, and a normal start never reads the variable. An error that is not a start-up failure (a throw no step
+handled, an uncaught error or rejection while the self-test runs) also becomes the line, `an unexpected error ended the start:` and the
+error's name and first 300 characters of its message on one line, and the program exits 1 with no dialog. Outside the self-test such an
+error still ends in `main.js`'s dialog, which shows no error text.
+
 ## Tests
 
 ```sh

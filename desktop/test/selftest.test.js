@@ -362,6 +362,116 @@ test("the shell in the self-test: each stage and step goes to stderr with the ti
   }
 });
 
+test("NO1D_SELFTEST_REPORT: the self-test appends its stage lines and its line to that file; a relative path and a normal start write none", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "no1d-report-"));
+  try {
+    const file = path.join(dir, "selftest.report");
+    const e = makeEnv({ argv: ["x.exe", "--self-test"] });
+    e.proc.env.NO1D_SELFTEST_REPORT = file;
+    try {
+      await e.shell.start();
+      assert.equal(e.electron.app.exitCode, 0);
+      const lines = fs.readFileSync(file, "utf8").trim().split("\n");
+      assert.ok(lines.includes("self-test: stage cmdline at 1.3 s"));
+      assert.ok(lines.some((l) => l.startsWith("self-test: result printed at")));
+      const json = lines.filter((l) => l.startsWith("{"));
+      assert.equal(json.length, 1);
+      assert.equal(JSON.parse(json[0]).selftest, "ok");
+      assert.equal(json[0], e.stdout.join("").trim(), "the report holds the same line as stdout");
+    } finally {
+      e.cleanup();
+    }
+    // a start-up failure: the reason is in the report too
+    const failFile = path.join(dir, "fail.report");
+    const f = makeEnv({ argv: ["x.exe", "--self-test"], guardFails: true });
+    f.proc.env.NO1D_SELFTEST_REPORT = failFile;
+    try {
+      await f.shell.start();
+      const j = fs.readFileSync(failFile, "utf8").trim().split("\n").filter((l) => l.startsWith("{"));
+      assert.equal(JSON.parse(j[0]).selftest, "failed");
+      assert.match(JSON.parse(j[0]).why, /not private to you/);
+    } finally {
+      f.cleanup();
+    }
+    // a relative path is not used
+    const r = makeEnv({ argv: ["x.exe", "--self-test"] });
+    r.proc.env.NO1D_SELFTEST_REPORT = "selftest.report";
+    try {
+      await r.shell.start();
+      assert.equal(r.electron.app.exitCode, 0);
+      assert.equal(fs.existsSync(path.resolve("selftest.report")), false);
+    } finally {
+      r.cleanup();
+    }
+    // a normal start never reads it
+    const normalFile = path.join(dir, "normal.report");
+    const n = makeEnv({ guardFails: true });
+    n.proc.env.NO1D_SELFTEST_REPORT = normalFile;
+    try {
+      await n.shell.start().catch(() => {});
+      assert.equal(fs.existsSync(normalFile), false);
+    } finally {
+      n.cleanup();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the self-test and an unexpected error: a throw that is no start-up failure, and an uncaught error later, print their words as the line and exit 1 with no dialog", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "no1d-report-"));
+  try {
+    const file = path.join(dir, "selftest.report");
+    const e = makeEnv({ argv: ["x.exe", "--self-test"] });
+    e.proc.env.NO1D_SELFTEST_REPORT = file;
+    e.modules.server.startProgramServer = async () => {
+      throw new TypeError("server could not be built");
+    };
+    try {
+      const r = await e.shell.start();
+      assert.equal(r.state, "aborted");
+      assert.equal(e.electron.app.exitCode, 1);
+      const j = JSON.parse(e.stdout.join("").trim());
+      assert.equal(j.selftest, "failed");
+      assert.equal(j.why, "an unexpected error ended the start: TypeError: server could not be built");
+      assert.ok(!e.electron.calls.some((c) => c.name === "showErrorBox"), "no dialog in the self-test");
+      const report = fs.readFileSync(file, "utf8");
+      assert.match(report, /self-test: stage server at/);
+      assert.match(report, /self-test: unexpected error at/);
+      assert.ok(report.includes(JSON.stringify(j)));
+      assert.equal(e.shell.tempDir, null, "the temporary folder is removed");
+    } finally {
+      e.cleanup();
+    }
+    // outside the self-test the same throw still reaches main.js, which says "could not start" in a dialog
+    const n = makeEnv();
+    n.modules.server.startProgramServer = async () => {
+      throw new TypeError("server could not be built");
+    };
+    try {
+      await assert.rejects(n.shell.start(), /server could not be built/);
+      assert.equal(n.stdout.join(""), "");
+    } finally {
+      n.cleanup();
+    }
+    // an uncaught error while the self-test runs (the quiet handler stays installed for the whole self-test)
+    const u = makeEnv({ argv: ["x.exe", "--self-test"] });
+    try {
+      await u.shell.start();
+      assert.equal(u.electron.app.exitCode, 0);
+      u.proc.emit("unhandledRejection", new Error("late\nrejection"));
+      assert.equal(u.electron.app.exitCode, 1);
+      const lines = u.stdout.join("").trim().split("\n");
+      assert.equal(JSON.parse(lines[0]).selftest, "ok");
+      assert.equal(JSON.parse(lines[1]).why, "an unexpected error ended the start: Error: late rejection", "the last line says it, on one line");
+    } finally {
+      u.cleanup();
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("NO1D_SELFTEST_HOLD_SECONDS is read from the program's environment by the self-test", async () => {
   const e = makeEnv({ argv: ["x.exe", "--self-test"] });
   e.proc.env.NO1D_SELFTEST_HOLD_SECONDS = "1";

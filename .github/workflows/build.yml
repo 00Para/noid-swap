@@ -654,6 +654,9 @@ jobs:
           trap { Write-Host "::error::$($_.Exception.Message)"; break }
           $out = Join-Path $env:RUNNER_TEMP "selftest.out"
           $err = Join-Path $env:RUNNER_TEMP "selftest.err"
+          # The program also writes its stage lines and its result line to this file: the output of a packed GUI program may not reach a
+          # redirect on Windows (build run 11 exited with code 1 and left selftest.out empty). The result is judged from this file.
+          $report = Join-Path $env:RUNNER_TEMP "selftest.report"
           # One query of all listening sockets per sample, filtered by the program's process ids (one query per process is slow).
           function Get-Listeners([int[]]$ids) { @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ids -contains [int]$_.OwningProcess }) }
           # A check that cannot see a known listener proves nothing: open one in this shell and require the same query to see it.
@@ -664,6 +667,7 @@ jobs:
           if ($seen.Count -eq 0) { throw "the listening-socket check did not see a known listener: it cannot prove the program has none" }
           Write-Host "the check sees a known listener: port $($seen[0].LocalPort)"
           $env:NO1D_SELFTEST_HOLD_SECONDS = "15"
+          $env:NO1D_SELFTEST_REPORT = $report
           $p = Start-Process -FilePath $env:EXE -ArgumentList "--self-test" -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
           $null = $p.Handle
           # The self-test has its own limits (60 s for its checks, the 15 s hold, 10 s for its stop); the rest is the start of a fresh
@@ -685,14 +689,16 @@ jobs:
           Write-Host "exit code: $code"
           Write-Host "--- stdout"; Get-Content $out -ErrorAction SilentlyContinue
           Write-Host "--- stderr (first 60 lines)"; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -First 60
-          if ($timedOut) {
-            # The program's own stage lines (self-test: ... at N s) say where it stopped; the annotation carries the last one and its line.
-            $last = Get-Content $err -ErrorAction SilentlyContinue | Where-Object { $_ -like "self-test: *" } | Select-Object -Last 1
-            $first = Get-Content $out -ErrorAction SilentlyContinue | Select-Object -First 1
-            throw "the self-test did not finish within 240 seconds (last stage: $(if ($last) { $last } else { 'none printed' }); line: $(if ($first) { $first } else { 'none' }))"
-          }
-          node desktop/scripts/startup-check.js selftest --file $out --exit-code $code
-          if ($LASTEXITCODE -ne 0) { throw "the self-test is not as required (exit code $code): $((Get-Content $out -ErrorAction SilentlyContinue | Select-Object -First 1))" }
+          Write-Host "--- report"; Get-Content $report -ErrorAction SilentlyContinue
+          # The program's own stage lines (self-test: ... at N s) say where it stopped; the annotation carries the last one, the result line and
+          # whether stdout reached its file at all.
+          $last = Get-Content $report -ErrorAction SilentlyContinue | Where-Object { $_ -like "self-test: *" } | Select-Object -Last 1
+          $line = Get-Content $report -ErrorAction SilentlyContinue | Where-Object { $_ -like "{*" } | Select-Object -Last 1
+          $outLines = @(Get-Content $out -ErrorAction SilentlyContinue).Count
+          $summary = "last stage: $(if ($last) { $last } else { 'none written' }); line: $(if ($line) { $line } else { 'none' }); stdout lines: $outLines"
+          if ($timedOut) { throw "the self-test did not finish within 240 seconds ($summary)" }
+          node desktop/scripts/startup-check.js selftest --file $report --exit-code $code
+          if ($LASTEXITCODE -ne 0) { throw "the self-test is not as required (exit code $code; $summary)" }
           Write-Host "listening sockets looked at $samples times"
           if ($listening.Count -gt 0) { $listening | Select-Object -Unique | ForEach-Object { Write-Host "::error::$_" }; throw "the program opened a TCP port" }
           if ($samples -lt 5) { throw "the listening sockets were looked at only $samples times: the check proves nothing" }

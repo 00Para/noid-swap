@@ -158,12 +158,46 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   // In the self-test every stage is also written to stderr with the seconds since the process started: the hosted start-up job shows
   // where a slow or stuck start spends its time. Nothing else of the program writes these lines.
   let selfTestMode = false;
+  // Under --self-test every line it writes (the stage lines and the result line) is also appended to the file NO1D_SELFTEST_REPORT names, when that
+  // is an absolute path: the output of a packed GUI program may not reach a redirect on Windows (build run 11 exited with code 1 and left its output
+  // file empty). Read only in the self-test, which opens no vault: nothing secret is written.
+  let reportPath = null;
+  const report = (line) => {
+    if (!reportPath) return;
+    try {
+      fs.appendFileSync(reportPath, `${line}\n`);
+    } catch {
+      /* stdout and stderr still carry it */
+    }
+  };
   const stderrLine = (line) => {
     try {
       (proc.stderr || process.stderr).write(`${line}\n`);
     } catch {
       /* nothing more to do */
     }
+    report(line);
+  };
+  // The self-test's one result line: stdout and the report.
+  const printLine = (line) => {
+    try {
+      (proc.stdout || process.stdout).write(`${line}\n`);
+    } catch {
+      /* the exit code still says it */
+    }
+    report(line);
+  };
+  const errorWords = (e) => {
+    try {
+      const name = e && typeof e.name === "string" ? `${e.name}: ` : "";
+      return `${name}${String(e && e.message !== undefined ? e.message : e)}`.replace(/\s+/g, " ").slice(0, 300);
+    } catch {
+      return "unknown";
+    }
+  };
+  const unexpected = (e) => {
+    stage("unexpected error");
+    printLine(JSON.stringify({ selftest: "failed", why: `an unexpected error ended the start: ${errorWords(e)}` }));
   };
   const uptime = () => {
     try {
@@ -190,9 +224,11 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   let quietOff = null;
 
   // From the first step until the crash handler is installed, an uncaught error ends the program without Electron's own error dialog (which
-  // shows the error's text and waits for a click). Nothing is stored or printed.
+  // shows the error's text and waits for a click). Nothing is stored or printed, except the self-test's line.
   function installQuietHandler() {
-    const quiet = () => {
+    const quiet = (e) => {
+      // In the self-test the error's words are its line: the hosted job has nothing else to read.
+      if (selfTestMode) unexpected(e);
       try {
         app.exit(1);
       } catch {
@@ -212,11 +248,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     if (selfTestMode) {
       // The self-test runs where no one can click (the hosted start-up job): a dialog would keep it waiting until the job gives up. The reason
       // goes into its one line instead. The texts are fixed sentences of this file and name no secret.
-      try {
-        (proc.stdout || process.stdout).write(`${JSON.stringify({ selftest: "failed", why: text })}\n`);
-      } catch {
-        /* the exit code still says it */
-      }
+      printLine(JSON.stringify({ selftest: "failed", why: text }));
     } else {
       try {
         dialog.showErrorBox(PRODUCT, text);
@@ -249,6 +281,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     // there, after ready (below): before it, the launch event that carries the answer may not have been handled yet.
     let startHidden = cmd.hidden;
     selfTestMode = cmd.selfTest === true;
+    const wanted = env.NO1D_SELFTEST_REPORT;
+    if (selfTestMode && typeof wanted === "string" && !wanted.includes("\0") && path.isAbsolute(wanted)) reportPath = wanted;
 
     t("cmdline");
     if (cmd.refused) fail(`${PRODUCT} does not start with a switch of its own kind (${cmd.refused}). Only --hidden and --self-test are read; start it again without the other one.`);
@@ -503,7 +537,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
           windowCtl.destroy();
         },
         cleanup: cleanupTemp,
-        print: (line) => (proc.stdout || process.stdout).write(`${line}\n`),
+        print: printLine,
         exit: (code) => app.exit(code),
         progress: stage,
       });
@@ -606,6 +640,17 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       if (e instanceof Abort) {
         cleanupTemp();
         return { state: "aborted", reason: e.message };
+      }
+      if (selfTestMode) {
+        // main.js would open a dialog that no one clicks on a hosted machine: in the self-test the error's words are the line instead.
+        unexpected(e);
+        cleanupTemp();
+        try {
+          app.exit(1);
+        } catch {
+          /* nothing more can be done */
+        }
+        return { state: "aborted", reason: "unexpected error" };
       }
       throw e;
     }
