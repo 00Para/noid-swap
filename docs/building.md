@@ -232,13 +232,32 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   fake platform), with the host's own rules. It now uses Windows rules. Its swap-cli, code-hash and console tests passed there.
 - A scheduled run once a day at 03:17 UTC, a quiet hour, gives the Mac program a hosted build without anyone starting one. GitHub
   gave the macOS jobs a machine in runs 2 and 3 and none in runs 4 to 6 ("not acquired", its capacity).
+- The same build by hand on a Mac went on to pack the program and start it, and found three faults that only a packed program shows:
+  1. macOS ended the program at start. With `mac.identity: null` the bundle kept only the linker's signature of the binary, which no
+     longer matched once the fuses were flipped. `identity: "-"` makes the builder sign the whole bundle ad hoc after the fuses
+     (no certificate, no identity): `codesign --verify --strict --deep` passes, the fuses check and the manifest check still pass, and
+     the program starts.
+  2. `eth/node_modules` was not packed: the builder leaves out the node_modules folder of a sub-folder by default, so `live.js`
+     could not load `ethers`. The manifest, made from what was packed, could not see the omission. A `files` entry
+     (`eth/node_modules/**/*`) packs it (only the TypeScript declaration files stay out, by the builder's default filter), and
+     `stage.js manifest` now takes `--stage` and refuses a packed program whose `eth/node_modules` does not hold the stage's
+     packages with the stage's `ethers` version; the manifest must list `ethers/package.json` and `live.js`. With it, the five
+     `live.js` parity cases gave the same answers under the program's own binary as under Node.
+  3. The self-test's page probe failed: Chromium sends no `Origin`, no `Sec-Fetch-*` and no `Referer` on a request answered
+     through `protocol.handle`, with the scheme's `corsEnabled` false and true, and the program-mode handler required
+     `Origin: no1d://app` on every POST. It now refuses an Origin or a `Sec-Fetch-Site` only when one is sent and names another
+     origin; the per-start token, the adapter's mark and the main window's session bind a write (`desktop/README.md`).
+
+  With the three fixes the same build by hand on the Mac passed every check of the start-up job on the disk image's copy of the
+  app: `codesign --verify --strict --deep`, the fuses, the manifest, the self-test (`page_script` true, `page_post` 403), no
+  listening port over 15 seconds, and the five `live.js` parity cases. Its node check said `ok` where a clean machine says
+  `not_running`, because that Mac runs a Parano1d node of its own; the hosted job runs on a clean machine.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the
   program starts on a clean machine; that the Windows binary (a GUI-subsystem program) shows its output to `Start-Process` redirection
-  and passes its stdin and stdout pipes under `ELECTRON_RUN_AS_NODE`; that the macOS app starts after the fuses change (the builder is
-  expected to reset the ad-hoc signature on arm64; if the app is killed at start, add an ad-hoc `codesign` step); and that the
-  uninstaller behaves as written.
+  and passes its stdin and stdout pipes under `ELECTRON_RUN_AS_NODE`; that the macOS app starts after the fuses change (a build by
+  hand on a Mac showed it does with the ad-hoc signature above); and that the uninstaller behaves as written.
 
 ### Code that only works on Unix, and what the tool does on Windows
 

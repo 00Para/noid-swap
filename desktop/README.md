@@ -177,10 +177,16 @@ session. The window loads `no1d://app/#token=<token>`; the token still appears i
 - The self-test also asks the page itself, through `webContents.executeJavaScript`, to say whether its scripts ran and to send one
   POST without the token to `/api/program/open` with its own `fetch`. The POST goes the real way: Chromium, the session's
   `protocol.handle`, the adapter, the handler. The self-test passes only when the scripts ran and the answer is 403 "missing or wrong
-  token", which the handler gives only after the request passed its Origin check. So the hosted run proves that Chromium sends
-  `Origin: no1d://app` on a page's POST through the handler and that the CSP's `connect-src no1d://app` lets the fetch out. A 403
-  "cross-origin or missing Origin" fails with its own words. The JSON line gains `page_script` (true) and `page_post` (403), and the
-  start-up check requires both.
+  token", which the handler gives only after the request was not refused as cross-origin. So the run proves that the page's POST
+  reaches the handler through Chromium and that the CSP's `connect-src no1d://app` lets the fetch out. A 403 "cross-origin request
+  refused" fails with its own words. The JSON line gains `page_script` (true) and `page_post` (403), and the start-up check requires
+  both.
+- The first packed program on a real window (a Mac build of the tree of 4.10) failed that probe: Chromium sends no `Origin`, no
+  `Sec-Fetch-*` and no `Referer` on a request answered through `protocol.handle` (the request carried only `accept`,
+  `content-type` and `user-agent`), with the scheme's `corsEnabled` false and true alike, and the handler required
+  `Origin: no1d://app` on every POST. The handler now refuses an Origin or a `Sec-Fetch-Site` only when one is sent and names
+  another origin. What binds a write in program mode: the adapter's mark, the handler attached to the main window's session only
+  (held to `no1d://app` by the navigation guard), and the per-start token in the fragment of the URL that window was loaded with.
 
 **After the independent read of 4.9.** The read found one must-fix and eleven low points.
 - Must-fix: the macOS half of the no-listening-port check read `lsof`'s exit status. `lsof` exits 1 when any process it is asked
@@ -190,7 +196,7 @@ session. The window loads `no1d://app/#token=<token>`; the token still appears i
   same query for it (on macOS together with a process that has none, the case that went wrong), and fail when it is not seen. A check
   that cannot see a known listener can no longer pass.
 - Low 1 (the page never fetched through the handler) is done: the page probe above. Low 2 (Chromium might add no Origin through a
-  scheme loader) is caught by it on the hosted run, before any release.
+  scheme loader) was right: the probe caught it on the first real window, and the rule changed as said above.
 - Low 5 is done: Windows now makes one `Get-NetTCPConnection -State Listen` query per sample and filters it by the set of process ids,
   instead of one slow query per process.
 - Low 6 is done: when the scheme cannot be attached, the shell stops the server before it exits 1, with fixed words ("The program's
@@ -199,9 +205,10 @@ session. The window loads `no1d://app/#token=<token>`; the token still appears i
 
 **Low points of 4.9 (left, for the final pass).**
 
-- Not one of these has run in a real window yet; the hosted start-up job is the first place, and its page probe is what settles the
-  Origin and the CSP. Until it has run green, both stay unproved: that the page sends `Origin: no1d://app` on its POSTs (and a
-  `Sec-Fetch-Site` of `same-origin` or none), and that a host source matches this scheme.
+- The CSP and the page's fetch are settled on a real window: a Mac build by hand of the 4.10 tree with the fixes above passed the
+  self-test (`page_script` true, `page_post` 403), so a host source matches this scheme and the page's POST reaches the handler. The
+  Origin is settled the other way: Chromium sends none through `protocol.handle`, and the handler no longer asks for one. The hosted
+  start-up job has still to pass on both systems.
 - The CSP is written with the explicit origin (`default-src no1d://app; ...`) rather than `'self'`, as the spec says. If a Chromium
   version did not match a host source for this scheme, the page would load blank and the page probe would fail.
 - `hardening.js`: `webRequest.onBeforeRequest` may not fire for a custom scheme at all, so the `no1d` branch of `requestAllowed` may
@@ -217,7 +224,13 @@ session. The window loads `no1d://app/#token=<token>`; the token still appears i
 - `scheme.js`: the adapter has no timeout. A handler that waits on a dialog (`join`'s file chooser, `/api/program/open`) keeps the
   page's fetch open for as long as the dialog is up. By design.
 - The Origin and `Sec-Fetch-Site` tests of `server-scheme.test.js` set headers that a browser forbids a page to set, so they test the
-  handler's rule, not what Chromium sends; the page probe is the test of the latter.
+  handler's rule, not what Chromium sends; the page probe is the test of the latter. The test client and the fake page now send what
+  Chromium was seen to send (no Origin).
+- From the read of the Origin change (no must-fix): the self-test proves only that the page's POST without the token is refused for
+  the token, not that a request of the page with the token gets through `protocol.handle`; requiring the page's program mode (set
+  after its own token GET answered 200) would prove it. And "one renderer in the main session" rests on design: the hardening policy is
+  looked up by session, so a second webContents in that session would get the page's allowed origin; looking it up by
+  `webContentsId` and refusing a second webContents there in a packaged program would enforce it. Both for the final pass.
 - The window reloads its page once per window lifetime on a lost process. The counter is never reset, so a loss after a long quiet
   period still counts as the second one.
 - The "Develop" menu of an unpackaged build (`lib/tray.js`) still has a `reload` role; Ctrl+R is stopped by the key handler, a click on

@@ -37,7 +37,7 @@ function aliceReady(env) {
   return a;
 }
 
-test("transport: the token, the address, Origin, same-origin, content type and the policy headers of terminal mode apply to every request", async () => {
+test("transport: the token, the address, a foreign Origin, same-origin reads, content type and the policy headers apply to every request", async () => {
   const env = makeEnv();
   try {
     const a = env.addSwap({ role: "alice" });
@@ -53,10 +53,12 @@ test("transport: the token, the address, Origin, same-origin, content type and t
     // a cross-site read
     assert.equal((await api("GET", "/api/program", undefined, { "sec-fetch-site": "cross-site" })).status, 403);
     assert.equal((await api("GET", "/api/program", undefined, { origin: "http://evil.example" })).status, 403);
-    // a POST: another origin, no origin, a wrong token, no token, a wrong content type, a body that is not an object, a body too large
+    // a POST: another origin; no Origin (what Chromium sends through protocol.handle) without the token; a wrong token, no token, a wrong
+    // content type, a body that is not an object, a body too large
     const body = { swap: a.id, id: "tick-alice" };
     assert.equal((await api("POST", "/api/action", body, { origin: "http://evil.example" })).status, 403);
-    assert.equal((await api("POST", "/api/action", body, { origin: undefined })).status, 403);
+    const bare = await request(srv, null, "POST", "/api/action", body, { origin: undefined });
+    assert.deepEqual([bare.status, bare.body.error], [403, "missing or wrong token"]);
     assert.equal((await request(srv, "wrong", "POST", "/api/action", body)).status, 403);
     assert.equal((await request(srv, null, "POST", "/api/action", body)).status, 403);
     assert.equal((await api("POST", "/api/action", body, { "content-type": "text/plain" })).status, 415);

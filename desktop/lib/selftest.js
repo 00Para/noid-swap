@@ -4,8 +4,8 @@
  * temporary data folder (never the real one), opens no vault (neither the key store nor the fallback) so every action is refused,
  * loads the page in a hidden window, makes one /api/program request without the token through the scheme adapter (expects
  * 401), asks the page itself (PAGE_PROBE) whether its own scripts ran and what a POST it sends without the token gets back
- * (expects 403 "missing or wrong token": the request reached the handler through protocol.handle and passed the Origin check,
- * so the page's origin is no1d://app and the content policy lets it fetch), reads the window's preferences, runs one node
+ * (expects 403 "missing or wrong token": the request reached the handler through protocol.handle and was not refused as
+ * cross-origin, and the content policy let the page fetch), reads the window's preferences, runs one node
  * check, prints one JSON line and exits 0 within 60 s; any failure exits 1.
  *
  * The program opens no port (build spec 9). To let the hosted test look for one from outside, NO1D_SELFTEST_HOLD_SECONDS
@@ -51,7 +51,7 @@ function pageProbeProblem(r) {
   const p = r.post;
   if (!p || typeof p !== "object") return "the page's POST gave no answer";
   if (p.status === 403 && p.error === "missing or wrong token") return null;
-  if (p.status === 403 && p.error === "cross-origin or missing Origin") return "a POST from the page was refused for its Origin: the page's origin is not no1d://app as the handler expects";
+  if (p.status === 403 && p.error === "cross-origin request refused") return "a POST from the page was refused for its Origin: the page sent an Origin or a Sec-Fetch-Site that is not no1d://app's";
   return `a POST from the page without the token was not refused for the token (status ${Number(p.status) || 0}${typeof p.error === "string" ? `, "${p.error.slice(0, 80)}"` : ""})`;
 }
 

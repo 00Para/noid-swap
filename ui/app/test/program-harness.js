@@ -269,16 +269,14 @@ function adapterOf(srv) {
 
 /**
  * One request to the program server, through the scheme adapter as a Fetch Request. `p` is a path, or a whole no1d:// address. `headers` may override or remove
- * (undefined) the defaults (the token, and for a POST the Origin and the content type). The adapter writes the Host itself, so a Host override changes nothing.
+ * (undefined) the defaults (the token, and for a POST the content type). No Origin by default: Chromium sends none through protocol.handle (seen on a real
+ * window), so the tests send what the program's page sends. The adapter writes the Host itself, so a Host override changes nothing.
  * Resolves { status, body (parsed JSON or text), text, headers }.
  */
 async function request(srv, token, method, p, body, headers = {}) {
   const data = body === undefined ? null : typeof body === "string" ? body : JSON.stringify(body);
   const h = { ...(token !== null ? { "x-swap-token": token } : {}) };
-  if (method === "POST") {
-    h.origin = "no1d://app";
-    h["content-type"] = "application/json";
-  }
+  if (method === "POST") h["content-type"] = "application/json";
   for (const [k, v] of Object.entries(headers)) {
     if (v === undefined) delete h[k];
     else h[k] = v;

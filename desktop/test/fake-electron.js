@@ -78,14 +78,15 @@ function createFakeElectron(opts = {}) {
     /**
      * The page's scripts, stood in for: `opts.pageScript(code, webContents)` when a test gives one; otherwise the self-test's probe
      * is answered the way a page on no1d://app would answer it: its scripts ran, and its POST without the token goes through this
-     * session's own scheme handler with the Origin and Sec-Fetch-Site a page of that origin sends.
+     * session's own scheme handler with the headers Chromium sends through protocol.handle (seen on a real window: accept,
+     * content-type and user-agent; no Origin, no Sec-Fetch-*, no Referer).
      */
     async executeJavaScript(code) {
       rec("webContents", "executeJavaScript");
       if (typeof opts.pageScript === "function") return opts.pageScript(code, this);
       const handler = this.session.protocol.handlers.no1d;
       if (typeof handler !== "function") return { scripts: true, post: { status: 0, error: "the fetch failed" } };
-      const r = await handler(new Request("no1d://app/api/program/open", { method: "POST", headers: { "content-type": "application/json", origin: "no1d://app", "sec-fetch-site": "same-origin" }, body: "{}" }));
+      const r = await handler(new Request("no1d://app/api/program/open", { method: "POST", headers: { accept: "*/*", "content-type": "application/json" }, body: "{}" }));
       let j = null;
       try {
         j = await r.json();

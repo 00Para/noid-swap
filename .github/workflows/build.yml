@@ -368,7 +368,8 @@ jobs:
             resources: "dist/mac-arm64/No1d Swap.app/Contents/Resources"
             binary: "dist/mac-arm64/No1d Swap.app"
     env:
-      # The build never looks for a signing identity (there is none; nothing is signed).
+      # The build never looks for a signing identity: there is none. The Mac program's ad-hoc signature (identity "-" in
+      # desktop/electron-builder.yml) needs no certificate and no identity.
       CSC_IDENTITY_AUTO_DISCOVERY: "false"
     defaults:
       run:
@@ -474,7 +475,7 @@ jobs:
         run: npx --no-install electron-builder ${{ matrix.dir_args }} --publish never
 
       - name: Write the runtime manifest
-        run: node desktop/scripts/stage.js manifest --resources "desktop/${{ matrix.resources }}" --out desktop/stage/runtime-manifest.json --version "$VERSION" --commit "$GITHUB_SHA"
+        run: node desktop/scripts/stage.js manifest --resources "desktop/${{ matrix.resources }}" --stage desktop/stage --out desktop/stage/runtime-manifest.json --version "$VERSION" --commit "$GITHUB_SHA"
 
       - name: Pack the program, pass 2 (the installer)
         working-directory: desktop

@@ -102,10 +102,11 @@ function makeEnv(opts = {}) {
         rec.push("server.listening");
         const handler = async (req, res) => {
           // a stand-in for the console's handler: 401 for a path under /api/ without the token, the page otherwise; a POST is
-          // refused as the program-mode handler refuses it (403 for an Origin that is not no1d://app, then 403 for the token)
+          // refused as the program-mode handler refuses it (403 for an Origin, when sent, that is not no1d://app, then 403 for the token)
           rec.push(`handler:${req.method}:${req.url}`);
           if (req.method === "POST") {
-            const refuse = req.headers.origin !== "no1d://app" ? "cross-origin or missing Origin" : req.headers["x-swap-token"] !== TOKEN ? "missing or wrong token" : null;
+            const o = req.headers.origin;
+            const refuse = o !== undefined && o !== "no1d://app" ? "cross-origin request refused" : req.headers["x-swap-token"] !== TOKEN ? "missing or wrong token" : null;
             res.writeHead(refuse ? 403 : 200, { "content-type": "application/json" });
             res.end(JSON.stringify(refuse ? { error: refuse } : { ok: true }));
             return;

@@ -179,6 +179,8 @@ test("desktop job: the checks come in the order that protects the package", (ctx
   ];
   assert.deepEqual(order, [...order].sort((a, b) => a - b));
   assert.equal(new Set(order).size, order.length);
+  // the manifest is written only when the packed eth/node_modules holds the stage's packages (the builder can leave them out)
+  assert.match(steps[idx(/stage\.js manifest/)].run, /stage\.js manifest --resources "desktop\/\$\{\{ matrix\.resources \}\}" --stage desktop\/stage /);
   const packed = steps[idx(/stage\.js verify-packed .*--asar/)].run;
   assert.match(packed, /fuses-check\.js --binary "desktop\/\$\{\{ matrix\.binary \}\}"/);
   assert.match(packed, /codehash-check\.js --artifacts "desktop\/\$\{\{ matrix\.resources \}\}\/app\.asar\.unpacked\/eth\/artifacts"/);
@@ -261,10 +263,12 @@ test("no step passes a secret or a key on a command line, and the only key used 
 
 // ---- electron-builder.yml ----
 
-test("builder: asar with eth/ and equiv/ unpacked, swap-cli into bin/, no signing, no publishing", (ctx) => {
+test("builder: asar with eth/ and equiv/ unpacked, eth/node_modules packed, swap-cli into bin/, only an ad-hoc Mac signature, no publishing", (ctx) => {
   if (needYaml(ctx)) return;
   assert.equal(builder.asar, true);
   assert.deepEqual(builder.asarUnpack, ["eth/**", "equiv/**"]);
+  // without the second pattern the builder leaves eth/node_modules out (the first Mac build)
+  assert.deepEqual(builder.files, ["**/*", "eth/node_modules/**/*"]);
   assert.deepEqual(builder.extraResources, [{ from: "stage-bin", to: "bin" }]);
   assert.equal(builder.directories.app, "stage");
   assert.equal(builder.publish, null);
@@ -272,7 +276,9 @@ test("builder: asar with eth/ and equiv/ unpacked, swap-cli into bin/, no signin
   assert.match(builder.appId, /^[a-z0-9]+(\.[a-z0-9]+)+$/);
   assert.equal(builder.npmRebuild, false);
   assert.ok(!/certificate|signtool|signingHashAlgorithms|notariz|provisioningProfile/i.test(builderText.replace(/#.*$/gm, "")));
-  assert.equal(builder.mac.identity, null);
+  // "-" is the ad-hoc signature (no certificate, no identity): with null the arm64 program was ended by macOS at start (the first Mac build)
+  assert.equal(builder.mac.identity, "-");
+  assert.equal(builder.win.certificateFile, undefined);
   assert.equal(builder.dmg.sign, false);
 });
 

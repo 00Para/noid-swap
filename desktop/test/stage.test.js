@@ -370,6 +370,7 @@ function makeResources(root) {
   put(res, "app.asar", "asar bytes");
   put(res, "app.asar.unpacked/eth/scripts/live.js", "live\n");
   put(res, "app.asar.unpacked/eth/node_modules/ethers/index.js", "ethers\n");
+  put(res, "app.asar.unpacked/eth/node_modules/ethers/package.json", JSON.stringify({ name: "ethers", version: "6.17.0" }));
   put(res, "app.asar.unpacked/equiv/portable/src/lib.rs", "rs\n");
   put(res, "bin/swap-cli.exe", "swap-cli\n");
   put(res, "elevate.exe", "outside the two folders\n");
@@ -388,6 +389,7 @@ test("buildManifest lists every file under app.asar.unpacked/ and bin/ with its 
     assert.deepEqual(Object.keys(m.files), [
       "app.asar.unpacked/equiv/portable/src/lib.rs",
       "app.asar.unpacked/eth/node_modules/ethers/index.js",
+      "app.asar.unpacked/eth/node_modules/ethers/package.json",
       "app.asar.unpacked/eth/scripts/live.js",
       "bin/swap-cli.exe",
     ]);
@@ -431,6 +433,50 @@ test("verifyManifest refuses a manifest that is not JSON, not version 1, or list
     for (const key of ["app.asar/x", "elevate.exe", "bin/../x", "bin//x", "bin\\x", "../bin/x"]) {
       assert.match(S.verifyManifest(res, JSON.stringify({ v: 1, files: { [key]: "0".repeat(64) } })).problems[0], /a path it must not/, key);
     }
+  } finally {
+    t.done();
+  }
+});
+
+test("a packed program without ethers (the builder left eth/node_modules out) gets no manifest, and a manifest that does not list it fails", () => {
+  const t = tmp();
+  try {
+    const res = makeResources(t.dir);
+    const text = S.serializeManifest(S.buildManifest(res, { version: "0.1.0", commit: COMMIT }));
+    fs.rmSync(path.join(res, "app.asar.unpacked", "eth", "node_modules"), { recursive: true });
+    assert.throws(() => S.buildManifest(res, { version: "0.1.0", commit: COMMIT }), /lacks app\.asar\.unpacked\/eth\/node_modules\/ethers\/package\.json \(the builder left it out\)/);
+    // a manifest that never listed it (made before this rule, or by hand) fails on its own, not only through the missing files
+    const m = JSON.parse(text);
+    for (const k of Object.keys(m.files)) if (k.includes("/node_modules/")) delete m.files[k];
+    assert.deepEqual(S.verifyManifest(res, JSON.stringify(m)).problems, ["the manifest does not list app.asar.unpacked/eth/node_modules/ethers/package.json, which the program needs"]);
+    assert.deepEqual(S.REQUIRED_PACKED, ["app.asar.unpacked/eth/scripts/live.js", "app.asar.unpacked/eth/node_modules/ethers/package.json"]);
+  } finally {
+    t.done();
+  }
+});
+
+test("checkPackedRuntime: the packed eth/node_modules must hold exactly the stage's packages, with the stage's ethers version", () => {
+  const t = tmp();
+  try {
+    const stageDir = path.join(t.dir, "stage");
+    installRuntime(stageDir);
+    const res = makeResources(t.dir);
+    put(res, "app.asar.unpacked/eth/node_modules/aes-js/package.json", JSON.stringify({ name: "aes-js", version: "1.0.0" }));
+    assert.deepEqual(S.checkPackedRuntime(res, stageDir), []);
+    // a single file left out by the builder (a README) is not a package: still fine
+    put(stageDir, "eth/node_modules/ethers/README.md", "readme\n");
+    assert.deepEqual(S.checkPackedRuntime(res, stageDir), []);
+    fs.rmSync(path.join(res, "app.asar.unpacked", "eth", "node_modules", "aes-js"), { recursive: true });
+    assert.deepEqual(S.checkPackedRuntime(res, stageDir), ["eth/node_modules/aes-js is in the stage and not in the packed program"]);
+    put(res, "app.asar.unpacked/eth/node_modules/aes-js/package.json", JSON.stringify({ name: "aes-js", version: "1.0.0" }));
+    put(res, "app.asar.unpacked/eth/node_modules/extra/package.json", JSON.stringify({ name: "extra", version: "1.0.0" }));
+    assert.deepEqual(S.checkPackedRuntime(res, stageDir), ["eth/node_modules/extra is in the packed program and not in the stage"]);
+    fs.rmSync(path.join(res, "app.asar.unpacked", "eth", "node_modules", "extra"), { recursive: true });
+    put(res, "app.asar.unpacked/eth/node_modules/ethers/package.json", JSON.stringify({ name: "ethers", version: "6.0.0" }));
+    assert.deepEqual(S.checkPackedRuntime(res, stageDir), ["ethers is 6.0.0 in the packed program and 6.17.0 in the stage"]);
+    fs.rmSync(path.join(res, "app.asar.unpacked", "eth", "node_modules"), { recursive: true });
+    assert.equal(S.checkPackedRuntime(res, stageDir).length, 2, "both packages missing");
+    assert.match(S.checkPackedRuntime(res, path.join(t.dir, "nowhere"))[0], /holds no package/);
   } finally {
     t.done();
   }
@@ -532,17 +578,26 @@ test("command line: stage, check, manifest and verify-packed, with exit codes", 
     installRuntime(r.out);
     assert.equal(cli("check", "--out", r.out).status, 0);
     const res = makeResources(t.dir);
+    put(res, "app.asar.unpacked/eth/node_modules/aes-js/package.json", JSON.stringify({ name: "aes-js", version: "1.0.0" }));
     const manifest = path.join(t.dir, "m.json");
-    assert.equal(cli("manifest", "--resources", res, "--out", manifest, "--version", "0.1.0", "--commit", COMMIT).status, 0);
+    assert.equal(cli("manifest", "--resources", res, "--out", manifest, "--version", "0.1.0", "--commit", COMMIT).status, 1, "--stage is required");
+    const S_ = ["--stage", r.out];
+    assert.equal(cli("manifest", "--resources", res, ...S_, "--out", manifest, "--version", "0.1.0", "--commit", COMMIT).status, 0);
     assert.equal(cli("verify-packed", "--resources", res, "--manifest", manifest).status, 0);
     fs.appendFileSync(path.join(res, "bin", "swap-cli.exe"), "!");
     const bad = cli("verify-packed", "--resources", res, "--manifest", manifest);
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /changed: bin\/swap-cli\.exe/);
-    assert.equal(cli("manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 1, "no commit given and GITHUB_SHA unset");
-    assert.equal(cliEnv({ ...base, GITHUB_SHA: "not-a-commit" }, "manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 1, "GITHUB_SHA bad");
-    assert.equal(cliEnv({ ...base, GITHUB_SHA: COMMIT }, "manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 0, "GITHUB_SHA is the commit when none is given");
+    assert.equal(cli("manifest", "--resources", res, ...S_, "--out", manifest, "--version", "0.1.0").status, 1, "no commit given and GITHUB_SHA unset");
+    assert.equal(cliEnv({ ...base, GITHUB_SHA: "not-a-commit" }, "manifest", "--resources", res, ...S_, "--out", manifest, "--version", "0.1.0").status, 1, "GITHUB_SHA bad");
+    assert.equal(cliEnv({ ...base, GITHUB_SHA: COMMIT }, "manifest", "--resources", res, ...S_, "--out", manifest, "--version", "0.1.0").status, 0, "GITHUB_SHA is the commit when none is given");
     assert.equal(JSON.parse(fs.readFileSync(manifest, "utf8")).commit, COMMIT);
+    // a packed program without a package of the stage gets no manifest, and says which
+    fs.rmSync(path.join(res, "app.asar.unpacked", "eth", "node_modules", "aes-js"), { recursive: true });
+    const lacking = cli("manifest", "--resources", res, ...S_, "--out", path.join(t.dir, "m2.json"), "--version", "0.1.0", "--commit", COMMIT);
+    assert.equal(lacking.status, 1);
+    assert.match(lacking.stderr, /eth\/node_modules\/aes-js is in the stage and not in the packed program/);
+    assert.equal(fs.existsSync(path.join(t.dir, "m2.json")), false);
     assert.equal(cli("nonsense").status, 2);
     assert.equal(cli("stage", "--repo").status, 1);
   } finally {

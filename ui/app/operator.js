@@ -1290,9 +1290,6 @@
     if (m) {
       state.token = m[1];
       history.replaceState(null, "", location.pathname + location.search);
-      // the chain-polling console is another page: its link carries the key too
-      const cl = document.querySelector('a[href="/console"]');
-      if (cl) cl.href = "/console#token=" + state.token;
     }
     const qs = new URLSearchParams(location.search);
     $("refresh").addEventListener("click", () => load(true));
@@ -1307,6 +1304,10 @@
       document.body.classList.add("program");
       window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel });
     } else {
+      // the terminal console's chain-polling page is another page: its link carries the key too. Only on the terminal console's own
+      // http address: on the program's scheme the key never goes into the page (not even when /api/program failed at start)
+      const cl = document.querySelector('a[href="/console"]');
+      if (cl && state.token && location.protocol === "http:") cl.href = "/console#token=" + state.token;
       try {
         state.health = await getJson("/api/health");
       } catch (e) {

@@ -49,13 +49,19 @@ async function direct(srv, req, { mark = true } = {}) {
   return out;
 }
 
-test("the checks are pure: the Host is exactly app, the Origin exactly no1d://app (and Sec-Fetch-Site, when sent, same-origin)", () => {
+test("the checks are pure: the Host is exactly app; the Origin, when sent, exactly no1d://app (and Sec-Fetch-Site, when sent, same-origin)", () => {
   assert.equal(schemeHostOk({ headers: { host: "app" } }), true);
   for (const h of ["APP", "app:1", "app.", "127.0.0.1", "127.0.0.1:8787", "localhost", "evil.example", "", " app", undefined]) assert.equal(schemeHostOk({ headers: { host: h } }), false, String(h));
   assert.equal(schemeOriginOk({ headers: { origin: "no1d://app" } }), true);
   assert.equal(schemeOriginOk({ headers: { origin: "no1d://app", "sec-fetch-site": "same-origin" } }), true);
-  for (const o of ["no1d://app/", "no1d://evil", "no1d://app:1", "http://app", "https://app", "http://127.0.0.1:8787", "null", "", undefined]) assert.equal(schemeOriginOk({ headers: { origin: o } }), false, String(o));
-  for (const s of ["cross-site", "same-site", "none", ""]) assert.equal(schemeOriginOk({ headers: { origin: "no1d://app", "sec-fetch-site": s } }), false, s);
+  // what Chromium sends through protocol.handle: neither header (the token and the session are what bind the write)
+  assert.equal(schemeOriginOk({ headers: {} }), true);
+  assert.equal(schemeOriginOk({ headers: { "sec-fetch-site": "same-origin" } }), true);
+  for (const o of ["no1d://app/", "no1d://evil", "no1d://app:1", "http://app", "https://app", "http://127.0.0.1:8787", "null", "", "NO1D://APP"]) assert.equal(schemeOriginOk({ headers: { origin: o } }), false, String(o));
+  for (const s of ["cross-site", "same-site", "none", ""]) {
+    assert.equal(schemeOriginOk({ headers: { origin: "no1d://app", "sec-fetch-site": s } }), false, s);
+    assert.equal(schemeOriginOk({ headers: { "sec-fetch-site": s } }), false, `no Origin, Sec-Fetch-Site ${s}`);
+  }
   assert.equal(SCHEME_ORIGIN, "no1d://app");
   assert.equal(CSP_SCHEME, EXPECTED_CSP);
   // terminal mode's own checks are unchanged: they still want the loopback address and the port
@@ -118,23 +124,35 @@ test("the Host: another host of the scheme never reaches the handler; behind the
   }
 });
 
-test("the Origin: a POST needs exactly no1d://app; any other, none, or a cross-site Sec-Fetch-Site is refused with 403 before the token or the body is looked at", async () => {
+test("the Origin: a POST with another Origin or a cross-site Sec-Fetch-Site is refused with 403 before the token or the body is looked at; one with none (what Chromium sends) still needs the token", async () => {
   const env = makeEnv();
   try {
     const a = env.addSwap({ role: "alice" });
     const { srv, api } = await env.start();
     const body = { swap: a.id, id: "tick-alice" };
-    for (const origin of ["http://evil.example", "no1d://evil", "no1d://app/", "http://127.0.0.1:8787", "null", "no1d://app:1", undefined]) {
-      assert.equal((await api("POST", "/api/action", body, { origin })).status, 403, String(origin));
+    for (const origin of ["http://evil.example", "no1d://evil", "no1d://app/", "http://127.0.0.1:8787", "null", "no1d://app:1", ""]) {
+      const r = await api("POST", "/api/action", body, { origin });
+      assert.equal(r.status, 403, String(origin));
+      assert.equal(r.body.error, "cross-origin request refused", String(origin));
     }
     for (const sfs of ["cross-site", "same-site", "none"]) assert.equal((await api("POST", "/api/action", body, { "sec-fetch-site": sfs })).status, 403, `Sec-Fetch-Site ${sfs}`);
     // a wrong Origin with a wrong token is still the Origin's refusal, and nothing was started
-    assert.equal((await request(srv, "wrong", "POST", "/api/action", body, { origin: "http://evil.example" })).status, 403);
+    assert.equal((await request(srv, "wrong", "POST", "/api/action", body, { origin: "http://evil.example" })).body.error, "cross-origin request refused");
+    // no Origin and no Sec-Fetch-Site (the program's own page, as Chromium sends it): without the token, or with a wrong one, it is the token's refusal
+    for (const tok of [null, "wrong", srv.token.slice(1)]) {
+      const r = await request(srv, tok, "POST", "/api/action", body, { origin: undefined, "sec-fetch-site": undefined });
+      assert.equal(r.status, 403, String(tok));
+      assert.equal(r.body.error, "missing or wrong token", String(tok));
+    }
     assert.equal(env.steps.calls.length, 0);
-    // the right Origin with Sec-Fetch-Site same-origin passes the checks (the action then runs: 202)
-    const ok = await api("POST", "/api/action", { swap: a.id, id: "tick-alice" }, { "sec-fetch-site": "same-origin" });
-    assert.ok(ok.status === 202 || ok.status === 200, `${ok.status} ${ok.text}`);
+    // no Origin with the token passes the checks (the action then runs: 202); so does the right Origin with Sec-Fetch-Site same-origin, below
+    const bare = await api("POST", "/api/action", { swap: a.id, id: "tick-alice" });
+    assert.ok(bare.status === 202 || bare.status === 200, `${bare.status} ${bare.text}`);
     await idle(srv.swapSet.get(a.id).runner);
+    // the right Origin with Sec-Fetch-Site same-origin passes the checks too: a route with no throttle answers on the body (400, not 403)
+    const ok = await api("POST", "/api/program/open", { what: "nothing-of-the-kind" }, { origin: "no1d://app", "sec-fetch-site": "same-origin" });
+    assert.equal(ok.status, 400, ok.text);
+    assert.match(ok.body.error, /^what must be one of/);
   } finally {
     await env.cleanup();
   }
@@ -149,10 +167,13 @@ test("the self-test's page probe against the real handler: the page's POST witho
       const r = await request(srv, null, "POST", "/api/program/open", "{}", headers);
       return { scripts: true, post: { status: r.status, error: r.body && typeof r.body.error === "string" ? r.body.error : null } };
     };
-    // what a page on no1d://app sends (the harness sets Origin no1d://app on a POST): the token's refusal, which the self-test requires
-    const good = await answer({ "sec-fetch-site": "same-origin" });
+    // what the page on no1d://app sends through protocol.handle (no Origin, no Sec-Fetch-*): the token's refusal, which the self-test requires
+    const good = await answer({ accept: "*/*" });
     assert.deepEqual(good.post, { status: 403, error: "missing or wrong token" });
     assert.equal(pageProbeProblem(good), null);
+    // should a later Chromium send them, the right ones give the same answer
+    const sent = await answer({ origin: "no1d://app", "sec-fetch-site": "same-origin" });
+    assert.equal(pageProbeProblem(sent), null);
     // a page whose origin the handler does not accept: the self-test fails and says why
     const opaque = await answer({ origin: "null" });
     assert.match(pageProbeProblem(opaque), /refused for its Origin/);

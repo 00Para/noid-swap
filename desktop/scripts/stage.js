@@ -19,7 +19,8 @@
  * Subcommands:
  *   stage         --repo DIR --out DIR --bin-out DIR --swap-cli-dir DIR [--platform win|mac]
  *   check         --out DIR                       after npm ci: ethers resolves, nothing else was installed
- *   manifest      --resources DIR --out FILE --version V [--commit SHA]    hash app.asar.unpacked/ and bin/ of a packed program
+ *   manifest      --resources DIR --stage DIR --out FILE --version V [--commit SHA]
+ *                                                 the packed eth/node_modules holds the stage's packages; hash app.asar.unpacked/ and bin/
  *   verify-packed --resources DIR --manifest FILE [--asar FILE]            the packed program holds exactly what the manifest lists
  */
 
@@ -313,13 +314,46 @@ function listResourceFiles(resourcesDir) {
   return files.sort(byCodeUnit);
 }
 
+// Files without which the packed program cannot run live.js and its Ethereum steps. The manifest is made from what the builder really
+// placed, so a file the builder leaves out would never be missed by the manifest alone (a build by hand on a Mac: electron-builder
+// dropped stage/eth/node_modules, and every check passed). A manifest without them is not written, and one that does not list them fails.
+const REQUIRED_PACKED = [`${UNPACKED}/eth/scripts/live.js`, `${UNPACKED}/eth/node_modules/ethers/package.json`];
+
 /** The manifest object: {v, program_version, commit, files:{path: sha256}} with sorted keys. */
 function buildManifest(resourcesDir, { version, commit }) {
   if (!/^\d+\.\d+\.\d+$/.test(version || "")) throw new Error("manifest: version must be x.y.z");
   if (!/^[0-9a-f]{40}$/.test(commit || "")) throw new Error("manifest: commit must be 40 lower-case hex characters");
   const files = {};
   for (const rel of listResourceFiles(resourcesDir)) files[rel] = sha256File(path.join(resourcesDir, ...rel.split("/")));
+  const missing = REQUIRED_PACKED.filter((r) => !Object.prototype.hasOwnProperty.call(files, r));
+  if (missing.length) throw new Error(`manifest: the packed program lacks ${missing.join(", ")} (the builder left it out)`);
   return { v: 1, program_version: version, commit, files };
+}
+
+/**
+ * After pass 1: the packed eth/node_modules holds exactly the packages of the stage's eth/node_modules (which `check` compared with the
+ * lock), with the same ethers version. The builder may leave out single files (READMEs, type files), never a package.
+ */
+function checkPackedRuntime(resourcesDir, stageDir) {
+  const problems = [];
+  const packed = path.join(resourcesDir, UNPACKED, "eth", "node_modules");
+  const staged = path.join(stageDir, "eth", "node_modules");
+  const have = listInstalled(packed, "eth/node_modules");
+  const want = listInstalled(staged, "eth/node_modules");
+  if (want.length === 0) problems.push("the stage's eth/node_modules holds no package: run `check` on the stage first");
+  for (const k of want) if (!have.includes(k)) problems.push(`${k} is in the stage and not in the packed program`);
+  for (const k of have) if (!want.includes(k)) problems.push(`${k} is in the packed program and not in the stage`);
+  const ethersVersion = (dir) => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(dir, "ethers", "package.json"), "utf8")).version;
+    } catch {
+      return null;
+    }
+  };
+  if (have.includes("eth/node_modules/ethers") && ethersVersion(packed) !== ethersVersion(staged)) {
+    problems.push(`ethers is ${ethersVersion(packed)} in the packed program and ${ethersVersion(staged)} in the stage`);
+  }
+  return problems;
 }
 
 const serializeManifest = (m) => JSON.stringify(m, null, 2) + "\n";
@@ -339,6 +373,7 @@ function verifyManifest(resourcesDir, text) {
     if (!(parts[0] === UNPACKED || parts[0] === BIN) || parts.includes("..") || parts.includes("") || key.includes("\\")) problems.push(`the manifest lists a path it must not: ${key}`);
   }
   if (problems.length) return { ok: false, problems };
+  for (const r of REQUIRED_PACKED) if (!Object.prototype.hasOwnProperty.call(m.files, r)) problems.push(`the manifest does not list ${r}, which the program needs`);
   let actual;
   try {
     actual = listResourceFiles(resourcesDir);
@@ -413,7 +448,13 @@ function main(argv) {
       return problems.length === 0 ? 0 : 1;
     }
     if (sub === "manifest") {
-      const m = buildManifest(path.resolve(need(f, "resources")), { version: need(f, "version"), commit: f.commit || process.env.GITHUB_SHA });
+      const resources = path.resolve(need(f, "resources"));
+      const runtime = checkPackedRuntime(resources, path.resolve(need(f, "stage")));
+      if (runtime.length) {
+        runtime.forEach((p) => process.stderr.write(`error: ${p}\n`));
+        return 1;
+      }
+      const m = buildManifest(resources, { version: need(f, "version"), commit: f.commit || process.env.GITHUB_SHA });
       fs.writeFileSync(path.resolve(need(f, "out")), serializeManifest(m));
       say(`manifest: ${Object.keys(m.files).length} files`);
       return 0;
@@ -455,6 +496,8 @@ module.exports = {
   readRequires,
   poseidonSpecDir,
   listInstalled,
+  checkPackedRuntime,
+  REQUIRED_PACKED,
   buildManifest,
   serializeManifest,
   verifyManifest,

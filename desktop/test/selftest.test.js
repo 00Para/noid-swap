@@ -161,7 +161,7 @@ test("the page probe: scripts that did not run, a POST refused for its Origin, a
   };
   const cases = [
     [goodPage({ scripts: false, post: { status: 403, error: "missing or wrong token" } }), /scripts did not run/],
-    [goodPage({ scripts: true, post: { status: 403, error: "cross-origin or missing Origin" } }), /refused for its Origin/],
+    [goodPage({ scripts: true, post: { status: 403, error: "cross-origin request refused" } }), /refused for its Origin/],
     [goodPage({ scripts: true, post: { status: 200, error: null } }), /not refused for the token \(status 200\)/],
     [goodPage({ scripts: true, post: { status: 0, error: "the fetch failed" } }), /status 0, "the fetch failed"/],
     [goodPage(null), /did not answer/],
@@ -180,7 +180,7 @@ test("the page probe: scripts that did not run, a POST refused for its Origin, a
 });
 
 test("with the fake, a handler whose Origin check refuses the page fails the self-test with words", async () => {
-  const e = makeEnv({ argv: ["x.exe", "--self-test"], electron: { pageScript: async () => ({ scripts: true, post: { status: 403, error: "cross-origin or missing Origin" } }) } });
+  const e = makeEnv({ argv: ["x.exe", "--self-test"], electron: { pageScript: async () => ({ scripts: true, post: { status: 403, error: "cross-origin request refused" } }) } });
   try {
     await e.shell.start();
     assert.equal(e.electron.app.exitCode, 1);

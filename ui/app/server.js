@@ -801,9 +801,24 @@ function schemeHostOk(req) {
   return req.headers.host === SCHEME_HOST;
 }
 
-/** Scheme mode, a POST: an Origin of exactly no1d://app, and Sec-Fetch-Site (when sent) same-origin. */
+/**
+ * Scheme mode, a POST: an Origin, when sent, of exactly no1d://app, and a Sec-Fetch-Site, when sent, of same-origin.
+ *
+ * Chromium sends neither on a request answered through protocol.handle, and no Referer either (seen on Electron 45 under macOS with the
+ * scheme's corsEnabled privilege false and true: the request carried only accept, content-type and user-agent). So an absent Origin is
+ * not a sign of a foreign page here, and requiring one refused the program's own page. What binds a write in scheme mode instead:
+ *   - the request reached this handler only through the scheme adapter (FROM_ADAPTER, checked first), and the adapter is attached to
+ *     the main window's session and to no other session, so a page of another session cannot reach it at all;
+ *   - the navigation guard keeps every page of that session on no1d://app (or on the fixed data: page shown after a second lost
+ *     renderer, which has no script); no window is opened and no webview is attached;
+ *   - every /api/ request needs the per-start token, which lives in the fragment of the URL the main window was loaded with and is never
+ *     in a response; a page of another origin could not read it, and could not send it: a cors fetch of the scheme is refused
+ *     (corsEnabled false), and a no-cors fetch or a form can carry neither the token header nor a JSON content type.
+ * An Origin or a Sec-Fetch-Site that IS sent and names another origin is still refused.
+ */
 function schemeOriginOk(req) {
-  if (req.headers.origin !== SCHEME_ORIGIN) return false;
+  const origin = req.headers.origin;
+  if (origin !== undefined && origin !== SCHEME_ORIGIN) return false;
   const sfs = req.headers["sec-fetch-site"];
   return sfs === undefined || sfs === "same-origin";
 }
@@ -834,7 +849,7 @@ function programRequestHandler(program, swapSet, getServer) {
 
       if (req.method === "POST") {
         if (!p.startsWith("/api/")) return send(res, 404, { error: "not found" });
-        if (!schemeOriginOk(req)) return send(res, 403, { error: "cross-origin or missing Origin" });
+        if (!schemeOriginOk(req)) return send(res, 403, { error: "cross-origin request refused" });
         if (!tokenOk(server, req)) return send(res, 403, { error: "missing or wrong token" });
         if (!/^application\/json\b/i.test(String(req.headers["content-type"] || ""))) return send(res, 415, { error: "application/json required" });
         let body;

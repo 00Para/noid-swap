@@ -839,7 +839,11 @@ that came through the desktop shell's scheme adapter, `maxBody` is the adapter's
   policy argument. Program mode's handler is a separate function (as it already was), so there is no shared "createRequestHandler";
   the two routes differ and sharing one function would have changed terminal mode.
 - In program mode: a request without the adapter's mark is refused (403) before anything else; the Host must be exactly `app`
-  (`schemeHostOk`); a POST needs `Origin: no1d://app` exactly and a `Sec-Fetch-Site`, when sent, of `same-origin` (`schemeOriginOk`);
+  (`schemeHostOk`); a POST with an `Origin` other than `no1d://app`, or a `Sec-Fetch-Site` other than `same-origin`, is refused
+  (`schemeOriginOk`). A POST with neither is accepted by this check: Chromium sends no `Origin`, no `Sec-Fetch-*` and no `Referer`
+  on a request answered through `protocol.handle` (seen on a real window under macOS, with `corsEnabled` false and true), so requiring
+  one refused the program's own page. A write is bound by the adapter's mark, the main window's session (the only one with the
+  handler, held to `no1d://app` by the navigation guard) and the per-start token;
   a GET on `/api/` is refused when `Sec-Fetch-Site` is cross-site or the Origin is another (`crossSiteRead` with the scheme origin).
   The per-start token stays as the second lock on every `/api/` request. After `stop()` the handler answers a fixed 503.
 - Every answer of program mode carries the policy `default-src no1d://app; style-src no1d://app; script-src no1d://app;
@@ -857,7 +861,8 @@ that came through the desktop shell's scheme adapter, `maxBody` is the adapter's
 
 - The adapter reads a whole request body into memory (at most 16384 bytes) before the handler runs; the handler's own streaming reader
   then sees it at once. Fine for these routes, not for large uploads.
-- `Sec-Fetch-Site` is accepted when absent (as in terminal mode); the Origin on a POST and the token are what bind a write.
+- `Sec-Fetch-Site` and `Origin` are accepted when absent in program mode (Chromium sends neither through `protocol.handle`); the
+  token, the adapter's mark and the main window's session are what bind a write. Terminal mode still requires the Origin on a POST.
 - The old terminal-mode console pages (`/console`, `/app.js`, `/styles.css`) are still not served in program mode.
 
 **Deviations from the build specification, section 9.**

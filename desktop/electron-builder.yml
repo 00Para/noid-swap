@@ -2,9 +2,9 @@
 # (.github/workflows/build.yml, job "desktop"); nothing here runs on a private machine.
 #
 # The program is laid out by desktop/scripts/stage.js into desktop/stage/ (the app folder below) and the swap-cli
-# program of the same run into desktop/stage-bin/ (copied to resources/bin). Nothing is signed: there is no identity
-# and no certificate, and the workflow uses no secrets. Nothing is published: the workflow passes --publish never and
-# uploads build artifacts only.
+# program of the same run into desktop/stage-bin/ (copied to resources/bin). Nothing is signed with a certificate: the
+# Mac program gets an ad-hoc signature, which needs no identity, and the workflow uses no secrets. Nothing is published:
+# the workflow passes --publish never and uploads build artifacts only.
 
 # Neutral reverse-DNS identifier: it names no person (build spec section 11, point 22). The owner may change it
 # before the first release; an installed program is keyed by it.
@@ -23,6 +23,14 @@ asar: true
 asarUnpack:
   - eth/**
   - equiv/**
+
+# The builder leaves out the node_modules folder of a sub-folder of the app by default, so without the second line
+# eth/node_modules (ethers and its five packages) was not packed and live.js could not start (seen on the first Mac
+# build). Its default filter still drops the TypeScript declaration files, which nothing reads at run time.
+# stage.js manifest --stage refuses a packed program whose eth/node_modules is not the stage's.
+files:
+  - "**/*"
+  - "eth/node_modules/**/*"
 
 # swap-cli, from this run's swap-cli job, lands in resources/bin/.
 extraResources:
@@ -74,14 +82,17 @@ nsis:
   deleteAppDataOnUninstall: false
   differentialPackage: false
 
-# macOS Apple Silicon, a disk image. Not signed and not notarized: the system asks the user to open it by hand.
-# On arm64 the builder resets the ad-hoc signature after the fuses are flipped; the start-up test proves it starts.
+# macOS Apple Silicon, a disk image. Not signed with a certificate and not notarized: the system asks the user to open it
+# by hand. identity "-" is an ad-hoc signature of the whole bundle, made after the fuses are flipped. With identity null
+# the bundle kept only the linker's signature of the binary, which the flipped fuses no longer match, and macOS ended the
+# program at start (seen on the first Mac build); with "-" codesign --verify --strict --deep passes and it starts.
+# The disk image itself stays unsigned.
 mac:
   target:
     - target: dmg
       arch:
         - arm64
-  identity: null
+  identity: "-"
   hardenedRuntime: false
   gatekeeperAssess: false
   category: public.app-category.finance
