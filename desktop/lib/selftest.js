@@ -31,7 +31,7 @@ function holdMsFrom(text) {
 const EXPECTED_PREFS = Object.freeze({ contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, webviewTag: false });
 
 /**
- * Run in the page (webContents.executeJavaScript): did the page's own scripts run (actions.js sets window.NoidProgram), and what
+ * Run in the page (webContents.executeJavaScript): did the page's own scripts run (program.js sets window.NoidProgram), and what
  * does a POST the page sends, without the token, get back? It asks for nothing the page could act on: the request is refused.
  */
 const PAGE_PROBE = `(async () => {

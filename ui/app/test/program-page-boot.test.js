@@ -112,6 +112,17 @@ test("program mode: the list has one row per swap with its role in words, its la
   for (const r of rows) assert.equal(r.children[0].tag, "button");
 });
 
+test("program mode: an empty list shows the first-start guide with the live Parano1d word and no link; a list with a swap does not", async () => {
+  const empty = await programPage({}, { swaps: [] });
+  const t = textOf(empty.byId("pg-root"));
+  assert.match(t, /Before your first swap/);
+  assert.match(t, /The Parano1d wallet app is open on this computer and in sync\.\s+Parano1d: connected/);
+  assert.match(t, /No swaps yet\. Make one with New swap/);
+  assert.equal(empty.byId("pg-root").all((n) => n.tag === "a").length, 0);
+  const full = await programPage();
+  assert.doesNotMatch(textOf(full.byId("pg-root")), /Before your first swap/);
+});
+
 test("program mode: the New swap button is disabled with the server's reason in words when a new swap is not allowed", async () => {
   const why = "Write down your recovery code first: it is not confirmed yet.";
   const page = await programPage({}, { new_swap_allowed: { ok: false, why }, vault: { ready: true, recovery_confirmed: false } });
@@ -212,8 +223,8 @@ test("program mode: opening a swap reads /api/run?swap=ID with the key; the swap
   assert.doesNotMatch(bar, /back up the swap file/i);
   // the first screen of a swap with no tick: the steps of this swap, no install, no terms
   const steps = page.text("start");
-  assert.match(steps, /Set up/);
-  assert.match(steps, /Make this swap's own wallets/);
+  assert.match(steps, /Make this swap's own wallets/); // Set up and the wallet setup are this one automatic step now
+  assert.match(page.text("next-action"), /Starts by itself\.|Running by itself\./);
   assert.match(steps, /Prepare the swap file/);
   assert.doesNotMatch(steps, /Install the helpers|Enter the terms|env\.local/);
   // back to the list
@@ -226,16 +237,17 @@ test("program mode: opening a swap reads /api/run?swap=ID with the key; the swap
 
 test("program mode: every POST of a swap's page carries the swap id (the action, the spend, the autopilot) and the page offers no terminal-only button", async () => {
   const posted = [];
-  const page = await programPage({ "POST /api/action": (u, body) => { posted.push(["/api/action", body]); return { status: 200, body: { ok: true } }; }, "POST /api/autopilot": (u, body) => { posted.push(["/api/autopilot", body]); return { status: 200, body: { ok: true } }; } });
+  // a failed Set up: the first screen's only button is "Try again" (the automatic steps have no button otherwise)
+  const page = await programPage({ "POST /api/action": (u, body) => { posted.push(["/api/action", body]); return { status: 200, body: { ok: true } }; }, "POST /api/autopilot": (u, body) => { posted.push(["/api/autopilot", body]); return { status: 200, body: { ok: true } }; } }, {}, { run: { first_steps: { running: null, failed: "setup", waiting: null } } });
   await page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"))[0].click();
   await page.flush();
   const root = page.byId("op-view");
   const all = buttons(page.document.body).map((b) => textOf(b));
   assert.ok(!all.some((t) => /Install helpers|Check object|check-object|Settings for this run|Write env\.local\.sh/.test(t)), "no install, no check-object, no env.local form: " + all.join(" | "));
   assert.ok(root.all((n) => n.attrs.id === "f-role").length === 0, "the terminal settings form is not built");
-  // the first screen's main button is the table's setup action
+  // the first screen's main button runs the table's setup action again
   const go = page.byId("next-action").all((n) => n.tag === "button" && n.className.includes("primary"))[0];
-  assert.match(textOf(go), /Set up/);
+  assert.match(textOf(go), /Try again/);
   await go.click();
   await page.flush();
   assert.deepEqual(posted[0], ["/api/action", { id: "setup", swap: F.SWAP_A }]);
@@ -283,8 +295,9 @@ test("program mode: the new-swap form posts the fields, shows the server's error
   assert.equal(posted[0].fields.profile, "sepolia");
   assert.equal(posted[0].fields.single_node_ok, false);
   assert.equal(posted[0].fields.lock_kind, undefined, "the lock kind is not a choice");
-  assert.equal(textOf(g("ns-err-noid_amount")), "over the test limit");
+  assert.equal(posted[0].remember, true, "the remember tick is on by default and goes with the fields");  assert.equal(textOf(g("ns-err-noid_amount")), "over the test limit");
   assert.equal(textOf(g("ns-err-contract")), "0x and 40 hex digits");
+  assert.equal(g("ns-optional").open, true, "an error on the contract opens the optional settings");
   assert.match(page.text("ns-general"), /errors; nothing was made/);
   g("ns-noid_amount").value = "5";
   await g("ns-go").click();
@@ -336,6 +349,7 @@ test("program mode: the settings screen shows the fields, shows the alert addres
   assert.match(all, /An alert address is set\. It is not shown\./);
   assert.ok(!JSON.stringify(page.document.body, (k, v) => (k === "parent" || k === "ownerDocument" || k === "listeners" || k === "classList" ? undefined : v)).includes("TOPSECRETTOKEN"), "the alert address is nowhere in the page");
   const g = (id) => root.all((n) => n.attrs.id === id)[0];
+  assert.equal(g("st-advanced").open, false, "the Advanced fold is closed");
   assert.equal(g("st-noid_rpc").value, "http://127.0.0.1:9601");
   assert.equal(g("st-board_relays").value, "wss://r1.example\nwss://r2.example");
   g("st-eth_sepolia_rpc").value = "http://bad";
@@ -350,6 +364,7 @@ test("program mode: the settings screen shows the fields, shows the alert addres
   assert.equal(posted[0].rpc_timeout_s, "x", "what is not a whole number is sent as typed and the server says so");
   assert.equal(textOf(g("st-err-eth_sepolia_rpc")), "an https:// address");
   assert.equal(textOf(g("st-err-rpc_timeout_s")), "a whole number");
+  assert.equal(g("st-advanced").open, false, "errors outside the fold leave it closed");
   g("st-eth_sepolia_rpc").value = "https://ok.example";
   g("st-rpc_timeout_s").value = "45";
   g("st-alert_url").value = "https://new.example/x";
@@ -424,7 +439,7 @@ test("static: the page files of program mode have no inline script, style or HTM
   const fs = require("fs");
   const path = require("path");
   const strip = (raw) => raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-  for (const f of ["operator.js", "actions.js", "board.js"]) {
+  for (const f of ["operator.js", "actions.js", "program.js", "board.js"]) {
     const src = strip(fs.readFileSync(path.join(__dirname, "..", f), "utf8"));
     assert.doesNotMatch(src, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|\.style\b|setAttribute\(\s*["']style|\bon\w+\s*=\s*["']/, f);
   }
@@ -433,7 +448,7 @@ test("static: the page files of program mode have no inline script, style or HTM
   assert.doesNotMatch(html, /\sstyle=|\son\w+=/i, "no inline style or handler");
   assert.doesNotMatch(html, /https?:\/\/(?!www\.w3\.org)/, "nothing from the internet");
   const ids = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-  for (const f of ["operator.js", "actions.js", "board.js"]) {
+  for (const f of ["operator.js", "actions.js", "program.js", "board.js"]) {
     const src = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
     for (const m of src.matchAll(/\$\("([\w-]+)"\)/g)) assert.ok(ids.has(m[1]) || ["caps"].includes(m[1]), `${f} looks up #${m[1]}, which index.html does not have`);
   }
@@ -446,10 +461,19 @@ test("static: the page files of program mode have no inline script, style or HTM
 test("static: the program-mode page code names no secret, no key and no mainnet or production choice", () => {
   const fs = require("fs");
   const path = require("path");
-  const all = ["operator.js", "actions.js", "board.js"].map((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")).join("\n");
-  const actions = fs.readFileSync(path.join(__dirname, "..", "actions.js"), "utf8");
-  // the second script of actions.js is the shell of program mode (the top bar, the list, the forms): without its comments
-  const prog = actions.slice(actions.indexOf("(() => {", actions.indexOf("noid-swap operator console, program mode"))).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
+  const all = ["operator.js", "actions.js", "program.js", "board.js"].map((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")).join("\n");
+  const program = fs.readFileSync(path.join(__dirname, "..", "program.js"), "utf8");
+  // program.js is the shell of program mode (the top bar, the list, the forms): without its comments
+  const prog = program.slice(program.indexOf("(() => {", program.indexOf("noid-swap operator console, program mode"))).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
   assert.doesNotMatch(prog, /master_secret|private_key|passphrase|\bmnemonic\b|invite_secret|--mainnet|"production"|"mainnet"/i);
   assert.doesNotMatch(all, /wallet export|ethkey emit|i-understand-this-is-the-key/);
+});
+
+test("program mode: the first screen says how deposited coins come back without promising it happens by itself (the sweeps and the recovery run by themselves only with the approval in force)", async () => {
+  const page = await programPage();
+  await page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"))[0].click();
+  await page.flush();
+  const text = page.text("start");
+  assert.match(text, /what is left can then be sent to your own addresses from this swap's page; while the program runs this swap for you, it does both by itself\./);
+  assert.doesNotMatch(text, /what is left is sent to your own addresses when the swap is over/);
 });

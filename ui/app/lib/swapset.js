@@ -26,9 +26,10 @@ const { RunLock } = require("./runlock");
 const { ActionRunner } = require("./actions");
 const { Autopilot } = require("./autopilot");
 const { createStepExecutor } = require("./stepexec");
+const { FirstSteps, wantedFor } = require("./firststeps");
 const { createRunJsonSource, readSlot } = require("./settingsource");
 const { createToolHasher } = require("./toolhash");
-const { PROFILES, decimalToInt } = require("./swapform");
+const { PROFILES, decimalToInt, pinFor } = require("./swapform");
 const { ENDED_PHASES } = require("./gate");
 const { readRun } = require("./runfolder");
 const { BoardHost, microToDec, weiToDec } = require("./board/host");
@@ -50,6 +51,13 @@ const IN_CONTRACT = {
   alice: new Set(["funding_submitted", "funded", "funding_final", "lock_seen", "lock_final", "reveal_submitted", "revealed", "refund_submitted", "refund_included"]),
   bob: new Set(["lock_submitted", "locked", "secret_seen", "claim_submitted", "claim_included", "refund_submitted", "refund_mined"]),
 };
+
+/** The board's pinned contracts: the settings' own table, with the profile's chain set to `pinFor` (the override when set, else the program's pin) when there is one. */
+function boardPins(b, ps) {
+  const pin = pinFor(b.profile, ps);
+  const prof = Object.prototype.hasOwnProperty.call(PROFILES, b.profile) ? PROFILES[b.profile] : null;
+  return pin && prof ? { ...b.pinned_htlc, [String(prof.chain)]: pin } : b.pinned_htlc;
+}
 
 const bad = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
 
@@ -298,6 +306,9 @@ class SwapSet {
       return this.refuseFolder(name, `the folder cannot be opened (${String((e && e.message) || "error").slice(0, 120)})`, dir);
     }
     swap.autopilot = new Autopilot(swap.runner);
+    // the first steps that send nothing (the setup chain, the check line) and the watch under rule W: for every swap with a runner; a board slot's setup is the board host's own
+    swap.firstSteps = new FirstSteps({ runner: swap.runner, executor: swap.executor, dir, settingsSource: source, board: !!slot, now: this.now });
+    swap.runner.firstSteps = swap.firstSteps;
     swap.board = null;
     swap.boardError = null;
     if (slot && !readOnly && !lockWhy) this.buildBoard(swap);
@@ -329,7 +340,8 @@ class SwapSet {
       const settings = {
         profile: b.profile,
         relays: b.relays,
-        pinned_htlc: b.pinned_htlc,
+        // the program's own contract for the network (the one pin), unless the settings name another one for that chain
+        pinned_htlc: boardPins(b, ps),
         noid_payout: role === "alice" ? ps.noid_payout : ps.noid_payout || undefined,
         bob_noid: role === "bob" ? ps.bob_noid : undefined,
         eth_payout: ps.eth_payout,
@@ -562,7 +574,14 @@ class SwapSet {
           }
           continue;
         }
-        const r = swap.executor.watchStart();
+        // rule W (lib/firststeps.js): a loop that only reads, until the engine's decision may be recorded
+        let wanted = "read";
+        try {
+          wanted = wantedFor(swap.runner, f.role, swap.runner.readRunFn(swap.runner.cfg.runDirs, Math.floor(this.now() / 1000)), this.now());
+        } catch {
+          wanted = "read";
+        }
+        const r = swap.executor.watchStart({ mode: wanted });
         if (r.started) swap.audit.append({ action: "watch", role: f.role, phase: "note", result: "watch loop started at program start" });
       } catch {
         /* the autopilot or a click starts it later */
@@ -583,6 +602,7 @@ class SwapSet {
       swap.stepping = true;
       try {
         swap.runner.walletPoll();
+        swap.firstSteps.step();
         if (swap.board) swap.board.step();
         swap.autopilot.step();
         swap.executor.supervise().catch(() => {});

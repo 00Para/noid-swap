@@ -105,7 +105,7 @@ test("the program object handed to the server has the fields of I1", async () =>
   try {
     await e.shell.start();
     const p = e.program();
-    for (const k of ["version", "network", "dataDir", "runsDir", "home", "tools", "toolFiles", "codeFiles", "vault", "folderGuard", "makeOwnerOnlyDir", "nodeStatus", "notify", "chooseBundleFile", "open", "atStakeChanged", "settings"]) {
+    for (const k of ["version", "network", "dataDir", "runsDir", "home", "tools", "toolFiles", "codeFiles", "vault", "folderGuard", "makeOwnerOnlyDir", "nodeStatus", "notify", "chooseBundleFile", "saveCopy", "chooseInvitationFile", "open", "atStakeChanged", "settings"]) {
       assert.ok(k in p, k);
     }
     assert.equal(p.network, "test");
@@ -399,6 +399,54 @@ test("the bundle dialog is a native open dialog; cancel gives null; a bad swap i
     assert.equal(await p.chooseBundleFile("a".repeat(32)), null);
     e.electron.dialog.openAnswer = { canceled: false, filePaths: ["relative.json"] };
     assert.equal(await p.chooseBundleFile("a".repeat(32)), null, "a relative path is never handed on");
+  } finally {
+    e.cleanup();
+  }
+});
+
+// the fixture makes the program for win32: it writes real files, so it runs on a Windows host only
+test("the save dialogs of the simple flow: the spec's titles, names and filters, a sheet of the window, cancel gives null, the program writes the file", { skip: process.platform !== "win32" }, async () => {
+  const e = makeEnv();
+  try {
+    await e.shell.start();
+    const p = e.program();
+    const dir = fs.mkdtempSync(path.join(require("node:os").tmpdir(), "no1d-save-"));
+    try {
+      const dest = path.join(dir, "copy.json");
+      e.electron.dialog.saveAnswer = { canceled: false, filePath: dest };
+      assert.equal(await p.saveCopy("bundle", Buffer.from("{}")), "saved");
+      assert.equal(fs.readFileSync(dest, "utf8"), "{}");
+      let args = e.electron.dialog.saveArgs;
+      assert.equal(args.length, 2, "a sheet of the main window");
+      assert.deepEqual(args[1], { title: "Save a copy of your swap file for Bob", defaultPath: "alice.bundle.json", filters: [{ name: "Swap file", extensions: ["json"] }] });
+      assert.equal(await p.saveCopy("invitation", Buffer.from("{}")), "saved");
+      args = e.electron.dialog.saveArgs;
+      assert.deepEqual(args[args.length - 1], { title: "Save an invitation for Alice", defaultPath: "no1d-invitation.json", filters: [{ name: "Invitation", extensions: ["json"] }] });
+      e.electron.dialog.saveAnswer = { canceled: true, filePath: "" };
+      assert.equal(await p.saveCopy("bundle", Buffer.from("{}")), "cancelled");
+      e.electron.dialog.saveAnswer = { canceled: false, filePath: "relative.json" };
+      assert.equal(await p.saveCopy("bundle", Buffer.from("{}")), "refused", "a relative path is never written");
+      assert.ok(!fs.existsSync("relative.json"));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    e.cleanup();
+  }
+});
+
+test("the invitation dialog is a native open dialog for one JSON file; cancel and a relative path give null", async () => {
+  const e = makeEnv({ electron: { openAnswer: { canceled: false, filePaths: [path.join(process.cwd(), "invitation.json")] } } });
+  try {
+    await e.shell.start();
+    const p = e.program();
+    assert.equal(await p.chooseInvitationFile(), path.join(process.cwd(), "invitation.json"));
+    const opts = e.electron.calls.filter((c) => c.name === "showOpenDialog").pop().args[0];
+    assert.deepEqual(opts, { title: "Open Bob's invitation", properties: ["openFile"], filters: [{ name: "Invitation", extensions: ["json"] }] });
+    e.electron.dialog.openAnswer = { canceled: true, filePaths: [] };
+    assert.equal(await p.chooseInvitationFile(), null);
+    e.electron.dialog.openAnswer = { canceled: false, filePaths: ["invitation.json"] };
+    assert.equal(await p.chooseInvitationFile(), null);
   } finally {
     e.cleanup();
   }

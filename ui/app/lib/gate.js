@@ -41,7 +41,11 @@ const ALARM_REFUSES = new Set(["fund_noid", "lock_eth", "reveal_eth", "claim_noi
 const ALERT_REFUSES = new Set(["fund_noid", "lock_eth", "reveal_eth"]);
 
 const STATEMENT_BOB_CHECK = "The statement was not confirmed: \"Bob's check line matches mine: the 16 digits of his bundle check line are the ones of my line, compared over a second channel\".";
-const STATEMENT_NO_PENDING = "The statement was not confirmed: \"No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else\".";
+// Program mode, outside a board run (simplifications, 1.4 and 1.5): Bob's lock also needs the statement that Alice's check line matches his, and a funding or a lock needs the
+// line-match record (the person said the other side read out the same 16 digits). Without the flags the gate is as before.
+const STATEMENT_ALICE_CHECK = "The statement was not confirmed: \"Alice's check line matches mine: the 16 digits of her bundle check line are the ones of my line, compared over a second channel\".";
+const LINE_MATCH_MISSING = "First confirm that the other person read you their check line and all 16 digits match.";
+const STATEMENT_NO_PENDING ="The statement was not confirmed: \"No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else\".";
 const TICK_FRESH_S = 120;
 const DRY_MAX_AGE_S = 90;
 const CLOCK_SKEW_S = 10;
@@ -458,6 +462,10 @@ function evaluateSpend(spend, ctx) {
   // And a third: Bob has checked the bundle against his own terms and the two check lines were compared. A funding sent before that locks the NOID until D
   // for a swap Bob may never join (time, not coins). The tool cannot see Bob's machine, so only the operator knows.
   if (ctx.requireTyped && spend.kind === "fund_noid" && ctx.bobCheck !== true && !b) no("statement_bob_check", STATEMENT_BOB_CHECK);
+  // The same for Bob in the program (his lock also waits for the line match: see below).
+  if (ctx.requireTyped && spend.kind === "lock_eth" && ctx.aliceCheckRequired === true && ctx.aliceCheck !== true && !b) no("statement_alice_check", STATEMENT_ALICE_CHECK);
+  // The line match: a funding or a lock, whoever starts it, waits until the person said the other side's check line matches (a fact of the run folder, not a statement of the request).
+  if ((spend.kind === "fund_noid" || spend.kind === "lock_eth") && ctx.lineMatchRequired === true && ctx.lineMatch !== true && !b) no("line_match_missing", LINE_MATCH_MISSING);
   if (ctx.requireTyped && !typedMatches(spend, terms, ctx.typed)) no("typed", `The typed confirmation does not match${exp ? ` (type ${exp.text})` : ""}.`);
 
   return { ok: reasons.length === 0, reasons, expected_typed: exp ? exp.text : null, notices };
@@ -477,4 +485,4 @@ function factsReady(spend, ctx) {
   return { ok: reasons.length === 0, reasons, ignored, notices: g.notices || [], expected_typed: g.expected_typed };
 }
 
-module.exports = { isNothingToSweep, NOTHING_TO_SWEEP_RE, BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, SPENDS, evaluateSpend, factsReady, relevantFor, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };
+module.exports = { isNothingToSweep, NOTHING_TO_SWEEP_RE, BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, STATEMENT_ALICE_CHECK, LINE_MATCH_MISSING, SPENDS, evaluateSpend, factsReady, relevantFor, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };

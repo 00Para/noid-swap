@@ -32,6 +32,9 @@
  *   7  `fail closed` / `fails closed` / `stale`  (a word in a note)   engine.rs `decide`: "not KIND: WHY (fail closed)", the stale-observation notes
  *        -> only to colour a note amber; nothing is offered or refused by it
  *
+ *   9  `funding window: N blocks left before it is too late to fund (...)` / `funding window is short: N blocks left ...; see the action` /
+ *        `funding window is closed: ...`  (a note, by its opening words)   engine.rs `lock_by_margin_note` (Alice in `created`): the page's deposit clock, display only
+ *
  * What is NOT text-matched: the amount and slots of instances at the contract root (`noid.instances`), the intent kind / parameters /
  * cutoff / late_cutoff (`intent.intent`), the producer summary (`noid.producers`), the chain ids, the phase (`phase_after`).
  */
@@ -92,6 +95,24 @@
     return "quiet";
   }
 
+  // 9
+  const FUNDING_LEFT = /^funding window(?: is short)?: (\d+) blocks left before it is too late to fund\b/;
+  const FUNDING_CLOSED = /^funding window is closed\b/;
+  /**
+   * Alice's funding-window note (text 5's first forms): the number of blocks left before it is too late to fund (0 is a real count: the engine still funds at that tip), -1 for the closed window, null for any other text.
+   * Display only (the deposit clock of the page): it decides nothing, the engine does.
+   */
+  function fundingBlocksLeft(text) {
+    if (typeof text !== "string") return null;
+    const t = text.trim();
+    const m = FUNDING_LEFT.exec(t);
+    if (m) {
+      const n = Number(m[1]);
+      return Number.isSafeInteger(n) ? n : null;
+    }
+    return FUNDING_CLOSED.test(t) ? -1 : null;
+  }
+
   // 6
   const LEFTOVER_REASON = /refund|still at the contract|still open|open past T_reveal/i;
   const leftoverReason = (reason) => typeof reason === "string" && LEFTOVER_REASON.test(reason);
@@ -118,6 +139,8 @@
     { id: 4, phrase: "ALERT: the producer screen refuses", files: ["producer_gate.rs"] },
     { id: 5, phrase: "funding window", files: ["engine.rs"] },
     { id: 5, phrase: "lock-by margin", files: ["engine.rs"] },
+    { id: 9, phrase: "blocks left before it is too late to fund", files: ["engine.rs"] },
+    { id: 9, phrase: "funding window is closed", files: ["engine.rs"] },
     { id: 5, phrase: "lock margin", files: ["engine.rs"] },
     { id: 5, phrase: "nominal lock-by", files: ["engine.rs"] },
     { id: 5, phrase: "the tip is the last lock height", files: ["engine.rs"] },
@@ -128,5 +151,5 @@
     { id: 8, phrase: DO_NOT_SEND, files: ["producer_gate.rs"] },
   ];
 
-  return { heldFreshDecision, revealCutoffHeld, isAlarmText, alarmText, isAlertNote, alertText, lockByNote, lockByLevel, leftoverReason, isCautionNote, doNotSend, ENGINE_PHRASES, REVEAL_CUTOFF_HELD };
+  return { heldFreshDecision, revealCutoffHeld, isAlarmText, alarmText, isAlertNote, alertText, lockByNote, lockByLevel, fundingBlocksLeft, leftoverReason, isCautionNote, doNotSend, ENGINE_PHRASES, REVEAL_CUTOFF_HELD };
 });

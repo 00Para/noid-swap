@@ -522,6 +522,9 @@ test("at program start, after the vault is ready, the watch starts for every swa
     set.tick();
     assert.equal(env.steps.watches.length, 1);
     assert.equal(env.steps.watches[0].ctx.runDir, live.dir);
+    // rule W (lib/firststeps.js): a swap with no tick yet is only read; the loop records nothing until the engine's decision may be recorded
+    assert.equal(env.steps.watches[0].opts.apply, false, "a fresh swap starts a read loop");
+    assert.equal(set.get(live.id).executor.watchStatus().mode, "read");
     set.tick();
     assert.equal(env.steps.watches.length, 1, "once");
     assert.ok(set.get(live.id).audit.all().some((r) => /watch loop started at program start/.test(r.result)));

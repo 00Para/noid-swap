@@ -22,6 +22,7 @@ async function setup(env, o = {}) {
   const a = env.addSwap({ role: o.role || "alice" });
   env.writeTerms(a, { aliceNoid: WNA });
   env.swapFile(a, o.role || "alice");
+  env.writeLineMatch(a, o.role || "alice"); // program mode: an approval needs the line match (lib/firststeps.js)
   env.writeTick(a, o.role || "alice", F.spendTick("fund_noid"));
   const set = new SwapSet({ program: env.program, deps: env.deps() });
   set.scan();
@@ -323,6 +324,37 @@ test("a wallet step that may have been sent stops the autopilot for that swap (n
     h.swap.audit.append({ action: "send-recover", role: "alice", phase: "end", result: "may have been sent, the same bytes may be sent again (wallet-recover.sh exit 6)" });
     h.ap.loadNeeds("alice");
     assert.ok(h.ap.needs.alice.some((e) => e.spend === "send-recover"));
+    await h.set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("program mode: both roles need the line match before an approval; Bob also needs his own swap file and gives three statements (lib/firststeps.js)", async () => {
+  const env = makeEnv();
+  try {
+    // Alice
+    const h = await setup(env);
+    fs.rmSync(path.join(h.a.dir, "line-match.json"));
+    assert.throws(() => h.ap.turnOn("alice", TYPED, STATEMENTS), (e) => e.status === 422 && e.reasons[0].code === "line_match_missing");
+    env.writeLineMatch(h.a, "alice");
+    assert.equal(h.ap.turnOn("alice", TYPED, STATEMENTS).status, 200);
+    assert.equal(h.ap.view(h.run()).alice.statements.length, 3);
+    // Bob: no swap file of his own, then no line match, then three statements
+    const b = env.addSwap({ role: "bob" });
+    env.writeTerms(b, { aliceNoid: WNA });
+    const set = new SwapSet({ program: env.program, deps: env.deps() });
+    set.scan();
+    const sb = set.get(b.id);
+    const bobStatements = { stay_on: true, no_manual_steps: true, alice_check_matches: true };
+    assert.throws(() => sb.autopilot.turnOn("bob", "0.001 ETH", bobStatements), (e) => e.reasons[0].code === "terms_missing" && /Your check of Alice/.test(e.reasons[0].text));
+    env.swapFile(b, "bob");
+    env.writeLineMatch(b, "bob", { match: false });
+    assert.throws(() => sb.autopilot.turnOn("bob", "0.001 ETH", bobStatements), (e) => e.reasons[0].code === "line_match_missing");
+    env.writeLineMatch(b, "bob");
+    assert.throws(() => sb.autopilot.turnOn("bob", "0.001 ETH", { stay_on: true, no_manual_steps: true }), (e) => e.reasons[0].code === "statement_alice_check_matches");
+    assert.equal(sb.autopilot.turnOn("bob", "0.001 ETH", bobStatements).status, 200);
+    await set.stopAll();
     await h.set.stopAll();
   } finally {
     await env.cleanup();

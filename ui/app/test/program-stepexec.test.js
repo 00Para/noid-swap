@@ -330,9 +330,19 @@ test("watch: start is idempotent, status shows it, stop ends it; the watch's con
     assert.deepEqual(w.opts.roles, ["alice"]);
     assert.equal(w.opts.intervalMs, 30000);
     assert.equal(executor.watchStatus().running, true);
+    // the two watch modes (lib/firststeps.js, rule W): the default start records, and the status says which mode runs
+    assert.equal(w.opts.apply, true);
+    assert.equal(executor.watchStatus().mode, "apply");
+    assert.deepEqual(Object.keys(executor.watchStatus()).sort(), ["applied_once", "last_end", "last_line_at", "mode", "running", "started_at", "stopped_by_person", "ticks", "upgrading"]);
     await executor.watchStop();
     assert.equal(executor.watchStatus().running, false);
+    assert.equal(executor.watchStatus().mode, null, "no loop, no mode");
     assert.equal(executor.watchStatus().last_end.reason, "stopped");
+    // a read start passes apply: false to the loop
+    assert.deepEqual(executor.watchStart({ mode: "read" }), { started: true });
+    assert.equal(env.steps.watches.at(-1).opts.apply, false);
+    assert.equal(executor.watchStatus().mode, "read");
+    await executor.watchStop();
     // through run(): the ids of the table
     const r = await executor.run(BY_ID.get("watch-start"), {});
     assert.equal(r.code, 0);

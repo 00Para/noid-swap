@@ -152,3 +152,13 @@ test("the page's signature carries the wallet facts but not their ages, and the 
   assert.doesNotMatch(src, /master_secret|private_key|wallet export|ethkey emit|emit\(|i-understand/i);
   assert.ok(N.wallet.SPEND_ORDER.includes("send-recover") && N.wallet.SPEND_ORDER.includes("send-sweep-noid") && N.wallet.SPEND_ORDER.includes("send-sweep-eth-bob"));
 });
+
+test("the signature carries Bob's swap key address (the invitation box draws it), and the deposit box without options is the classic one", () => {
+  const a1 = payload().actions;
+  const a2 = payload().actions;
+  a2.wallet.roles.bob.key_address = EB;
+  assert.notDeepEqual(N.wallet.walletSignature(a1), N.wallet.walletSignature(a2));
+  assert.notEqual(N.signature({ ...a1, wallet: a1.wallet }), N.signature({ ...a2, wallet: a2.wallet }));
+  assert.match(textOf(N.wallet.depositBlock(payload(), "alice")), /NOID deposit address/);
+  assert.doesNotMatch(textOf(N.wallet.depositBlock(payload(), "alice")), /to deposit|Copy amount/);
+});

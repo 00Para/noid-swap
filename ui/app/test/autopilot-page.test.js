@@ -262,3 +262,63 @@ test("on, a sweep with nothing left: the finished line is drawn as a plain line 
   // an older payload without the field draws as before
   assert.doesNotThrow(() => NA.autopilotBlock(bobView(), payload(AP(), AP({ on: true, doing: "x" }))));
 });
+
+test("the off box leads with what the person gives and gets, in coin colours, when the server says both; without gets_text the box is as before", () => {
+  const give = (role, o = {}) => AP({ expected_typed: role === "alice" ? "5 NOID" : "0.001 ETH", gets_text: role === "alice" ? "0.001 ETH" : "5 NOID", ...o });
+  state.payload = payload(give("alice"), give("bob"));
+  const box = NA.autopilotBlock({ role: "alice", phase: { id: "created", terminal: false } }, state.payload);
+  const line = box.all((x) => x.tag === "p" && /^You give/.test(x.textContent))[0];
+  assert.equal(line.textContent, "You give 5 NOID. You get 0.001 ETH.");
+  assert.deepEqual(line.children.filter((c) => c.tag === "span").map((c) => [c.textContent, c.className]), [["5 NOID", "c-noid"], ["0.001 ETH", "c-eth"]]);
+  const bob = NA.autopilotBlock(bobView(), state.payload);
+  assert.equal(bob.all((x) => x.tag === "p" && /^You give/.test(x.textContent))[0].textContent, "You give 0.001 ETH. You get 5 NOID.");
+  // the line comes before the intro, and an older payload has none
+  assert.ok(texts(box).indexOf("You give") < texts(box).indexOf("Once you approve"));
+  state.payload = payload(AP(), AP());
+  assert.ok(!/You give/.test(texts(NA.autopilotBlock(bobView(), state.payload))));
+  // a missing amount is not made up
+  state.payload = payload(give("alice", { gets_text: null }), AP());
+  assert.ok(!/You give/.test(texts(NA.autopilotBlock({ role: "alice", phase: { id: "created", terminal: false } }, state.payload))));
+});
+
+test("the line statement is pre-ticked only when the page has the line match, can be un-ticked, and the approval still needs every tick", () => {
+  const stmts = [...STMT, { id: "alice_check_matches", text: "Alice's check line matches mine." }];
+  const lineOn = { actions: { enabled: true, production: null, line_match: { hex: "b4271c7f3ea51fe7", at: 1 }, autopilot: { alice: AP(), bob: AP({ statements: stmts }) } } };
+  state.payload = lineOn;
+  const box = NA.autopilotBlock(bobView(), state.payload);
+  const ticks = box.all((x) => x.tag === "input" && x.attrs.type === "checkbox");
+  assert.deepEqual(ticks.map((t) => [t.attrs.id, t.checked]), [["ap-stmt-stay_on", false], ["ap-stmt-no_manual_steps", false], ["ap-stmt-alice_check_matches", true]]);
+  const go = buttons(box).find((b) => /Turn on/.test(b.textContent));
+  const input = box.all((x) => x.tag === "input" && x.attrs.type === "text")[0];
+  input.value = "0.001 ETH";
+  input.fire("input");
+  for (const t of ticks.slice(0, 2)) {
+    t.checked = true;
+    t.fire("change");
+  }
+  assert.equal(go.disabled, false, "all three are ticked");
+  ticks[2].checked = false;
+  ticks[2].fire("change");
+  assert.equal(go.disabled, true, "un-ticking it turns the button off again");
+  // a redraw keeps the person's un-tick
+  const again = NA.autopilotBlock(bobView(), state.payload);
+  assert.equal(again.all((x) => x.tag === "input" && x.attrs.id === "ap-stmt-alice_check_matches")[0].checked, false);
+  // without the line match nothing is pre-ticked
+  NA.clearStart();
+  state.payload = { actions: { enabled: true, production: null, autopilot: { alice: AP(), bob: AP({ statements: stmts }) } } };
+  const none = NA.autopilotBlock(bobView(), state.payload);
+  assert.equal(none.all((x) => x.tag === "input" && x.attrs.type === "checkbox").every((t) => !t.checked), true);
+  NA.clearStart();
+});
+
+test("the signature carries what the simple start draws: gets_text, the board flag, the line match, the check line, the first steps and the watch mode", () => {
+  const base = { enabled: true, autopilot: { alice: AP(), bob: AP() }, watch: { started_here: true, some_loop_running: true, pid: null, mode: "read" } };
+  const sig = NA.signature(base);
+  assert.notEqual(NA.signature({ ...base, autopilot: { alice: AP(), bob: AP({ gets_text: "5 NOID" }) } }), sig);
+  assert.notEqual(NA.signature({ ...base, autopilot: { alice: AP(), bob: AP({ board: true }) } }), sig);
+  assert.notEqual(NA.signature({ ...base, line_match: { hex: "b4271c7f3ea51fe7", at: 1 } }), sig);
+  assert.notEqual(NA.signature({ ...base, check_line: { hex: "b4271c7f3ea51fe7", from: "join" } }), sig);
+  assert.notEqual(NA.signature({ ...base, first_steps: { running: "setup", failed: null, waiting: null } }), sig);
+  assert.notEqual(NA.signature({ ...base, watch: { ...base.watch, mode: "apply" } }), sig);
+  assert.notEqual(NA.signature({ ...base, spends: { "send-lock": { relevant: true, eligible: true, statements_needed: ["alice_check_matches"] } } }), NA.signature({ ...base, spends: { "send-lock": { relevant: true, eligible: true, statements_needed: [] } } }));
+});

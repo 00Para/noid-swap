@@ -406,15 +406,20 @@
     // the buttons come first, directly under the reason; the funding order (Bob's check first) is above the button that sends it
     if (actionsOn) {
       // the autopilot's box leads the card: it says whether the console does the steps itself, and what stopped it
-      const apb = window.NoidActions.autopilotBlock(view, state.payload);
-      if (apb) doBox.appendChild(apb);
-      const f = window.NoidActions.fundingBlock(view, state.payload);
-      if (f) doBox.appendChild(f);
-      // Bob's check line stays on his page until his lock is sent, above the lock's send box
-      const bc = window.NoidActions.bobCheckBlock(view, state.payload);
-      if (bc) doBox.appendChild(bc);
-      const sb = window.NoidActions.spendBlock(view, state.payload);
-      if (sb) doBox.appendChild(sb);
+      // program mode outside a board run: one builder set in the order of the work (the file and the check line, the approval, the deposit, then the send boxes)
+      const pc = window.NoidActions.programFirstCard ? window.NoidActions.programFirstCard(view, state.payload) : null;
+      if (pc) doBox.appendChild(pc);
+      else {
+        const apb = window.NoidActions.autopilotBlock(view, state.payload);
+        if (apb) doBox.appendChild(apb);
+        const f = window.NoidActions.fundingBlock(view, state.payload);
+        if (f) doBox.appendChild(f);
+        // Bob's check line stays on his page until his lock is sent, above the lock's send box
+        const bc = window.NoidActions.bobCheckBlock(view, state.payload);
+        if (bc) doBox.appendChild(bc);
+        const sb = window.NoidActions.spendBlock(view, state.payload);
+        if (sb) doBox.appendChild(sb);
+      }
     }
 
     if (a.stale && a.kind !== "wait") say.appendChild(el("p", { class: "plain" }, chip("attn", "stale tick"), " This decision comes from an old tick. Do not act on it until a fresh tick (watch loop, or Refresh tick) shows the same step."));

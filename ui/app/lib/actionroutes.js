@@ -14,7 +14,7 @@
 
 const { validateForm, writeEnvLocal } = require("./swapform");
 
-const ACTION_POSTS = new Set(["/api/action", "/api/spend", "/api/autopilot", "/api/funded", "/api/newswap", "/api/board"]);
+const ACTION_POSTS = new Set(["/api/action", "/api/spend", "/api/autopilot", "/api/funded", "/api/newswap", "/api/board", "/api/checkline/confirm"]);
 
 const bad = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
 
@@ -33,8 +33,15 @@ function handleActionPost(p, body, { actions, runDir, board, startMeta }) {
       if (body.no_pending_funding !== undefined && typeof body.no_pending_funding !== "boolean") throw bad(400, "no_pending_funding must be true or false");
       // and the statement that Bob's check line was compared with Alice's own ("Bob's check line matches mine"): required and recorded the same way
       if (body.bob_check_matches !== undefined && typeof body.bob_check_matches !== "boolean") throw bad(400, "bob_check_matches must be true or false");
-      const job = actions.startSpend(body.id, body.typed, { noPendingFunding: body.no_pending_funding === true, bobCheckMatches: body.bob_check_matches === true });
+      // program mode: Bob's lock also needs "Alice's check line matches mine", required in the request and recorded the same way
+      if (body.alice_check_matches !== undefined && typeof body.alice_check_matches !== "boolean") throw bad(400, "alice_check_matches must be true or false");
+      const job = actions.startSpend(body.id, body.typed, { noPendingFunding: body.no_pending_funding === true, bobCheckMatches: body.bob_check_matches === true, aliceCheckMatches: body.alice_check_matches === true });
       return { status: 202, body: { accepted: true, job } };
+    }
+    case "/api/checkline/confirm": {
+      // program mode only (the terminal console has no such route); the swap is named by the server already
+      if (!actions.programMode) throw bad(404, "not found");
+      return actions.confirmCheckLine(body);
     }
     case "/api/autopilot": {
       if (!actions.autopilot) throw bad(404, "the autopilot is not available on this console");

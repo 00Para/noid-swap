@@ -31,8 +31,9 @@ const crypto = require("crypto");
 const { pathCandidates } = require("./runfolder");
 const runsettings = require("./runsettings");
 const { TOOL_KEYS, stepCodeHash } = require("./toolhash");
-const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES } = require("./gate");
+const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES, LINE_MATCH_MISSING } = require("./gate");
 const E = require("./enginetext");
+const FS = require("./firststeps");
 
 const ROLES = ["alice", "bob"];
 const FILE_VERSION = 1;
@@ -59,17 +60,22 @@ const FRESHNESS = new Set(["tick_writing", "tick_stale", "tick_clock", "tick_mis
 // What a wallet run's deposit and sweep rules mean: the step is not ready, nothing is wrong (a deposit that has not arrived, a swap that is not over).
 const WAIT_REASONS = new Set(["deposit_short", "reserve_short", "sweep_not_ready"]);
 // Reasons that stop the step for the person: the engine itself says not to send, or it raises an alarm.
-const STOP_REASONS = new Set(["engine_do_not_send", "engine_cutoff", "engine_alarm", "engine_alert"]);
+const STOP_REASONS = new Set(["engine_do_not_send", "engine_cutoff", "engine_alarm", "engine_alert", "statement_alice_check"]);
+// The open case of rule W (the program has no step for it): an abort the engine does not record because a funding or a lock was decided and never cancelled (swap-cli engine.rs tick_apply).
+const NOT_RECORDED_RE = /^abort not recorded: a (fund_noid|lock_eth) was decided for this swap and never cancelled\b/;
+const CANNOT_END_TEXT = "This swap cannot end by itself: a funding (or lock) was prepared and never sent. Its coins are safe in the swap wallet. See 'If a swap cannot end' in the help.";
 
 const STATEMENTS = {
   stay_on: "This computer stays on and awake until the swap is over.",
   no_manual_steps: "No step of this swap is sent by hand outside this console while the autopilot is on.",
   no_pending_funding: "No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else.",
   bob_check_matches: "Bob's check line matches mine: the 16 digits of his bundle check line are the ones of my line, compared over a second channel.",
+  alice_check_matches: "Alice's check line matches mine: the 16 digits of her bundle check line are the ones of my line, compared over a second channel.",
 };
 // A wallet run's funding statements: only Bob's check line remains (the wallet holds one funding and the tool refuses a funding submitted by another path, so "no pending funding" is not asked).
 // A BOARD run (piece 3): Alice's "Bob's check line matches mine" is NOT asked, and is not accepted in its place anywhere: the funding needs the board's verified handover check (lib/gate.js boardReasons).
-const requiredStatements = (role, wallet = false, board = false) => (role === "alice" ? (wallet ? (board ? ["stay_on", "no_manual_steps"] : ["stay_on", "no_manual_steps", "bob_check_matches"]) : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"]) : ["stay_on", "no_manual_steps"]);
+// In the program (outside a board run) Bob also confirms that Alice's check line matches his, as Alice confirms Bob's.
+const requiredStatements = (role, wallet = false, board = false, program = false) => (role === "alice" ? (wallet ? (board ? ["stay_on", "no_manual_steps"] : ["stay_on", "no_manual_steps", "bob_check_matches"]) : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"]) : program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches"] : ["stay_on", "no_manual_steps"]);
 
 const sha256 = (x) => crypto.createHash("sha256").update(x).digest("hex");
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -441,8 +447,9 @@ class Autopilot {
     if (!ap.in_force || !ap.file || ap.file.role !== spend.role) return null;
     if (this.blocking(spend.role, spend.id)) return null;
     // a wallet run's funding needs no funding statements of the 300 s window; its one statement (Bob's check line) is part of the approval itself
-    if (spend.kind === "fund_noid" && this.actions.walletRun().use_swap_wallet === true) return { approval: ap.hash.slice(0, 12), statements: Array.isArray(ap.file.statements) && ap.file.statements.includes("bob_check_matches") };
-    return { approval: ap.hash.slice(0, 12), statements: spend.kind === "fund_noid" && this.fundingStatementsValid(nowMs) };
+    const aliceCheck = Array.isArray(ap.file.statements) && ap.file.statements.includes("alice_check_matches");
+    if (spend.kind === "fund_noid" && this.actions.walletRun().use_swap_wallet === true) return { approval: ap.hash.slice(0, 12), statements: Array.isArray(ap.file.statements) && ap.file.statements.includes("bob_check_matches"), aliceCheck };
+    return { approval: ap.hash.slice(0, 12), statements: spend.kind === "fund_noid" && this.fundingStatementsValid(nowMs), aliceCheck };
   }
 
   // ------------------------------------------------------------------ needs_you
@@ -585,11 +592,20 @@ class Autopilot {
     if (board && !(a.board && typeof a.board.identity === "function" && a.board.identity())) this.refuse(role, 422, "board_identity_missing", "This is a board run, but the board has no offer and counterparty for it (no handover file, or the board is not running on this console): there is nothing to approve.");
     if (wallet && (!wr.noid_payout || !wr.eth_payout) && role === "alice") this.refuse(role, 422, "payout_missing", "A wallet run needs both payout addresses (NOID_PAYOUT and ETH_PAYOUT) in env.local.sh before it is approved: they decide where the leftovers go.");
     if (wallet && !wr.eth_payout) this.refuse(role, 422, "payout_missing", "A wallet run needs ETH_PAYOUT in env.local.sh before it is approved: it decides where the leftover ETH goes.");
+    // program mode outside a board run: Bob's own check of Alice's file must have passed, and both roles confirm the line match before they approve (the record is written by the page)
+    const program = this.programMode();
+    if (program && wallet && !board) {
+      if (role === "bob" && !this.bobFileExists()) this.refuse(role, 422, "terms_missing", "Your check of Alice's file has not passed, so there is nothing to approve.");
+      // only while the page can still offer its Confirm box (a swap made before the line match existed, already funded or locked, is approved without it: the gate guards the funding and the lock)
+      const tick = run.roles && run.roles[role] ? run.roles[role].tick || null : null;
+      const funded = !!(a.fundedMarker() || a.walletMarker("wallet-funded.marker"));
+      if (FS.lineConfirmable(role, tick && tick.phase_after, funded) && !FS.lineMatchFor(a.runFolder(), role)) this.refuse(role, 422, "line_match_missing", LINE_MATCH_MISSING);
+    }
     if (!run.terms) this.refuse(role, 422, "terms_missing", "The public terms (bundle and object file) are not in the run folder, so there is nothing to approve.");
     const exp = expectedAmount(spend, run.terms);
     if (!exp) this.refuse(role, 422, "amount_unknown", "The terms do not state the amount to confirm.");
     if (!typedMatches(spend, run.terms, typed)) this.refuse(role, 422, "typed", `The typed amount does not match (type ${exp.text}).`);
-    const missing = requiredStatements(role, wallet, board).filter((k) => statements[k] !== true);
+    const missing = requiredStatements(role, wallet, board, program).filter((k) => statements[k] !== true);
     if (missing.length) {
       this.note(role, "refused: statements");
       throw bad(422, "a statement was not confirmed", { reasons: missing.map((k) => ({ code: `statement_${k}`, text: `The statement was not confirmed: "${STATEMENTS[k]}"` })) });
@@ -610,7 +626,7 @@ class Autopilot {
       role,
       terms_sha256: hash,
       approved_at: approvedAt,
-      statements: requiredStatements(role, wallet, board),
+      statements: requiredStatements(role, wallet, board, program),
       funding_statements_at: role === "alice" && !wallet ? iso(nowMs) : null,
       console_pid_start: `${(l && l.pid) || process.pid}@${(l && l.started) || iso(nowMs)}`,
       needs_you: [],
@@ -618,7 +634,7 @@ class Autopilot {
     };
     // the audit line first: when it cannot be written nothing is approved
     try {
-      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${requiredStatements(role, wallet, board).join(",")}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
+      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${requiredStatements(role, wallet, board, program).join(",")}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
     } catch (e) {
       throw bad(500, `the audit log cannot be written (${e.code || e.message}); nothing was approved`);
     }
@@ -631,6 +647,8 @@ class Autopilot {
     }
     this.forcedOff.delete(role);
     this.freshLook.delete(role);
+    // a person's Stop of the watch no longer holds back the program's own watch: an approval is the person's start (program mode)
+    if (a.executor && typeof a.executor.clearStopped === "function") a.executor.clearStopped();
     this.needs[role] = carried.filter((e) => e && own(SPEND_TABLE, e.spend)).map((e) => ({ spend: e.spend, kind: String(e.kind || "outcome"), reason: String(e.reason || "").slice(0, 300), at: Number(e.at) || 0, retrying: e.retrying === true }));
     if (role === "alice" && !wallet) {
       this.fundingStatements = { at_ms: nowMs };
@@ -647,6 +665,16 @@ class Autopilot {
   loadNeedsMerge(role) {
     const have = new Set(this.needs[role].map((e) => e.spend));
     for (const e of this.rebuildFromAudit(role)) if (!have.has(e.spend)) this.needs[role].push(e);
+  }
+
+  /** Does Bob's swap file exist in the run folder (his check of Alice's file passed)? */
+  bobFileExists() {
+    try {
+      fs.lstatSync(path.join(this.runDir(), "bob", "bob.swap.json"));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   turnOff(role) {
@@ -716,14 +744,16 @@ class Autopilot {
           needs_you: ap.exists ? this.needViews(role) : [],
           funding_statements_valid_until: role === "alice" && !wallet && this.fundingStatementsValid(nowMs) ? Math.floor((this.fundingStatements.at_ms + FUNDING_WINDOW_MS) / 1000) : null,
           expected_typed: exp ? exp.text : null,
-          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true).map((id) => ({ id, text: STATEMENTS[id] })),
+          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode()).map((id) => ({ id, text: STATEMENTS[id] })),
+          // what the person gets for what they give (the approval names both): Alice gets ETH, Bob gets NOID
+          gets_text: run && run.terms ? ((expectedAmount({ unit: role === "alice" ? "ETH" : "NOID" }, run.terms) || {}).text || null) : null,
           board: wallet && this.actions.boardRun().on === true,
           funding_offered: role === "alice" && run ? this.actions.spendContext(spend, run, nowMs).relevant : null,
           wallet,
           payouts: wallet ? { noid: wr.noid_payout, eth: wr.eth_payout } : null,
         };
       } catch {
-        out[role] = { available: true, on: false, doing: null, waiting_reason: null, needs_you: [], statements: requiredStatements(role).map((id) => ({ id, text: STATEMENTS[id] })) };
+        out[role] = { available: true, on: false, doing: null, waiting_reason: null, needs_you: [], statements: requiredStatements(role, false, false, this.programMode()).map((id) => ({ id, text: STATEMENTS[id] })) };
       }
     }
     return out;
@@ -831,7 +861,23 @@ class Autopilot {
     const finished = this.swapFinished(role, run, ctxs);
     // amendment K: a watch loop is started only when no loop file was updated for 180 s AND this console knows of no loop of its own that is still alive
     const w = a.watchView(run);
-    if (!finished && !w.started_here && (w.loop_file_age_s === null || w.loop_file_age_s > WATCH_DEAD_S)) {
+    // program mode (rule W, lib/firststeps.js): a loop that only reads records nothing; the autopilot starts or upgrades to a recording loop only when the engine's decision may be
+    // recorded (an approval in force and the deposit seen, or the file already shows this role has acted). The loop file's age is not used: a read loop writes it too.
+    let readPhase = false;
+    if (a.programMode) {
+      const wanted = finished ? "apply" : FS.wantedFor(a, role, run, nowMs);
+      readPhase = !finished && wanted === "read";
+      if (!finished && wanted === "apply" && w.mode !== "apply" && (w.started_here || w.loop_file_age_s === null || w.loop_file_age_s > WATCH_DEAD_S)) {
+        try {
+          a.startAction("watch-start");
+          st.doing = w.started_here ? "switching the watch loop to recording" : "starting the watch loop";
+          st.waiting_reason = null;
+          return true;
+        } catch (e) {
+          st.waiting_reason = `could not start the watch loop: ${e.message}`;
+        }
+      }
+    } else if (!finished && !w.started_here && (w.loop_file_age_s === null || w.loop_file_age_s > WATCH_DEAD_S)) {
       try {
         a.startAction("watch-start");
         st.doing = "starting the watch loop";
@@ -840,6 +886,24 @@ class Autopilot {
       } catch (e) {
         st.waiting_reason = `could not start the watch loop: ${e.message}`;
       }
+    }
+    // the open case of rule W: an abort the engine does not record, because a funding or a lock was decided and never cancelled: the swap cannot end by itself (one entry, once)
+    {
+      const notes = run && run.roles && run.roles[role] && run.roles[role].tick && Array.isArray(run.roles[role].tick.notes) ? run.roles[role].tick.notes : [];
+      const hit = notes.map((n) => NOT_RECORDED_RE.exec(String(n).trim())).find(Boolean);
+      const id = hit ? (hit[1] === "fund_noid" ? "send-fund" : "send-lock") : null;
+      for (const sid of ["send-fund", "send-lock"]) {
+        const key = `${role}:${sid}:cannot_end`;
+        if (sid === id && SPEND_TABLE[sid].role === role && !this.stopSeen.has(key)) {
+          this.stopSeen.add(key);
+          this.raise(role, sid, "cannot_end", CANNOT_END_TEXT);
+        } else if (sid !== id) this.stopSeen.delete(key);
+      }
+    }
+    if (readPhase) {
+      st.doing = "waiting for your deposit to be seen";
+      st.waiting_reason = FS.READ_PHASE_TEXT;
+      return false;
     }
     const walletRun = a.walletRun().use_swap_wallet === true;
     // a wallet run's recovery close, once it is sent: the swap file must record it (tick --closed-by) when the tool will take it
@@ -991,6 +1055,13 @@ class Autopilot {
     const reasons = e && Array.isArray(e.reasons) ? e.reasons : [];
     st.doing = `waiting: ${spend.label}`;
     st.waiting_reason = reasons.length ? reasons[0].text : (e && e.message) || "the step could not be started";
+    // Bob's lock refused because his approval does not carry "Alice's check line matches mine": one entry for the person, never a loop of dry runs
+    const stop = reasons.find((r) => r.code === "statement_alice_check");
+    if (stop) {
+      const ent = this.raise(role, spend.id, stop.code, stop.text);
+      this.state[role] = { doing: "stopped: needs you", waiting_reason: ent.reason };
+      return;
+    }
     if (!reasons.length || reasons.some((r) => r.code === "autopilot_off") || reasons.every((r) => FRESHNESS.has(r.code) || WAIT_REASONS.has(r.code))) return; // not the step's fault: tried again on a later step
     this.countRefusal(role, spend, reasons.map((r) => r.code).join(","));
   }
@@ -1074,4 +1145,4 @@ class Autopilot {
   }
 }
 
-module.exports = { Autopilot, ROLES, STEP_MS, FUNDING_WINDOW_MS, AUTO_ORDER, REPLACE_ORDER, STATEMENTS, FRESHNESS, WAIT_REASONS, RERUN_KINDS, SWEEP_IDS, SWEEP_RETRY_MS, RECORD_RETRY_MS, requiredStatements, fileOf, FILE_VERSION };
+module.exports = { Autopilot, ROLES, STEP_MS, STOP_REASONS, CANNOT_END_TEXT, FUNDING_WINDOW_MS, AUTO_ORDER, REPLACE_ORDER, STATEMENTS, FRESHNESS, WAIT_REASONS, RERUN_KINDS, SWEEP_IDS, SWEEP_RETRY_MS, RECORD_RETRY_MS, requiredStatements, fileOf, FILE_VERSION };

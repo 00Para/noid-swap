@@ -25,6 +25,18 @@ const PROFILES = {
   sepolia: { chain: 11155111, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
   rehearsal: { chain: 31337, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
 };
+// The one pin of the program's own contract for a network (build spec #5). The form's default and the board both ask `pinFor`; the settings' `board.pinned_htlc`
+// (empty by default) overrides it per chain id. The rehearsal chain has no pin of its own; production has no entry and gets null.
+const PINNED_CONTRACT = Object.freeze({ sepolia: "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF", rehearsal: null });
+
+/** The pinned contract for a profile: `settings.board.pinned_htlc[chain id]` when set, else `PINNED_CONTRACT[profile]`, else null (also for any profile that is not a test profile). */
+function pinFor(profile, settings) {
+  if (typeof profile !== "string" || !Object.prototype.hasOwnProperty.call(PROFILES, profile)) return null;
+  const pins = settings && settings.board && settings.board.pinned_htlc;
+  const chain = String(PROFILES[profile].chain);
+  if (pins && typeof pins === "object" && Object.prototype.hasOwnProperty.call(pins, chain) && typeof pins[chain] === "string" && pins[chain] !== "") return pins[chain];
+  return Object.prototype.hasOwnProperty.call(PINNED_CONTRACT, profile) ? PINNED_CONTRACT[profile] || null : null;
+}
 const ROLES = ["alice", "bob", "both"];
 const LOCK_KINDS = ["sha256", "poseidon"];
 // The two terms the Parano1d side of the agreement also depends on. Absent in a request means the helpers' own default (raw, 1), which the template now WRITES, so that a machine that only checks the other side's file (scripts/live/join.sh) has them as its own stated terms.
@@ -360,4 +372,4 @@ function envLocalState(dir) {
   }
 }
 
-module.exports = { OPTIONAL, TEMPLATE_KEYS, validateForm, renderEnvLocal, writeEnvLocal, envLocalState, PROFILES, ROLES, LOCK_KINDS, VARIANTS, CONTRACT_VERSIONS, FIELDS, decimalToInt };
+module.exports = { PINNED_CONTRACT, pinFor, OPTIONAL, TEMPLATE_KEYS, validateForm, renderEnvLocal, writeEnvLocal, envLocalState, PROFILES, ROLES, LOCK_KINDS, VARIANTS, CONTRACT_VERSIONS, FIELDS, decimalToInt };

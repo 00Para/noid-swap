@@ -204,3 +204,19 @@ test("program.js and the data-folder helper write nothing under the real temp fo
   }
   assert.deepEqual(hits, []);
 });
+
+test("the two file dialogs of the simple flow exist on the program object and are inert without the shell's handlers", async () => {
+  const { program } = base();
+  assert.equal(typeof program.saveCopy, "function");
+  assert.equal(typeof program.chooseInvitationFile, "function");
+  assert.equal(await program.saveCopy("bundle", Buffer.from("x")), "refused", "no save dialog: nothing is saved");
+  assert.equal(await program.chooseInvitationFile(), null);
+  await assert.rejects(program.saveCopy("nope", Buffer.from("x")), ProgramError);
+  // the handlers the shell gives are called with the kind, and an open path must be absolute
+  const seen = [];
+  const wired = base({ saveFile: async (k) => (seen.push(k), null), chooseInvitation: async () => "C:\\x\\invitation.json" }).program;
+  assert.equal(await wired.saveCopy("invitation", Buffer.from("x")), "cancelled");
+  assert.deepEqual(seen, ["invitation"]);
+  assert.equal(await wired.chooseInvitationFile(), "C:\\x\\invitation.json");
+  assert.equal(await base({ chooseInvitation: async () => "invitation.json" }).program.chooseInvitationFile(), null);
+});

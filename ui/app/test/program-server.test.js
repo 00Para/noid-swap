@@ -26,6 +26,7 @@ function aliceReady(env) {
   const a = env.addSwap({ role: "alice" });
   env.writeTerms(a, { aliceNoid: WNA });
   env.swapFile(a, "alice");
+  env.writeLineMatch(a, "alice"); // program mode: a funding waits for the line match (lib/firststeps.js)
   env.writeTick(a, "alice", F.spendTick("fund_noid"));
   env.writeLoop(a, "alice");
   env.steps.results.walletStatus = { code: 0, stdout: statusText("alice"), stderr: "", files: [] };

@@ -95,6 +95,59 @@ function makeStubSteps() {
   return steps;
 }
 
+/**
+ * The REAL watch loop (lib/steps/watch.js) with a fake tick step and a short real pause between ticks, for the tests of rule W (lib/firststeps.js). `tickFn(ctx, role, args, n)` answers one tick
+ * ({ code, stdout, stderr, files }); it may write last-tick-ROLE.json itself. `kit.calls` is every tick asked for: { role, args } (args: the extra flags, `["--apply"]` or `[]`).
+ * `kit.created` counts the loops made; `kit.next()` ends the pause and waits for one more tick. `kit.deps(extra)` are the deps for a SwapSet or startProgramServer.
+ */
+function loopKit(env, tickFn, o = {}) {
+  const { createWatch } = require("../lib/steps/watch");
+  const calls = [];
+  const pending = [];
+  const kit = { calls, created: 0, loops: [] };
+  const watchOpts = {
+    tick: async (ctx, role, opts) => {
+      const args = opts && Array.isArray(opts.args) ? [...opts.args] : null;
+      calls.push({ role, args });
+      if (tickFn) return tickFn(ctx, role, args, calls.length);
+      return { code: 0, stdout: `[${role}] tick exit 0 at 12:00:00\napplied: ${args && args.includes("--apply") ? "True" : "False"} phase_after: created\n`, stderr: "", files: [] };
+    },
+    // the pause between two ticks: ends by itself after pauseMs, or at once when a test calls kit.next()
+    sleep: () =>
+      new Promise((r) => {
+        pending.push(r);
+        const t = setTimeout(r, o.pauseMs ?? 400);
+        if (typeof t.unref === "function") t.unref();
+      }),
+  };
+  kit.steps = {
+    ...env.steps,
+    createWatch: (ctx, opts) => {
+      kit.created++;
+      const w = createWatch(ctx, opts);
+      kit.loops.push(w);
+      return w;
+    },
+  };
+  kit.watchOpts = watchOpts;
+  /** Ends the pause of every running loop and waits until one more tick has been asked for. */
+  kit.next = async () => {
+    const n = calls.length;
+    pending.splice(0).forEach((r) => r());
+    await until(() => calls.length > n, "the next tick");
+  };
+  kit.deps = (extra = {}) => env.deps({ steps: kit.steps, watchOpts, ...extra });
+  return kit;
+}
+
+/** A tick of the real swap-cli (a fixture from test/simple-watch-rule.test.js) written as the run folder's last tick of a role, with its own clock `at` (unix s) and a fresh file time. */
+function writeRealTick(sw, role, tick, at) {
+  const p = path.join(sw.dir, `last-tick-${role}.json`);
+  fs.writeFileSync(p, JSON.stringify({ ...tick, now: at }));
+  const t = new Date(Date.now() - 2000);
+  fs.utimesSync(p, t, t);
+}
+
 function makeEnv(o = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "no1d-prog-")));
   const dataDir = path.join(root, "data");
@@ -231,6 +284,16 @@ function makeEnv(o = {}) {
       const t = new Date(Date.now() - ageS * 1000);
       fs.utimesSync(p, t, t);
     },
+    /**
+     * The check line and the line match of a run folder (lib/firststeps.js): what the program writes after the prepare or join step and after the person confirmed the digits.
+     * Program-mode approvals and spends need both. `match: false` writes only the check line.
+     */
+    writeLineMatch(sw, role, o = {}) {
+      const hex = o.hex || "b4271c7f3ea51fe7";
+      fs.writeFileSync(path.join(sw.dir, "check-line.json"), JSON.stringify({ v: 1, from: role === "alice" ? "prepare" : "join", hex, at: 1_800_000_000 }) + "\n", { mode: 0o600 });
+      if (o.match !== false) fs.writeFileSync(path.join(sw.dir, "line-match.json"), JSON.stringify({ v: 1, role, hex, at: 1_800_000_100 }) + "\n", { mode: 0o600 });
+      return hex;
+    },
     swapFile(sw, role) {
       const p = role === "alice" ? path.join(sw.dir, "alice.swap.json") : path.join(sw.dir, "bob", "bob.swap.json");
       fs.mkdirSync(path.dirname(p), { recursive: true });
@@ -320,4 +383,4 @@ function allFiles(dir) {
   return out;
 }
 
-module.exports = { makeEnv, makeStubSteps, makeVault, request, until, allFiles, VERSION, KEY_CHECK, PASSPHRASE, SEALED, noidAddress };
+module.exports = { makeEnv, makeStubSteps, makeVault, loopKit, writeRealTick, request, until, allFiles, VERSION, KEY_CHECK, PASSPHRASE, SEALED, noidAddress };

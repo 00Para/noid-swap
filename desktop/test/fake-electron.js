@@ -302,6 +302,13 @@ function createFakeElectron(opts = {}) {
       rec("dialog", "showOpenDialog", args[args.length - 1]);
       return Promise.resolve(this.openAnswer);
     },
+    saveAnswer: opts.saveAnswer || { canceled: true, filePath: "" },
+    saveArgs: null,
+    showSaveDialog(...args) {
+      this.saveArgs = args;
+      rec("dialog", "showSaveDialog", args[args.length - 1]);
+      return Promise.resolve(this.saveAnswer);
+    },
   };
 
   electron.notifications = [];

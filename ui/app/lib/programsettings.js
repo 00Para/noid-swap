@@ -82,8 +82,9 @@ function strictParse(text) {
     i++;
     while (i < text.length && text[i] !== '"') {
       if (text[i] === "\\") {
-        out += text.slice(i, i + 2);
-        i += text[i + 1] === "u" ? 6 : 2;
+        const n = text[i + 1] === "u" ? 6 : 2; // the whole escape is kept, so the key can be decoded
+        out += text.slice(i, i + n);
+        i += n;
       } else out += text[i++];
     }
     i++;
@@ -100,7 +101,8 @@ function strictParse(text) {
       if (text[i] === "}") return void i++;
       for (;;) {
         ws();
-        const k = str();
+        // the keys are compared decoded: "eth_w\u0065i" is the same key as "eth_wei" (the text already parsed, so the raw string body is a valid JSON string body)
+        const k = JSON.parse('"' + str() + '"');
         if (keys.has(k)) fail("a key appears twice");
         keys.add(k);
         ws();

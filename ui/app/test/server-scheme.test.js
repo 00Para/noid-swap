@@ -360,6 +360,7 @@ test("a spend route through the scheme: the dry run, a wrong typed amount (422, 
   const env = makeEnv();
   try {
     const a = aliceReady(env);
+    env.writeLineMatch(a, "alice"); // program mode: a funding waits for the line match (lib/firststeps.js)
     const { srv, api } = await env.start();
     const sw = srv.swapSet.get(a.id);
     srv.swapSet.tick();

@@ -27,16 +27,16 @@
     if (!a || !a.enabled) return "off";
     const spends = {};
     for (const [id, s] of Object.entries(a.spends || {})) {
-      spends[id] = s.relevant ? { e: s.eligible, r: (s.reasons || []).map((x) => x.code), d: s.dry ? [s.dry.hash, s.dry.ok, s.dry.all_ok, s.dry.at, (s.dry.rows || []).map((r) => r.ok)] : null, t: s.expected_typed, c: s.command, tx: s.replace_tx, n: (s.notices || []).map((x) => x.text) } : 0;
+      spends[id] = s.relevant ? { e: s.eligible, r: (s.reasons || []).map((x) => x.code), d: s.dry ? [s.dry.hash, s.dry.ok, s.dry.all_ok, s.dry.at, (s.dry.rows || []).map((r) => r.ok)] : null, t: s.expected_typed, c: s.command, tx: s.replace_tx, n: (s.notices || []).map((x) => x.text), sn: s.statements_needed || null } : 0;
     }
-    return JSON.stringify([a.production && a.production.text, a.busy && a.busy.id, (a.jobs || []).map((j) => [j.job, j.state, j.ok, j.finished_at]), a.watch && [a.watch.started_here, a.watch.some_loop_running, a.watch.pid], spends, a.funding, (a.audit && a.audit.tail ? a.audit.tail.map((r) => r.seq) : []), a.audit && a.audit.chain && a.audit.chain.ok, autopilotSignature(a), a.form && [a.form.env_local, a.form.run_number], a.lock && [a.lock.held, a.lock.folder_missing], a.join, walletSignature(a), ui.msg, ui.formMsg, !!H.state.token, ui.sending, ui.folded]);
+    return JSON.stringify([a.production && a.production.text, a.busy && a.busy.id, (a.jobs || []).map((j) => [j.job, j.state, j.ok, j.finished_at]), a.watch && [a.watch.started_here, a.watch.some_loop_running, a.watch.pid, a.watch.mode], a.first_steps, a.check_line, a.line_match, spends, a.funding, (a.audit && a.audit.tail ? a.audit.tail.map((r) => r.seq) : []), a.audit && a.audit.chain && a.audit.chain.ok, autopilotSignature(a), a.form && [a.form.env_local, a.form.run_number], a.lock && [a.lock.held, a.lock.folder_missing], a.join, walletSignature(a), ui.msg, ui.formMsg, !!H.state.token, ui.sending, ui.folded]);
   }
 
   /** What is drawn of the wallet part of a payload, without the ages and clocks that change every second. */
   function walletSignature(a) {
     const w = a && a.wallet;
     if (!w || !w.on) return w ? [w.on, !!w.ambiguous] : null;
-    const role = (r) => (r ? [r.swap_file, r.addresses_file, r.status ? [r.status.at, r.status.ok, r.status.show, (r.status.problems || []).join("|"), r.status.noid && [r.status.noid.covers, r.status.noid.plain_micronoid], r.status.eth && [r.status.eth.covered, r.status.eth.balance_wei]] : null] : null);
+    const role = (r) => (r ? [r.swap_file, r.addresses_file, r.key_address, r.status ? [r.status.at, r.status.ok, r.status.show, (r.status.problems || []).join("|"), r.status.noid && [r.status.noid.covers, r.status.noid.plain_micronoid], r.status.eth && [r.status.eth.covered, r.status.eth.balance_wei]] : null] : null);
     return [w.on, !!w.ambiguous, w.noid_payout, w.eth_payout, w.funded_marker, w.swept, w.recovered_txid, role(w.roles && w.roles.alice), role(w.roles && w.roles.bob)];
   }
 
@@ -47,7 +47,7 @@
     return ["alice", "bob"].map((r) => {
       const x = ap[r];
       if (!x) return null;
-      return [x.available, x.on, x.terms_changed, x.expected_typed, x.funding_offered, !!x.funding_statements_valid_until, (x.needs_you || []).map((n) => [n.spend, n.reason, n.retrying]), x.on ? [x.doing, x.waiting_reason, x.finished_notes] : null];
+      return [x.available, x.on, x.terms_changed, x.expected_typed, x.gets_text, x.board, x.funding_offered, !!x.funding_statements_valid_until, (x.needs_you || []).map((n) => [n.spend, n.reason, n.retrying]), x.on ? [x.doing, x.waiting_reason, x.finished_notes] : null];
     });
   }
 
@@ -142,6 +142,27 @@
 
   // ------------------------------------------------------------------ small pieces
   const btn = (label, onclick, opts = {}) => H.el("button", { type: "button", class: (opts.big ? "btn" : "btn sm") + (opts.primary ? " primary" : "") + (opts.danger ? " danger" : ""), disabled: opts.disabled ? true : null, title: opts.title || null, onclick }, label);
+
+  /** HH:MM in the person's own time zone, from unix seconds (the page shows no seconds where a rough time is meant). */
+  function hhmm(sec) {
+    const d = new Date(Number(sec) * 1000);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  /** An amount with its unit ("5 NOID", "0.001 ETH") in the coin's colour; any other text stays plain. */
+  function coinSpan(text) {
+    const t = String(text);
+    return /\bNOID$/.test(t) ? H.el("span", { class: "c-noid", text: t }) : /\bETH$/.test(t) ? H.el("span", { class: "c-eth", text: t }) : t;
+  }
+
+  /** A 16-digit check line in four groups of four ("b427 1c7f 3ea5 1fe7"): easy to read aloud. Anything else is returned as it is. */
+  const groupHex = (hex) => (/^[0-9a-f]{16}$/.test(hex) ? hex.match(/.{4}/g).join(" ") : String(hex));
+
+  /** True for a board run (program mode): the board hands the terms and the file over by itself, so the first card keeps today's boxes and words. */
+  function isBoardRun(payload, role) {
+    const ap = payload && payload.actions && payload.actions.autopilot && payload.actions.autopilot[role];
+    return !!((payload && payload.board) || (ap && ap.board === true));
+  }
 
   /** Why the button of a table action is disabled, as words, or null: the key, the table's own block, the run folder's lock, a running job. The start screen's buttons use it too. */
   function actionWhy(a, id) {
@@ -260,12 +281,19 @@
     // a wallet run does not ask "no funding of this contract is pending" (the wallet holds one funding and the tool refuses one submitted by another path); Bob's check line is still asked
     const wallet = !!walletOf(a);
     const stmt = needsStatement && !wallet ? H.el("input", { type: "checkbox", id: "confirm-stmt" }) : null;
-    const stmtBob = needsStatement ? H.el("input", { type: "checkbox", id: "confirm-stmt-bob" }) : null;
+    // program mode: the line match of the run folder pre-ticks the line statement (it is still asked, and still required)
+    const lineMatched = !!(a && a.line_match);
+    const stmtBob = needsStatement ? H.el("input", { type: "checkbox", id: "confirm-stmt-bob", checked: lineMatched ? true : null }) : null;
+    // Bob's lock also needs "Alice's check line matches mine" (the server says so in statements_needed, program mode outside a board run)
+    const needsAlice = sp.kind === "lock_eth" && Array.isArray(sp.statements_needed) && sp.statements_needed.includes("alice_check_matches");
+    const stmtAlice = needsAlice ? H.el("input", { type: "checkbox", id: "confirm-stmt-alice", checked: lineMatched ? true : null }) : null;
+    const lineHex = a && a.check_line && typeof a.check_line.hex === "string" && /^[0-9a-f]{16}$/.test(a.check_line.hex) ? a.check_line.hex : null;
     const myLine = needsStatement ? bundleCheckLine(a.jobs) : null;
     const send = btn("Send for real", async () => {
       send.disabled = true;
       clear(err);
-      const r = await post("/api/spend", needsStatement ? { id: sp.id, typed: input.value, no_pending_funding: !!(stmt && stmt.checked), bob_check_matches: !!(stmtBob && stmtBob.checked) } : { id: sp.id, typed: input.value });
+      const body = needsStatement ? { id: sp.id, typed: input.value, no_pending_funding: !!(stmt && stmt.checked), bob_check_matches: !!(stmtBob && stmtBob.checked) } : needsAlice ? { id: sp.id, typed: input.value, alice_check_matches: !!(stmtAlice && stmtAlice.checked) } : { id: sp.id, typed: input.value };
+      const r = await post("/api/spend", body);
       if (r.ok) {
         closeDialog();
         ui.msg = null;
@@ -294,11 +322,12 @@
       return norm(m[1], m[2]) === norm(e[1], e[2]);
     };
     const refresh = () => {
-      send.disabled = !matches() || (needsStatement && !((wallet || (stmt && stmt.checked)) && stmtBob && stmtBob.checked)) || !!(H.state.payload && H.state.payload.actions && H.state.payload.actions.busy);
+      send.disabled = !matches() || (needsStatement && !((wallet || (stmt && stmt.checked)) && stmtBob && stmtBob.checked)) || (needsAlice && !(stmtAlice && stmtAlice.checked)) || !!(H.state.payload && H.state.payload.actions && H.state.payload.actions.busy);
     };
     input.addEventListener("input", refresh);
     if (stmt) stmt.addEventListener("change", refresh);
     if (stmtBob) stmtBob.addEventListener("change", refresh);
+    if (stmtAlice) stmtAlice.addEventListener("change", refresh);
     const dryRows = sp.dry && sp.dry.rows ? sp.dry.rows.filter((r) => r.ok !== null) : [];
     dlg.appendChild(
       H.el(
@@ -313,7 +342,9 @@
         input,
         stmt ? H.el("label", { class: "ack", for: "confirm-stmt" }, stmt, " No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else") : null,
         needsStatement ? H.el("label", { class: "ack", for: "confirm-stmt-bob" }, stmtBob, " Bob's check line matches mine: the 16 digits of his bundle check line are the ones of my line, compared over a second channel") : null,
-        needsStatement ? (myLine ? H.el("div", {}, H.el("div", { class: "label", text: "Your line, as Prepare printed it" }), H.el("p", { class: "bundle-check mono", text: myLine })) : H.el("p", { class: "dim", text: "Your bundle check line is the one Prepare printed (it is also in new-alice.err in the run folder)." })) : null,
+        needsAlice ? H.el("label", { class: "ack", for: "confirm-stmt-alice" }, stmtAlice, " Alice's check line matches mine: the 16 digits of her bundle check line are the ones of my line, compared over a second channel") : null,
+        (needsStatement || needsAlice) && lineHex ? H.el("div", {}, H.el("div", { class: "label", text: "Your check line" }), H.el("p", { class: "bundle-check grouped mono", text: groupHex(lineHex) })) : null,
+        needsStatement && !lineHex ? (myLine ? H.el("div", {}, H.el("div", { class: "label", text: "Your line, as Prepare printed it" }), H.el("p", { class: "bundle-check mono", text: myLine })) : H.el("p", { class: "dim", text: "Your bundle check line is the one Prepare printed (it is also in new-alice.err in the run folder)." })) : null,
         err,
         H.el("div", { class: "row end" }, btn("Cancel", closeDialog), send)
       )
@@ -399,12 +430,71 @@
     return row;
   }
 
+  // The program-mode deposit box (opts.plain): the figures a person types into a wallet. NOID exact (six places, trailing zeros removed); ETH wei rounded UP to six
+  // decimals, so the figure is never below what is needed. BigInt only; the exact figures stay on the line beneath.
+  const trimFrac = (whole, frac) => {
+    const f = frac.replace(/0+$/, "");
+    return f ? `${whole}.${f}` : String(whole);
+  };
+  function noidFigure(micro) {
+    try {
+      const v = BigInt(micro);
+      return v < 0n ? null : trimFrac(v / 1000000n, String(v % 1000000n).padStart(6, "0"));
+    } catch {
+      return null;
+    }
+  }
+  function ethFigure(wei) {
+    try {
+      const v = BigInt(wei);
+      if (v < 0n) return null;
+      const u = (v + 10n ** 12n - 1n) / 10n ** 12n;
+      return trimFrac(u / 1000000n, String(u % 1000000n).padStart(6, "0"));
+    } catch {
+      return null;
+    }
+  }
+
+  /** One deposit line in plain units: what to send (with a button that copies the figure alone), where to, and the exact figures beneath. */
+  function depositRowPlain(coin, address, figure, exact, seen) {
+    const cls = coin === "NOID" ? "noid" : "eth";
+    const row = H.el("div", { class: "deposit-row" }, H.el("div", { class: "label", text: `${coin} to deposit` }));
+    row.appendChild(H.el("div", { class: "row" }, "Send at least", H.el("span", { class: `leg ${cls}` }, H.el("span", { class: "amt", text: figure }), H.el("span", { class: "unit", text: coin })), H.copyButton(figure, `the ${coin} amount`, "Copy amount")));
+    row.appendChild(H.el("div", { class: "row" }, "to this address", H.copyButton(address, `the ${coin} deposit address`, address)));
+    row.appendChild(H.el("p", { class: "dim", text: exact }));
+    row.appendChild(H.el("div", { class: "row" }, seen ? H.chip("ok", "seen") : H.chip("attn", "not yet")));
+    return row;
+  }
+
+  /** Alice's clock: how long her deposit has, from the engine's funding-window note on the last tick (display only: the engine decides). Twenty seconds a block, four blocks kept back. */
+  function depositClock(payload) {
+    const r = payload && payload.roles && payload.roles.alice;
+    const tick = r && r.tick;
+    const E = typeof window !== "undefined" ? window.NoidEngineText : null;
+    let n = null;
+    if (tick && Array.isArray(tick.notes) && E && typeof E.fundingBlocksLeft === "function") {
+      for (const t of tick.notes) {
+        const k = E.fundingBlocksLeft(t);
+        if (k !== null) {
+          n = k;
+          break;
+        }
+      }
+    }
+    if (n === null || !tick || !Number.isFinite(tick.now)) return H.el("p", { class: "dim", text: "The time left shows at the first reading of the chain." });
+    const m = n - 4;
+    if (n < 0) return H.el("p", { class: "attn", text: "The funding window has closed: this swap will not start. Do not deposit." });
+    if (m <= 0) return H.el("p", { class: "attn", text: "The funding window is about to close. A deposit now may be too late; then the swap does not start. Anything deposited can then be sent back to your own addresses from this swap's page; while the program runs this swap for you, it does that by itself." });
+    return H.el("p", { class: m <= 5 ? "attn" : "dim", text: `Deposit before about ${hhmm(tick.now + m * 20)}, so the funding can go in on time. Blocks come at random, so earlier is safer.` });
+  }
+
   /**
    * The deposit box of a wallet run for one role: the address to deposit to and the exact amount, from the newest CLEAN status of this run only (the helper's reserve check proves the
    * key owns the Ethereum address before any amount is shown; the console shows an address only from a status about this swap's own addresses), "seen" or "not yet", and the warning
    * that an exchange withdrawal may arrive later than the swap's window. null outside a wallet run. `withButton`: a button that reads the deposit again now.
    */
-  function depositBlock(payload, role) {
+  function depositBlock(payload, role, opts = {}) {
+    const plain = !!(opts && opts.plain);
     const a = payload && payload.actions;
     const w = walletOf(a);
     if (!w) return null;
@@ -426,16 +516,30 @@
       box.appendChild(H.el("div", { class: "row" }, check));
       return box;
     }
-    if (role === "alice" && s.noid) {
+    if (role === "alice" && s.noid && plain && noidFigure(s.noid.need_micronoid) !== null) {
+      const n = s.noid;
+      const amt = noidFigure(n.amount_micronoid);
+      box.appendChild(depositRowPlain("NOID", n.address, noidFigure(n.need_micronoid), `At least exactly ${n.need_micronoid} micro-NOID: the swap's ${amt !== null ? amt + " NOID" : n.amount_micronoid + " micro-NOID"} and the funding's fee. The wallet holds ${n.plain_micronoid} micro-NOID now.`, n.covers === true));
+    } else if (role === "alice" && s.noid) {
       const n = s.noid;
       box.appendChild(depositRow("NOID", n.address, `${n.need_micronoid} micro-NOID`, noidWords(n.need_micronoid), n.covers === true, `the swap's amount (${noidWords(n.amount_micronoid) || n.amount_micronoid + " micro-NOID"}) and the funding's fee reserve. The wallet holds ${n.plain_micronoid} micro-NOID of plain coins now.`));
     }
-    if (s.eth) {
+    if (s.eth && plain && ethFigure(s.eth.required_wei) !== null) {
+      const e = s.eth;
+      const short = e.covered === true ? "" : `, short by ${e.shortfall_wei} wei`;
+      const exact = role === "alice" ? `At least exactly ${e.required_wei} wei: the fee of the reveal, paid from this swap's own key. The ETH you get arrives there too, and goes to your own address at the end. The key holds ${e.balance_wei} wei now${short}.` : `At least exactly ${e.required_wei} wei: the ${ethWords(e.amount_wei) || e.amount_wei + " wei"} and the fees of the lock and of a refund. The key holds ${e.balance_wei} wei now${short}.`;
+      box.appendChild(depositRowPlain("ETH", e.address, ethFigure(e.required_wei), exact, e.covered === true));
+    } else if (s.eth) {
       const e = s.eth;
       const why = role === "alice" ? "the fee of the reveal, paid from the swap's own Ethereum key; the ETH you buy arrives there too" : `the amount (${ethWords(e.amount_wei) || e.amount_wei + " wei"}) and the fee of the lock and of a refund, in the swap's own Ethereum key`;
       box.appendChild(depositRow("ETH", e.address, `${e.required_wei} wei`, ethWords(e.required_wei), e.covered === true, `${why}. The key holds ${e.balance_wei} wei now${e.covered === true ? "" : `, short by ${e.shortfall_wei} wei`}.`));
     }
-    box.appendChild(H.el("p", { class: "dim", text: `Read ${typeof s.age_s === "number" ? s.age_s + " s ago" : "just now"}. An exchange withdrawal can arrive later than this swap's window: send from a wallet you control, and early. A deposit that arrives too late only means the swap does not start; nothing is locked before the funding.` }));
+    if (plain) {
+      box.appendChild(H.el("p", { class: "dim", text: `Read ${typeof s.age_s === "number" ? s.age_s + " s ago" : "just now"}.` }));
+      if (role === "alice") box.appendChild(depositClock(payload));
+      else box.appendChild(H.el("p", { class: "dim", text: "Deposit now: your lock is sent as soon as Alice's funding is final, and only once your deposit is seen." }));
+      box.appendChild(H.el("p", { class: "dim", text: "Send from a wallet you control, not from an exchange: an exchange withdrawal can arrive late. A deposit that arrives too late only means the swap does not start; nothing is locked before the funding." }));
+    } else box.appendChild(H.el("p", { class: "dim", text: `Read ${typeof s.age_s === "number" ? s.age_s + " s ago" : "just now"}. An exchange withdrawal can arrive later than this swap's window: send from a wallet you control, and early. A deposit that arrives too late only means the swap does not start; nothing is locked before the funding.` }));
     if (w.noid_payout || w.eth_payout) box.appendChild(H.el("p", { class: "dim", text: `What is left when the swap is over is sent to your own addresses: ${role === "alice" && w.noid_payout ? "NOID to " + w.noid_payout + ", " : ""}ETH to ${w.eth_payout || "(not set)"}.` }));
     box.appendChild(H.el("div", { class: "row" }, check));
     if (!H.state.token) box.appendChild(keyNote());
@@ -559,6 +663,10 @@
       // program mode: why the approval went out of force (the server's `version_changed`; only the program version has words of its own)
       terms_changed_why: x.version_changed === true ? "program_version" : typeof x.terms_changed_why === "string" ? x.terms_changed_why : x.terms_changed_why && typeof x.terms_changed_why.code === "string" ? x.terms_changed_why.code : null,
       expected_typed: x.expected_typed || null,
+      // what the person gets for what they give (the approval is bound to both amounts)
+      gets_text: typeof x.gets_text === "string" && x.gets_text ? x.gets_text : null,
+      // program mode: the line match of the run folder (the two sides' check lines were compared); it pre-ticks the line statement, which is still required
+      line_match: !!a.line_match,
       statements: Array.isArray(x.statements) ? x.statements : [],
       needs_you: needs,
       doing: x.doing || null,
@@ -644,14 +752,17 @@
       return box;
     }
     if (f.terms_changed) box.appendChild(H.el("p", { class: "attn", role: "alert", text: isProgram() && f.terms_changed_why === "program_version" ? "The program was updated since you approved, so the autopilot is off. Approve again after an update, once the terms look right." : isProgram() ? "The terms, the settings of this swap, the program or one of its tools changed since you approved, so the autopilot is off. Check the terms, then approve again if they are right." : "The terms changed since you approved (or a file they are bound to did), so the autopilot is off. Check the terms, then approve again if they are right." }));
+    if (f.expected_typed && f.gets_text) box.appendChild(H.el("p", { class: "plain" }, "You give ", coinSpan(f.expected_typed), ". You get ", coinSpan(f.gets_text), "."));
     box.appendChild(H.el("p", { class: "plain", text: (f.wallet ? AP_INTRO_WALLET : AP_INTRO)[f.role] }));
-    if (f.wallet) box.appendChild(H.el("p", { class: "plain dim", text: f.role === "alice" ? "A wallet run does not ask the classic funding statement (the wallet holds one funding and the tool refuses a funding another path submitted). It still asks whether Bob's check line matches yours." : "A wallet run asks the same two statements as before." }));
+    if (f.wallet) box.appendChild(H.el("p", { class: "plain dim", text: f.role === "alice" ? "A wallet run does not ask the classic funding statement (the wallet holds one funding and the tool refuses a funding another path submitted). It still asks whether Bob's check line matches yours." : f.statements.some((st) => st.id === "alice_check_matches") ? "A wallet run asks three statements: that this computer stays on, that you send no step by hand, and that Alice's check line matches yours." : "A wallet run asks the same two statements as before." }));
     if (!f.can_turn_on) box.appendChild(H.el("p", { class: "attn", text: "The engine does not offer your funding yet. You can turn the autopilot on when it does (after Bob's check)." }));
     // the ticks and the typed amount belong to one swap and one role: another swap (or the other role) opens with an empty form
     const apKey = `${H.state.swap || ""}|${f.role}`;
     if (ui.ap.key !== apKey) ui.ap = { key: apKey, typed: "", ticks: {} };
     const input = H.el("input", { type: "text", id: "ap-typed", autocomplete: "off", spellcheck: "false", "aria-describedby": "ap-typed-hint", placeholder: f.expected_typed || "", value: ui.ap.typed });
     const ticks = f.statements.map((st) => {
+      // the line match of the run folder pre-ticks the line statement (still asked, still required); a person's own un-tick is kept
+      if (f.line_match && (st.id === "bob_check_matches" || st.id === "alice_check_matches") && ui.ap.ticks[st.id] === undefined) ui.ap.ticks[st.id] = true;
       const cb = H.el("input", { type: "checkbox", id: `ap-stmt-${st.id}`, checked: ui.ap.ticks[st.id] ? true : null });
       cb.addEventListener("change", () => {
         ui.ap.ticks[st.id] = cb.checked;
@@ -668,6 +779,7 @@
         openSimpleConfirm({
           title: "Run this swap for me",
           lines: [
+            ...(f.expected_typed && f.gets_text ? [`You give ${f.expected_typed}. You get ${f.gets_text}.`] : []),
             f.wallet
               ? `From now on this console does every step of this swap by itself, from this swap's own wallet${f.payouts ? `, and when it is over it sends what is left to ${f.role === "alice" && f.payouts.noid ? "NOID address " + f.payouts.noid + " and " : ""}ETH address ${f.payouts.eth}` : ""}. The approval is bound to those addresses.`
               : f.role === "alice"
@@ -964,7 +1076,7 @@
     }
     const entry = (a.table || []).find((e) => e.id === s.action);
     const why = actionWhy(a, s.action);
-    return { el: btn(s.id === "deposit" ? "Read the deposit now" : s.title, () => startAction(s.action), { primary: true, big: true, disabled: !!why, title: why || (entry ? `${entry.note}\n\n${entry.command || ""}` : "") }), why };
+    return { el: btn(s.id === "deposit" ? "Read the deposit now" : s.button || s.title, () => startAction(s.action), { primary: true, big: true, disabled: !!why, title: why || (entry ? `${entry.note}\n\n${entry.command || ""}` : "") }), why };
   }
 
   /** The form is built once; until the person picks a role by hand it shows the role of the screen it is on (a console started with --role has only that one valid). */
@@ -1305,6 +1417,10 @@
     return H.el("div", { class: "watch row" }, H.el("strong", { text: "Watch loop" }), w.started_here ? H.chip("ok", isProgram() ? "running in the program" : `running (started here${w.pid ? ", pid " + w.pid : ""})`) : w.some_loop_running ? H.chip("attn", "a loop is updating the files, not started here") : H.chip("danger", "not running"));
   }
 
+  /** Program mode: what the watch loop does, in words (the page reads `watch.mode`; null when no loop runs or the program does not say). */
+  const WATCH_MODE_WORDS = { read: ["quiet", "Watch: reading only (records nothing)"], apply: ["ok", "Watch: recording"] };
+  const watchModeChip = (w) => (isProgram() && w && w.started_here && Object.prototype.hasOwnProperty.call(WATCH_MODE_WORDS, w.mode) ? WATCH_MODE_WORDS[w.mode] : null);
+
   /** The strip's one button for Bob's step: the table's own action, the form's own save, or the copy of the run folder's path. */
   function joinButton(a, s, f) {
     if (s.id === "file") {
@@ -1408,38 +1524,28 @@
   }
 
   // ------------------------------------------------------------------ program mode: the first screen of a swap
-  // Shown instead of the swap page while the swap has no tick yet. The swap was made by the new-swap form (its terms are in run.json), so there is no
-  // install step and no terms step: the steps are the table's own actions. It adds no request of its own: its buttons are startAction(table id).
+  // Shown instead of the swap page while the swap has no tick yet. The swap was made by the new-swap form (its terms are in run.json), so there is no install step and no terms
+  // step. The program makes the swap's own wallets by itself ("Make"); the person's own steps are Prepare (Alice) and Choose and check Alice's file (Bob). Under it the same
+  // boxes as the swap page's first card (programFirstCard), in the order of the work: the file and the check line, the approval, then the deposit.
   const PROGRAM_BACKUP = "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough.";
   const PROGRAM_STEPS = {
     alice: [
-      { id: "setup", action: "setup", title: "Set up" },
-      { id: "wallet", action: "wallet-setup-alice", title: "Make this swap's own wallets" },
+      { id: "make", action: null, title: "Make this swap's own wallets", auto: true },
       { id: "prepare", action: "prepare", title: "Prepare the swap file" },
-      { id: "deposit", action: "wallet-status-alice", title: "Deposit the coins" },
-      { id: "send", action: null, title: "Send Bob the bundle file" },
-      { id: "watch", action: "watch-start", title: "Start the watch" },
     ],
     bob: [
-      { id: "setup", action: "setup", title: "Set up" },
-      { id: "wallet", action: "wallet-setup-bob", title: "Make this swap's own Ethereum key" },
-      { id: "join", action: "join", title: "Choose and check Alice's file" },
-      { id: "watch", action: "watch-start", title: "Start the watch" },
-      { id: "deposit", action: "wallet-status-bob", title: "Deposit the ETH" },
+      { id: "make", action: null, title: "Make this swap's own Ethereum key", auto: true },
+      { id: "join", action: "join", title: "Choose and check Alice's file", button: "Choose Alice's file…" },
     ],
   };
   // what a later step shows about an earlier one (a later step cannot have run without it)
-  const PROGRAM_IMPLIED = { setup: ["wallet", "prepare", "join"], wallet: ["prepare", "join"] };
+  const PROGRAM_IMPLIED = { make: ["prepare", "join"] };
   const PROGRAM_SAY = {
-    setup: "Makes this swap's folders and reads a recent block of the Ethereum chain for the log start. Sends nothing.",
-    wallet_alice: "Makes a fresh NOID wallet and a fresh Ethereum key for this one swap, sealed in the run folder, and checks that the key opens the Ethereum address it will show. Nothing is deposited or sent. Your own wallets are never used.",
-    wallet_bob: "Makes a fresh Ethereum key for this one swap, sealed in the run folder, and checks that the key opens the address it will show. Tell Alice this address: it is the sender of your lock. Nothing is deposited or sent. Your own wallet is never used.",
-    prepare: "Makes your swap file with a fresh secret and this swap's wallet and key sealed in it, and the bundle file for Bob. " + PROGRAM_BACKUP + " Sends nothing. With the proof-free lock it takes seconds.",
-    join: "A window opens to choose Alice's bundle file (alice.bundle.json). The tool rebuilds the swap from it, compares it with your own terms and writes your swap file. Nothing is sent to any chain. If it refuses, its reason shows below and nothing is written. " + PROGRAM_BACKUP,
-    watch_alice: "Starts the loop that makes the tool's ticks; the swap page appears at the first tick, and the funding is offered there. Start it once your deposit is seen and Bob has the bundle file. It records facts and sends nothing.",
-    watch: "Starts the loop that makes the tool's ticks; the swap page appears at the first tick. Start it only once the bundle check line below is the same as the one Alice's side shows. It records facts and sends nothing.",
-    deposit: "Deposit the coins to the addresses below. The program reads the deposit about every 40 seconds; this step is done when it is seen. Nothing is locked before the funding.",
-    send: "Hand Bob the bundle file. It holds no secret. Send it as a file, not as pasted text, and compare the two bundle check lines over a second channel.",
+    make_alice: "The program does this by itself: a fresh NOID wallet and a fresh Ethereum key for this one swap, sealed in the swap's folder, and a check that the key opens the address it will show. Nothing is sent.",
+    make_bob: "The program does this by itself: a fresh Ethereum key for this one swap, sealed in the swap's folder, and a check that the key opens the address it will show. Nothing is sent.",
+    make_failed: "The last run did not end cleanly. Its result is below; read it before you try again. If it stops again because some of the wallet files already exist, make a new swap instead: nothing was sent.",
+    prepare: "Makes your swap file with a fresh secret, and the file for Bob. Press it when Bob is ready to check that file: from then on the clock runs, and your deposit and the funding must go in within about 25 minutes, or the swap does not start (nothing is lost then). Sends nothing.",
+    join: "First save the invitation below and send it to Alice. When her file (alice.bundle.json) arrives, choose it here: the program rebuilds the swap from it and refuses it if it differs from your own terms. Nothing is sent.",
   };
 
   /** True while the first screen applies: actions on, not a production run, no tick of this role yet, and no funding recorded. */
@@ -1452,46 +1558,54 @@
     return !(f.marker_at || (w && w.funded_marker));
   }
 
-  /** What the screen reads from the payload (nothing else): clean job records and files. */
+  /** What the screen reads from the payload (nothing else): clean job records, files, and what the program says about its own first steps. */
   function programStartFacts(p, role) {
     const a = (p && p.actions) || {};
     const w = (walletOf(a) && a.wallet.roles && a.wallet.roles[role]) || {};
     const prepareRec = newestState(a.jobs, "prepare");
     const prepareBad = prepareRec === "running" || prepareRec === "failed";
+    const walletId = `wallet-setup-${role}`;
+    const setupRec = newestState(a.jobs, "setup");
+    const walletRec = newestState(a.jobs, walletId);
+    const fsv = a.first_steps && typeof a.first_steps === "object" ? a.first_steps : null;
+    // the two automatic steps are one line: running while either is; failed (until the person says "Try again") when the program or the newest record says so
+    const running = !!(fsv && fsv.running) || setupRec === "running" || walletRec === "running";
+    const failed = running ? null : fsv && (fsv.failed === "setup" || fsv.failed === "wallet") ? fsv.failed : setupRec === "failed" ? "setup" : walletRec === "failed" ? "wallet" : null;
     return {
       role,
       setup: cleanJob(a.jobs, "setup"),
-      states: { setup: newestState(a.jobs, "setup"), wallet: newestState(a.jobs, `wallet-setup-${role}`), prepare: prepareRec, join: newestState(a.jobs, "join"), watch: newestState(a.jobs, "watch-start"), deposit: newestState(a.jobs, `wallet-status-${role}`) },
-      wallet: cleanJob(a.jobs, `wallet-setup-${role}`) || (w.addresses_file ? { at: null } : null),
+      make: { running, failed, waiting: fsv && typeof fsv.waiting === "string" && fsv.waiting ? fsv.waiting : null },
+      states: { make: running ? "running" : failed ? "failed" : null, prepare: prepareRec, join: newestState(a.jobs, "join") },
+      wallet: cleanJob(a.jobs, walletId) || (w.addresses_file ? { at: null } : null),
       prepare: role === "alice" && p && p.bundle_file && !prepareBad ? { at: null } : null,
       join: role === "bob" ? cleanJob(a.jobs, "join") || (w.swap_file === true ? { at: null } : null) : null,
-      watch: a.watch && a.watch.started_here === true ? { at: null } : null,
-      deposit: depositSeen(a, role),
     };
   }
 
-  /** The steps with their state: done, now (the first that is not done; the last step when all are) or todo. */
+  /** The steps with their state: done, now (the first that is not done) or todo. When every step is done none is "now". */
   function programSteps(f) {
     const list = PROGRAM_STEPS[f.role] || [];
-    const own = { setup: f.setup, wallet: f.wallet, prepare: f.prepare, join: f.join, watch: f.watch, deposit: f.deposit ? { at: null } : null, send: null };
+    const own = { make: f.wallet, prepare: f.prepare, join: f.join };
     const steps = list.map((s, i) => {
       const fact = own[s.id] || null;
       const from = fact ? null : (PROGRAM_IMPLIED[s.id] || []).find((l) => !!own[l]) || null;
-      return { id: s.id, n: i + 1, title: s.title, action: s.action, state: fact || from ? "done" : "todo", done_by: fact ? "fact" : from ? "implied" : null, at: fact && typeof fact.at === "number" ? fact.at : null, rec: (f.states || {})[s.id] || null };
+      return { id: s.id, n: i + 1, title: s.title, button: s.button || null, auto: !!s.auto, action: s.action, state: fact || from ? "done" : "todo", done_by: fact ? "fact" : from ? "implied" : null, at: fact && typeof fact.at === "number" ? fact.at : null, rec: (f.states || {})[s.id] || null, make: s.id === "make" ? f.make : null };
     });
-    const first = steps.find((s) => s.state !== "done" && s.id !== "send");
-    const now = first || steps[steps.length - 1];
-    if (now) now.state = "now";
+    const first = steps.find((s) => s.state !== "done");
+    if (first) first.state = "now";
     return steps;
   }
 
   function programStepLine(s) {
     const t = (u) => (typeof u === "number" ? ` at ${H.clock(u)}` : "");
-    if (s.state === "done") return s.done_by === "implied" ? "seen from a later step that ran" : s.id === "deposit" ? "the deposit is seen" : `done${t(s.at)}`;
-    if (s.id === "send") return "the page cannot see whether Bob has it";
+    if (s.state === "done") return s.done_by === "implied" ? "seen from a later step that ran" : `done${t(s.at)}`;
+    if (s.id === "make") {
+      const m = s.make || {};
+      return m.running ? "running by itself" : m.failed ? "did not end cleanly" : m.waiting ? `waiting: ${m.waiting}` : "starts by itself";
+    }
     if (s.state === "now" && s.rec === "running") return "running now";
     if (s.state === "now" && s.rec === "failed") return "the last run did not end cleanly";
-    return s.id === "deposit" ? "not seen yet" : "";
+    return "";
   }
 
   function programStepList(steps) {
@@ -1503,68 +1617,240 @@
     return ol;
   }
 
+  // ------------------------------------------------------------------ the boxes of the first card (program mode)
+  /** The newest save or confirm message of a box: kept across redraws, for the swap on show only. */
+  const noteOf = (kind) => (ui.file && ui.file.swap === (H.state.swap || "") && ui.file.kind === kind ? ui.file : null);
+
+  /** One of the two "save a file" buttons (the swap file for Bob, the invitation for Alice): the program's own dialog opens; the answer is "saved", "cancelled" or the server's words. */
+  async function saveFile(kind) {
+    if (!H.state.token) return;
+    const path = kind === "bundle" ? "/api/bundle/save" : "/api/invitation/save";
+    ui.file = { swap: H.state.swap || "", kind, busy: true, ok: null, text: null };
+    forceRender();
+    const r = await post(path, {});
+    if (r.ok) ui.file = { swap: H.state.swap || "", kind, busy: false, ok: r.json && r.json.saved === true, text: r.json && r.json.saved === true ? (kind === "bundle" ? "Saved. Send that file to Bob." : "Saved. Send that file to Alice.") : "Nothing was saved." };
+    else ui.file = { swap: H.state.swap || "", kind, busy: false, ok: false, error: true, text: r.json.error || `HTTP ${r.status}` };
+    forceRender();
+    await H.reload(true);
+  }
+
+  /** The line under a save button: the result of the last press (nothing before the first). */
+  function fileNote(kind) {
+    const n = noteOf(kind);
+    return n && n.text ? H.el("p", { class: n.error ? "attn" : "plain", role: n.error ? "alert" : "status", text: n.text }) : null;
+  }
+
+  /** What the page can show of this role's check line: `{ hex, recorded }`. `recorded` only when the program has written check-line.json (the confirm box needs that); else the line of the step's own result, for display. */
+  function checkLineOf(a, role) {
+    const cl = a && a.check_line && typeof a.check_line.hex === "string" && /^[0-9a-f]{16}$/.test(a.check_line.hex) ? a.check_line.hex : null;
+    if (cl) return { hex: cl, recorded: true };
+    const line = role === "alice" ? bundleCheckLine(a && a.jobs) : (joinResult(a && a.jobs) || {}).line;
+    const m = line ? /bundle check: ([0-9a-fA-F]{16})\b/.exec(line) : null;
+    return m ? { hex: m[1].toLowerCase(), recorded: false } : { hex: null, recorded: false };
+  }
+
+  const CHECK_LINE_SAY = {
+    alice: "Read it to Bob over a call or another channel, and let him read his to you. All 16 digits must be the same. If they differ, or his program refused your file, stop: do not approve and do not deposit.",
+    bob: "Read it to Alice over a call or another channel, and let her read hers to you. All 16 digits must be the same. If they differ, stop: do not approve and do not deposit.",
+  };
+
+  /** The check line in four groups of four to read aloud, and the one thing to do with it: say that the other side's line matches. Nothing is approved before that. */
+  function checkLineBlock(view, payload) {
+    const a = payload && payload.actions;
+    const role = view && view.role;
+    if (!a || (role !== "alice" && role !== "bob")) return null;
+    const other = role === "alice" ? "Bob" : "Alice";
+    const cl = checkLineOf(a, role);
+    const box = H.el("section", { class: "spend-box funding-guide check-line-box", "aria-label": "Your check line" }, H.el("div", { class: "row" }, H.el("strong", { text: "Compare the check lines" }), H.chip("quiet", `with ${other}`)));
+    if (!cl.hex) {
+      box.appendChild(H.el("p", { class: "attn", role: "alert", text: "The check line could not be read from the step's result. Do not go on until you have read the step's output in the run controls." }));
+      return box;
+    }
+    box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "Your check line" }), H.el("p", { class: "bundle-check grouped mono", text: groupHex(cl.hex) })));
+    box.appendChild(H.el("p", { class: "plain", text: CHECK_LINE_SAY[role] }));
+    if (!cl.recorded) return box;
+    const lm = a.line_match;
+    if (lm && lm.hex === cl.hex) {
+      box.appendChild(H.chip("ok", `Confirmed at ${typeof lm.at === "number" ? hhmm(lm.at) : "--:--"}: the lines match.`));
+      return box;
+    }
+    const word = role === "alice" ? "Bob read me his" : "Alice read me her";
+    const key = `${H.state.swap || ""}|${cl.hex}`;
+    if (!ui.cl || ui.cl.key !== key) ui.cl = { key, ticked: false, error: null };
+    const cb = H.el("input", { type: "checkbox", id: "cl-match", checked: ui.cl.ticked ? true : null });
+    const go = btn(
+      "Confirm",
+      async () => {
+        go.disabled = true;
+        ui.cl.error = null;
+        const r = await post("/api/checkline/confirm", { matches: true, hex: cl.hex });
+        if (!r.ok) ui.cl.error = r.json.error || `HTTP ${r.status}`;
+        forceRender();
+        await H.reload(true);
+      },
+      { primary: true, disabled: !ui.cl.ticked || !H.state.token, title: H.state.token ? null : KEY_LOST }
+    );
+    cb.addEventListener("change", () => {
+      ui.cl.ticked = cb.checked;
+      go.disabled = !cb.checked || !H.state.token;
+    });
+    box.appendChild(H.el("label", { class: "ack", for: "cl-match" }, cb, ` ${word} line and all 16 digits match`));
+    box.appendChild(H.el("div", { class: "row" }, go));
+    if (ui.cl.error) box.appendChild(H.el("p", { class: "attn", role: "alert", text: ui.cl.error }));
+    if (!H.state.token) box.appendChild(keyNote());
+    return box;
+  }
+
+  /** True once this role's own swap file exists (a tick, the bundle file, or the wallet's swap file say so). */
+  function haveSwapFile(payload, role) {
+    const w = walletOf(payload.actions);
+    const r = w && w.roles && w.roles[role];
+    return !!((r && r.swap_file === true) || (role === "alice" && payload.bundle_file) || (payload.roles && payload.roles[role]));
+  }
+
+  /** True when this role's funding is recorded (Alice) or its lock was sent (Bob): the file and the check line are no longer drawn. */
+  function fundingRecorded(a) {
+    const w = walletOf(a);
+    const f = a.funding || {};
+    return !!(f.marker_at || (w && w.funded_marker));
+  }
+
+  /**
+   * The box that hands the check line over: Alice first has a button that saves a copy of her swap file for Bob, then both sides see the check line and its confirmation.
+   * Alice's while her file is at "created" and no funding is recorded; Bob's until his lock. null outside program mode, in a board run and outside those phases.
+   */
+  function handoverBlock(view, payload) {
+    const a = payload && payload.actions;
+    if (!isProgram() || !a || !a.enabled || !view || !view.phase || isBoardRun(payload, view.role)) return null;
+    const role = view.role;
+    if (role === "alice" ? view.phase.id !== "created" || fundingRecorded(a) : !BOB_BEFORE_LOCK.includes(view.phase.id)) return null;
+    if (!haveSwapFile(payload, role)) return null;
+    const wrap = H.el("div", { class: "wallet-funding handover" });
+    if (role === "alice") {
+      const busy = !!(noteOf("bundle") && noteOf("bundle").busy);
+      const box = H.el("section", { class: "spend-box handover-box", "aria-label": "Give Bob your swap file" }, H.el("div", { class: "row" }, H.el("strong", { text: "Give Bob your swap file" }), H.chip("quiet", "holds no secret")));
+      box.appendChild(H.el("p", { class: "plain", text: "Bob needs this file to check your swap. It holds no secret. Save a copy and send it to him as a file, not as pasted text." }));
+      box.appendChild(H.el("div", { class: "row" }, btn("Save a copy for Bob…", () => saveFile("bundle"), { primary: true, disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST })));
+      const note = fileNote("bundle");
+      if (note) box.appendChild(note);
+      wrap.appendChild(box);
+    }
+    const cl = checkLineBlock(view, payload);
+    if (cl) wrap.appendChild(cl);
+    return wrap;
+  }
+
+  /** Bob's invitation: his terms and his two addresses in a file Alice's program opens, so she does not type them. Drawn while his key exists and his swap file does not. */
+  function invitationBlock(payload) {
+    const a = payload && payload.actions;
+    const w = walletOf(a);
+    const r = w && w.roles && w.roles.bob;
+    if (!isProgram() || !r || !r.key_address || r.swap_file === true || (payload.roles && payload.roles.bob) || isBoardRun(payload, "bob")) return null;
+    const own = payload.program && typeof payload.program.own_noid === "string" && payload.program.own_noid ? payload.program.own_noid : null;
+    const busy = !!(noteOf("invitation") && noteOf("invitation").busy);
+    const box = H.el("section", { class: "spend-box invitation-box", "aria-label": "Send Alice an invitation" }, H.el("div", { class: "row" }, H.el("strong", { text: "Send Alice an invitation" }), H.chip("quiet", "holds no secret")));
+    box.appendChild(H.el("p", { class: "plain", text: "The invitation holds your terms and your two addresses, so Alice does not type them. It holds no secret. Send it to Alice as a file." }));
+    if (own) box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "Your Parano1d address (the NOID comes here)" }), H.el("div", { class: "row" }, H.copyButton(own, "your Parano1d address", own))));
+    box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "This swap's Ethereum key (the sender of your lock)" }), H.el("div", { class: "row" }, H.copyButton(r.key_address, "this swap's Ethereum key address", r.key_address)), H.el("p", { class: "dim", text: "Do not send coins to it yet: the deposit box shows when the swap is ready." })));
+    box.appendChild(H.el("div", { class: "row" }, btn("Save an invitation for Alice…", () => saveFile("invitation"), { primary: true, disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST })));
+    const note = fileNote("invitation");
+    if (note) box.appendChild(note);
+    return box;
+  }
+
+  const READ_PHASE_SAY = "The program reads both chains every 30 seconds and records nothing yet. It starts acting once you have approved and your deposit is seen.";
+
+  /**
+   * The boxes of the first card in program mode outside a board run, in the order of the work: the file and the check line, the read-phase line, the approval (only once the
+   * check lines are confirmed, or while it is in force), the deposit while it is needed, the funding once it is recorded, then the engine's send boxes. One element, or null when
+   * the card is not this one (the terminal console, a board run): the caller then draws today's boxes.
+   */
+  function programFirstCard(view, payload) {
+    const a = payload && payload.actions;
+    if (!isProgram() || !a || !a.enabled || a.production || !view || !view.role || isBoardRun(payload, view.role)) return null;
+    const wrap = H.el("div", { class: "wallet-funding first-card" });
+    const add = (n) => {
+      if (n) wrap.appendChild(n);
+    };
+    add(handoverBlock(view, payload));
+    if (a.watch && a.watch.mode === "read") add(H.el("p", { class: "plain", text: READ_PHASE_SAY }));
+    const x = a.autopilot && a.autopilot[view.role];
+    if (x && (a.line_match || x.on === true || x.terms_changed === true || (Array.isArray(x.needs_you) && x.needs_you.length))) add(autopilotBlock(view, payload));
+    // the deposit comes after the comparison of the check lines: only once the line match exists or the approval is in force
+    if (depositNeeded(view, a) && haveSwapFile(payload, view.role) && (a.line_match || (x && x.on === true))) add(depositBlock(payload, view.role, { plain: true }));
+    if (view.role === "alice" && fundingRecorded(a)) add(fundingBlock(view, payload));
+    add(spendBlock(view, payload));
+    return wrap.children.length ? wrap : null;
+  }
+
   /** Draws the first screen of a swap: the strip into #next-action, the rest into #start. The caller has emptied the other sections. */
   function renderProgramStart(payload, role) {
     const a = payload.actions;
     const f = programStartFacts(payload, role);
     const steps = programSteps(f);
-    const next = steps.find((s) => s.state === "now");
-    const sayOf = (s) => (s.id === "wallet" ? PROGRAM_SAY[`wallet_${role}`] : s.id === "watch" && role === "alice" ? PROGRAM_SAY.watch_alice : PROGRAM_SAY[s.id]);
+    const next = steps.find((s) => s.state === "now") || null;
+    const board = isBoardRun(payload, role);
 
     const strip = empty($("next-action"));
     strip.classList.remove("warn-rail", "attn-rail", "danger-rail", "ok-rail");
     strip.classList.add("act", "two");
-    const say = H.el("div", { class: "due-say" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-action" }, next.title, " ", H.chip("accent", `Step ${next.n} of ${steps.length}, your step`))));
-    say.appendChild(H.el("p", { class: "plain", text: sayOf(next) }));
-    if (next.rec === "running") say.appendChild(H.el("p", { class: "plain", text: "Running now. The result shows here when it ends." }));
-    if (next.rec === "failed") say.appendChild(H.el("p", { class: "plain", text: "The last run did not end cleanly. Its result is below; read it before you run the step again." }));
+    const say = H.el("div", { class: "due-say" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-action" }, next ? next.title : "The swap is made", " ", next ? H.chip("accent", next.auto ? `Step ${next.n} of ${steps.length}, by itself` : `Step ${next.n} of ${steps.length}, your step`) : H.chip("ok", "done"))));
+    let jobId = null;
+    let doBox = null;
+    if (next && next.id === "make") {
+      say.appendChild(H.el("p", { class: "plain", text: PROGRAM_SAY[`make_${role}`] }));
+      const line = programStepLine(next);
+      if (!f.make.failed) say.appendChild(H.el("p", { class: "plain dim", text: line.charAt(0).toUpperCase() + line.slice(1) + "." }));
+      if (f.make.failed) {
+        say.appendChild(H.el("p", { class: "plain", text: PROGRAM_SAY.make_failed }));
+        jobId = f.make.failed === "setup" ? "setup" : `wallet-setup-${role}`;
+        const again = jobId;
+        const why = actionWhy(a, again);
+        doBox = H.el("div", { class: "due-do start-go" }, btn("Try again", () => startAction(again), { primary: true, big: true, disabled: !!why, title: why || "Runs the step again. It sends nothing." }));
+        if (why) doBox.appendChild(H.el("p", { class: "why", text: why }));
+      }
+    } else if (next) {
+      say.appendChild(H.el("p", { class: "plain", text: PROGRAM_SAY[next.id] }));
+      if (next.rec === "running") say.appendChild(H.el("p", { class: "plain", text: "Running now. The result shows here when it ends." }));
+      if (next.rec === "failed") say.appendChild(H.el("p", { class: "plain", text: "The last run did not end cleanly. Its result is below; read it before you run the step again." }));
+      jobId = next.action;
+      const b = stepButton(a, next, payload);
+      doBox = H.el("div", { class: "due-do start-go" }, b.el);
+      if (b.why) doBox.appendChild(H.el("p", { class: "why", text: b.why }));
+    } else say.appendChild(H.el("p", { class: "plain", text: "The program is reading both chains. The swap page shows at its first reading; what to do next is below." }));
     strip.appendChild(say);
-    const b = stepButton(a, next, payload);
-    const doBox = H.el("div", { class: "due-do start-go" }, b.el);
-    if (b.why) doBox.appendChild(H.el("p", { class: "why", text: b.why }));
+    if (!doBox) doBox = H.el("div", { class: "due-do start-go" });
     if (ui.msg) doBox.appendChild(H.el("p", { class: ui.msg.kind === "danger" ? "attn" : "plain", role: "alert", text: ui.msg.text }));
-    strip.appendChild(doBox);
-    const lastJob = next.action ? (a.jobs || []).filter((j) => j.id === next.action).slice(-1)[0] : null;
+    if (doBox.children.length) strip.appendChild(doBox);
+    const lastJob = jobId ? (a.jobs || []).filter((j) => j.id === jobId).slice(-1)[0] : null;
     if (lastJob) strip.appendChild(H.el("div", { class: "due-more" }, jobBox(lastJob, false)));
 
     const start = empty($("start"));
     start.hidden = false;
     start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-steps" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-steps", text: role === "alice" ? "Start a swap" : "Join a swap" }), H.el("div", { class: "right" }, H.chip("quiet", "These steps lock nothing and send nothing to either chain."))), programStepList(steps)));
 
-    // the deposit (from the swap's own wallet) once the swap file exists
-    const w = walletOf(a);
-    if (w && w.roles && w.roles[role] && w.roles[role].swap_file) start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-deposit" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-deposit", text: "Your deposit" })), depositBlock(payload, role)));
-
-    // Alice: the file for Bob and its check line, once Prepare has made it
-    if (role === "alice" && f.prepare) {
-      // the program names the file but not its folder (a path never reaches this page): the file is in this swap's run folder
-      const path = payload.bundle_file && (payload.bundle_file.path || payload.bundle_file.name);
-      const box = H.el("section", { class: "block start-send", "aria-labelledby": "h-send" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-send", text: "Send Bob the bundle file" })));
-      if (path) box.appendChild(H.el("div", { class: "row" }, H.copyButton(path, "the bundle file's name", path), payload.bundle_file.path ? null : H.el("span", { class: "dim", text: " in this swap's run folder" })));
-      box.appendChild(H.el("p", { class: "plain", text: PROGRAM_SAY.send }));
-      const line = bundleCheckLine(a.jobs);
-      if (line) box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "Your line, as Prepare printed it" }), H.el("p", { class: "bundle-check mono", text: line })));
-      else box.appendChild(H.el("p", { class: "dim", text: "Your bundle check line is the one Prepare printed (it is in the step's result above)." }));
-      box.appendChild(H.el("p", { class: "plain", text: "The swap page appears at the tool's first tick, which the watch makes once the program has started it." }));
-      box.appendChild(watchChips(a));
-      if (!H.state.token) box.appendChild(keyNote());
-      start.appendChild(box);
+    // Bob: his invitation, while his key exists and Alice's file has not been checked yet
+    if (role === "bob") {
+      const inv = invitationBlock(payload);
+      if (inv) start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-invite" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-invite", text: "Your invitation" })), inv));
     }
 
-    // Bob: what the check printed, and the line to compare
+    // Bob: what the check printed
     if (role === "bob" && f.join) {
       const result = joinResult(a.jobs);
       const box = H.el("section", { class: "block join-result", "aria-labelledby": "h-result" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-result", text: "The check" }), H.el("div", { class: "right" }, H.chip("ok", "Alice's file accepted"))));
       if (result && result.terms) box.appendChild(termsRows(result.terms));
-      if (result && result.line) {
-        box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "The bundle check line, as the tool printed it" }), H.el("p", { class: "bundle-check mono", text: result.line })));
-        box.appendChild(H.el("p", { class: "plain", text: "Compare this line with the one Alice's side shows, over a second channel such as a call. If they differ, stop: do not start the watch and lock nothing." }));
-      } else box.appendChild(H.el("p", { class: "attn", text: "No single line of the form \"bundle check: 16 hex digits ok\" was found in the step's output. Do not go on until you have read the output." }));
-      box.appendChild(watchChips(a));
       start.appendChild(box);
     }
 
-    start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-stops" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-stops", text: "What happens if it stops here" })), H.el("p", { class: "plain", text: "These steps lock nothing and send nothing to either chain. Nothing is locked before the funding, so stopping now costs nothing." }), H.el("p", { class: "plain", text: PROGRAM_BACKUP }), role === "alice" ? H.el("p", { class: "plain", text: "Coins you deposited stay in this swap's own wallet. If the swap does not go through, the NOID comes back to it after the deadline, and what is left is sent to your own addresses when the swap is over." }) : null));
+    // the boxes of the swap page's first card, in the same order (the file and the check line, the approval, the deposit); a board run keeps its own boxes
+    const view = { role, phase: { id: role === "alice" ? "created" : "received" } };
+    const card = board ? null : programFirstCard(view, payload);
+    if (card) start.appendChild(H.el("section", { class: "block", "aria-label": "What to do next" }, card));
+    const w = walletOf(a);
+    if (board && w && w.roles && w.roles[role] && w.roles[role].swap_file) start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-deposit" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-deposit", text: "Your deposit" })), depositBlock(payload, role)));
+
+    start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-stops" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-stops", text: "What happens if it stops here" })), H.el("p", { class: "plain", text: "These steps lock nothing and send nothing to either chain. Nothing is locked before the funding, so stopping now costs nothing." }), H.el("p", { class: "plain", text: PROGRAM_BACKUP }), role === "alice" ? H.el("p", { class: "plain", text: "Coins you deposited stay in this swap's own wallet. If the swap does not go through, the NOID comes back to it after the deadline, and what is left can then be sent to your own addresses from this swap's page; while the program runs this swap for you, it does both by itself." }) : null));
   }
 
   // ------------------------------------------------------------------ the panel
@@ -1587,8 +1873,12 @@
   function watchBox(a) {
     const w = a.watch || {};
     const alive = w.started_here;
-    const box = H.el("div", { class: "watch row" }, H.el("strong", { text: "Watch loop" }), alive ? H.chip("ok", isProgram() ? "running in the program" : `running (started here${w.pid ? ", pid " + w.pid : ""})`) : w.some_loop_running ? H.chip("attn", "a loop is updating the files, not started here") : H.chip("danger", "not running"));
-    box.appendChild(actionButton(a, "watch-start", "Start", isProgram() ? "Runs inside the program while it is open" : "Detached; keeps running when this page is closed"));
+    const mode = watchModeChip(w);
+    const box = H.el("div", { class: "watch row" }, mode ? null : H.el("strong", { text: "Watch loop" }), mode ? H.chip(mode[0], mode[1]) : alive ? H.chip("ok", isProgram() ? "running in the program" : `running (started here${w.pid ? ", pid " + w.pid : ""})`) : w.some_loop_running ? H.chip("attn", "a loop is updating the files, not started here") : H.chip("danger", "not running"));
+    // program mode: the button starts the recording loop (or switches the reading one to it); the table's own note says what that means and is shown, not only in a hover title
+    const startNote = isProgram() ? ((a.table || []).find((e) => e.id === "watch-start") || {}).note : null;
+    box.appendChild(actionButton(a, "watch-start", "Start", isProgram() ? startNote || "Records what the engine decides" : "Detached; keeps running when this page is closed"));
+    if (startNote) box.appendChild(H.el("span", { class: "dim", text: startNote }));
     box.appendChild(actionButton(a, "watch-stop", "Stop", "Stops only the loop started here"));
     // a console started with --role does not offer the other role's tick at all
     for (const [id, label] of [["tick-alice", "Tick Alice (read-only)"], ["tick-bob", "Tick Bob (read-only)"]]) {
@@ -1868,490 +2158,11 @@
     fundingBlock,
     banners,
     tick,
-    program: { isProgram, startKind: programStartKind, startFacts: programStartFacts, steps: programSteps, renderStart: renderProgramStart, hungWarning, TERMINAL_ONLY, PROGRAM_STEPS, PROGRAM_BACKUP, CODE1_ADVICE },
-  };
-})();
-
-/* noid-swap operator console, program mode: the top bar, the list of swaps, the new-swap form and the settings screen.
-   Pure builders (data and handlers in, element trees out); operator.js mounts them. The only requests made here are the ones of the program API
-   (POST /api/newswap, POST /api/settings, POST /api/program/open, POST /api/board/slot, GET /api/settings), each with the per-start token.
-   No secret ever passes through this file: the recovery code, the restore input, a passphrase, a key and the board invite are shown and typed only in a window of the
-   program itself. A menu item here only asks the program to open that window (POST /api/program/open {what}); nothing secret comes back and nothing is typed here.
-   No inline styles or handlers (CSP). */
-(() => {
-  "use strict";
-  let H = null; // { el, chip, state, phaseLabel }
-  const KEY_LOST_PROGRAM = "This page lost its key (a reload drops it). Close this window and open the program again.";
-
-  // ------------------------------------------------------------------ fixed words
-  const ROLE_WORDS = { alice: "You sell NOID", bob: "You sell ETH" };
-  const roleWords = (role) => ROLE_WORDS[role] || "Role not known";
-
-  // I4: the node status is states and numbers only; the page shows a fixed phrase per state and never a URL, a host or an error text
-  const NOID_WORDS = { ok: "connected", not_running: "not running: start the Parano1d wallet app", wrong_chain: "not the expected chain", behind: "behind: still catching up", error: "cannot be checked" };
-  const ETH_WORDS = { ok: "connected", unreachable: "not reachable", wrong_chain: "not the expected network", behind: "behind: still catching up", error: "cannot be checked" };
-  const LEVEL = { ok: "ok", behind: "attn", error: "attn", not_running: "danger", unreachable: "danger", wrong_chain: "danger" };
-
-  /** `{ noid: {word, level}, eth: {word, level} }` from a NodeStatus; anything not in the fixed tables reads as "cannot be checked". */
-  function nodeWords(node) {
-    const one = (obj, words) => {
-      const st = obj && typeof obj.state === "string" && Object.prototype.hasOwnProperty.call(words, obj.state) ? obj.state : "error";
-      const out = { state: st, word: words[st], level: LEVEL[st] || "attn" };
-      // the Parano1d chain identity is checked against a pinned block once the program has one; until then it says so
-      if (words === NOID_WORDS && st === "ok" && obj && obj.chain_checked === false) out.word += " (the chain is not verified yet)";
-      return out;
-    };
-    return { noid: one(node && node.noid, NOID_WORDS), eth: one(node && node.eth, ETH_WORDS) };
-  }
-
-  const UPDATE_WORDS = { not_configured: "Update check: not set up in this version", off: "Update check: off", none: "You have the newest version", current: "You have the newest version", available: "A new version is available", checking: "Checking for a new version", error: "The update check did not work", unknown: "Not checked yet", ask: "Not checked yet", newer: "A new version is available", never: "Not checked yet", skipped_active: "Not checked: a swap was active" };
-  function updateWords(update) {
-    const st = update && typeof update.state === "string" && Object.prototype.hasOwnProperty.call(UPDATE_WORDS, update.state) ? update.state : "unknown";
-    const latest = update && typeof update.latest === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(update.latest) ? update.latest : null;
-    const url = update && typeof update.url === "string" && /^https:\/\/[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]{1,200}$/.test(update.url) ? update.url : null;
-    // the program's checker says "newer" (desktop/lib/updatecheck.js); "available" is the same
-    const isNew = st === "available" || st === "newer";
-    return { state: st, text: UPDATE_WORDS[st] + (isNew && latest ? `: ${latest}` : "") + (isNew ? ". Check its sha256 and build provenance on its release page before installing." : ""), url: isNew ? url : null };
-  }
-
-  const activeCount = (swaps) => (Array.isArray(swaps) ? swaps.filter((s) => s && s.active === true).length : 0);
-
-  /** The vault facts the page shows as banners (from /api/program only). */
-  function vaultNotes(prog) {
-    const v = (prog && prog.vault) || {};
-    return { not_ready: v.ready !== true, unconfirmed: v.ready === true && v.recovery_confirmed !== true };
-  }
-
-  /** The list's order: swaps that need you first, then active ones, then newest first. */
-  function sortSwaps(swaps) {
-    return (Array.isArray(swaps) ? swaps.slice() : []).sort((a, b) => (b.needs_you === true) - (a.needs_you === true) || (b.active === true) - (a.active === true) || (Number(b.created_at) || 0) - (Number(a.created_at) || 0));
-  }
-
-  /** What changes the top bar or the list, without the ages that change at every read. */
-  function signature(prog) {
-    if (!prog) return "none";
-    const node = prog.node ? { noid: { ...prog.node.noid, checked_at: 0 }, eth: { ...prog.node.eth, checked_at: 0 } } : null;
-    return JSON.stringify({ v: prog.version, n: prog.network, node, vault: prog.vault, ns: prog.new_swap_allowed, swaps: prog.swaps, board: prog.board, update: prog.update, token: !!(H && H.state.token) });
-  }
-
-  // ------------------------------------------------------------------ transport
-  async function request(method, path, body) {
-    const init = { method, cache: "no-store", headers: { "x-swap-token": H.state.token || "", ...(body !== undefined ? { "content-type": "application/json" } : {}) } };
-    if (body !== undefined) init.body = JSON.stringify(body);
-    const r = await fetch(path, init);
-    const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-    return { ok: r.ok, status: r.status, json: j };
-  }
-  const errorText = (r) => (r.json && typeof r.json.error === "string" && r.json.error) || `HTTP ${r.status}`;
-
-  // ------------------------------------------------------------------ the top bar
-  /** What a menu item asks the program to open: its own window (never this page). */
-  const OPEN_ITEMS = [
-    ["recovery-code", "Recovery code"],
-    ["restore", "Restore from a recovery code"],
-    ["import", "Import a run folder"],
-    ["invite", "Board invite"],
-    ["help", "Help"],
-  ];
-
-  /**
-   * The bar over every screen: the mark, "Your swaps" with the number of active ones, the network in words, the two node states in words and the menu. No Alice/Bob switch:
-   * each swap has its own role. `h`: { go(screen), open(what), refresh() }.
-   */
-  function topBar(prog, ui, h) {
-    const el = H.el;
-    const nodes = nodeWords(prog && prog.node);
-    const n = activeCount(prog && prog.swaps);
-    const net = prog && prog.network === "test" ? H.chip("quiet", "Test network") : H.chip("danger", "Network not recognised");
-    const nodeChip = (name, w) => H.chip(w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn", `${name}: ${w.word}`);
-    const summary = el("summary", { class: "btn sm", "aria-label": "Menu" }, "Menu");
-    const menu = el("details", { class: "pg-menu" }, summary);
-    // Escape closes the menu and gives focus back to its button (a details element does not do that by itself)
-    menu.addEventListener("keydown", (ev) => {
-      if (ev && ev.key === "Escape" && menu.open) {
-        menu.removeAttribute("open");
-        if (summary.focus) summary.focus();
-      }
-    });
-    const list = el("ul", { class: "pg-menu-list" });
-    const item = (label, fn) => list.appendChild(el("li", {}, el("button", { type: "button", class: "btn sm", onclick: async () => { menu.removeAttribute("open"); await fn(); } }, label)));
-    item("Settings", () => h.go("settings"));
-    for (const [what, label] of OPEN_ITEMS) item(label, () => h.open(what));
-    // the program runs the check and answers in its own dialog; the line below the menu shows the result at the next read
-    item("Check for a new version", async () => {
-      await h.open("update-check");
-      await h.refresh();
-    });
-    const up = updateWords(prog && prog.update);
-    menu.appendChild(el("div", { class: "pg-menu-pop" }, list, el("p", { class: "pg-update dim" }, up.text, up.url ? el("span", {}, " ", H.copyButton ? H.copyButton(up.url, "the download address", "Copy the download address") : null) : null)));
-    return el(
-      "div",
-      { class: "wrap pg-bar-in" },
-      el("div", { class: "pg-brand" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 22, height: 22 }), el("span", { class: "wordmark", "aria-label": "No1d Swap" }, "No1d", el("i", { class: "dia", "aria-hidden": "true" }), "Swap")),
-      el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" ? "page" : null, onclick: () => h.go("list") }, "Your swaps", el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
-      el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, nodeChip("Parano1d", nodes.noid), nodeChip("Ethereum", nodes.eth)),
-      el("div", { class: "pg-tools" }, el("button", { type: "button", class: "btn ghost sm", onclick: () => h.refresh() }, "Refresh"), menu)
-    );
-  }
-
-  // ------------------------------------------------------------------ the list of swaps
-  function phaseWord(role, phase) {
-    if (!phase) return "not started";
-    return H.phaseLabel ? H.phaseLabel(role, phase) : String(phase);
-  }
-
-  function swapRow(s, h) {
-    const el = H.el;
-    const chips = [];
-    if (!s.refused) chips.push(H.chip("quiet", phaseWord(s.role, s.phase)));
-    if (s.needs_you) chips.push(H.chip("accent", "Needs you"));
-    if (s.in_contract) chips.push(H.chip("warn", "Coins are in the contract"));
-    if (s.refused) chips.push(H.chip("danger", "Read only"));
-    else if (!s.active && s.phase) chips.push(H.chip("quiet", "Ended"));
-    return el(
-      "li",
-      { class: "pg-swap" + (s.needs_you ? " needs" : "") },
-      el(
-        "button",
-        { type: "button", class: "pg-row", onclick: () => h.openSwap(s.swap) },
-        el("span", { class: "pg-row-main" }, el("strong", { class: "pg-label", text: s.label || "A swap" }), el("span", { class: "dim", text: ` ${roleWords(s.role)}` })),
-        el("span", { class: "pg-row-chips" }, ...chips),
-        s.until_text ? el("span", { class: "dim pg-until", text: s.until_text }) : null,
-        s.refused ? el("span", { class: "pg-refused", text: `This folder is read only: ${s.refused}` }) : null
-      )
-    );
-  }
-
-  /** `h`: { openSwap(swapId), go(screen), openProgram(what), board(role), openBoard(slotId) }. */
-  function swapList(prog, h) {
-    const el = H.el;
-    const swaps = sortSwaps(prog && prog.swaps);
-    const ns = (prog && prog.new_swap_allowed) || { ok: false, why: "The program did not say." };
-    const v = vaultNotes(prog);
-    const noKey = !(H.state && H.state.token);
-    const root = el("section", { class: "pg-list", "aria-labelledby": "pg-h-swaps" });
-    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, "New swap"))));
-    if (noKey) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: KEY_LOST_PROGRAM }));
-    else if (!ns.ok) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: ns.why || "A new swap cannot start now." }));
-    if (v.not_ready) root.appendChild(el("div", { class: "alarm danger big", role: "alert" }, el("span", { class: "lv", text: "key store" }), el("span", { class: "tx" }, "The program's key store is not open, so no swap can act. Restore from your recovery code, or close the program and open it again. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("restore") }, "Restore from a recovery code"))));
-    if (v.unconfirmed) root.appendChild(el("div", { class: "alarm warn big", role: "note" }, el("span", { class: "lv", text: "recovery code" }), el("span", { class: "tx" }, "Your recovery code is not confirmed yet. Without it a swap cannot be restored on another machine, so no new swap starts until you have written it down and typed it back. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("recovery-code") }, "Show my recovery code"))));
-    if (!swaps.length) root.appendChild(el("p", { class: "plain", text: "No swaps yet. Make one with New swap, or use the offer board if it is on." }));
-    else {
-      const ul = el("ul", { class: "pg-swaps", "aria-label": "Your swaps" });
-      for (const s of swaps) ul.appendChild(swapRow(s, h));
-      root.appendChild(ul);
-    }
-    const b = prog && prog.board;
-    if (b && b.enabled === true) {
-      const sec = el("section", { class: "pg-board", "aria-labelledby": "pg-h-board" }, el("div", { class: "card-head" }, el("h2", { id: "pg-h-board", text: "Offer board" })));
-      sec.appendChild(el("p", { class: "plain", text: "Test offers only. The program holds one board swap at a time; other swaps are made with New swap and a file." }));
-      if (typeof b.slot === "string" && b.slot) sec.appendChild(el("div", { class: "row" }, el("button", { type: "button", class: "btn", onclick: () => h.openBoard(b.slot) }, "Open the offer board")));
-      else {
-        const why = ns.ok ? null : ns.why;
-        sec.appendChild(el("div", { class: "row" }, el("button", { type: "button", class: "btn", disabled: why ? true : null, onclick: () => h.board("alice") }, "Use the board: I sell NOID"), el("button", { type: "button", class: "btn", disabled: why ? true : null, onclick: () => h.board("bob") }, "Use the board: I sell ETH")));
-        if (why) sec.appendChild(el("p", { class: "pg-why", text: why }));
-      }
-      root.appendChild(sec);
-    }
-    return root;
-  }
-
-  // ------------------------------------------------------------------ forms (shared pieces)
-  /** One labelled control: `{ box, control, err }`; the label is tied to the control by id. */
-  function field(form, key, label, control, hint, cls) {
-    const el = H.el;
-    const err = el("span", { class: "ferr", id: `${form}-err-${key}`, role: "alert" });
-    const lab = el("label", { for: `${form}-${key}` }, label);
-    const box = el("div", { class: "field" + (cls ? " " + cls : "") }, lab, control, hint ? el("span", { class: "dim hint", text: hint }) : null, err);
-    return { box, control, err, label: lab };
-  }
-  const textInput = (form, key, value, ph) => H.el("input", { type: "text", id: `${form}-${key}`, name: key, autocomplete: "off", spellcheck: "false", placeholder: ph || "", value: value === null || value === undefined ? "" : String(value) });
-  const selectInput = (form, key, options, value) => {
-    const s = H.el("select", { id: `${form}-${key}`, name: key });
-    for (const [v, t] of options) s.appendChild(H.el("option", { value: v, selected: v === value ? true : null }, t));
-    return s;
-  };
-  const checkInput = (form, key, on) => H.el("input", { type: "checkbox", id: `${form}-${key}`, name: key, checked: on ? true : null });
-  const val = (c) => (c && typeof c.value === "string" ? c.value.trim() : "");
-
-  /** Shows server errors under their fields; anything it cannot place goes into `general` as words. Returns the lines that were not placed. */
-  function placeErrors(errors, byKey, general) {
-    const left = [];
-    for (const k of Object.keys(byKey)) byKey[k].err.textContent = "";
-    if (general) general.textContent = "";
-    if (Array.isArray(errors)) for (const e of errors) left.push(String(e));
-    else if (errors && typeof errors === "object") {
-      for (const [k, m] of Object.entries(errors)) {
-        const f = byKey[k] || null;
-        if (f) f.err.textContent = String(m);
-        else left.push(`${k}: ${m}`);
-      }
-    }
-    if (general && left.length) general.textContent = left.join(" ");
-    return left;
-  }
-
-  // ------------------------------------------------------------------ the new-swap form
-  /** The test profiles the form offers: nothing for mainnet or production. */
-  const NEW_PROFILES = [["sepolia", "Sepolia (the public test network of Ethereum)"], ["rehearsal", "Rehearsal (a test chain on this machine)"]];
-
-  /**
-   * The form of a new swap. Returns `{ node, collect(), setErrors(errors), submit() }`; `collect()` is the body of POST /api/newswap (`{ fields }`). `settings` only prefills (the payout
-   * addresses and Bob's Parano1d address): the person sees every value and keeps or changes it. Bob's terms have no default. `h`: { created(swapId), message(text) }.
-   */
-  function newSwapForm(prog, settings, h) {
-    const el = H.el;
-    const S = settings || {};
-    const F = "ns";
-    const by = {};
-    const reg = (key, f) => {
-      by[key] = f;
-      return f;
-    };
-    const role = reg("role", field(F, "role", "Your side", selectInput(F, "role", [["alice", "I sell NOID and get ETH (Alice)"], ["bob", "I sell ETH and get NOID (Bob)"]], "alice"), "Each swap has one side, chosen here and never changed."));
-    const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Test networks only: the Ethereum side has no value, the NOID is real."));
-    const version = reg("contract_version", field(F, "contract_version", "Parano1d contract version", selectInput(F, "contract_version", [["1", "1"], ["2", "2"]], "1"), "The version you and your counterparty agreed."));
-    const noid = reg("noid_amount", field(F, "noid_amount", "NOID amount", textInput(F, "noid_amount", "", "5"), "The program refuses more than its test limit and says how much that is.", "amt amt-noid"));
-    const eth = reg("eth_amount", field(F, "eth_amount", "ETH amount", textInput(F, "eth_amount", "", "0.001"), "Same limit rule.", "amt amt-eth"));
-    const contract = reg("contract", field(F, "contract", "Ethereum contract address", textInput(F, "contract", "", "0x…"), "The deployment on this network's chain, agreed with your counterparty."));
-    const bobNoid = reg("bob_noid", field(F, "bob_noid", "Bob's Parano1d address", textInput(F, "bob_noid", S.bob_noid, "o1…"), "Where the NOID goes when the swap completes."));
-    const bobEth = reg("bob_eth", field(F, "bob_eth", "Bob's Ethereum address", textInput(F, "bob_eth", "", "0x…"), "The address Bob's tool shows after it makes his key for this swap."));
-    const noidPay = reg("noid_payout", field(F, "noid_payout", "Your Parano1d address for what is left", textInput(F, "noid_payout", S.noid_payout, "o1…"), "Leftover NOID of this swap's wallet is sent here when the swap is over (optional for Bob)."));
-    const ethPay = reg("eth_payout", field(F, "eth_payout", "Your Ethereum address for what is left", textInput(F, "eth_payout", S.eth_payout, "0x…"), "Leftover ETH of this swap's key is sent here. Use your own wallet, not an exchange deposit address."));
-    const single = checkInput(F, "single_node_ok", false);
-    const optBlock = reg("deploy_block", field(F, "deploy_block", "Log start block", textInput(F, "deploy_block", "", ""), "Optional. The first Ethereum block the tool scans for this swap's contract events; empty lets the tool pick a recent one. Never a block after the lock."));
-    const hcLead = reg("hc_lead", field(F, "hc_lead", "Blocks before the funding block", textInput(F, "hc_lead", "", "50"), "Optional, 1 to 1000. Empty uses 50."));
-    const gas = reg("gas_price_gwei", field(F, "gas_price_gwei", "Ethereum gas price, gwei", textInput(F, "gas_price_gwei", "", "20"), "Optional, for the test networks."));
-    const tip = reg("priority_fee_gwei", field(F, "priority_fee_gwei", "Ethereum tip, gwei", textInput(F, "priority_fee_gwei", "", "0.01"), "Optional, needs the gas price above and not above it. A lock cannot be replaced, so give it a generous tip."));
-    const general = el("p", { class: "attn", id: "ns-general", role: "alert" });
-
-    const sync = () => {
-      const r = role.control.value;
-      bobEth.box.hidden = r !== "alice";
-      const text = r === "alice" ? "Bob's Parano1d address" : "Your Parano1d address (where the NOID you buy goes)";
-      bobNoid.label.textContent = text;
-    };
-    role.control.addEventListener("change", sync);
-    sync();
-
-    const collect = () => {
-      const f = { role: role.control.value, profile: profile.control.value, contract_version: version.control.value, noid_amount: val(noid.control), eth_amount: val(eth.control), contract: val(contract.control), bob_noid: val(bobNoid.control), noid_payout: val(noidPay.control), eth_payout: val(ethPay.control), single_node_ok: !!single.checked };
-      if (f.role === "alice") f.bob_eth = val(bobEth.control);
-      for (const [k, c] of [["deploy_block", optBlock], ["hc_lead", hcLead], ["gas_price_gwei", gas], ["priority_fee_gwei", tip]]) if (val(c.control)) f[k] = val(c.control);
-      return { fields: f };
-    };
-    const setErrors = (errors) => placeErrors(errors, by, general);
-    const go = H.el("button", { type: "button", class: "btn primary", id: "ns-go", disabled: !H.state.token ? true : null }, "Make the swap");
-    const submit = async () => {
-      go.disabled = true;
-      setErrors(null);
-      try {
-        const r = await request("POST", "/api/newswap", collect());
-        if (r.ok && r.json && r.json.ok === true && typeof r.json.swap === "string") {
-          if (h && h.created) await h.created(r.json.swap);
-          return r;
-        }
-        if (r.json && r.json.errors) {
-          setErrors(r.json.errors);
-          if (!general.textContent) general.textContent = "The form has errors; nothing was made.";
-        } else general.textContent = errorText(r);
-        return r;
-      } finally {
-        go.disabled = !H.state.token;
-      }
-    };
-    go.addEventListener("click", submit);
-
-    const node = el(
-      "section",
-      { class: "pg-form", "aria-labelledby": "ns-h" },
-      el("div", { class: "card-head" }, el("h1", { id: "ns-h", text: "New swap" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Cancel"))),
-      el("p", { class: "plain", text: "Every value is checked by the program before anything is made. A new swap sends nothing to any chain; coins move only after you deposit and approve." }),
-      el("div", { class: "form-grid" }, role.box, profile.box, version.box, noid.box, eth.box, contract.box, bobNoid.box, bobEth.box, noidPay.box, ethPay.box),
-      el("details", { class: "newswap-opt" }, el("summary", { text: "Optional settings (empty means the program's default)" }), el("div", { class: "form-grid" }, optBlock.box, hcLead.box, gas.box, tip.box)),
-      el("label", { class: "ack", for: `${F}-single_node_ok` }, single, el("span", {}, " I accept a single node per chain for this swap. ", el("strong", { text: "Never tick this for a swap with someone you do not know:" }), " one node that lies can make the program act on a false chain. Leave it empty unless you control both sides.")),
-      general,
-      el("div", { class: "row" }, go)
-    );
-    return { node, collect, setErrors, submit, controls: { role, profile, version, noid, eth, contract, bobNoid, bobEth, noidPay, ethPay, single, optBlock, hcLead, gas, tip } };
-  }
-
-  // ------------------------------------------------------------------ the settings screen
-  const T = (path, label, hint, extra) => ({ path, label, hint, kind: "text", ...extra });
-  /** The fields of settings.json (never `v`, never a secret). `alert_url` is write-only (below). */
-  const SETTINGS_FIELDS = [
-    { group: "Parano1d node" },
-    T(["noid_rpc"], "Parano1d node address", "This machine only (http://127.0.0.1:…): the node of the Parano1d wallet app."),
-    T(["noid_rpc2"], "Second Parano1d node (optional)", "A second opinion on the chain.", { nullable: true }),
-    { path: ["noid_rpc2_remote"], label: "The second Parano1d node is on another machine", kind: "check" },
-    { group: "Ethereum nodes" },
-    T(["eth", "sepolia", "rpc"], "Sepolia node", "An https:// address."),
-    T(["eth", "sepolia", "rpc2"], "Sepolia, second node (optional)", "", { nullable: true }),
-    T(["eth", "rehearsal", "rpc"], "Rehearsal node", "The test chain on this machine."),
-    T(["eth", "rehearsal", "rpc2"], "Rehearsal, second node (optional)", "", { nullable: true }),
-    { path: ["eth_rpc2_remote"], label: "The second Ethereum node is on another machine", kind: "check" },
-    { path: ["rpc_timeout_s"], label: "Seconds to wait for a node", kind: "int" },
-    { group: "Your addresses (they only fill the form of a new swap)" },
-    T(["noid_payout"], "Your Parano1d address for what is left", "", { nullable: true }),
-    T(["eth_payout"], "Your Ethereum address for what is left", "", { nullable: true }),
-    T(["bob_noid"], "Bob's Parano1d address (optional)", "", { nullable: true }),
-    { group: "Offer board" },
-    { path: ["board", "relays"], label: "Relays, one address per line", kind: "lines", hint: "wss:// addresses." },
-    { path: ["board", "lead_blocks"], label: "Blocks of lead before the funding block", kind: "int" },
-    { path: ["board", "fund_k"], label: "Funding limit k (optional)", kind: "int", nullable: true },
-    T(["board", "reserve_wei"], "Ethereum fee reserve in wei (optional)", "", { nullable: true }),
-    { path: ["board", "allow_public"], label: "Allow public relays", kind: "check" },
-    { path: ["board", "allow_local_test"], label: "Allow a relay on this machine (tests)", kind: "check" },
-    { path: ["board", "min_pow_bits"], label: "Minimum proof-of-work bits of a message", kind: "int" },
-    { group: "Updates" },
-    { path: ["update_check"], label: "Check for a new version", kind: "select", options: [["ask", "Ask me"], ["daily", "Once a day"], ["off", "Never"]] },
-  ];
-
-  const getPath = (o, path) => path.reduce((x, k) => (x && typeof x === "object" ? x[k] : undefined), o);
-  function setPath(o, path, v) {
-    let x = o;
-    for (let i = 0; i < path.length - 1; i++) {
-      if (!x[path[i]] || typeof x[path[i]] !== "object") x[path[i]] = {};
-      x = x[path[i]];
-    }
-    x[path[path.length - 1]] = v;
-  }
-
-  /**
-   * The settings screen: the fields of settings.json except `v`, with the server's errors shown per field. `settings` is what GET /api/settings answered. The alert address is write-only:
-   * the page says whether one is set and never shows it; a new one is typed in a field of its own, and "Remove it" clears it. `h`: { saved(settings), cancel() }.
-   */
-  function settingsForm(settings, h) {
-    const el = H.el;
-    const S = settings || {};
-    const F = "st";
-    const by = {};
-    const ctl = [];
-    const grid = el("div", { class: "form-grid" });
-    let sect = null;
-    const sections = [];
-    for (const spec of SETTINGS_FIELDS) {
-      if (spec.group) {
-        sect = { title: spec.group, grid: el("div", { class: "form-grid" }) };
-        sections.push(sect);
-        continue;
-      }
-      const key = spec.path.join("_");
-      const cur = getPath(S, spec.path);
-      let control;
-      if (spec.kind === "check") control = checkInput(F, key, cur === true);
-      else if (spec.kind === "select") control = selectInput(F, key, spec.options, typeof cur === "string" ? cur : spec.options[0][0]);
-      else if (spec.kind === "lines") control = el("textarea", { id: `${F}-${key}`, name: key, rows: 3, autocomplete: "off", spellcheck: "false", value: Array.isArray(cur) ? cur.join("\n") : "" });
-      else control = textInput(F, key, cur);
-      if (spec.kind === "lines" && Array.isArray(cur)) control.value = cur.join("\n");
-      const f = field(F, key, spec.label, control, spec.hint, spec.kind === "check" ? "check" : "");
-      for (const k of [spec.path.join("."), key, spec.path.length === 1 ? spec.path[0] : null]) if (k) by[k] = f;
-      ctl.push({ spec, control, f });
-      sect.grid.appendChild(f.box);
-    }
-    // the alert address: write-only
-    const alertSet = typeof S.alert_url === "string" ? S.alert_url.length > 0 : S.alert_url === true;
-    const alertNew = textInput(F, "alert_url", "", "https://…");
-    const alertOff = checkInput(F, "alert_remove", false);
-    const alertF = field(F, "alert_url", "Replace the alert address", alertNew, "Where the program posts alerts. It is never shown again after you save it.");
-    by.alert_url = alertF;
-    const general = el("p", { class: "attn", id: "st-general", role: "alert" });
-    const note = el("p", { class: "plain", id: "st-note" });
-
-    const collect = () => {
-      const out = JSON.parse(JSON.stringify(S));
-      delete out.v;
-      for (const { spec, control } of ctl) {
-        let v;
-        if (spec.kind === "check") v = !!control.checked;
-        else if (spec.kind === "select") v = control.value;
-        else if (spec.kind === "lines") v = String(control.value || "").split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
-        else {
-          const t = val(control);
-          if (spec.kind === "int") v = t === "" ? (spec.nullable ? null : "") : /^\d+$/.test(t) ? Number(t) : t;
-          else v = t === "" ? (spec.nullable ? null : "") : t;
-        }
-        setPath(out, spec.path, v);
-      }
-      if (alertOff.checked) out.alert_url = null;
-      else if (val(alertNew)) out.alert_url = val(alertNew);
-      out.v = 1;
-      return out;
-    };
-    const go = el("button", { type: "button", class: "btn primary", id: "st-go", disabled: !H.state.token ? true : null }, "Save settings");
-    const setErrors = (errors) => placeErrors(errors, by, general);
-    const submit = async () => {
-      go.disabled = true;
-      setErrors(null);
-      note.textContent = "";
-      try {
-        const r = await request("POST", "/api/settings", collect());
-        if (r.ok && r.json && r.json.ok === true) {
-          note.textContent = "Saved. A swap that is already made keeps the settings it was made with.";
-          if (h && h.saved) await h.saved(r.json.settings || null);
-          return r;
-        }
-        if (r.json && r.json.errors) {
-          setErrors(r.json.errors);
-          if (!general.textContent) general.textContent = "The settings have errors; nothing was saved.";
-        } else general.textContent = errorText(r);
-        return r;
-      } finally {
-        go.disabled = !H.state.token;
-      }
-    };
-    go.addEventListener("click", submit);
-
-    const node = el(
-      "section",
-      { class: "pg-form", "aria-labelledby": "st-h" },
-      el("div", { class: "card-head" }, el("h1", { id: "st-h", text: "Settings" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Back to your swaps"))),
-      el("p", { class: "plain", text: "These are the program's own settings. Each new swap copies the ones it needs when it is made; changing them later does not change a swap that exists. Nothing secret is kept here." }),
-      ...sections.map((s) => el("fieldset", { class: "pg-set" }, el("legend", { text: s.title }), s.grid)),
-      el("fieldset", { class: "pg-set" }, el("legend", { text: "Alerts" }), el("p", { class: "plain", text: alertSet ? "An alert address is set. It is not shown." : "No alert address is set." }), el("div", { class: "form-grid" }, alertF.box), alertSet ? el("label", { class: "ack", for: `${F}-alert_remove` }, alertOff, " Remove the alert address") : null),
-      general,
-      note,
-      el("div", { class: "row" }, go)
-    );
-    return { node, collect, setErrors, submit };
-  }
-
-  // ------------------------------------------------------------------ the requests of the menu and the board slot
-  /** Asks the program to open one of its own windows; nothing comes back that the page shows except the word that it was asked. */
-  async function openProgram(what) {
-    const r = await request("POST", "/api/program/open", { what });
-    return r.ok && r.json && r.json.ok === true ? { ok: true } : { ok: false, error: errorText(r) };
-  }
-  async function makeSlot(role) {
-    const r = await request("POST", "/api/board/slot", { role });
-    return r.ok && r.json && r.json.ok === true && typeof r.json.swap === "string" ? { ok: true, swap: r.json.swap } : { ok: false, error: errorText(r) };
-  }
-  async function loadSettings() {
-    const r = await request("GET", "/api/settings");
-    return r.ok && r.json && r.json.ok === true && r.json.settings && typeof r.json.settings === "object" ? { ok: true, settings: r.json.settings } : { ok: false, error: errorText(r) };
-  }
-
-  window.NoidProgram = {
-    init(helpers) {
-      H = helpers;
-    },
-    roleWords,
-    nodeWords,
-    updateWords,
-    activeCount,
-    sortSwaps,
-    signature,
-    vaultNotes,
-    topBar,
-    swapList,
-    newSwapForm,
-    settingsForm,
-    openProgram,
-    makeSlot,
-    loadSettings,
-    request,
-    SETTINGS_FIELDS,
-    NEW_PROFILES,
-    OPEN_ITEMS,
+    program: { isProgram, startKind: programStartKind, startFacts: programStartFacts, steps: programSteps, renderStart: renderProgramStart, hungWarning, TERMINAL_ONLY, PROGRAM_STEPS, PROGRAM_BACKUP, CODE1_ADVICE, firstCard: programFirstCard },
+    programFirstCard,
+    handoverBlock,
+    checkLineBlock,
+    invitationBlock,
+    depositFigures: { noid: noidFigure, eth: ethFigure },
   };
 })();

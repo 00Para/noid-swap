@@ -8,8 +8,11 @@
  *     swap = { id, dir, settingsSource, slotRole?, audit?, folderGuard(fresh) }
  *   Executor.precheck(entry, { sender }) -> { ok:true } | { ok:false, status:409, tag, why }
  *   Executor.run(entry, x) -> Promise<{ code, stdout, stderr, files, step, refused?, threw? }>      x: { tx?, bundlePath? }
- *   Executor.watchStart() -> { started }   watchStop() -> Promise<void>   watchStatus() -> { running, started_at, ticks, last_end, last_line_at }
- *   Executor.supervise() -> Promise<boolean>   restarts a watch whose loop file is older than 180 s
+ *   Executor.watchStart({ mode? }) -> { started, upgrade? }   watchStop() -> Promise<void>   watchStatus() -> { running, started_at, ticks, last_end, last_line_at, mode, applied_once, stopped_by_person, upgrading }
+ *     mode "apply" (the default) records what the engine decides; mode "read" ticks without --apply and records nothing (lib/firststeps.js, rule W). A running read loop asked for
+ *     apply is stopped (after its tick in progress) and an apply loop started in its place (`upgrade`, a promise); an apply loop is never turned into a read loop.
+ *   Executor.supervise() -> Promise<boolean>   restarts a watch whose loop file is older than 180 s, in the mode it had
+ *   Executor.clearStopped()   the person's Stop is forgotten (a turnOn of the autopilot does this)
  *
  * The rules this file keeps (each has a test):
  *   - nothing here builds a path or an argument from a request: `x.tx` is a hash the runner read from the engine's tick and checked; `x.bundlePath` comes from the
@@ -135,6 +138,9 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
   let watch = null; // { w, ac, startedAt, lines, lastLineAt, promise }
   let lastEnd = null;
   let supervising = false;
+  let upgrading = false; // a read loop is being stopped for an apply loop: nothing else starts or restarts a loop meanwhile
+  let appliedOnce = false; // an apply loop was started by this process: the deposit is spent by the funding, so a loop never falls back to reading
+  let stoppedByPerson = false; // the person pressed Stop: the program does not start a loop again by itself until a program start or a turnOn
 
   const audit = (r) => {
     try {
@@ -250,15 +256,17 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
 
   // ------------------------------------------------------------------------------------------------ the watch loop
   function watchStatus() {
-    return { running: !!(watch && watch.w.running), started_at: watch ? Math.floor(watch.startedAt / 1000) : null, ticks: watch ? watch.w.ticks : 0, last_end: lastEnd, last_line_at: watch && watch.lastLineAt ? Math.floor(watch.lastLineAt / 1000) : null };
+    const running = !!(watch && watch.w.running);
+    return { running, started_at: watch ? Math.floor(watch.startedAt / 1000) : null, ticks: watch ? watch.w.ticks : 0, last_end: lastEnd, last_line_at: watch && watch.lastLineAt ? Math.floor(watch.lastLineAt / 1000) : null, mode: running ? watch.mode : null, applied_once: appliedOnce, stopped_by_person: stoppedByPerson, upgrading };
   }
 
-  function startWatchNow(settings) {
+  function startWatchNow(settings, mode = "apply") {
     const ac = new AbortController();
     const ctx = buildCtx(settings, ac.signal);
     const rec = { lastLineAt: 0 };
-    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], onLine: () => (rec.lastLineAt = clock()), ...(watchOpts || {}) });
-    const entry = { w, ac, startedAt: clock(), get lastLineAt() { return rec.lastLineAt; } };
+    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], onLine: () => (rec.lastLineAt = clock()), ...(watchOpts || {}), apply: mode === "apply" });
+    const entry = { w, ac, mode, startedAt: clock(), get lastLineAt() { return rec.lastLineAt; } };
+    if (mode === "apply") appliedOnce = true;
     watch = entry;
     entry.promise = Promise.resolve(w.start()).then(
       (res) => {
@@ -273,11 +281,38 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     return entry;
   }
 
-  function watchStart() {
-    if (watch && watch.w.running) return { started: false };
+  /**
+   * Starts a loop in `o.mode` ("apply", the default, or "read"). Nothing starts while a read loop is being swapped for an apply loop. A running read loop asked for apply is
+   * upgraded: `upgrade` is the promise of the switch (the old loop stopped after its tick in progress, the new one started). A running loop is never turned into a read loop.
+   */
+  function watchStart(o = {}) {
+    const mode = o.mode === "read" ? "read" : "apply";
+    if (upgrading) return { started: false, upgrading: true };
+    if (watch && watch.w.running) {
+      if (mode === "apply" && watch.mode === "read") {
+        const loaded = swap.settingsSource.load();
+        if (!loaded.ok) return { started: false, why: "run.json cannot be used" };
+        upgrading = true;
+        const old = watch;
+        audit({ action: "watch", role: loaded.settings.role, phase: "note", result: "watch loop switched to recording" });
+        const upgrade = (async () => {
+          try {
+            await old.w.stop();
+            old.ac.abort();
+            lastEnd = null;
+            startWatchNow(loaded.settings, "apply");
+          } finally {
+            upgrading = false;
+          }
+        })();
+        return { started: true, upgraded: true, upgrade };
+      }
+      return { started: false };
+    }
     const loaded = swap.settingsSource.load();
     if (!loaded.ok) return { started: false, why: "run.json cannot be used" };
-    startWatchNow(loaded.settings);
+    startWatchNow(loaded.settings, mode);
+    if (mode === "read") audit({ action: "watch", role: loaded.settings.role, phase: "note", result: "reading the chains (records nothing)" });
     return { started: true };
   }
 
@@ -291,8 +326,12 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     }
   }
 
+  function clearStopped() {
+    stoppedByPerson = false;
+  }
+
   async function supervise() {
-    if (supervising || !watch || !watch.w.running) return false;
+    if (supervising || upgrading || !watch || !watch.w.running) return false;
     const age = clock() - watch.startedAt;
     if (age < WATCH_STALE_S * 1000) return false;
     const role = swap.settingsSource.role();
@@ -313,7 +352,7 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
       old.ac.abort(); // the tick child is killed
       await old.w.stop();
       const loaded = swap.settingsSource.load();
-      if (loaded.ok) startWatchNow(loaded.settings);
+      if (loaded.ok) startWatchNow(loaded.settings, old.mode); // a loop is restarted in the mode it had
       return true;
     } finally {
       supervising = false;
@@ -328,9 +367,20 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
       const pre = precheck(entry, { sender: false });
       if (!pre.ok) return { code: null, refused: true, why: pre.why, stdout: "", stderr: "", files: [], step: id };
       if (id === "watch-start") {
+        // the person's (or the autopilot's) explicit start: it records, and it undoes an earlier Stop
+        stoppedByPerson = false;
         const r = watchStart();
-        return { code: r.started || (watch && watch.w.running) ? 0 : 1, stdout: r.started ? "started: the watch loop runs inside the program and keeps running while it is open\n" : "the watch loop is already running\n", stderr: "", files: [], step: id };
+        if (r.upgrade) {
+          try {
+            await r.upgrade;
+          } catch {
+            /* the loop is not running then: the code below says so */
+          }
+        }
+        if (r.upgrading) return { code: 0, stdout: "the watch loop is being switched to recording\n", stderr: "", files: [], step: id };
+        return { code: r.started || (watch && watch.w.running) ? 0 : 1, stdout: r.upgraded ? "the watch loop was switched to recording\n" : r.started ? "started: the watch loop runs inside the program and keeps running while it is open\n" : "the watch loop is already running\n", stderr: "", files: [], step: id };
       }
+      stoppedByPerson = true;
       await watchStop();
       return { code: 0, stdout: "stopped\n", stderr: "", files: [], step: id };
     }
@@ -365,7 +415,7 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     }
   }
 
-  return { precheck, run, watchStart, watchStop, watchStatus, supervise, folderGuard, STEP_OF };
+  return { precheck, run, watchStart, watchStop, watchStatus, supervise, folderGuard, clearStopped, STEP_OF };
 }
 
 module.exports = { createStepExecutor, resolve, isSender, STEP_OF, TERMINAL_ONLY, NO_PASSPHRASE, NEEDS_RECOVERY_CODE, FOLDER_GUARD_CACHE_MS, WATCH_STALE_S };

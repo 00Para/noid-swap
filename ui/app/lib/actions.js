@@ -33,6 +33,8 @@ const { classifySpendExit, classifyStepExit, NOT_SENT } = require("./exitcodes")
 const { productionReason } = require("./production");
 const { boardRun: boardRunOf } = require("./board/runmode");
 const { STEP_OF, TERMINAL_ONLY } = require("./stepexec");
+const firststeps = require("./firststeps");
+const { readBobKeyAddress } = require("./invitation");
 
 /** Own-property lookup: an id such as "__proto__" or "constructor" is not a spend. */
 const SPENDS = new Proxy(SPEND_TABLE, { get: (t, k) => (typeof k === "string" && Object.prototype.hasOwnProperty.call(t, k) ? t[k] : undefined) });
@@ -51,6 +53,7 @@ const watchStartFor = (who) => 'echo $$ > "$L/ui-watch.pid"; exec bash "$L/bin/w
 const WATCH_STARTS = { both: watchStartFor("both"), alice: watchStartFor("alice"), bob: watchStartFor("bob") };
 const WATCH_START = WATCH_STARTS.both;
 const WATCH_STOP = 'p=$(cat "$L/ui-watch.pid" 2>/dev/null); if [ -n "$p" ] && grep -q "bin/watch.sh" "/proc/$p/cmdline" 2>/dev/null; then kill "$p" && echo "stopped $p"; else echo "not running (no loop started by this console)"; fi';
+const WATCH_START_PROGRAM_NOTE = "Records what the engine decides, including a funding or a lock to send next. Use it only if you will send by hand.";
 const WATCH_STATUS = 'p=$(cat "$L/ui-watch.pid" 2>/dev/null); if [ -n "$p" ] && grep -q "bin/watch.sh" "/proc/$p/cmdline" 2>/dev/null; then echo "alive $p"; else echo dead; fi';
 
 /*
@@ -343,6 +346,7 @@ class ActionRunner {
     this.hostToken = Object.freeze({ boardHost: true }); // the private value a board-only table entry needs as `meta.host` (lib/board/host.js); no request can carry it
     this.board = null; // lib/board/host.js sets itself here (gateFacts, identity, view); without it a board run has no facts and nothing that puts coins in is offered
     this.autopilot = null; // lib/autopilot.js sets itself here; without it a spend started with meta.auto is refused
+    this.firstSteps = null; // program mode: lib/firststeps.js (lib/swapset.js sets it): the setup chain, the check line and the watch under rule W
     this.sentCache = new Map(); // a helper's error file (path, time, size) -> the hash on its "sent:" line, or null
     this.walletStatus = { alice: null, bob: null }; // the newest wallet-status.sh result of each role: { at_ms, ok, noid, eth, problems } (lib/walletrun.js parseWalletStatus); a restart forgets it
     this.walletPollMark = { alice: 0, bob: 0 };
@@ -499,6 +503,15 @@ class ActionRunner {
     return { on: true, ambiguous: br.ambiguous, facts };
   }
 
+  /**
+   * The gate's facts of program mode outside a board run (lib/gate.js): the funding and the lock wait for the line match (a record of the run folder, for the CURRENT check line),
+   * and Bob's lock also asks for the statement that Alice's check line matches his. A terminal console and a board run give nothing here, so the gate is as before for them.
+   */
+  programGateCtx(spend) {
+    if (!this.programMode || this.boardRun().on) return {};
+    return { lineMatchRequired: true, lineMatch: !!firststeps.lineMatchFor(this.runFolder(), spend.role), aliceCheckRequired: spend.kind === "lock_eth" };
+  }
+
   /** The reason a table entry (or spend) is refused by the run's mode, or null. */
   modeBlockFor(entry) {
     return modeBlock(entry, this.walletRun(), this.boardRun());
@@ -620,7 +633,9 @@ class ActionRunner {
         display = null;
       }
       const modeWhy = modeBlock(e, wr);
-      return { id: e.id, group: e.group, role: e.role || null, label: e.label, note: e.note, command: display, blocked: prodReason || (modeWhy ? null : this.roleBlockFor(e)) || null, ...(e.mode ? { mode: e.mode, mode_blocked: modeWhy } : {}) };
+      // in program mode the button records what the engine decides (it starts, or switches a reading loop to recording): the note says so
+      const note = this.programMode && e.id === "watch-start" ? WATCH_START_PROGRAM_NOTE : e.note;
+      return { id: e.id, group: e.group, role: e.role || null, label: e.label, note, command: display, blocked: prodReason || (modeWhy ? null : this.roleBlockFor(e)) || null, ...(e.mode ? { mode: e.mode, mode_blocked: modeWhy } : {}) };
     });
   }
 
@@ -793,7 +808,7 @@ class ActionRunner {
     } catch {
       expectedDry = null;
     }
-    return { tick, relevant, replaceTx, gate: { run, nowMs, dry: this.dryFor(spend, run, replaceTx, nowMs), expectedDryCommand: expectedDry, latch: this.latchOf(spend.id), sentHash, wallet: this.walletCtx(spend), board: this.boardCtx(spend) } };
+    return { tick, relevant, replaceTx, gate: { run, nowMs, dry: this.dryFor(spend, run, replaceTx, nowMs), expectedDryCommand: expectedDry, latch: this.latchOf(spend.id), sentHash, wallet: this.walletCtx(spend), board: this.boardCtx(spend), ...this.programGateCtx(spend) } };
   }
 
   /** What the gate needs to know about the latch of a spend id. */
@@ -807,12 +822,14 @@ class ActionRunner {
     const spends = {};
     const production = this.productionBlock(run);
     for (const s of Object.values(SPENDS)) {
+      // the statements the page must ask beside the typed amount (program mode, outside a board run: Bob's lock needs "Alice's check line matches mine")
+      const statements_needed = s.kind === "lock_eth" && this.programMode && !this.boardRun().on ? ["alice_check_matches"] : [];
       if (this.roleBlockFor(s)) {
-        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, other_machine: true };
+        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, other_machine: true, statements_needed };
         continue;
       }
       if (production) {
-        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, production: true };
+        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, production: true, statements_needed };
         continue;
       }
       const r = run && run.roles && run.roles[s.role];
@@ -820,7 +837,7 @@ class ActionRunner {
       const sentHash = this.sentHashFor(s, run);
       const relevant = this.spendModeOk(s) && relevantFor(s, tick, s.replace ? this.replaceTxFor(s, run) : sentHash);
       if (!relevant) {
-        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false };
+        spends[s.id] = { id: s.id, kind: s.kind, role: s.role, label: s.label, replace: s.replace, relevant: false, statements_needed };
         continue;
       }
       const replaceTx = this.replaceTxFor(s, run);
@@ -831,7 +848,7 @@ class ActionRunner {
       } catch {
         expectedDry = null;
       }
-      const g = evaluateSpend(s, { run, nowMs, dry: dryRec, expectedDryCommand: expectedDry, requireTyped: false, latch: this.latchOf(s.id), sentHash, wallet: this.walletCtx(s), board: this.boardCtx(s) });
+      const g = evaluateSpend(s, { run, nowMs, dry: dryRec, expectedDryCommand: expectedDry, requireTyped: false, latch: this.latchOf(s.id), sentHash, wallet: this.walletCtx(s), board: this.boardCtx(s), ...this.programGateCtx(s) });
       // The typed text is the only reason that may be open in the preview: everything else is already decided.
       const plain = describeSpend(s, run && run.terms, run && run.roles && run.roles[s.role] && run.roles[s.role].tick, { wallet: !!this.walletCtx(s) });
       let cmd = null;
@@ -847,6 +864,7 @@ class ActionRunner {
         label: s.label,
         replace: s.replace,
         relevant: true,
+        statements_needed,
         eligible: g.ok,
         reasons: g.reasons,
         // an engine ALARM beside a step that only returns coins to their owner (the ETH refund): not a refusal, shown next to the send box
@@ -877,6 +895,8 @@ class ActionRunner {
       lock: this.runLock && this.runLock.isLazy ? this.runLock.status() : null,
       join: this.joinView(),
       wallet: this.walletView(run),
+      first_steps: this.programMode && this.firstSteps ? this.firstSteps.view() : null,
+      ...this.checkLineView(),
       spends,
       autopilot: this.autopilot ? this.autopilot.view(run) : null,
       funding: {
@@ -911,6 +931,7 @@ class ActionRunner {
       roles[role] = {
         swap_file: role === "alice" ? files(/^alice\.swap\.json$/) : files(/^bob\.swap\.json$/, "bob"),
         addresses_file: files(/^wallet-addresses\.txt$/),
+        ...(role === "bob" ? { key_address: this.bobKeyAddress() } : {}),
         status: st
           ? {
               at: Math.floor(st.at_ms / 1000),
@@ -948,6 +969,54 @@ class ActionRunner {
       return m ? m[0] : "present";
     } catch {
       return "present";
+    }
+  }
+
+  /** Bob's swap key address: BOB_ETH of wallet-addresses.txt, read by lib/invitation.js (the one reader of that file), else null. */
+  bobKeyAddress() {
+    const dir = this.runFolder();
+    return dir ? readBobKeyAddress(dir) : null;
+  }
+
+  /** The check line and the line match of the run folder for the page: { check_line, line_match } (program mode; null in a terminal console). The match shows only for the current line. */
+  checkLineView() {
+    if (!this.programMode) return { check_line: null, line_match: null };
+    const dir = this.runFolder();
+    const cl = firststeps.readCheckLine(dir);
+    const role = this.curRole();
+    const lm = cl && (role === "alice" || role === "bob") ? firststeps.lineMatchFor(dir, role) : null;
+    return { check_line: cl ? { hex: cl.hex, from: cl.from } : null, line_match: lm };
+  }
+
+  /**
+   * POST /api/checkline/confirm (program mode only): the person says the other side read out its check line and all 16 digits match. Written once to line-match.json after its audit
+   * line; the same hex again answers the same without a second line. `body`: { matches: true, hex }.
+   */
+  confirmCheckLine(body) {
+    if (!body || body.matches !== true) throw Object.assign(new Error("matches must be true"), { status: 400 });
+    if (!this.programMode) throw Object.assign(new Error("not found"), { status: 404 });
+    this.assertLock("check-line");
+    this.assertNotProduction("check-line");
+    if (this.boardRun().on) throw Object.assign(new Error("A board run compares the full digest by itself."), { status: 409 });
+    const dir = this.runFolder();
+    const role = this.curRole();
+    const cl = firststeps.readCheckLine(dir);
+    if (!cl || (role !== "alice" && role !== "bob")) throw Object.assign(new Error("There is no check line yet."), { status: 409 });
+    if (typeof body.hex !== "string" || body.hex !== cl.hex) throw Object.assign(new Error("The check line on the page is not this swap's line any more. Read it again."), { status: 409 });
+    const have = firststeps.readLineMatch(dir);
+    if (have && have.hex === cl.hex && have.role === role) return { status: 200, body: { ok: true, line_match: { hex: have.hex, at: have.at } } };
+    // the audit line first: when it cannot be written nothing is recorded
+    try {
+      this.audit.append({ action: "check-line", role, phase: "note", result: "the other side's line matches", detail: cl.hex });
+    } catch (err) {
+      throw Object.assign(new Error(`the audit log cannot be written (${err.code || err.message}); nothing was recorded`), { status: 500 });
+    }
+    try {
+      if (have) fs.unlinkSync(path.join(dir, firststeps.MATCH_FILE)); // a record of another line or role: it counted as none, and the new one replaces it
+      const rec = firststeps.confirmLineMatch(dir, role, cl.hex, this.now());
+      return { status: 200, body: { ok: true, line_match: { hex: rec.hex, at: rec.at } } };
+    } catch (err) {
+      throw Object.assign(new Error(`the confirmation could not be written (${(err && (err.code || err.message)) || "error"}); nothing was recorded`), { status: 500 });
     }
   }
 
@@ -1016,7 +1085,7 @@ class ActionRunner {
       const role = this.curRole();
       const mtime = role && run && run.roles && run.roles[role] ? run.roles[role].loop_mtime : null;
       const age = typeof mtime === "number" ? this.nowS() - mtime : null;
-      return { started_here: ws.running === true, pid: null, checked_at: this.nowS(), loop_file_age_s: age, some_loop_running: age !== null && age <= WATCH_FRESH_S, in_process: true, ticks: ws.ticks, last_end: ws.last_end || null };
+      return { started_here: ws.running === true, pid: null, checked_at: this.nowS(), loop_file_age_s: age, some_loop_running: age !== null && age <= WATCH_FRESH_S, in_process: true, ticks: ws.ticks, last_end: ws.last_end || null, mode: ws.running === true && (ws.mode === "read" || ws.mode === "apply") ? ws.mode : null };
     }
     this.refreshWatch();
     // only the roles this console drives count: a loop file of the other role (another machine's, or an old copy) says nothing about this machine
@@ -1030,6 +1099,7 @@ class ActionRunner {
       checked_at: this.watch.checked_ms ? Math.floor(this.watch.checked_ms / 1000) : null,
       loop_file_age_s: age,
       some_loop_running: age !== null && age <= WATCH_FRESH_S,
+      mode: null, // the two watch modes exist in program mode only
     };
   }
 
@@ -1188,6 +1258,7 @@ class ActionRunner {
     let typedText = typed;
     let statement = meta.noPendingFunding === true;
     let bobCheck = meta.bobCheckMatches === true;
+    let aliceCheck = meta.aliceCheckMatches === true;
     let auto = null;
     if (meta.auto !== undefined && meta.auto !== null) {
       auto = !spend.replace && this.autopilot && typeof this.autopilot.authorize === "function" ? this.autopilot.authorize(meta.auto, spend, run, nowMs) : null;
@@ -1199,8 +1270,10 @@ class ActionRunner {
       typedText = exp ? exp.text : null;
       statement = auto.statements;
       bobCheck = auto.statements;
+      aliceCheck = auto.aliceCheck === true;
     }
-    const g = evaluateSpend(spend, { run, nowMs, dry, expectedDryCommand: expectedDry, typed: typedText, requireTyped: true, latch: this.latchOf(id), sentHash: this.sentHashFor(spend, run), statement, bobCheck, wallet: this.walletCtx(spend), board: this.boardCtx(spend) });
+    const programGate = this.programGateCtx(spend);
+    const g = evaluateSpend(spend, { run, nowMs, dry, expectedDryCommand: expectedDry, typed: typedText, requireTyped: true, latch: this.latchOf(id), sentHash: this.sentHashFor(spend, run), statement, bobCheck, aliceCheck, wallet: this.walletCtx(spend), board: this.boardCtx(spend), ...programGate });
     if (!g.ok) {
       this.audit.append({ action: id, role: spend.role, phase: "refused", result: "refused: " + g.reasons.map((r) => r.code).join(","), dry_hash: dry && dry.check ? dry.check.hash : null, detail: auto ? `auto=1; approval=${auto.approval}` : null });
       throw Object.assign(new Error("the gate refused this spend"), { status: 422, reasons: g.reasons });
@@ -1210,7 +1283,7 @@ class ActionRunner {
     const tick = run.roles[spend.role].tick;
     const latch = { tickNow: typeof tick.now === "number" ? tick.now : null, intentAt: tick.intent && tick.intent.intent && typeof tick.intent.intent.decided_at === "number" ? tick.intent.intent.decided_at : null };
     this.dry.delete(id); // a dry run authorizes one start
-    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, role: spend.role, spend, run, replaceTx, dryHash: dry.check.hash, latch });
+    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, aliceCheckRequired: programGate.aliceCheckRequired === true, role: spend.role, spend, run, replaceTx, dryHash: dry.check.hash, latch });
   }
 
   /**
@@ -1256,7 +1329,7 @@ class ActionRunner {
     const job = ++this.jobSeq;
     // the line before: if it cannot be written, nothing runs
     try {
-      this.audit.append({ action: e.id, role: meta.role || null, phase: "start", result: "started", dry_hash: meta.dryHash || null, detail: [meta.replaceTx ? `replaces ${meta.replaceTx}` : null, e.group === "spend" && meta.spend && meta.spend.kind === "fund_noid" ? (this.boardCtx(meta.spend) ? "board run: the handover check by the board, no human statement" : this.walletCtx(meta.spend) ? "statement=bob_check_line_matches; wallet run: no funding statement asked" : "statement=no_pending_funding; statement=bob_check_line_matches") : null, meta.bundleFromPublic ? "bundle from the public copy folder" : null, meta.autoApproval ? `auto=1; approval=${meta.autoApproval}` : null, meta.latch ? `tick=${meta.latch.tickNow === null ? "-" : meta.latch.tickNow};intent=${meta.latch.intentAt === null ? "-" : meta.latch.intentAt}` : null].filter(Boolean).join("; ") || null });
+      this.audit.append({ action: e.id, role: meta.role || null, phase: "start", result: "started", dry_hash: meta.dryHash || null, detail: [meta.replaceTx ? `replaces ${meta.replaceTx}` : null, e.group === "spend" && meta.spend && meta.spend.kind === "fund_noid" ? (this.boardCtx(meta.spend) ? "board run: the handover check by the board, no human statement" : this.walletCtx(meta.spend) ? "statement=bob_check_line_matches; wallet run: no funding statement asked" : "statement=no_pending_funding; statement=bob_check_line_matches") : null, meta.bundleFromPublic ? "bundle from the public copy folder" : null, meta.firstSteps === true ? "started by the program" : null, e.group === "spend" && meta.aliceCheckRequired === true ? "statement=alice_check_line_matches" : null, meta.autoApproval ? `auto=1; approval=${meta.autoApproval}` : null, meta.latch ? `tick=${meta.latch.tickNow === null ? "-" : meta.latch.tickNow};intent=${meta.latch.intentAt === null ? "-" : meta.latch.intentAt}` : null].filter(Boolean).join("; ") || null });
     } catch (err) {
       throw Object.assign(new Error(`the audit log cannot be written (${err.code || err.message}); nothing was run`), { status: 500 });
     }

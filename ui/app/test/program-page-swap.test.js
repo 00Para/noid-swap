@@ -40,25 +40,27 @@ const tickPayload = (role, o = {}) => {
   return p;
 };
 
-test("Alice's first screen: six steps (set up, wallets, prepare, deposit, send, the watch), the first one next, no install and no terms step; the button posts the table id with the swap", async () => {
+test("Alice's first screen: two steps (the program makes her wallets by itself, then Prepare), no install, terms, set-up, deposit or watch step; the make step has no button, Prepare posts the table id with the swap", async () => {
   const page = await openSwap(F.SWAP_A, (r) => F.runPayload(r));
   const t = squash(page.text("start"));
-  for (const w of ["Set up", "Make this swap's own wallets", "Prepare the swap file", "Deposit the coins", "Send Bob the bundle file", "Start the watch"]) assert.ok(t.includes(w), w);
-  assert.doesNotMatch(t, /Install the helpers|Enter the terms|Check the object file|env\.local/);
-  assert.match(squash(page.text("next-action")), /Set up Step 1 of 6, your step/);
+  for (const w of ["Make this swap's own wallets", "Prepare the swap file"]) assert.ok(t.includes(w), w);
+  assert.doesNotMatch(t, /Install the helpers|Enter the terms|Check the object file|env\.local|Deposit the coins|Start the watch|Send Bob the bundle file/);
+  const list = page.byId("start").all((n) => n.className.includes("pg-steps"))[0];
+  assert.equal(list.children.length, 2, "two steps");
+  assert.doesNotMatch(squash(textOf(list)), /Set up/, "the set-up is part of the make step, not a step of its own");
+  assert.match(squash(page.text("next-action")), /Make this swap's own wallets Step 1 of 2, by itself/);
   assert.match(squash(page.text("start")), /These steps lock nothing and send nothing to either chain/);
   const items = page.byId("start").all((n) => n.tag === "li" && n.className.includes("now"));
   assert.equal(items.length, 1);
   assert.equal(items[0].attrs["aria-current"], "step");
-  await btnWith(page.byId("next-action"), "Set up").click();
-  await page.flush();
-  assert.deepEqual(page.posted[0], ["/api/action", { id: "setup", swap: F.SWAP_A }]);
+  assert.equal(page.byId("next-action").all((n) => n.tag === "button").length, 0, "an automatic step has no button");
+  assert.deepEqual(page.posted, []);
 });
 
-test("Alice's first screen: a clean setup and her addresses file move the next step to Prepare; the bundle file brings the file for Bob and the deposit; each step posts its own table id", async () => {
+test("Alice's first screen: a clean wallet step moves the next step to Prepare; the swap file brings the file for Bob; each step posts its own table id", async () => {
   const jobs = [F.job("setup"), F.job("wallet-setup-alice")];
   const page = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs, wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } } }));
-  assert.match(squash(page.text("next-action")), /Prepare the swap file Step 3 of 6/);
+  assert.match(squash(page.text("next-action")), /Prepare the swap file Step 2 of 2, your step/);
   assert.match(squash(page.text("start")), /Back up the whole run folder \(the swap file and run\.json are in it\) and keep your recovery code/);
   assert.doesNotMatch(squash(page.text("start")), /back (it|the swap file) up|Back up the swap file/i);
   await btnWith(page.byId("next-action"), "Prepare the swap file").click();
@@ -66,48 +68,36 @@ test("Alice's first screen: a clean setup and her addresses file move the next s
   assert.deepEqual(page.posted[0], ["/api/action", { id: "prepare", swap: F.SWAP_A }]);
 
   const prepared = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [...jobs, F.job("prepare", { stdout: "bundle copied to /x/alice.bundle.json -- bundle check: 0123456789abcdef ok" })], bundle_file: { name: "alice.bundle.json" }, wallet: { roles: { alice: { swap_file: true, addresses_file: true, status: null }, bob: {} } } }));
-  assert.match(squash(prepared.text("next-action")), /Deposit the coins Step 4 of 6/);
-  const send = squash(prepared.text("start"));
-  assert.match(send, /Send Bob the bundle file/);
-  assert.match(send, /alice\.bundle\.json.*in this swap's run folder/);
-  assert.match(send, /bundle check: 0123456789abcdef ok/);
-  assert.match(send, /Your deposit/);
-
-  // once the deposit is seen the watch is next (the send step is never "next" by itself): without it no tick is made until the program starts again
-  const covered = { ok: true, show: true, eth: { covered: true }, noid: { covers: true } };
-  const deposited = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [...jobs, F.job("prepare", { stdout: "bundle check: 0123456789abcdef ok" })], bundle_file: { name: "alice.bundle.json" }, wallet: { roles: { alice: { swap_file: true, addresses_file: true, status: covered }, bob: {} } } }));
-  assert.match(squash(deposited.text("next-action")), /Start the watch Step 6 of 6/);
-  assert.match(squash(deposited.text("next-action")), /the funding is offered there/);
-  assert.doesNotMatch(squash(deposited.text("next-action")), /Alice's side shows/, "Bob's words are not Alice's");
-  await btnWith(deposited.byId("next-action"), "Start the watch").click();
-  await deposited.flush();
-  assert.deepEqual(deposited.posted[0], ["/api/action", { id: "watch-start", swap: F.SWAP_A }]);
+  assert.match(squash(prepared.text("next-action")), /The swap is made done/);
+  const box = squash(prepared.text("start"));
+  assert.match(box, /Give Bob your swap file/);
+  assert.match(box, /Your check line 0123 4567 89ab cdef/, "from the step's own result: four groups of four");
+  assert.doesNotMatch(box, /bundle check: 0123456789abcdef ok/);
 });
 
-test("Bob's first screen: set up, his Ethereum key, choose and check Alice's file, the watch, the deposit; the check posts the table's join (the program opens the file dialog), nothing about a path", async () => {
-  const page = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-bob")] }));
+test("Bob's first screen: his Ethereum key by itself, then choose and check Alice's file; the button posts the table's join (the program opens the file dialog), nothing about a path", async () => {
+  const page = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-bob")], wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, status: null } } } }));
   const t = squash(page.text("start"));
-  for (const w of ["Set up", "Make this swap's own Ethereum key", "Choose and check Alice's file", "Start the watch", "Deposit the ETH"]) assert.ok(t.includes(w), w);
-  assert.match(squash(page.text("next-action")), /Choose and check Alice's file Step 3 of 5/);
-  assert.match(squash(page.text("next-action")), /A window opens to choose Alice's bundle file/);
-  await btnWith(page.byId("next-action"), "Choose and check Alice's file").click();
+  for (const w of ["Make this swap's own Ethereum key", "Choose and check Alice's file"]) assert.ok(t.includes(w), w);
+  assert.doesNotMatch(t, /Start the watch|Deposit the ETH|Set up/);
+  assert.match(squash(page.text("next-action")), /Choose and check Alice's file Step 2 of 2, your step/);
+  assert.match(squash(page.text("next-action")), /First save the invitation below and send it to Alice\. When her file \(alice\.bundle\.json\) arrives, choose it here/);
+  await btnWith(page.byId("next-action"), "Choose Alice's file…").click();
   await page.flush();
   assert.deepEqual(page.posted[0], ["/api/action", { id: "join", swap: F.SWAP_B }], "no path, no file name in the request: the program's dialog decides");
 });
 
-test("Bob after a clean check: the printed terms and the check line to compare, then the watch is next", async () => {
+test("Bob after a clean check: the printed terms and his check line in groups of four; without the program's check-line record there is no confirm box", async () => {
   const lines = ["Your terms, as this machine will state them (check them against what you agreed):", "  your Parano1d address:  o1bob", "  your Ethereum address:  0x" + "b0".repeat(20), "  the contract:  0x" + "c1".repeat(20), "  the NOID amount:  5000000 micro-NOID", "  the ETH amount:  1000000000000000 wei", "  the chain:  11155111", "  the profile:  sepolia", "  the contract version:  1", "  the lock kind:  poseidon", "  the variant:  raw", "bundle check: 0123456789abcdef ok"];
   const jobs = [F.job("setup"), F.job("wallet-setup-bob"), F.job("join", { stdout: lines.join("\n") })];
   const page = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs, wallet: { roles: { alice: {}, bob: { swap_file: true, addresses_file: true, status: null } } } }));
-  assert.match(squash(page.text("next-action")), /Start the watch Step 4 of 5/);
+  assert.match(squash(page.text("next-action")), /The swap is made done/);
   const t = squash(page.text("start"));
   assert.match(t, /Alice's file accepted/);
-  assert.match(t, /bundle check: 0123456789abcdef ok/);
+  assert.match(t, /Your check line 0123 4567 89ab cdef/);
   assert.match(t, /the NOID amount 5000000 micro-NOID \(5 NOID\)/);
-  assert.match(t, /Compare this line with the one Alice's side shows/);
-  await btnWith(page.byId("next-action"), "Start the watch").click();
-  await page.flush();
-  assert.deepEqual(page.posted[0], ["/api/action", { id: "watch-start", swap: F.SWAP_B }]);
+  assert.match(t, /Read it to Alice over a call or another channel/);
+  assert.equal(page.byId("start").all((n) => n.attrs.id === "cl-match").length, 0);
 });
 
 test("the swap page with a tick: today's view, the run controls in the program's words (no WSL, no env.local, no install), only this swap's role tick, and a head without a run number", async () => {

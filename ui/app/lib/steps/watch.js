@@ -10,6 +10,7 @@
  * The loop line is the helper's: the time, then eight parts, each cut on its own, the last (`applied: .. phase_after: ..`) whole. The terminal rule
  * is watch.sh's: phase_after refunded, lost or aborted, or `done` unless the action or reason still names a leftover leg.
  * Injectable for tests: ctx.now (the clock of the line), opts.sleep(ms) (resolves when the pause is over), opts.tick (replaces the tick step).
+ * `opts.apply` (default true): false makes every tick read-only (no --apply): it records nothing, and shows what the engine would decide (lib/firststeps.js, rule W).
  */
 
 const fs = require("fs");
@@ -62,6 +63,7 @@ class Watch {
     this.tickStep = opts.tick || realTick;
     this.sleepFn = opts.sleep || null;
     this.onLine = opts.onLine || null;
+    this.apply = opts.apply !== false;
     this.ticks = 0;
     this.lastError = null;
     this.stopped = false;
@@ -99,7 +101,7 @@ class Watch {
     const ctx = this.ctx;
     let res;
     try {
-      res = await this.tickStep(ctx, role, { args: ["--apply"] });
+      res = await this.tickStep(ctx, role, { args: this.apply ? ["--apply"] : [] });
     } catch (e) {
       this.lastError = String((e && e.message) || e);
       res = { code: null, stdout: "", stderr: "", files: [] };

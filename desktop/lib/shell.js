@@ -477,6 +477,21 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         const r = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
         return r && !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] || null : null;
       },
+      saveFile: async (kind) => {
+        const parent = windowCtl && !windowCtl.isDestroyed() ? windowCtl.window : null;
+        const options =
+          kind === "invitation"
+            ? { title: "Save an invitation for Alice", defaultPath: "no1d-invitation.json", filters: [{ name: "Invitation", extensions: ["json"] }] }
+            : { title: "Save a copy of your swap file for Bob", defaultPath: "alice.bundle.json", filters: [{ name: "Swap file", extensions: ["json"] }] };
+        const r = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options);
+        return r && !r.canceled && typeof r.filePath === "string" && r.filePath ? r.filePath : null;
+      },
+      chooseInvitation: async () => {
+        const parent = windowCtl && !windowCtl.isDestroyed() ? windowCtl.window : null;
+        const options = { title: "Open Bob's invitation", properties: ["openFile"], filters: [{ name: "Invitation", extensions: ["json"] }] };
+        const r = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+        return r && !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] || null : null;
+      },
       openHandlers: {
         help: async () => {
           const h = helpMessage();

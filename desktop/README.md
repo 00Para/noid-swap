@@ -312,6 +312,20 @@ printf '%s' "no1d-swap/v1/swap-passphrase/$RUN_ID" | openssl dgst -sha256 -mac H
 Two limits of that form: it puts the install secret in `openssl`'s argument list, which other programs of the same machine can read while it
 runs, and it gives a wrong passphrase for an imported folder (one with `passphrase.sealed`). Use it only to check the advised way.
 
+## Save a copy and open an invitation (2026-11-19)
+
+Two dialogs of the program object (`lib/program.js`), used by the console's routes `/api/bundle/save`, `/api/invitation/save` and
+`/api/invitation/open` (see `ui/app/README.md`, "Simpler swaps"):
+- `saveCopy(kind, bytes)` -> `"saved" | "cancelled" | "busy" | "refused"`. `kind` is `bundle` (Alice's swap file for Bob, default name
+  `alice.bundle.json`) or `invitation` (Bob's invitation for Alice, default name `no1d-invitation.json`); any other kind throws. The bytes are 1 to
+  1,048,576. One dialog at a time: a second call while one is open answers `"busy"` and opens nothing. The chosen path must be absolute and, after
+  resolving it and the real path of its parent folder, must not lie inside the program's data folder (compared without case on Windows); a file with a
+  second name (a hard link) is refused too. Nothing is written when the person cancels.
+- `chooseInvitationFile()` -> an absolute path or null, one dialog at a time (`showOpenDialog`, files only, filter `.json`). The console reads the
+  file itself (a plain file, at most 4,096 bytes) and never shows the path.
+- The shell gives both dialogs the main window as their parent when it has one (`saveFile`, `chooseInvitation`). Tests: `test/simple-dialogs.test.js`,
+  `test/program.test.js`, `test/shell-start.test.js`.
+
 ## Low points (one line each)
 
 - The menu's "Settings" brings the window forward and then asks the page to open its settings screen (`openSettings` in `lib/window.js`): the main process runs one fixed line in the page that clicks the page's own menu item "Settings". It asks only while the window shows the program's own page (the private scheme), takes no argument and gives the page nothing; if the page has no such item (a page that is not in program mode, or one not drawn yet) the window is only shown. It depends on the item's text. Fixed 2026-11-19 (D-extra-1); the build info file (`DESKTOP-BUILD-INFO.txt`) now says "signature: none on Windows, ad hoc on macOS (no certificate, no notarization)" instead of "unsigned: yes".

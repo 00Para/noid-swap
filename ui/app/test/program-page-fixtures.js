@@ -36,6 +36,8 @@ function runPayload(role, o = {}) {
     commands: {},
     bundle: null,
     bundle_file: o.bundle_file || null, // the program serves { name } only: no path reaches the page
+    board: o.board || null, // a board run carries the board's view
+    program: o.program || { swap: null, own_noid: null }, // program mode: the swap's own facts (own_noid: Bob's Parano1d address of run.json)
     server_now: Math.floor(Date.now() / 1000),
     actions: {
       enabled: true,
@@ -48,6 +50,9 @@ function runPayload(role, o = {}) {
       spends: {},
       audit: { tail: [], chain: { ok: true }, file: "ui-audit.jsonl" },
       autopilot: o.autopilot || null,
+      first_steps: o.first_steps === undefined ? { running: null, failed: null, waiting: null } : o.first_steps, // what the program's first steps are doing
+      check_line: o.check_line || null, // { hex, from } once the program has written check-line.json
+      line_match: o.line_match || null, // { hex, at } once the person confirmed the other side's line
       table: ids.map((id) => ({ id, label: `label of ${id}`, group: "g", blocked: null, mode_blocked: null, note: "n", command: `cmd ${id}` })),
       ...(wallet ? { wallet } : {}),
       form: null,

@@ -47,7 +47,8 @@ const { demoPayload, scenarioList, FLAGS: DEMO_FLAGS } = require("./lib/demo");
 const { ReadOnlyRunner, validateConfig, TABLE: RUNNER_TABLE } = require("./lib/runner");
 const { ActionRunner, validateActionsConfig, runNumberOf, defaultRepoLiveDir, TABLE: ACTION_TABLE } = require("./lib/actions");
 const { AuditLog } = require("./lib/audit");
-const { validateForm, writeEnvLocal, envLocalState, PROFILES: FORM_PROFILES, ROLES: FORM_ROLES, LOCK_KINDS } = require("./lib/swapform");
+const { validateForm, writeEnvLocal, envLocalState, PROFILES: FORM_PROFILES, ROLES: FORM_ROLES, LOCK_KINDS, pinFor } = require("./lib/swapform");
+const invitation = require("./lib/invitation");
 const { pathCandidates } = require("./lib/runfolder");
 const { handleActionPost, ACTION_POSTS } = require("./lib/actionroutes");
 const { RunLock, LazyRunLock } = require("./lib/runlock");
@@ -67,6 +68,7 @@ const STATIC = {
   "/viewmodel.js": ["lib/viewmodel.js", "text/javascript; charset=utf-8"],
   "/enginetext.js": ["lib/enginetext.js", "text/javascript; charset=utf-8"],
   "/actions.js": ["actions.js", "text/javascript; charset=utf-8"],
+  "/program.js": ["program.js", "text/javascript; charset=utf-8"],
   // the offer board's screens (P3.7): the page code, its DOM-free logic and its stylesheet (the tokens are operator.css's)
   "/board.js": ["board.js", "text/javascript; charset=utf-8"],
   "/boardview.js": ["lib/boardview.js", "text/javascript; charset=utf-8"],
@@ -715,7 +717,8 @@ function main() {
 const PROGRAM_STATIC = Object.fromEntries(Object.entries(STATIC).filter(([p]) => !["/console", "/app.js", "/styles.css"].includes(p)));
 const OPEN_WHAT = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
 const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384 };
-const FORM_PROFILE_VIEW = Object.fromEntries(Object.entries(FORM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18 }]));
+/** The form's view of the test profiles: chain, caps, and the program's own contract for the network (`pinFor`: the settings' override, else the one pin; null when there is none). */
+const formProfileView = (settings) => Object.fromEntries(Object.entries(FORM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18, contract: pinFor(k, settings) || null }]));
 
 function programNodeStatus(program) {
   const fallback = { noid: { state: "error", tip: null, chain_checked: false, ok_since_start: false, checked_at: null }, eth: { state: "error", chain_id: null, endpoints: 0, checked_at: null } };
@@ -759,14 +762,24 @@ function programPayload(program, swapSet) {
     swaps: swapSet.list(),
     board: { enabled: !!(ps && ps.board.relays.length >= 2), slot: slot ? slot.id : null },
     update,
-    form: { profiles: FORM_PROFILE_VIEW, roles: ["alice", "bob"] },
+    form: { profiles: formProfileView(ps), roles: ["alice", "bob"] },
   };
+}
+
+/** Bob's own Parano1d address (run.json's `bob_noid`) for a Bob swap, else null: the page shows it in the invitation block. */
+function ownNoid(swap) {
+  try {
+    const l = swap.settingsSource ? swap.settingsSource.load() : null;
+    return l && l.ok && l.settings.role === "bob" && typeof l.settings.bob_noid === "string" ? l.settings.bob_noid : null;
+  } catch {
+    return null;
+  }
 }
 
 /** GET /api/run?swap=ID: today's run payload for one swap (no path of the data folder in it). */
 function programRunPayload(swapSet, swap) {
   const now = nowS();
-  const program = { swap: swap.id, refused: swap.refused || null, read_only: !!swap.readOnly, board_error: swap.boardError || null, summary: swapSet.summary(swap) };
+  const program = { swap: swap.id, refused: swap.refused || null, read_only: !!swap.readOnly, board_error: swap.boardError || null, summary: swapSet.summary(swap), own_noid: ownNoid(swap) };
   if (!swap.runner) return { mode: "run", server_now: now, role: null, program, runner: { enabled: false, items: [] }, actions: { enabled: false }, board: null };
   const run = readRun([swap.dir, swap.pub], now);
   const role = swap.settingsSource.role();
@@ -870,6 +883,193 @@ function pagePathRewriter(program) {
   return (value) => walk(value, 0);
 }
 
+// ---- the file routes of program mode (build spec #3 and #4): "Save a copy for Bob...", Bob's invitation, and opening an invitation. The native dialogs are the program's
+// (desktop/lib/program.js saveCopy, chooseInvitationFile); the server never sees or returns a path, and the words below are fixed.
+const BUNDLE_MAX_BYTES = 1048576;
+const FILE_WORDS = Object.freeze({
+  bundle_role: "Only the swap of the side that sells NOID has a file for Bob.",
+  bundle_board: "A board run hands the file over by itself.",
+  bundle_none: "There is no file for Bob yet: prepare the swap file first.",
+  bundle_bad: "The file for Bob cannot be used. Nothing was saved.",
+  dialog_open: "A save dialog is already open.",
+  no_dialog: "The program has no save dialog here.",
+  no_open_dialog: "The program has no open dialog here.",
+  place: "That place cannot be used: choose a folder outside the program's own data folder. Nothing was saved.",
+  invitation_role: "Only the swap of the side that sells ETH makes an invitation.",
+  invitation_board: "A board run hands the terms over by itself.",
+  invitation_network: "Invitations are made for Sepolia swaps only.",
+  invitation_key: "There is no invitation yet: the program is still making this swap's key.",
+  invitation_bad: "The invitation cannot be made from this swap's settings. Nothing was saved.",
+});
+
+const fileRefusal = (status, error) => ({ status, body: { error } });
+
+/** The checks the two save routes share: the swap is open, not production, the role's own swap (and not read-only), not a board run. Returns a refusal or null. */
+function savePrecheck(swap, role, words) {
+  if (!swap.runner) return fileRefusal(409, swap.refused || "this folder is not open");
+  let production = null;
+  try {
+    production = swap.runner.productionBlock();
+  } catch {
+    production = "the production check could not be made: every action is refused.";
+  }
+  if (production) return fileRefusal(409, production);
+  let r = null;
+  try {
+    r = swap.settingsSource.role();
+  } catch {
+    r = null;
+  }
+  if (swap.readOnly || r !== role) return fileRefusal(409, words.role);
+  let board = true;
+  try {
+    board = swap.runner.boardRun().on === true;
+  } catch {
+    board = true;
+  }
+  if (board) return fileRefusal(409, words.board);
+  return null;
+}
+
+/** The bytes of Alice's bundle in the run folder, read once: a plain file of 1 to 1,048,576 bytes that is a JSON object with `params`. Returns { bytes } or { why }. */
+function readBundleBytes(dir) {
+  const swapFile = path.join(dir, "alice.swap.json");
+  const bundle = path.join(dir, "alice.bundle.json");
+  try {
+    fs.lstatSync(swapFile);
+  } catch {
+    return { why: FILE_WORDS.bundle_none };
+  }
+  let st;
+  try {
+    st = fs.lstatSync(bundle);
+  } catch {
+    return { why: FILE_WORDS.bundle_none };
+  }
+  if (st.isSymbolicLink() || !st.isFile() || st.size < 1 || st.size > BUNDLE_MAX_BYTES) return { why: FILE_WORDS.bundle_bad };
+  try {
+    const bytes = fs.readFileSync(bundle);
+    if (bytes.length < 1 || bytes.length > BUNDLE_MAX_BYTES) return { why: FILE_WORDS.bundle_bad };
+    const j = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (!j || typeof j !== "object" || Array.isArray(j) || !j.params || typeof j.params !== "object" || Array.isArray(j.params)) return { why: FILE_WORDS.bundle_bad };
+    return { bytes };
+  } catch {
+    return { why: FILE_WORDS.bundle_bad };
+  }
+}
+
+/** Runs program.saveCopy and answers the route: saved / cancelled (200 with an audit note), busy or refused (409, nothing logged). */
+async function saveAndAnswer(program, swap, kind, bytes, audit) {
+  if (typeof program.saveCopy !== "function") return fileRefusal(409, FILE_WORDS.no_dialog);
+  let r;
+  try {
+    r = await program.saveCopy(kind, bytes);
+  } catch {
+    return fileRefusal(409, kind === "bundle" ? FILE_WORDS.bundle_bad : FILE_WORDS.invitation_bad);
+  }
+  if (r === "busy") return fileRefusal(409, FILE_WORDS.dialog_open);
+  if (r === "refused") return fileRefusal(409, FILE_WORDS.place);
+  const saved = r === "saved";
+  if (!saved && r !== "cancelled") return fileRefusal(409, FILE_WORDS.place);
+  try {
+    swap.audit.append({ action: audit.action, role: audit.role, phase: "note", result: saved ? "copy saved" : "save cancelled" });
+  } catch {
+    /* the file is saved (or nothing was); a note that cannot be written is not undone by refusing now */
+  }
+  return { status: 200, body: { ok: true, saved } };
+}
+
+/** POST /api/bundle/save {"swap"}: Alice saves a copy of the bundle for Bob. */
+async function bundleSaveRoute(program, swap) {
+  const no = savePrecheck(swap, "alice", { role: FILE_WORDS.bundle_role, board: FILE_WORDS.bundle_board });
+  if (no) return no;
+  const b = readBundleBytes(swap.dir);
+  if (!b.bytes) return fileRefusal(409, b.why);
+  return saveAndAnswer(program, swap, "bundle", b.bytes, { action: "bundle-save", role: "alice" });
+}
+
+/** POST /api/invitation/save {"swap"}: Bob saves his invitation for Alice. */
+async function invitationSaveRoute(program, swap) {
+  const no = savePrecheck(swap, "bob", { role: FILE_WORDS.invitation_role, board: FILE_WORDS.invitation_board });
+  if (no) return no;
+  const l = swap.settingsSource.load();
+  if (!l.ok) return fileRefusal(409, FILE_WORDS.invitation_bad);
+  if (l.settings.profile !== "sepolia") return fileRefusal(409, FILE_WORDS.invitation_network);
+  const key = invitation.readBobKeyAddress(swap.dir);
+  if (!key) return fileRefusal(409, FILE_WORDS.invitation_key);
+  let text;
+  try {
+    text = invitation.build(l.settings, key);
+  } catch {
+    return fileRefusal(409, FILE_WORDS.invitation_bad);
+  }
+  return saveAndAnswer(program, swap, "invitation", Buffer.from(text, "utf8"), { action: "invitation-save", role: "bob" });
+}
+
+/** POST /api/invitation/open {}: the native open dialog, then the strict reader. Answers the form fields only: never a path, no audit line. */
+async function invitationOpenRoute(program) {
+  if (typeof program.chooseInvitationFile !== "function") return fileRefusal(409, FILE_WORDS.no_open_dialog);
+  let file = null;
+  try {
+    file = await program.chooseInvitationFile();
+  } catch {
+    file = null;
+  }
+  if (typeof file !== "string" || !file || !path.isAbsolute(file)) return { status: 200, body: { ok: true, chosen: false } };
+  const bad = (why) => ({ status: 422, body: { ok: false, error: why } });
+  let text;
+  try {
+    const st = fs.lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile() || st.size < 1) return bad(invitation.WORDS.DAMAGED);
+    if (st.size > invitation.MAX_BYTES) return bad(invitation.WORDS.TOO_LARGE);
+    const buf = Buffer.alloc(invitation.MAX_BYTES + 1);
+    const fd = fs.openSync(file, "r");
+    let n;
+    try {
+      n = fs.readSync(fd, buf, 0, buf.length, 0);
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (n > invitation.MAX_BYTES) return bad(invitation.WORDS.TOO_LARGE);
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buf.subarray(0, n));
+  } catch {
+    return bad(invitation.WORDS.DAMAGED);
+  }
+  const r = invitation.parse(text);
+  return r.ok ? { status: 200, body: { ok: true, chosen: true, fields: r.fields } } : bad(r.why);
+}
+
+/**
+ * "Use these addresses for my next swaps" (build spec #5): after a swap was made, its own payout addresses go into settings.json: Alice's NOID and Ethereum payouts, Bob's NOID address and
+ * Ethereum payout. A settings.json that does not pass its schema is never replaced here (loadSafe not ok: nothing is saved), and a failed save never undoes the swap. Returns whether it saved.
+ */
+function rememberAddresses(program, swapSet, id) {
+  try {
+    const cur = programsettings.loadSafe(program.dataDir);
+    if (!cur.ok) return false;
+    const swap = swapSet.get(id);
+    const l = swap && swap.settingsSource ? swap.settingsSource.load() : null;
+    if (!l || !l.ok) return false;
+    const rs = l.settings;
+    const next = JSON.parse(JSON.stringify(cur.settings));
+    const put = (k, v) => {
+      if (typeof v === "string" && v !== "") next[k] = v;
+    };
+    if (rs.role === "alice") {
+      put("noid_payout", rs.noid_payout);
+      put("eth_payout", rs.eth_payout);
+    } else if (rs.role === "bob") {
+      put("bob_noid", rs.bob_noid);
+      put("eth_payout", rs.eth_payout);
+    } else return false;
+    if (Object.keys(programsettings.validate(next)).length) return false;
+    programsettings.save(program.dataDir, next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
 function programRequestHandler(program, swapSet, getServer) {
   const forPage = pagePathRewriter(program);
@@ -914,7 +1114,7 @@ function programRequestHandler(program, swapSet, getServer) {
         try {
           if (p === "/api/newswap") {
             const id = swapSet.create(body.fields);
-            return send(res, 200, { ok: true, swap: id });
+            return send(res, 200, { ok: true, swap: id, remembered: body.remember === true ? rememberAddresses(program, swapSet, id) : false });
           }
           if (p === "/api/settings") {
             const cur = programsettings.loadSafe(program.dataDir);
@@ -939,6 +1139,16 @@ function programRequestHandler(program, swapSet, getServer) {
               return send(res, 500, { error: "that window could not be opened" });
             }
             return send(res, 200, { ok: true });
+          }
+          if (p === "/api/invitation/open") {
+            const out = await invitationOpenRoute(program);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/bundle/save" || p === "/api/invitation/save") {
+            const swap = swapOf(body.swap, res);
+            if (!swap) return;
+            const out = p === "/api/bundle/save" ? await bundleSaveRoute(program, swap) : await invitationSaveRoute(program, swap);
+            return send(res, out.status, out.body);
           }
           if (p === "/api/board/slot") {
             const id = swapSet.createBoardSlot(body.role);

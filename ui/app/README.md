@@ -875,3 +875,115 @@ that came through the desktop shell's scheme adapter, `maxBody` is the adapter's
    able to mark requests with a Symbol private to the server module, and the ceiling of the largest route is the server's to name.
 3. A hold in the self-test through an environment variable (`NO1D_SELFTEST_HOLD_SECONDS`) was added so the hosted job can look for
    listening sockets while the program is up; the spec's acceptance did not say how.
+
+## Simpler swaps (2026-11-19)
+
+Bottom line: in program mode a person presses one step button per role, confirms that the two check lines match, approves once, and then deposits; the
+program does the rest under the same dry runs, gate, latch and audit lines as before. Nothing here sends by itself, the engine still decides every spend,
+and payouts still go only to the person's own addresses. The terminal console and board runs keep their screens unless a line below says otherwise.
+
+**First steps by themselves (`lib/firststeps.js`, `FirstSteps`).** On the program's 3 s timer, a form swap gets Set up and then the wallet setup
+(`wallet-setup-ROLE`) through the usual table actions, precheck, busy flag and audit lines (with "started by the program"). A step that fails waits for
+the person's "Try again"; a closed key store or an unconfirmed recovery code is a wait with no audit line; a start that throws backs off from 60 s,
+doubling up to 15 minutes. Board slots, read-only folders and folders that already hold the role's swap file get no setup step. The page shows two steps
+per role: Alice "Make this swap's own wallets" (by itself) and "Prepare the swap file"; Bob "Make this swap's own Ethereum key" (by itself) and
+"Choose and check Alice's file".
+
+**The watch rule W (`watchWanted`).** Two kinds of watch loop: a read loop runs `tick` without `--apply` and records nothing; an apply loop runs
+`tick --apply`. A swap gets an apply loop, in this order, when: (1) an intent is held or recorded; (2) this role has acted (Alice past `created`, Bob
+from `lock_submitted` on); (3) a height abort that cannot turn back (Alice "too late to fund"; Bob "last lock height … passed", past his lock-by height
+or past `B_bob`; either role "recovery branch") was seen on two read ticks in a row, read from `action.action || action.kind`; (4) it has applied
+once already; (5) the approval is in force and the deposit is seen. Otherwise it reads. An apply loop never goes back to reading; an upgrade waits for
+the tick in progress (`upgrading`), so there is one loop at a time; a person's Stop holds until a program start or a `turnOn`. The abort patterns are
+taken from the engine's own texts, and a test fails if `swap-cli/src/engine.rs` or `params.rs` stops printing one of them. Why: before this, the
+applied watch started right after Prepare, so the engine could record a funding intent before the person had approved or deposited.
+
+**The check line and the line match.** `check-line.json` (`{"v":1,"from":"prepare"|"join","hex":…,"at":…}`, mode 0600, written once, never
+replaced) is taken from the step's own output on disk, and only once the step reached its clean end: Alice's `new-alice.err`
+(`bundle check: <16 hex> (opening_hex …`), once `alice.swap.json` exists; Bob's `join-new-bob.out` (`bundle check: <16 hex> ok`), once
+`bob/bob.swap.json` exists; exactly one distinct line, else nothing is written. The page shows it as four groups of four digits.
+`POST /api/checkline/confirm {"swap", "hex", "matches": true}` records that the other side read the same line: one audit note and `line-match.json`
+(written once; asked again it answers the same, with no second line). Refusals: 400 without `matches: true`, 404 on the terminal console, 409 for a
+board run, no check line, another hex or a read-only folder, 403 for production. In program mode outside a board run, the approval (`turnOn`) is
+refused with `line_match_missing` until that record exists for the current line, while the role has not acted yet, and the gate refuses a funding or a
+lock sent by hand for the same reason. Bob's approval has a third statement, "Alice's check line matches mine", and the gate refuses his lock without it
+(`statement_alice_check`), by hand or by the autopilot.
+
+**Approve before the deposit.** The approval's terms hash comes from the bundle, run.json, the tools and the code, never from a tick, so an approval
+given before the first tick stays in force. The approval box says "You give X. You get Y." With the approval in force and no deposit seen, only a read
+loop runs and nothing is sent; once the deposit is seen the loop records and the funding or lock goes through the usual dry run and gate, once.
+
+**The deposit box (program mode).** The amount in plain units (NOID exact; ETH rounded up to six decimals, never below the wei needed), a Copy amount
+button (the figure without the unit), the exact figure underneath, and for Alice a clock read from the engine's funding-window note
+(`enginetext.fundingBlocksLeft`): "Deposit before about HH:MM", counted with 20 s blocks and four blocks kept in hand. The terminal console's wallet runs
+keep their words.
+
+**Files for the other side.** `POST /api/bundle/save {"swap"}` (Alice) saves the bytes of the run folder's `alice.bundle.json` through the program's
+own save dialog (`program.saveCopy`); `POST /api/invitation/save {"swap"}` (Bob) saves an invitation the same way. Answers are `{ ok, saved }` and
+never a path; one audit note per save or cancel. Refused (409, with fixed words): the wrong role, a read-only folder, a board run, production, a missing
+or unusable file, a dialog already open, a place inside the program's own data folder.
+
+**The invitation (`lib/invitation.js`).** A small JSON file Bob saves and Alice opens, so neither types the other's terms or addresses:
+
+```json
+{ "kind": "no1d-swap-invitation", "v": 1, "network": "sepolia",
+  "contract": "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF", "contract_version": 1,
+  "noid_micronoid": "5000000", "eth_wei": "1000000000000000", "bob_noid": "o1…", "bob_eth": "0x…" }
+```
+
+Exactly these nine keys, Sepolia only, at most 4,096 bytes, amounts and addresses as strings, never a payout, a path, a node or a fee setting.
+`POST /api/invitation/open {}` opens the program's open dialog, reads the chosen plain file once (no link, strict UTF-8, strict JSON with no duplicate
+key) and answers only the form's fields (never a path, no audit line). The form then shows every value; Alice still checks each one.
+
+Why a changed or forged invitation is caught before any coin is at risk:
+1. Alice's program only checks form and range; she reads every value in her form, and her approval names both amounts.
+2. Her bundle carries those terms; Bob's `new-bob` checks it against his own run.json and key (`check_bob_terms`): a changed amount, contract,
+   version, address or key address is refused, so Bob gets no swap file and no check line.
+3. Alice cannot approve before she records that Bob read her his line and it matches hers, and the autopilot funds only with that approval; a refused
+   bundle gives Bob no line to read.
+4. Before the funding nothing of hers is locked; under W a swap that does not start records its abort, and the deposit can be sent back to her own
+   addresses.
+5. An impostor who swapped both files meets the real Bob's line, which differs.
+6. A different contract cannot run other code: `live.js` and `swap-cli` check its code hash.
+
+**Defaults.** One pin per network (`swapform.PINNED_CONTRACT`, `pinFor`): the program's own Sepolia contract
+`0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF` (its code hash is still checked before any lock), none for the rehearsal chain; the settings'
+`board.pinned_htlc` overrides it, for the form and the board alike. `POST /api/newswap {fields, remember}`: with `remember: true` (the tick "Use these
+addresses for my next swaps", on by default) the person's own payout addresses are saved to the settings after the swap is made; a failed save never
+undoes the swap. The form keeps network, contract version and contract under "Optional". Settings are grouped, with the rehearsal chain and the offer
+board under a closed "Advanced" fold. An empty swap list shows "Before your first swap": six things to have ready, with the live node word and no link.
+
+**If a swap cannot end.** An intent recorded after the approval and a seen deposit that is then never sent still needs `swap-cli intent --cancel`,
+which the program has no step for. W makes it rare. When the engine's note shows it, the autopilot raises one needs-you entry pointing to the help
+paragraph "If a swap cannot end", which gives the steps by hand.
+
+Tests: `test/simple-*.test.js` (first steps, the watch rule with real tick output, the line match, Bob's statement, approving early, the invitation,
+the dialogs and file routes, the engine texts, the form, the page's start screen, the deposit box, the guide).
+
+**After the independent read (2026-11-19).** No path was found that moves coins without the one approval or around the dry run, the gate, the latch
+or the audit line, and none that puts an invitation value or a settings address into a payout. Fixed, each with a test that fails without it
+(`test/simple-review-fixes.test.js` unless named):
+- A Prepare that ended with exit 6, or Bob's check with exit 9 or 10, leaves its swap file and one check line behind; the check line was written
+  anyway, so the page offered Confirm and the approval on a step that had said "stop and look". `check-line.json` is now written only when the
+  step's sealed standalone files are gone (Alice: `wallet-setup/noid-wallet.json` and `eth-key.json`; Bob: `eth-key.json`), which the steps delete
+  only after every check passed; a link or a folder there counts as present.
+- A swap made before this release and already funded or locked could not be approved again (the release raises the version, so its approval lapses),
+  because the approval asked for a line match the page no longer offers past the handover. The approval asks for it only while the page can offer
+  its Confirm box (`lineConfirmable`: Alice with no tick or at `created` and no funding marker; Bob with no tick or at `received`, `funded` or
+  `funding_final`); a test checks for every phase that the page and the approval agree. The gate's rule for a funding or lock sent by hand is unchanged.
+- The strict JSON reader (`programsettings.strictParse`, used by the invitation and the settings) compared raw keys, so a key written with a `\u`
+  escape counted as new and the last value won; it now compares decoded keys (and keeps the hex digits of a `\u` escape it used to drop).
+- `fundingBlocksLeft` gave 0 both for "0 blocks left" and for "closed", so the page said the window had closed while the engine could still fund;
+  closed is now -1.
+- The deposit box's "about to close" text and the first screen's "what happens if it stops here" promised that deposited coins go back by themselves;
+  the sweeps and the recovery run by themselves only while the approval is in force. Both now say the coins can be sent back from the swap's page, and
+  that the program does it by itself while it runs the swap (`test/program-page-boot.test.js` for the second).
+- The deposit box showed as soon as the swap file existed, before the lines were confirmed; it now shows once the line match exists or the approval
+  is in force.
+
+Left (low):
+- The needs-you entry "This swap cannot end by itself" is raised only while the approval is in force; with the autopilot off, or stopped on another
+  needs-you after an intent was recorded, the page gives no pointer to the help. The apply loop also keeps running after a turnOff once it has
+  applied (rule 4, by design).
+- A settings `bob_noid` saved under the earlier label "Bob's Parano1d address (optional)" may hold the other person's address; it now prefills Bob's
+  own "where the NOID you buy goes" (the Bob form prefilled from it before too). Nothing has been released with the old label.

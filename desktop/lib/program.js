@@ -13,6 +13,8 @@ const { HELP_TITLE, HELP_PARAGRAPHS } = require("./helptext");
 
 const OPEN_KINDS = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
 const SWAP_ID = /^[0-9a-f]{32}$/;
+const SAVE_KINDS = new Set(["bundle", "invitation"]);
+const SAVE_MAX_BYTES = 1048576;
 
 class ProgramError extends Error {}
 
@@ -34,6 +36,8 @@ class ProgramError extends Error {}
  * @param {(kind:string, swapId:string|null) => void} o.notify
  * @param {(list:object[]) => void} o.onAtStake
  * @param {(swapId:string) => Promise<string|null>} o.chooseFile    a native open dialog
+ * @param {(kind:"bundle"|"invitation") => Promise<string|null>} [o.saveFile]   a native save dialog: the chosen path, or null
+ * @param {() => Promise<string|null>} [o.chooseInvitation]                     a native open dialog for an invitation file
  * @param {Object<string, () => Promise<void>>} [o.openHandlers]   "import", "help" (the shell supplies them)
  * @param {() => object} [o.updateStatus]    the update checker's status() (updatecheck.js); without it "never"
  */
@@ -122,6 +126,78 @@ function createProgram(o) {
     }
   }
 
+  // The two file dialogs of build spec #3 and #4: one native dialog at a time between them (a second call while one is open does not open another).
+  let dialogOpen = false;
+  const realPath = (x) => (typeof fs.realpathSync.native === "function" ? fs.realpathSync.native(x) : fs.realpathSync(x));
+
+  // True when `target` is the data folder or lies inside it. Both are real paths; compared without regard to letter case on Windows and macOS.
+  const insideDataDir = (target) => {
+    const fold = (x) => (win || o.platform === "darwin" ? x.toLowerCase() : x);
+    let root;
+    try {
+      root = realPath(o.dataDir);
+    } catch {
+      root = P.resolve(o.dataDir);
+    }
+    const rel = P.relative(fold(P.resolve(root)), fold(P.resolve(target)));
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${P.sep}`) && !P.isAbsolute(rel));
+  };
+
+  /**
+   * Asks where to save a file and writes the bytes there (build spec #3). Kinds: "bundle" (Alice's swap file for Bob) and "invitation" (Bob's invitation for Alice).
+   * Answers "saved", "cancelled", "busy" (a dialog is already open: none is opened) or "refused" (a relative path, a place inside the program's own data folder, or a write
+   * that failed). The chosen path never leaves this function.
+   */
+  async function saveCopy(kind, bytes) {
+    if (typeof kind !== "string" || !SAVE_KINDS.has(kind)) throw new ProgramError("unknown file kind");
+    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > SAVE_MAX_BYTES) throw new ProgramError("the file to save is empty or too large");
+    if (typeof o.saveFile !== "function") return "refused";
+    if (dialogOpen) return "busy";
+    dialogOpen = true;
+    let chosen = null;
+    try {
+      chosen = await o.saveFile(kind);
+    } catch {
+      chosen = null;
+    } finally {
+      dialogOpen = false;
+    }
+    if (typeof chosen !== "string" || chosen === "") return "cancelled";
+    if (!P.isAbsolute(chosen)) return "refused";
+    try {
+      const resolved = P.resolve(chosen);
+      const parent = realPath(P.dirname(resolved));
+      let target = P.join(parent, P.basename(resolved));
+      // a destination that already exists is judged by where it really is (a link to a file of the data folder is refused)
+      try {
+        const st = fs.lstatSync(target);
+        if (st.nlink > 1) return "refused"; // a second name of a file somewhere else (the data folder's own files included)
+        target = realPath(target);
+      } catch (e) {
+        if (!e || e.code !== "ENOENT") return "refused";
+      }
+      if (insideDataDir(parent) || insideDataDir(target)) return "refused";
+      fs.writeFileSync(target, bytes);
+    } catch {
+      return "refused";
+    }
+    return "saved";
+  }
+
+  async function chooseInvitationFile() {
+    if (typeof o.chooseInvitation !== "function" || dialogOpen) return null;
+    dialogOpen = true;
+    let f = null;
+    try {
+      f = await o.chooseInvitation();
+    } catch {
+      f = null;
+    } finally {
+      dialogOpen = false;
+    }
+    return typeof f === "string" && P.isAbsolute(f) ? f : null;
+  }
+
   const program = {
     version: o.version,
     network: "test",
@@ -142,6 +218,8 @@ function createProgram(o) {
       const f = await o.chooseFile(swapId);
       return typeof f === "string" && P.isAbsolute(f) ? f : null;
     },
+    saveCopy,
+    chooseInvitationFile,
     open,
     atStakeChanged: (list) => o.onAtStake(Array.isArray(list) ? list : []),
     settings: () => o.programsettings.load(o.dataDir),
