@@ -80,9 +80,15 @@ every swap at stake and until when. The system's own shutdown or log-off is neve
 
 ## The secret window (build spec 7.5)
 
-A separate modal window of the main process with its own in-memory partition, loaded from a file (no server, no API), with
-content protection on. Values cross one IPC channel, accepted only from that window's own webContents and only while a request is
-open. Requests are served one at a time. Closing the window ends a request as a cancel (`askGroups` and `askText` give `null`;
+A separate modal window of the main process with its own in-memory partition and no API, with content protection on. Its page
+is served on the private scheme at `no1d://secret/` by that partition's own session, and by no other: exactly `secret.html`,
+`secret.css` and `secret.js`, GET only, read by the main process; anything else is 404, and the window may load nothing else.
+It was first loaded from a `file://` URL, which never worked in an installed program: with the `grantFileProtocolExtraPrivileges`
+fuse off, Chromium's own file loader serves `file://`, it cannot read inside `app.asar` (ERR_FILE_NOT_FOUND), and the window
+closed at once, so the recovery code could not be shown (seen at the first start of the rehearsal's installers on both systems;
+reproduced in Electron 45.2.3 with the build's fuses, where the new way loads with its script, stylesheet and preload). The
+self-test now loads this page too (below). Values cross one IPC channel, accepted only from that window's own webContents and
+only while a request is open. Requests are served one at a time. Closing the window ends a request as a cancel (`askGroups` and `askText` give `null`;
 `show` rejects with `code: "CLOSED"`, which the vault reads as "the person never saw the code"). The vault asks for a new
 fallback passphrase in two prompts (`fallback-new`, then again with `again: true`) and compares them itself.
 
@@ -90,10 +96,12 @@ fallback passphrase in two prompts (`fallback-new`, then again with `again: true
 
 For the hosted start-up test only. A fresh temporary data folder (used as the data folder before the single-instance lock so it cannot collide with a
 real running program), no vault, a hidden window; it expects 401 for `/api/program` without the token and the expected window
-preferences, runs one node check and prints one JSON line:
+preferences, asks the page whether its scripts ran and what a POST without the token gets, loads the secret window's page in a
+window of that kind that is never shown (its script, its stylesheet and its preload's bridge must be there; no code or passphrase
+exists in this mode), runs one node check and prints one JSON line:
 
 ```
-{"selftest":"ok","node":"not_running","page":"loaded","prefs":{...},"no_token":401}
+{"selftest":"ok","node":"not_running","page":"loaded","prefs":{...},"no_token":401,"page_script":true,"page_post":403,"secret_page":true}
 ```
 
 Exit 0 within 60 s; on any failure it prints `{"selftest":"failed","why":"..."}` and exits 1. The temporary folder is removed.

@@ -18,18 +18,21 @@ test("navigation: only the page's own URL, the fragment ignored", () => {
   assert.equal(navigationAllowed("http://127.0.0.1:5000/", null), false);
 });
 
-test("requests: same origin and inline data only; the file policy is prefix-exact", () => {
+test("requests: same origin and inline data only; never file://, whatever the policy says", () => {
   assert.equal(requestAllowed("http://127.0.0.1:5000/a.js", page), true);
   assert.equal(requestAllowed("ws://127.0.0.1:5000/", page), false);
   assert.equal(requestAllowed("https://127.0.0.1:5000/", page), false);
   assert.equal(requestAllowed("data:image/svg+xml,x", page), true);
   assert.equal(requestAllowed("blob:http://127.0.0.1:5000/x", page), false);
+  // the old file allowance is gone: a policy that still names one opens nothing
   const file = { fileUrlPrefix: "file:///app/secret/" };
-  assert.equal(requestAllowed("file:///app/secret/secret.css", file), true);
-  assert.equal(requestAllowed("file:///app/secret/../x.js", file), false);
-  assert.equal(requestAllowed("file:///app/secrets/x.js", file), false);
+  assert.equal(requestAllowed("file:///app/secret/secret.css", file), false);
   assert.equal(requestAllowed("file:///etc/passwd", file), false);
   assert.equal(requestAllowed("http://127.0.0.1:5000/", file), false);
+  const secret = { allowedOrigin: "no1d://secret", pageUrl: "no1d://secret/secret.html" };
+  assert.equal(requestAllowed("no1d://secret/secret.css", secret), true);
+  assert.equal(requestAllowed("no1d://app/api/program", secret), false);
+  assert.equal(requestAllowed("file:///app/secret/secret.css", secret), false);
 });
 
 test("stripFragment", () => {

@@ -8,7 +8,7 @@
  * two steps does not matter.
  */
 
-const DENY = Object.freeze({ allowedOrigin: null, pageUrl: null, fileUrlPrefix: null, allowDevtools: false });
+const DENY = Object.freeze({ allowedOrigin: null, pageUrl: null, allowDevtools: false });
 
 function parse(u) {
   try {
@@ -47,7 +47,10 @@ function navigationAllowed(url, policy) {
   return a !== null && b !== null && a === b;
 }
 
-/** A sub-request (script, style, font, fetch): the page's own origin, an inline data URL, or the secret window's own files. */
+/**
+ * A sub-request (script, style, font, fetch): the page's own origin or an inline data URL. Never file://: both windows are served on the
+ * private scheme (the console on no1d://app, the secret window on no1d://secret).
+ */
 function requestAllowed(url, policy) {
   const x = parse(url);
   if (!x || !policy) return false;
@@ -55,7 +58,6 @@ function requestAllowed(url, policy) {
   if (x.protocol === "blob:" || x.protocol === "filesystem:") return false; // their origin is the creator's, but the page needs neither
   if (policy.allowDevtools && x.protocol === "devtools:") return true;
   if (policy.allowedOrigin && originOf(x) === policy.allowedOrigin) return true;
-  if (policy.fileUrlPrefix && x.protocol === "file:" && x.href.startsWith(policy.fileUrlPrefix)) return true;
   return false;
 }
 
@@ -147,7 +149,7 @@ function createGuard(electron) {
       electron.app.on("web-contents-created", (_event, wc) => applyWebContents(wc));
     },
     applySession,
-    /** Say what one webContents may load: { allowedOrigin, pageUrl, fileUrlPrefix, allowDevtools }. */
+    /** Say what one webContents may load: { allowedOrigin, pageUrl, allowDevtools }. */
     apply(wc, policy) {
       registry.set(wc, policy);
       applyWebContents(wc);

@@ -29,7 +29,10 @@ function registerPrivileged(electron) {
   electron.protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { ...PRIVILEGES } }]);
 }
 
-/** After `ready`: the scheme is answered on the main window's session only (the secret window and the default session answer nothing on it). */
+/**
+ * After `ready`: the console (no1d://app) is answered on the main window's session only. The default session answers nothing on
+ * the scheme; the secret window's session answers only that window's own page, at no1d://secret (secretwin.js).
+ */
 function attach({ electron, adapter }) {
   if (typeof adapter !== "function") throw new Error("scheme: an adapter is needed");
   const ses = electron.session.fromPartition(MAIN_PARTITION);

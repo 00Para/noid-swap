@@ -5,8 +5,10 @@
  * loads the page in a hidden window, makes one /api/program request without the token through the scheme adapter (expects
  * 401), asks the page itself (PAGE_PROBE) whether its own scripts ran and what a POST it sends without the token gets back
  * (expects 403 "missing or wrong token": the request reached the handler through protocol.handle and was not refused as
- * cross-origin, and the content policy let the page fetch), reads the window's preferences, runs one node
- * check, prints one JSON line and exits 0 within 60 s; any failure exits 1.
+ * cross-origin, and the content policy let the page fetch), reads the window's preferences, loads the secret window's page in
+ * a window of that kind that is never shown (expects it loaded, its script ran and its preload gave it the bridge; no recovery
+ * code or passphrase exists in self-test mode), runs one node check, prints one JSON line and exits 0 within 60 s; any
+ * failure exits 1.
  *
  * The program opens no port (build spec 9). To let the hosted test look for one from outside, NO1D_SELFTEST_HOLD_SECONDS
  * (0 to 30, default 0) keeps the program running with its window and its scheme handler up for that long before it stops; the
@@ -57,6 +59,16 @@ function pageProbeProblem(r) {
   return `a POST from the page without the token was not refused for the token (status ${Number(p.status) || 0}${typeof p.error === "string" ? `, "${p.error.slice(0, 80)}"` : ""})`;
 }
 
+/** The words of what is wrong with the secret window's probe (secretwin.probe), or null when its page loaded with its script, its stylesheet and its bridge. */
+function secretProbeProblem(r) {
+  if (!r || typeof r !== "object") return "the secret window's page did not answer its probe";
+  if (r.loaded !== true) return `the secret window's page did not load${typeof r.why === "string" && r.why ? ` (${r.why.slice(0, 80)})` : ""}`;
+  if (r.script !== true) return "the secret window's script did not run (the content policy may block it)";
+  if (r.css !== true) return "the secret window's stylesheet did not load";
+  if (r.bridge !== true) return "the secret window's preload did not give the page its bridge";
+  return null;
+}
+
 /** A vault that is never opened: every question gets the refusing answer. */
 function createSelfTestVault() {
   const refuse = () => ({ ok: false, why: "the program is in self-test mode" });
@@ -101,6 +113,7 @@ async function requestStatus(adapter, pathName) {
  * @param {() => Promise<void>} o.whenLoaded
  * @param {object} o.webContents                 has getLastWebPreferences()
  * @param {(path:string) => Promise<number>} o.request
+ * @param {() => Promise<object>} o.secretProbe  the secret window's page check (secretwin.probe)
  * @param {{checkOnce: () => Promise<object>}} o.nodeCheck
  * @param {() => Promise<void>} o.stop           stop the server and the node check
  * @param {() => void} o.cleanup                 remove the temporary data folder
@@ -111,7 +124,7 @@ async function requestStatus(adapter, pathName) {
  * @param {(what:string) => void} [o.progress]   told each step as it is reached (the shell writes it to stderr with the time)
  * @param {number} [o.stopMs]
  */
-async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, cleanup, print, exit, timeoutMs = TIMEOUT_MS, holdMs = 0, progress = () => {}, stopMs = STOP_MS }) {
+async function runSelfTest({ whenLoaded, webContents, request, secretProbe, nodeCheck, stop, cleanup, print, exit, timeoutMs = TIMEOUT_MS, holdMs = 0, progress = () => {}, stopMs = STOP_MS }) {
   const step = (what) => {
     try {
       progress(what);
@@ -142,11 +155,15 @@ async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, 
         const why = pageProbeProblem(probe);
         if (why) throw new Error(why);
         step("page probe answered");
+        if (typeof secretProbe !== "function") throw new Error("the secret window's page could not be checked");
+        const secretWhy = secretProbeProblem(await secretProbe());
+        if (secretWhy) throw new Error(secretWhy);
+        step("secret page probe answered");
         const status = await nodeCheck.checkOnce();
         step("node check answered");
         if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
         if (holdMs > 0) step("hold over");
-        return { selftest: "ok", node: status.noid.state, page: "loaded", prefs: pickPrefs(prefs), no_token: noToken, page_script: true, page_post: probe.post.status };
+        return { selftest: "ok", node: status.noid.state, page: "loaded", prefs: pickPrefs(prefs), no_token: noToken, page_script: true, page_post: probe.post.status, secret_page: true };
       })(),
       deadline,
     ]);
@@ -184,4 +201,4 @@ async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, 
   return { code, line };
 }
 
-module.exports = { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, PAGE_PROBE, EXPECTED_PREFS, TIMEOUT_MS, STOP_MS, HOLD_MAX_SECONDS };
+module.exports = { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, secretProbeProblem, PAGE_PROBE, EXPECTED_PREFS, TIMEOUT_MS, STOP_MS, HOLD_MAX_SECONDS };

@@ -370,14 +370,19 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
 
     // The tray's notifier, the secret window and the application menu need the app to be ready.
     const notifier = createNotifier({ Notification: electron.Notification, now, onClick: () => showWindow() });
-    secretUi = createSecretUi({
-      electron,
-      guard,
-      preloadPath: path.join(desktopDir, "preload-secret.js"),
-      htmlPath: path.join(desktopDir, "secret", "secret.html"),
-      // A sheet of a window that is hidden in the tray would not show (on a Mac its parent is not on screen): the parent only while it is visible.
-      getParent: () => (windowCtl && !windowCtl.isDestroyed() && windowCtl.window.isVisible() && !windowCtl.window.isMinimized() ? windowCtl.window : null),
-    });
+    try {
+      secretUi = createSecretUi({
+        electron,
+        guard,
+        preloadPath: path.join(desktopDir, "preload-secret.js"),
+        htmlPath: path.join(desktopDir, "secret", "secret.html"),
+        // A sheet of a window that is hidden in the tray would not show (on a Mac its parent is not on screen): the parent only while it is visible.
+        getParent: () => (windowCtl && !windowCtl.isDestroyed() && windowCtl.window.isVisible() && !windowCtl.window.isMinimized() ? windowCtl.window : null),
+      });
+    } catch {
+      // its page is served on the secret session's own scheme handler; without it no recovery code or passphrase can be shown
+      fail("The program could not prepare its window for secrets. Nothing was started.");
+    }
 
     t("vault");
     let vault;
@@ -531,6 +536,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         whenLoaded: windowCtl.whenLoaded,
         webContents: windowCtl.webContents,
         request: (p) => (deps.requestStatus || selftest.requestStatus)(adapter, p),
+        secretProbe: () => secretUi.probe(),
         holdMs: selftest.holdMsFrom(env.NO1D_SELFTEST_HOLD_SECONDS),
         nodeCheck,
         stop: async () => {

@@ -40,7 +40,8 @@ function createFakeElectron(opts = {}) {
     s.protocol = {
       handlers: {},
       handle(scheme, fn) {
-        if (opts.protocolHandleThrows) throw new Error("the scheme is already handled");
+        // true: every session refuses; a partition name: only that session refuses
+        if (opts.protocolHandleThrows === true || opts.protocolHandleThrows === partition) throw new Error("the scheme is already handled");
         this.handlers[scheme] = fn;
         rec("session", "protocol.handle", partition, scheme);
       },
@@ -85,6 +86,13 @@ function createFakeElectron(opts = {}) {
       rec("webContents", "executeJavaScript");
       if (typeof opts.pageScript === "function") return opts.pageScript(code, this);
       const handler = this.session.protocol.handlers.no1d;
+      // the secret window's page: its script and its bridge are there when its three files are served on its own session
+      if (this.session.partition === "no1d-secret") {
+        if (typeof handler !== "function") return { script: false, css: false, bridge: false };
+        const ok = async (f) => (await handler(new Request(`no1d://secret/${f}`, { method: "GET" }))).status === 200;
+        const html = await ok("secret.html");
+        return { script: html && (await ok("secret.js")), css: html && (await ok("secret.css")), bridge: html && typeof this.win.options.webPreferences.preload === "string" };
+      }
       if (typeof handler !== "function") return { scripts: true, post: { status: 0, error: "the fetch failed" } };
       const r = await handler(new Request("no1d://app/api/program/open", { method: "POST", headers: { accept: "*/*", "content-type": "application/json" }, body: "{}" }));
       let j = null;

@@ -453,7 +453,7 @@ test("closing the secret window while the vault opens does not quit the program 
   }
 });
 
-test("the private scheme: declared with exactly the spec's privileges, answered on the main window's session only, and no port is part of the result", async () => {
+test("the private scheme: declared with exactly the spec's privileges, the console answered on the main window's session only, the secret window's session serving its own page only, and no port is part of the result", async () => {
   const e = makeEnv();
   try {
     const r = await e.shell.start();
@@ -464,10 +464,19 @@ test("the private scheme: declared with exactly the spec's privileges, answered 
       { scheme: "no1d", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: false, bypassCSP: false, allowServiceWorkers: false } },
     ]);
     assert.equal(e.electron.protocol.registered.length, 1, "no second scheme");
-    const withHandler = [...e.electron.sessions.entries()].filter(([, s]) => Object.keys(s.protocol.handlers).length > 0).map(([name]) => name);
-    assert.deepEqual(withHandler, ["no1d-main"], "only the main window's session answers the scheme");
+    const withHandler = [...e.electron.sessions.entries()].filter(([, s]) => Object.keys(s.protocol.handlers).length > 0).map(([name]) => name).sort();
+    assert.deepEqual(withHandler, ["no1d-main", "no1d-secret"], "the main window's session and the secret window's session, no other (not the default one)");
     assert.deepEqual(Object.keys(e.electron.sessions.get("no1d-main").protocol.handlers), ["no1d"]);
+    assert.deepEqual(Object.keys(e.electron.sessions.get("no1d-secret").protocol.handlers), ["no1d"]);
     assert.equal(e.electron.windows[0].options.webPreferences.partition, "no1d-main", "the window uses that partition");
+    // the secret window's session never reaches the console or its API: it serves its own page on no1d://secret and nothing else
+    const secretHandle = e.electron.sessions.get("no1d-secret").protocol.handlers.no1d;
+    const before = e.rec.filter((x) => x.startsWith("handler:")).length;
+    for (const url of ["no1d://app/api/program", "no1d://app/", "no1d://secret/api/program"]) {
+      assert.equal((await secretHandle(new Request(url, { headers: { "x-swap-token": TOKEN } }))).status, 404, url);
+    }
+    assert.equal(e.rec.filter((x) => x.startsWith("handler:")).length, before, "nothing reached the console's handler");
+    assert.equal((await secretHandle(new Request("no1d://secret/secret.html"))).status, 200);
   } finally {
     e.cleanup();
   }
@@ -499,14 +508,14 @@ test("a server that is not on the private scheme is refused: it is stopped, the 
     assert.equal(e.electron.app.exitCode, 1);
     assert.ok(e.rec.includes("server.stop"));
     assert.equal(e.electron.windows.length, 0);
-    assert.equal(e.electron.calls.some((c) => c.name === "protocol.handle"), false);
+    assert.equal(e.electron.calls.some((c) => c.name === "protocol.handle" && c.args[0] === "no1d-main"), false, "the console is never attached");
   } finally {
     e.cleanup();
   }
 });
 
 test("attaching the private scheme fails: the server is stopped, the program exits 1 with fixed words and no window is made", async () => {
-  const e = makeEnv({ electron: { protocolHandleThrows: true } });
+  const e = makeEnv({ electron: { protocolHandleThrows: "no1d-main" } });
   try {
     const r = await e.shell.start();
     assert.equal(r.state, "aborted");
@@ -514,6 +523,21 @@ test("attaching the private scheme fails: the server is stopped, the program exi
     assert.equal(e.electron.app.exitCode, 1);
     assert.ok(e.rec.includes("server.stop"), "the server is stopped before the exit");
     assert.equal(e.electron.windows.length, 0);
+    assert.equal(JSON.stringify(e.electron.dialog.errorBoxes).includes("already handled"), false, "the error's own text is not shown");
+  } finally {
+    e.cleanup();
+  }
+});
+
+test("the secret window's page cannot be served: the program exits 1 with fixed words before the vault opens, and no window is made", async () => {
+  const e = makeEnv({ electron: { protocolHandleThrows: "no1d-secret" } });
+  try {
+    const r = await e.shell.start();
+    assert.equal(r.state, "aborted");
+    assert.match(r.reason, /could not prepare its window for secrets/);
+    assert.equal(e.electron.app.exitCode, 1);
+    assert.equal(e.electron.windows.length, 0);
+    assert.ok(!e.rec.includes("vault.open"), "the vault is not opened: it could not show its recovery code");
     assert.equal(JSON.stringify(e.electron.dialog.errorBoxes).includes("already handled"), false, "the error's own text is not shown");
   } finally {
     e.cleanup();

@@ -5,7 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { makeEnv } = require("./shell-fixture");
-const { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, PAGE_PROBE } = require("../lib/selftest");
+const { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, secretProbeProblem, PAGE_PROBE } = require("../lib/selftest");
 
 // The folder this test's self-test made (userData is its electron/ subfolder). Only that one is checked: another test file, or another
 // run of the suite, may be making its own no1d-selftest- folder in the same temporary folder at the same time.
@@ -17,6 +17,8 @@ const ownTmp = (e) => {
 };
 const GOOD_PREFS = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, webviewTag: false };
 /** web contents whose page answers the probe: `probe` is its answer (default: scripts ran, the POST was refused for the token). */
+/** the secret window's probe when its page loaded with its script and its bridge */
+const GOOD_SECRET = { loaded: true, script: true, css: true, bridge: true };
 const goodPage = (probe = { scripts: true, post: { status: 403, error: "missing or wrong token" } }) => ({ getLastWebPreferences: () => GOOD_PREFS, executeJavaScript: async () => probe });
 
 test("with the fake: one JSON line, exit 0, the temporary folder gone, the real data folder untouched", async () => {
@@ -31,7 +33,7 @@ test("with the fake: one JSON line, exit 0, the temporary folder gone, the real 
     const line = e.stdout[0];
     assert.ok(line.endsWith("\n") && line.trim().split("\n").length === 1);
     const j = JSON.parse(line);
-    assert.deepEqual(Object.keys(j), ["selftest", "node", "page", "prefs", "no_token", "page_script", "page_post"]);
+    assert.deepEqual(Object.keys(j), ["selftest", "node", "page", "prefs", "no_token", "page_script", "page_post", "secret_page"]);
     // the page's POST went through the session's own scheme handler to the real server and was refused for the token
     assert.equal(j.page_script, true);
     assert.equal(j.page_post, 403);
@@ -102,6 +104,7 @@ test("self-test with a damaged window preference fails", async () => {
     whenLoaded: async () => {},
     webContents: { getLastWebPreferences: () => ({ contextIsolation: false, sandbox: true, nodeIntegration: false, webSecurity: true, webviewTag: false }) },
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
     stop: async () => {},
     cleanup: () => {},
@@ -120,6 +123,7 @@ test("self-test times out", async () => {
     whenLoaded: () => new Promise(() => {}),
     webContents: {},
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({}) },
     stop: async () => {},
     cleanup: () => {},
@@ -138,6 +142,7 @@ test("a failing stop or cleanup does not hide the result", async () => {
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "ok" } }) },
     stop: async () => {
       throw new Error("x");
@@ -156,7 +161,7 @@ test("the page probe: scripts that did not run, a POST refused for its Origin, a
   const run = async (webContents) => {
     const lines = [];
     let code = null;
-    await runSelfTest({ whenLoaded: async () => {}, webContents, request: async () => 401, nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) }, stop: async () => {}, cleanup: () => {}, print: (l) => lines.push(l), exit: (c) => (code = c) });
+    await runSelfTest({ whenLoaded: async () => {}, webContents, request: async () => 401, secretProbe: async () => GOOD_SECRET, nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) }, stop: async () => {}, cleanup: () => {}, print: (l) => lines.push(l), exit: (c) => (code = c) });
     return { code, j: JSON.parse(lines[0]) };
   };
   const cases = [
@@ -177,6 +182,56 @@ test("the page probe: scripts that did not run, a POST refused for its Origin, a
   // the probe is one expression that sends no token and names no other address
   assert.ok(!/token=|x-swap-token|no1d:\/\/|https?:/.test(PAGE_PROBE));
   assert.match(PAGE_PROBE, /fetch\("\/api\/program\/open"/);
+});
+
+test("the secret window's probe: a page that did not load, a script, stylesheet or bridge missing, a probe that throws and no probe at all fail the self-test with words", async () => {
+  const run = async (secretProbe) => {
+    const lines = [];
+    let code = null;
+    await runSelfTest({ whenLoaded: async () => {}, webContents: goodPage(), request: async () => 401, secretProbe, nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) }, stop: async () => {}, cleanup: () => {}, print: (l) => lines.push(l), exit: (c) => (code = c) });
+    return { code, j: JSON.parse(lines[0]) };
+  };
+  const cases = [
+    [async () => ({ loaded: false, script: false, css: false, bridge: false, why: "ERR_FILE_NOT_FOUND" }), /secret window's page did not load \(ERR_FILE_NOT_FOUND\)/],
+    [async () => ({ loaded: false }), /secret window's page did not load$/],
+    [async () => ({ ...GOOD_SECRET, script: false }), /secret window's script did not run/],
+    [async () => ({ ...GOOD_SECRET, css: false }), /secret window's stylesheet did not load/],
+    [async () => ({ ...GOOD_SECRET, bridge: false }), /preload did not give the page its bridge/],
+    [async () => null, /did not answer its probe/],
+    [async () => { throw new Error("the window could not be made"); }, /the window could not be made/],
+    [undefined, /secret window's page could not be checked/],
+  ];
+  for (const [probe, re] of cases) {
+    const r = await run(probe);
+    assert.equal(r.code, 1, String(re));
+    assert.equal(r.j.selftest, "failed");
+    assert.match(r.j.why, re);
+    assert.equal("secret_page" in r.j, false);
+  }
+  assert.equal(secretProbeProblem(GOOD_SECRET), null);
+  const ok = await run(async () => GOOD_SECRET);
+  assert.equal(ok.code, 0);
+  assert.equal(ok.j.secret_page, true);
+});
+
+test("with the fake, a secret page that cannot be served fails the self-test with words", async () => {
+  const e = makeEnv({ argv: ["x.exe", "--self-test"] });
+  try {
+    // the secret session's handler answers nothing: the page's files are 404
+    e.electron.session.fromPartition = ((from) => (p) => {
+      const s = from(p);
+      if (p === "no1d-secret") {
+        const handle = s.protocol.handle.bind(s.protocol);
+        s.protocol.handle = (scheme) => handle(scheme, () => new Response("no", { status: 404 }));
+      }
+      return s;
+    })(e.electron.session.fromPartition);
+    await e.shell.start();
+    assert.equal(e.electron.app.exitCode, 1);
+    assert.match(JSON.parse(e.stdout[0]).why, /secret window's script did not run/);
+  } finally {
+    e.cleanup();
+  }
 });
 
 test("with the fake, a handler whose Origin check refuses the page fails the self-test with words", async () => {
@@ -247,6 +302,7 @@ test("the hold keeps everything up while it waits: the program stops only after 
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => (order.push("check"), { noid: { state: "not_running" } }) },
     stop: async () => order.push("stop"),
     cleanup: () => order.push("cleanup"),
@@ -261,6 +317,7 @@ test("the hold keeps everything up while it waits: the program stops only after 
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
     stop: async () => order.push(`stop after ${Date.now() - t0 >= 50}`),
     cleanup: () => {},
@@ -279,6 +336,7 @@ test("a stop that never ends: the line is already printed, and the program exits
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
     stop: () => new Promise(() => {}),
     cleanup: () => order.push("cleanup"),
@@ -297,6 +355,7 @@ test("the progress lines name each step in order; a progress function that throw
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
     stop: async () => {},
     cleanup: () => {},
@@ -305,13 +364,14 @@ test("the progress lines name each step in order; a progress function that throw
     holdMs: 5,
     progress: (s) => steps.push(s),
   });
-  assert.deepEqual(steps, ["checks begin", "page loaded", "request without the token answered", "page probe answered", "node check answered", "hold over", "result printed", "stopped"]);
+  assert.deepEqual(steps, ["checks begin", "page loaded", "request without the token answered", "page probe answered", "secret page probe answered", "node check answered", "hold over", "result printed", "stopped"]);
   let code = null;
   const lines = [];
   await runSelfTest({
     whenLoaded: async () => {},
     webContents: goodPage(),
     request: async () => 401,
+    secretProbe: async () => GOOD_SECRET,
     nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
     stop: async () => {},
     cleanup: () => {},

@@ -288,7 +288,10 @@ test("POST /api/board/slot and /api/board through the server: the slot is made, 
     // a swap that is not a slot has no board
     const b = env.addSwap({ role: "bob" });
     await api("GET", "/api/program"); // the next scan sees it
-    assert.equal((await api("POST", "/api/board", { swap: slot.replace(/./, "0"), op: "cancel" })).status, 404);
+    // another id: the first character changed for certain (a slot that starts with "0" once made this the same id, build run 14)
+    const other = `${slot[0] === "0" ? "1" : "0"}${slot.slice(1)}`;
+    assert.notEqual(other, slot);
+    assert.equal((await api("POST", "/api/board", { swap: other, op: "cancel" })).status, 404);
     void b;
     r = await api("POST", "/api/board", { swap: slot, op: "cancel" });
     assert.equal(r.status, 200);

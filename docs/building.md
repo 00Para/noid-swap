@@ -169,7 +169,7 @@ permissions (`id-token`, `attestations`, on that job only).
 **`desktop-startup`** (needs `desktop`; a fresh machine of each kind): checks the installer against its sha256 file; installs it
 (Windows: `/S`, per user, to `%LOCALAPPDATA%\Programs\no1d-swap`, the package name; macOS: attaches the disk image and copies the app); starts the
 program with `--self-test` (a hidden window on a temporary data folder, no vault, nothing can act) and requires its JSON line
-(`startup-check.js selftest`: page loaded, no Parano1d node, 401 without the token, hardened web preferences, exit code 0);
+(`startup-check.js selftest`: page loaded, no Parano1d node, 401 without the token, the page's scripts ran and its POST was refused for the token, the secret window's page loaded with its script, stylesheet and bridge, hardened web preferences, exit code 0);
 reads the fuses of the installed binary; checks the installed files against the manifest; runs offline `live.js` commands (an
 address from a key on the stdin pipe, a message signature, a verification, a `keygen --stdout` piped back in) once under the
 program's own binary with `ELECTRON_RUN_AS_NODE=1` and once under Node 24 and requires equal answers; on Windows plants
@@ -286,6 +286,14 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   that account can never be removed from Administrators, so this lets no one in that Administrators did not already cover. A
   refused folder now gives its descriptor as the self-test's detail. The same refusal would have stopped anyone who runs the
   program as the built-in Administrator account.
+- Run 14 (`a014974`): the Windows start-up job passed every step. At the first start of that installer, and of the Mac one built
+  by hand, the window that shows the recovery code closed at once and showed nothing, so no swap could start. Its page was
+  loaded from a `file://` URL inside `app.asar`; with the GrantFileProtocolExtraPrivileges fuse off, Chromium's own file loader
+  serves `file://` and cannot read inside the archive (ERR_FILE_NOT_FOUND). The self-test never opened that window, so the job
+  could not see it. The page is now served on the private scheme at `no1d://secret/` by that window's own session (exactly its
+  three files), the fuse stays off, and the self-test loads the page in a hidden window of that kind and requires its script, its
+  stylesheet and its preload's bridge (`secret_page: true`). Both ways were run in Electron 45.2.3 with the build's fuses and the
+  page inside an archive: `file://` failed as on the installed programs, the private scheme loaded.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

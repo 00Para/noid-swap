@@ -31,7 +31,7 @@ async function openWindow(electron, n = 0) {
   throw new Error("no window opened");
 }
 
-test("the window is hardened: own partition, preload, content protection, no devtools, file-only policy", async () => {
+test("the window is hardened: own partition, preload, content protection, no devtools, its own page only", async () => {
   const { electron, ui } = make();
   const p = ui.askText({ kind: "restore" });
   const w = await openWindow(electron);
@@ -44,23 +44,141 @@ test("the window is hardened: own partition, preload, content protection, no dev
   assert.equal(wp.devTools, false);
   assert.ok(!wp.partition.startsWith("persist:"));
   assert.equal(w.contentProtection, true);
-  assert.equal(w.loadedFile, HTML);
-  assert.equal(w.loadedUrl, null, "no server, no URL");
-  // it may load only its own folder
+  // the page comes from the private scheme, never from a file:// URL (Chromium's file loader cannot read inside app.asar)
+  assert.equal(w.loadedUrl, "no1d://secret/secret.html");
+  assert.equal(w.loadedFile, null, "no file:// load");
+  // it may load only its own page
   const decide = (url) => {
     let r;
     w.webContents.session.handlers.beforeRequest({ url }, (v) => (r = v));
     return r.cancel;
   };
-  assert.equal(decide(require("node:url").pathToFileURL(path.join(__dirname, "..", "secret", "secret.css")).href), false);
+  assert.equal(decide("no1d://secret/secret.css"), false);
+  assert.equal(decide("no1d://secret/secret.js"), false);
+  assert.equal(decide("no1d://app/api/program"), true, "never the console's API");
   assert.equal(decide("http://127.0.0.1:5000/api/program"), true);
   assert.equal(decide("https://example.com/"), true);
+  assert.equal(decide(require("node:url").pathToFileURL(path.join(__dirname, "..", "secret", "secret.css")).href), true, "no file:// at all");
   assert.equal(decide(require("node:url").pathToFileURL(path.join(__dirname, "..", "main.js")).href), true);
-  let prevented = false;
-  w.webContents.emit("will-navigate", { preventDefault: () => (prevented = true) }, "https://example.com/");
-  assert.equal(prevented, true);
+  const navPrevented = (url) => {
+    let prevented = false;
+    w.webContents.emit("will-navigate", { preventDefault: () => (prevented = true) }, url);
+    return prevented;
+  };
+  assert.equal(navPrevented("https://example.com/"), true);
+  assert.equal(navPrevented("no1d://app/"), true, "never to the console");
+  assert.equal(navPrevented("no1d://secret/secret.css"), true, "only to its own page");
+  assert.equal(navPrevented(require("node:url").pathToFileURL(HTML).href), true, "never to a file:// page");
+  assert.equal(navPrevented("no1d://secret/secret.html"), false);
   await electron.ipcMain.invoke("no1d-secret", w.webContents, { type: "cancel" });
   assert.equal(await p, null);
+});
+
+test("a probe window's bridge is refused: no request is open while it runs", async () => {
+  const { electron, ui } = make({
+    pageScript: async (_code, wc) => {
+      // the page uses its bridge while the probe runs: the main process refuses it
+      await assert.rejects(electron.ipcMain.invoke("no1d-secret", wc, { type: "submit", values: { ack: true } }), /refused/);
+      await assert.rejects(electron.ipcMain.invoke("no1d-secret", wc, { type: "cancel" }), /refused/);
+      return { script: true, css: true, bridge: true };
+    },
+  });
+  assert.deepEqual(await ui.probe(), { loaded: true, script: true, css: true, bridge: true });
+});
+
+test("the page's scheme handler: on the secret session only, exactly its three files, with their types; everything else is 404", async () => {
+  const { electron } = make();
+  const handler = electron.session.fromPartition("no1d-secret").protocol.handlers.no1d;
+  assert.equal(typeof handler, "function");
+  assert.equal(electron.session.defaultSession.protocol.handlers.no1d, undefined, "the default session answers nothing");
+  assert.ok(!electron.sessions.has("no1d-main") || electron.sessions.get("no1d-main").protocol.handlers.no1d === undefined, "not attached to the main window's session by the secret window");
+  const get = async (url, init) => {
+    const r = await handler(new Request(url, init || { method: "GET" }));
+    return { status: r.status, type: r.headers.get("content-type"), cache: r.headers.get("cache-control"), sniff: r.headers.get("x-content-type-options"), body: Buffer.from(await r.arrayBuffer()) };
+  };
+  const dir = path.join(__dirname, "..", "secret");
+  for (const [name, type] of [["secret.html", /^text\/html/], ["secret.css", /^text\/css/], ["secret.js", /^text\/javascript/]]) {
+    const r = await get(`no1d://secret/${name}`);
+    assert.equal(r.status, 200, name);
+    assert.match(r.type, type);
+    assert.equal(r.cache, "no-store");
+    assert.equal(r.sniff, "nosniff");
+    assert.ok(r.body.equals(fs.readFileSync(path.join(dir, name))), `${name} is the file itself`);
+  }
+  for (const url of [
+    "no1d://app/secret.html",
+    "no1d://app/api/program",
+    "no1d://secret/",
+    "no1d://secret/preload-secret.js",
+    "no1d://secret/../main.js",
+    "no1d://secret/%2e%2e/main.js",
+    "no1d://secret/..%2fmain.js",
+    "no1d://secret/secret.html?x=1",
+    "no1d://secret/SECRET.HTML",
+    "no1d://secret:1/secret.html",
+  ]) {
+    assert.equal((await get(url)).status, 404, url);
+  }
+  // a Request cannot carry credentials; the handler refuses them when it is asked with such a URL anyway
+  assert.equal((await handler({ url: "no1d://user@secret/secret.html", method: "GET" })).status, 404);
+  assert.equal((await handler({ url: "not a url", method: "GET" })).status, 404);
+  assert.equal((await get("no1d://secret/secret.html", { method: "POST", body: "x" })).status, 404, "GET only");
+  assert.equal((await get("no1d://secret/secret.html", { method: "HEAD" })).status, 404, "GET only");
+});
+
+test("the page server: a file it cannot read is 404, never an error", async () => {
+  const { createPageServer } = require("../lib/secretwin");
+  const serve = createPageServer("/nowhere", () => {
+    throw new Error("ENOENT");
+  });
+  assert.equal((await serve(new Request("no1d://secret/secret.html"))).status, 404);
+});
+
+test("probe: the page loads in a window that is never shown, is asked for its script and bridge, and the window is destroyed", async () => {
+  const { electron, ui } = make();
+  const r = await ui.probe();
+  assert.deepEqual(r, { loaded: true, script: true, css: true, bridge: true });
+  assert.equal(electron.windows.length, 1);
+  const w = electron.windows[0];
+  assert.equal(w.loadedUrl, "no1d://secret/secret.html");
+  assert.equal(w.options.webPreferences.partition, "no1d-secret");
+  assert.equal(w.options.webPreferences.preload, PRELOAD);
+  assert.equal(w.contentProtection, true);
+  assert.ok(!electron.calls.some((c) => c.who === "window" && c.name === "show"), "never shown");
+  assert.equal(w.isDestroyed(), true);
+  assert.equal(w.webContents.sent.length, 0, "nothing is sent to the page");
+  // the page answers for itself: a script that did not run, no bridge
+  const bad = make({ pageScript: async () => ({ script: false, css: true, bridge: true }) });
+  assert.deepEqual(await bad.ui.probe(), { loaded: true, script: false, css: true, bridge: true });
+  const nob = make({ pageScript: async () => ({ script: true, css: true, bridge: false }) });
+  assert.deepEqual(await nob.ui.probe(), { loaded: true, script: true, css: true, bridge: false });
+  const thrown = make({ pageScript: async () => { throw new Error("x"); } });
+  assert.deepEqual(await thrown.ui.probe(), { loaded: true, script: false, css: false, bridge: false });
+});
+
+test("probe: a page that fails to load, or never answers, is reported, and the window is gone", async () => {
+  const failed = make({ loadFails: true });
+  const r = await failed.ui.probe();
+  assert.equal(r.loaded, false);
+  assert.equal(failed.electron.windows[0].isDestroyed(), true);
+  const silent = make({ autoLoad: false });
+  const t = await silent.ui.probe({ timeoutMs: 20 });
+  assert.deepEqual(t, { loaded: false, script: false, css: false, bridge: false, why: "timed out" });
+  assert.equal(silent.electron.windows[0].isDestroyed(), true);
+});
+
+test("probe waits for an open request: one window at a time", async () => {
+  const { electron, ui } = make();
+  const a = ui.askText({ kind: "restore" });
+  const pr = ui.probe();
+  const w1 = await openWindow(electron);
+  await tick();
+  await tick();
+  assert.equal(electron.windows.length, 1, "the probe waits");
+  await electron.ipcMain.invoke("no1d-secret", w1.webContents, { type: "submit", values: { text: "one" } });
+  assert.equal(await a, "one");
+  assert.deepEqual(await pr, { loaded: true, script: true, css: true, bridge: true });
+  assert.equal(electron.windows.length, 2);
 });
 
 test("it is modal to the main window when there is one", async () => {
