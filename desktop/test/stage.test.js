@@ -520,7 +520,11 @@ test("command line: stage, check, manifest and verify-packed, with exit codes", 
   const t = tmp();
   try {
     const r = makeRepo(t.dir);
-    const cli = (...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8" });
+    // without the hosted build's GITHUB_SHA (set on GitHub's machines, where the "no commit given" case below would take it; run 6)
+    const base = { ...process.env };
+    delete base.GITHUB_SHA;
+    const cliEnv = (env, ...args) => spawnSync(process.execPath, [SCRIPT, ...args], { encoding: "utf8", env });
+    const cli = (...args) => cliEnv(base, ...args);
     const staged = cli("stage", "--repo", r.repo, "--out", r.out, "--bin-out", r.binOut, "--swap-cli-dir", r.swap, "--platform", "win");
     assert.equal(staged.status, 0, staged.stderr);
     assert.match(staged.stdout, /staged version 0\.1\.0/);
@@ -535,7 +539,10 @@ test("command line: stage, check, manifest and verify-packed, with exit codes", 
     const bad = cli("verify-packed", "--resources", res, "--manifest", manifest);
     assert.equal(bad.status, 1);
     assert.match(bad.stderr, /changed: bin\/swap-cli\.exe/);
-    assert.equal(cli("manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 1, "no commit given and GITHUB_SHA unset or bad");
+    assert.equal(cli("manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 1, "no commit given and GITHUB_SHA unset");
+    assert.equal(cliEnv({ ...base, GITHUB_SHA: "not-a-commit" }, "manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 1, "GITHUB_SHA bad");
+    assert.equal(cliEnv({ ...base, GITHUB_SHA: COMMIT }, "manifest", "--resources", res, "--out", manifest, "--version", "0.1.0").status, 0, "GITHUB_SHA is the commit when none is given");
+    assert.equal(JSON.parse(fs.readFileSync(manifest, "utf8")).commit, COMMIT);
     assert.equal(cli("nonsense").status, 2);
     assert.equal(cli("stage", "--repo").status, 1);
   } finally {

@@ -222,6 +222,13 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   compared every `no1d-selftest-` folder in the shared temporary folder, and another run's folder was there. Those tests now check
   only their own folder, and the self-test's removal of its folder tries again if a scanner briefly holds a file. That this was
   run 5's cause is not proved.
+- Run 6 (`356d595`) named the failure in its annotation: one test, `stage.test.js` "command line: stage, check, manifest and
+  verify-packed". It expects `stage.js manifest` without `--commit` to fail, but on GitHub's machines `GITHUB_SHA` is set, and the
+  script takes the commit from it, as written. The test now runs the script without `GITHUB_SHA`, and it checks a good and a bad
+  `GITHUB_SHA` as well. Run 5 most likely failed on the same test, which it had too. The whole desktop suite passes here with
+  GitHub's usual build variables set. macOS again had no machine.
+- A scheduled run once a day at 03:17 UTC, a quiet hour, gives the Mac program a hosted build without anyone starting one. GitHub
+  gave the macOS jobs a machine in runs 2 and 3 and none in runs 4 to 6 ("not acquired", its capacity).
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

@@ -124,6 +124,19 @@ test("the two test names the no-skip step looks for are the names of the real te
   assert.ok(rs.includes("SKIPPED:"), "the skip message the step greps for still exists");
 });
 
+test("triggers: a push to main, a manual start, and one scheduled run a day at a quiet hour (UTC)", (ctx) => {
+  if (needYaml(ctx)) return;
+  const on = doc.on;
+  assert.deepEqual(Object.keys(on).sort(), ["push", "schedule", "workflow_dispatch"]);
+  assert.deepEqual(on.push, { branches: ["main"] });
+  assert.equal(on.schedule.length, 1);
+  const [min, hour, dom, mon, dow] = on.schedule[0].cron.split(" ");
+  assert.deepEqual([dom, mon, dow], ["*", "*", "*"], "once a day");
+  assert.ok(Number(hour) >= 1 && Number(hour) <= 5, "a quiet hour, when GitHub's macOS machines were free");
+  assert.ok(Number(min) > 0 && Number(min) < 60, "not on the hour, when every schedule starts at once");
+  assert.ok(!("pull_request" in on) && !("pull_request_target" in on), "no run for code from outside");
+});
+
 test("desktop job: a failing test is named in an annotation (readable without a login), right after the test step and only when it failed", (ctx) => {
   if (needYaml(ctx)) return;
   const steps = doc.jobs.desktop.steps;

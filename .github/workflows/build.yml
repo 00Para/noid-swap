@@ -25,6 +25,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Once a day at a quiet hour (UTC). GitHub gave the macOS jobs a machine in runs 2 and 3 and none in runs 4 to 6 ("not acquired",
+  # its capacity), so this run gives the Mac program a hosted build at an hour when fewer jobs wait, without anyone starting one.
+  schedule:
+    - cron: "17 3 * * *"
 
 permissions:
   contents: read
