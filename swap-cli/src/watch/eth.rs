@@ -128,6 +128,15 @@ pub fn lock_word_of(kind: LockKind, preimage: &[u8; 32]) -> [u8; 32] {
 /// Bob's own sender, so its size does not depend on the other users of the contract.
 pub const DEFAULT_LOG_RANGE_MAX: u64 = 10_000;
 
+/// How many skipped `Locked` logs are described one by one in [`EthObservation::ignored_logs`]; the rest are counted.
+pub const MAX_IGNORED_LOGS: usize = 8;
+
+/// `0x1234…abcd` of a 32-byte word, for a note.
+fn short_hex(w: &[u8; 32]) -> String {
+    let h = hex::encode(w);
+    format!("0x{}…{}", &h[..4], &h[60..])
+}
+
 /// The error when `getLock` shows a lock that `eth_getLogs` does not. It stays an error (the poll fails and the engine decides nothing on
 /// it); the text only says what is the usual cause right after a lock was mined, so that one failed poll there does not alarm.
 pub const NO_LOCKED_EVENT_MSG: &str = "getLock shows this lock but eth_getLogs returned no Locked event for it. Right after a lock was mined this is usually the provider's log index lagging behind its state, and it clears on the next poll. If it does not clear, the cause is one of: --eth-from-block above the lock's block, a provider block-range limit, or a log index that stays behind; fix that and poll again";
@@ -260,10 +269,16 @@ impl<R: JsonRpc> EthWatcher<R> {
         // lock is never hidden behind the first. The pinned lock (or, without a pin, the first match) comes first.
         // REVIEW-6 R6-1: both kinds find the swap's own locks the same way, through the INDEXED sender and receiver topics. The poseidon
         // kind's all-`Locked` scan is separate (below), asked only when the caller says Bob is deciding to lock, and it cannot fail the poll.
-        let discovered: Vec<[u8; 32]> = match &self.discover {
+        // A `Locked` log whose amount or timelock does not fit the widths this tool uses is skipped, not an error (`newLock` takes any
+        // uint256 timelock in the future, so one such lock to Alice's receiver could otherwise stop every poll). It can never be the agreed
+        // lock; each skip is reported in `ignored_logs`.
+        let (discovered, mut ignored_logs, ignored_total): (Vec<[u8; 32]>, Vec<String>, usize) = match &self.discover {
             Some(rule) => self.discover_lock_ids(rule)?,
-            None => Vec::new(),
+            None => (Vec::new(), Vec::new(), 0),
         };
+        if ignored_total > ignored_logs.len() {
+            ignored_logs.push(format!("and {} more such log(s), not listed", ignored_total - ignored_logs.len()));
+        }
         let mut ids: Vec<[u8; 32]> = Vec::new();
         if self.lock_id != [0u8; 32] {
             ids.push(self.lock_id);
@@ -384,6 +399,7 @@ impl<R: JsonRpc> EthWatcher<R> {
             word_scan,
             reverted_claim,
             reveal_tx_note,
+            ignored_logs,
             signer_nonce_latest,
             signer_nonce_pending,
             second: None,
@@ -409,7 +425,9 @@ impl<R: JsonRpc> EthWatcher<R> {
 
     /// Alice's lookup: EVERY `Locked(_, sender, receiver, ...)` of our contract whose `hashlock` is ours, in log
     /// order (REVIEW-2 F10: the first is not necessarily the right one). Each id must recompute from its own terms.
-    fn discover_lock_ids(&self, rule: &LockDiscovery) -> Result<Vec<[u8; 32]>, RpcError> {
+    /// Returns the lock ids, then at most [`MAX_IGNORED_LOGS`] lines on the logs skipped because their amount or timelock does not fit,
+    /// and how many were skipped in all.
+    fn discover_lock_ids(&self, rule: &LockDiscovery) -> Result<(Vec<[u8; 32]>, Vec<String>, usize), RpcError> {
         const M: &str = "eth_getLogs";
         let filter = json!([{
             "address": hex0x(&self.contract),
@@ -420,6 +438,8 @@ impl<R: JsonRpc> EthWatcher<R> {
         let logs = self.rpc.call(M, filter)?;
         let logs = logs.as_array().ok_or_else(|| dec(M, "result is not an array"))?;
         let mut found: Vec<[u8; 32]> = Vec::new();
+        let mut ignored: Vec<String> = Vec::new();
+        let mut ignored_total = 0usize;
         for log in logs {
             if log.get("removed").and_then(Value::as_bool) == Some(true) {
                 continue;
@@ -443,8 +463,25 @@ impl<R: JsonRpc> EthWatcher<R> {
             if data.len() != 96 || word_at(M, &data, 1)? != rule.hashlock {
                 continue;
             }
-            let amount_wei = u128_word(M, &word_at(M, &data, 0)?)?;
-            let timelock = u64_word(M, &word_at(M, &data, 2)?)?;
+            let (amount_wei, timelock) = match (u128_word(M, &word_at(M, &data, 0)?), u64_word(M, &word_at(M, &data, 2)?)) {
+                (Ok(a), Ok(t)) => (a, t),
+                (a, t) => {
+                    ignored_total += 1;
+                    if ignored.len() < MAX_IGNORED_LOGS {
+                        let what = match (a.is_err(), t.is_err()) {
+                            (true, true) => "its amount and its timelock do not fit",
+                            (true, false) => "its amount does not fit in 128 bits",
+                            _ => "its timelock does not fit in 64 bits",
+                        };
+                        let block = log.get("blockNumber").and_then(|b| quantity(M, b).ok()).map_or_else(|| "?".to_string(), |b| b.to_string());
+                        ignored.push(format!(
+                            "a Locked log of the agreed parties and hashlock was skipped: {what}, so it can never be the agreed lock (lock {}, block {block})",
+                            short_hex(&topics[1])
+                        ));
+                    }
+                    continue;
+                }
+            };
             if compute_lock_id(&rule.sender, &rule.receiver, amount_wei, &rule.hashlock, timelock) != topics[1] {
                 return Err(dec(M, "Locked event: lockId does not recompute from its own fields"));
             }
@@ -452,7 +489,7 @@ impl<R: JsonRpc> EthWatcher<R> {
                 found.push(topics[1]);
             }
         }
-        Ok(found)
+        Ok((found, ignored, ignored_total))
     }
 
     /// The `poseidon` word check (review V2-8, REVIEW-6 R6-1, REVIEW-7 R7-1). `Locked` has the lock word in its DATA, not as a topic, but
@@ -484,10 +521,22 @@ impl<R: JsonRpc> EthWatcher<R> {
         let logs: Vec<Value> = match query(&format!("0x{:x}", self.from_block), "latest") {
             Ok(l) => l,
             Err(RpcError::Remote { .. }) => {
+                if self.from_block > latest_block {
+                    return Err(RpcError::Decode(format!(
+                        "eth_getLogs: from_block {} is ahead of latest_block {latest_block}",
+                        self.from_block
+                    )));
+                }
+                const MAX_CHUNKS: usize = 512;
                 let step = self.log_range_max.max(1);
                 let mut all = Vec::new();
                 let mut start = self.from_block;
+                let mut chunks: usize = 0;
                 while start <= latest_block {
+                    chunks += 1;
+                    if chunks > MAX_CHUNKS {
+                        return Err(RpcError::Decode(format!("eth_getLogs: scan exceeded {MAX_CHUNKS} chunks")));
+                    }
                     let end = start.saturating_add(step - 1).min(latest_block);
                     all.extend(query(&format!("0x{start:x}"), &format!("0x{end:x}"))?);
                     if end == u64::MAX {

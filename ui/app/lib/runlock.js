@@ -2,8 +2,10 @@
 /*
  * One console per run folder (actions mode). Two consoles on the same folder would each keep their own latches, busy flag and watch state,
  * so a click in one is invisible to the other (a double funding, a double send). The lock is a file in the run folder, created with the
- * exclusive flag ("wx": it fails when the file exists), holding the pid and the start time of the console. It is removed on a clean exit.
- * A lock whose pid is gone (a crash, a killed window) is stale and is replaced, and the caller says so. A lock whose content cannot be
+ * exclusive flag ("wx": it fails when the file exists), holding the pid, the start time of the console and the start time of its process
+ * ("proc"). It is removed on a clean exit. A lock whose pid is gone (a crash, a killed window), or whose pid now belongs to another process
+ * (after a reboot or a crash the system reuses pids: the process start time differs), is stale and is replaced, and the caller says so.
+ * When the start time of a running process cannot be read, the lock is kept (fail closed). A lock whose content cannot be
  * read is NOT replaced (it might be mid-write by a console that is starting right now): remove it by hand.
  *
  * Two consoles can find the same stale lock at the same moment and both take it over. So a takeover waits a moment and reads the file again,
@@ -13,6 +15,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const cp = require("child_process");
 
 const FILE = "ui-console.lock";
 const SETTLE_MS = 150;
@@ -25,6 +28,53 @@ function pidAlive(pid) {
   } catch (e) {
     return !!e && e.code === "EPERM"; // exists, but not ours to signal
   }
+}
+
+/**
+ * An opaque string that identifies the process incarnation behind `pid` (its start time), or null when it cannot be read.
+ * Linux: field 22 of /proc/PID/stat; macOS and other Unix: `ps -o lstart=`; Windows: the process creation time from PowerShell.
+ */
+function procStart(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const rest = stat.slice(stat.lastIndexOf(")") + 2).split(" "); // after "pid (comm) ": state is field 3
+      return rest[19] ? `linux:${rest[19]}` : null; // starttime is field 22
+    }
+    const r =
+      process.platform === "win32"
+        ? cp.spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`], { encoding: "utf8", timeout: 10000, windowsHide: true })
+        : cp.spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000, env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
+    const out = r && r.status === 0 ? String(r.stdout).trim() : "";
+    return out ? `${process.platform}:${out}` : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The start time of THIS process, read once per process and kept (also when it could not be read: a blocked or slow PowerShell is not asked again for the
+ * next swap folder). The console takes one lock per swap folder at start-up, and on Windows every read is a synchronous PowerShell call of up to 10 s.
+ * Another pid (a holder found in a lock file) is never cached: it is read only on the takeover path.
+ */
+const ownStarts = new Map();
+function ownProcStart(pid, read = procStart) {
+  if (!ownStarts.has(pid)) ownStarts.set(pid, read(pid));
+  return ownStarts.get(pid);
+}
+
+/** For tests: forget the kept start times. */
+function resetOwnProcStart() {
+  ownStarts.clear();
+}
+
+/** Does the lock's holder still run? A live pid with another start time is a reused pid: not the holder. An unreadable start time keeps the lock. */
+function holderRuns(held, alive, start) {
+  if (!alive(held.pid)) return false;
+  if (typeof held.proc !== "string" || held.proc === "") return true; // a lock written before the start time was recorded: the pid alone
+  const now = start(held.pid);
+  return now === null || now === held.proc;
 }
 
 /** A short pause, without a timer (the caller is synchronous). */
@@ -46,9 +96,10 @@ class RunLock {
     const now = o.now || Date.now;
     const alive = o.isAlive || pidAlive;
     const sleep = o.sleep || sleepMs;
+    const start = o.procStart || ((p) => (p === process.pid ? ownProcStart(p) : procStart(p)));
     const file = path.join(dir, FILE);
     const started = new Date(now()).toISOString().replace(/\.\d{3}Z$/, "Z");
-    const body = JSON.stringify({ pid, started, role: o.role || null }) + "\n";
+    const body = JSON.stringify({ pid, started, proc: o.procStart ? o.procStart(pid) : ownProcStart(pid), role: o.role || null }) + "\n";
     let replaced = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -71,7 +122,7 @@ class RunLock {
         held = null;
       }
       if (!held || !Number.isInteger(held.pid)) throw new Error(`${file} exists and cannot be read: another console may be starting on this run folder. Remove the file by hand if no console is running`);
-      if (alive(held.pid)) throw new Error(`another console is already running on this run folder (pid ${held.pid}, started ${held.started || "?"}; ${file}). Use that one, or stop it first. If no console is running, delete ${file}`);
+      if (holderRuns(held, alive, start)) throw new Error(`another console is already running on this run folder (pid ${held.pid}, started ${held.started || "?"}; ${file}). Use that one, or stop it first. If no console is running, delete ${file}`);
       replaced = held;
       try {
         // only the stale record we read: a lock that was replaced meanwhile is somebody else's and is left alone
@@ -190,4 +241,4 @@ class LazyRunLock {
   }
 }
 
-module.exports = { RunLock, LazyRunLock, FILE, pidAlive };
+module.exports = { RunLock, LazyRunLock, FILE, pidAlive, procStart, ownProcStart, resetOwnProcStart };

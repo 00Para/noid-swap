@@ -70,6 +70,7 @@ const AMOUNT = /^[1-9]\d{0,19}$/;
 const URL_CHARS = /^[A-Za-z0-9\-._~:/?@&=+%[\]]+$/;
 const HOST = /^(?:\[[0-9A-Fa-f:]{2,45}\]|[A-Za-z0-9][A-Za-z0-9.-]{0,252})$/;
 const LOOPBACK = new Set(["127.0.0.1", "[::1]", "localhost"]);
+const STRICT_LOOPBACK = new Set(["127.0.0.1", "[::1]"]);
 
 class RunSettingsError extends Error {
   /** @param {string} message @param {string[]} [problems] */
@@ -115,10 +116,28 @@ function urlProblem(s, { httpsOnly = false, anyHttp = false } = {}) {
   return null;
 }
 
-/** True when a node address is on this machine (the host is 127.0.0.1, [::1] or localhost) and is written with http:// (swap-cli counts only that form as its own node). */
+/** Do two node addresses name the same node (same scheme, host and port, as the URL parser reads them; the path and the query do not make another node, and swap-cli compares the same way)? Used for "the second node must be another node". */
+function sameNodeUrl(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  if (a.toLowerCase() === b.toLowerCase()) return true;
+  try {
+    const ua = new URL(a);
+    const ub = new URL(b);
+    const portOf = (u) => u.port || (u.protocol === "https:" ? "443" : u.protocol === "http:" ? "80" : "");
+    return ua.protocol === ub.protocol && ua.hostname.toLowerCase() === ub.hostname.toLowerCase() && portOf(ua) === portOf(ub);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when a node address is on this machine and is written with http:// as one of the machine's own addresses: 127.0.0.1 or [::1] (swap-cli counts only the http:// form as its
+ * own node). A name such as localhost goes through the hosts file, so it is no proof of loopback: the program's node check and the program settings take only the two literals,
+ * and this answer waives the second Parano1d node on Ethereum mainnet, so it stays strict. The name localhost still passes `urlProblem` for a test network.
+ */
 function isLoopbackUrl(s) {
   const m = typeof s === "string" ? /^http:\/\/(\[[^\]]*\]|[^:/?#]*)/.exec(s) : null;
-  return !!m && LOOPBACK.has(m[1].toLowerCase());
+  return !!m && STRICT_LOOPBACK.has(m[1].toLowerCase());
 }
 
 /**
@@ -137,7 +156,7 @@ function productionRules(o, p, create) {
   if (o.eth_rpc2 === null) p("eth_rpc2", "required on Ethereum mainnet: two Ethereum nodes from two operators");
   if (o.single_node_ok !== false) p("single_node_ok", "must be false on Ethereum mainnet");
   if (o.handover !== null) p("handover", "must be null on Ethereum mainnet: the board does not run there");
-  if (o.role === "bob" && o.noid_rpc2 === null && !isLoopbackUrl(o.noid_rpc)) p("noid_rpc2", "required for Bob on Ethereum mainnet unless his Parano1d node is on this machine: the producer check needs a second node");
+  if (o.role === "bob" && o.noid_rpc2 === null && !isLoopbackUrl(o.noid_rpc)) p("noid_rpc2", "required for Bob on Ethereum mainnet unless his Parano1d node is on this machine, written as http://127.0.0.1 or http://[::1]: the producer check needs a second node");
 }
 
 /** Problems (an empty list = valid) of a settings object. Messages name the key and the rule, never a value. */
@@ -243,8 +262,8 @@ function validate(obj, { create = false } = {}) {
   bool("single_node_ok");
   if (o.noid_rpc2_remote === true && o.noid_rpc2 === null) p("noid_rpc2_remote", "true only with a second node (noid_rpc2)");
   if (o.eth_rpc2_remote === true && o.eth_rpc2 === null) p("eth_rpc2_remote", "true only with a second node (eth_rpc2)");
-  if (typeof o.noid_rpc2 === "string" && typeof o.noid_rpc === "string" && o.noid_rpc2.toLowerCase() === o.noid_rpc.toLowerCase()) p("noid_rpc2", "must be a different node from noid_rpc");
-  if (typeof o.eth_rpc2 === "string" && typeof o.eth_rpc === "string" && o.eth_rpc2.toLowerCase() === o.eth_rpc.toLowerCase()) p("eth_rpc2", "must be a different node from eth_rpc");
+  if (sameNodeUrl(o.noid_rpc2, o.noid_rpc)) p("noid_rpc2", "must be a different node from noid_rpc");
+  if (sameNodeUrl(o.eth_rpc2, o.eth_rpc)) p("eth_rpc2", "must be a different node from eth_rpc");
   whole("rpc_timeout_s", 1, 600);
 
   for (const k of ["gas_price_gwei", "priority_fee_gwei"]) {
@@ -823,6 +842,7 @@ module.exports = {
   productionReason,
   migrateFromEnvLocal,
   urlProblem,
+  sameNodeUrl,
   isLoopbackUrl,
   MAINNET_TIP_MAX_GWEI,
   MAINNET_CAP_MAX_GWEI,

@@ -365,9 +365,62 @@ describe("live.js (over Hardhat's in-process network)", function () {
       const l = await live.lock(provider, w, { ...tgt, contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal, receiver: await bob.getAddress(), amountWei: "1000" });
       expect(l.sender).to.equal(address);
 
-      fs.writeFileSync(path.join(dir, "bad.key"), "not a key\n");
+      fs.writeFileSync(path.join(dir, "bad.key"), "not a key\n", { mode: 0o600 });
       expect(() => live.loadSigner(provider, path.join(dir, "bad.key"))).to.throw(/0x" \+ 64 hex/);
       expect(() => live.loadSigner(provider, path.join(dir, "missing.key"))).to.throw(/not found/);
+    });
+
+    it("a key file that group or other can read is refused where modes mean something, and is judged by its mode alone", async () => {
+      // the rule itself, on every platform
+      expect(() => live.checkKeyFileMode("k.key", 0o100644, "linux")).to.throw(/--key-file: k\.key can be read by group or other \(mode 0644\).*chmod 600.*refusing/);
+      expect(() => live.checkKeyFileMode("k.key", 0o100640, "darwin")).to.throw(/mode 0640/);
+      expect(() => live.checkKeyFileMode("k.key", 0o100604, "linux")).to.throw(/mode 0604/);
+      expect(() => live.checkKeyFileMode("k.key", undefined, "linux")).to.throw(/mode unknown/);
+      expect(() => live.checkKeyFileMode("k.key", 0o100600, "linux")).to.not.throw();
+      expect(() => live.checkKeyFileMode("k.key", 0o100400, "linux")).to.not.throw();
+      expect(() => live.checkKeyFileMode("k.key", 0o100666, "win32")).to.not.throw();
+      // a real file (POSIX only: Windows has no owner-only mode bits to read)
+      if (process.platform !== "win32") {
+        const file = path.join(dir, "open.key");
+        await live.keygen(null, null, { out: file });
+        expect(() => live.loadSigner(provider, file)).to.not.throw();
+        fs.chmodSync(file, 0o644);
+        expect(() => live.loadSigner(provider, file)).to.throw(/can be read by group or other \(mode 0644\)/);
+        fs.chmodSync(file, 0o600);
+        expect(() => live.loadSigner(provider, file)).to.not.throw();
+      }
+    });
+
+    it("lock reads the receiver's code before it signs: a receiver with code (a contract or an EIP-7702 delegation) or one that cannot be read is refused, in a dry run too", async () => {
+      const file = path.join(dir, "lk.key");
+      const { address } = await live.keygen(null, null, { out: file });
+      await live.send(provider, alice, { to: address, amountWei: ethers.parseEther("1").toString() });
+      const w = live.loadSigner(provider, file);
+      const receiver = ethers.Wallet.createRandom().address;
+      const args = async (over = {}) => ({ ...tgt, contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal: String((await latestTs()) + HOUR), receiver, amountWei: "1000", ...over });
+      const setCode = (code) => provider.send("hardhat_setCode", [receiver, code]);
+      const REFUSED = /refusing: the lock's receiver 0x[0-9a-fA-F]{40} has code on chain \(\d+ bytes, read before the long checks; T11: EOAs only, and an EIP-7702 delegation counts too\); a lock to it could never be claimed if it rejects ETH, and the claim would still publish the secret; nothing was signed, nothing was sent$/;
+      for (const code of ["0x00", "0xef0100" + "ab".repeat(20)]) {
+        await setCode(code);
+        try {
+          await expect(live.lock(provider, w, await args({ dryRun: true })), "dry run " + code).to.be.rejectedWith(REFUSED);
+          const before = await provider.getTransactionCount(address, "latest");
+          await expect(live.lock(provider, w, await args()), "real " + code).to.be.rejectedWith(REFUSED);
+          expect(await provider.getTransactionCount(address, "latest"), "nothing was sent").to.equal(before);
+        } finally {
+          await setCode("0x");
+        }
+      }
+      // a receiver without code locks as before
+      const ok = await live.lock(provider, w, await args());
+      expect(ok.sender).to.equal(address);
+      // a node that cannot answer the code read: refused, not guessed
+      const blindRead = async (a, tag) => {
+        if (String(a).toLowerCase() === receiver.toLowerCase()) throw new Error("no code reads here");
+        return provider.getCode(a, tag);
+      };
+      const blind = new Proxy(provider, { get: (t, k) => (k === "getCode" ? blindRead : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+      await expect(live.lock(blind, w, await args({ dryRun: true }))).to.be.rejectedWith(/refusing: could not read the code of the lock's receiver 0x[0-9a-fA-F]{40} before the long checks/);
     });
   });
 });
@@ -735,7 +788,7 @@ describe("live.js gates (REVIEW-2 F1, F3, F4, F7)", function () {
           });
         },
       });
-      await expect(live.claim(liar, bob, { ...base(l), secret: l.preimage, dryRun: true })).to.be.rejectedWith(/disagrees with getLock/);
+      await expect(live.claim(liar, bob, { ...base(l), secret: l.preimage, dryRun: true })).to.be.rejectedWith(/disagrees with getLock|does not recompute its lock id from its own fields/);
     });
 
     it("still sends a real claim when every gate passes, and --confirmations keeps working", async () => {
@@ -3146,8 +3199,10 @@ describe("live.js --mainnet (chain id 1)", function () {
       const clNoSecret = await live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, swap: clSwap, dryRun: true, ...m() });
       expect(clNoSecret.gasEstimate).to.equal(null);
       expect(clNoSecret.maxFeeGwei).to.equal("50.0");
-      expect(clNoSecret.worstCaseFeeWei).to.equal(null);
-      expect(clNoSecret.worstCaseFeeNote).to.match(/real secret/);
+      // The gas limit is fixed, so the worst case is known without the secret and equals the one with it.
+      expect(clNoSecret.worstCaseFeeWei).to.equal(cl.worstCaseFeeWei);
+      expect(clNoSecret.requiredWei).to.equal(cl.requiredWei);
+      expect(clNoSecret).to.not.have.property("worstCaseFeeNote");
       expect(clNoSecret.senderBalanceWei).to.equal((await bal(bobAddr)).toString());
 
       await passAge(HOUR + 5);

@@ -50,7 +50,7 @@
 //! Known cost: step 7 is one RPC per single-page mempool entry. That is fine
 //! for a testnet mempool; a busy mainnet mempool would want a smarter filter.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -58,10 +58,20 @@ use serde_json::{json, Value};
 
 use super::{ConfirmedTx, JsonRpc, NoidInstance, NoidInstanceStatus, NoidObservation, PendingCall, RpcError};
 
-/// How many instance slots to ask for. Our opening's root should own exactly
-/// one; the page is a little larger so a double-funding is visible, not hidden: every non-empty slot is reported in
-/// `NoidObservation::instances` (REVIEW-2 F10), the first one also in the legacy single-instance fields.
-const INSTANCE_PAGE: u32 = 16;
+/// How many instance slots to ask for per page. `observe` follows `next_slot` up to [`MAX_INSTANCE_PAGES`]
+/// so dust outputs at lower slot indices can never eclipse a funded instance.
+/// The first page keeps the size the tool always asked for (so every recorded fixture still answers); the next ones use the node's maximum.
+const INSTANCE_FIRST_PAGE: u32 = 16;
+const INSTANCE_PAGE: u32 = 256;
+const MAX_INSTANCE_PAGES: usize = 64;
+/// The most coins one read lists: the first page plus the later ones (the page counter stops the read after `MAX_INSTANCE_PAGES` pages).
+pub const MAX_ROOT_COINS: u32 = INSTANCE_FIRST_PAGE + (MAX_INSTANCE_PAGES as u32 - 1) * INSTANCE_PAGE;
+
+fn too_many_coins() -> String {
+    format!(
+        "paranoid_getObjectInstances: more than {MAX_ROOT_COINS} coins at the contract root and the node gave no definite answer for the swap's own slot: the list cannot be judged"
+    )
+}
 
 // `serde` structs that mirror only the fields we read (see module docs).
 
@@ -80,6 +90,9 @@ struct ObjectInstances {
     /// Height of the State snapshot the page was read from (the node identifies every page by it).
     #[serde(default)]
     height: u64,
+    /// Inclusive cursor for the next page, if more slots remain at this root.
+    #[serde(default)]
+    next_slot: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +102,9 @@ struct ObjectStatus {
     /// Height the status was computed at.
     #[serde(default)]
     tip_height: u64,
+    /// Present on real nodes: lets a direct slot lookup recover a tracked instance even under a root flood.
+    #[serde(default)]
+    slot: Option<SlotInfo>,
 }
 
 #[derive(Deserialize)]
@@ -156,15 +172,33 @@ pub struct NoidWatcher<R: JsonRpc> {
     pub opening_hex: String,
     /// Clock for `observed_at` (Unix seconds); the system clock unless a test pins it.
     pub clock: fn() -> u64,
+    /// Optional already-recorded instance slot: queried directly via `paranoid_getObjectStatus` if not seen in pages.
+    pub tracked_slot: Option<u32>,
+    /// True once the swap is committed to claiming/recovering `tracked_slot` (so a root flood beyond `MAX_INSTANCE_PAGES` cannot stall claim/recovery).
+    pub allow_truncated_with_tracked: bool,
+    /// The agreed amount: with it a status is asked only for the tracked slot and for coins of this amount (one call per coin would be
+    /// thousands of calls on a crowded root). Without it every coin gets one.
+    pub agreed_amount: Option<u64>,
 }
 
 impl<R: JsonRpc> NoidWatcher<R> {
     pub fn new(rpc: R, opening_hex: String) -> Self {
-        Self { rpc, opening_hex, clock: super::system_now }
+        Self { rpc, opening_hex, clock: super::system_now, tracked_slot: None, allow_truncated_with_tracked: false, agreed_amount: None }
     }
 
     pub fn with_clock(mut self, clock: fn() -> u64) -> Self {
         self.clock = clock;
+        self
+    }
+
+    pub fn with_tracked_slot(mut self, slot: Option<u32>, allow_truncated: bool) -> Self {
+        self.tracked_slot = slot;
+        self.allow_truncated_with_tracked = allow_truncated;
+        self
+    }
+
+    pub fn with_agreed_amount(mut self, amount: u64) -> Self {
+        self.agreed_amount = Some(amount);
         self
     }
 
@@ -196,14 +230,47 @@ impl<R: JsonRpc> NoidWatcher<R> {
         let fee: FeeEstimate = self.call("paranoid_estimateFeeDetailed", json!([1, 1]))?;
         let stats: MempoolStats = self.call("paranoid_getMempoolStats", json!([]))?;
 
-        let page: ObjectInstances =
-            self.call("paranoid_getObjectInstances", json!([self.opening_hex, 0, INSTANCE_PAGE]))?;
-        tip = tip.max(page.height);
-        // REVIEW-2 F10: EVERY non-empty slot of the page, each with its own status. The first one is mirrored in the
+        // Paginate `paranoid_getObjectInstances` so lower-index dust outputs cannot eclipse a live swap instance.
+        let mut from_slot: u32 = 0;
+        let mut pages: usize = 0;
+        let mut truncated = false;
+        let mut seen_slots: BTreeSet<u32> = BTreeSet::new();
+        let mut raw_slots: Vec<SlotInfo> = Vec::new();
+        loop {
+            let page: ObjectInstances =
+                self.call("paranoid_getObjectInstances", json!([self.opening_hex, from_slot, if pages == 0 { INSTANCE_FIRST_PAGE } else { INSTANCE_PAGE }]))?;
+            tip = tip.max(page.height);
+            for s in page.slots.into_iter().filter(|s| !s.empty) {
+                if seen_slots.insert(s.slot_index) {
+                    raw_slots.push(s);
+                }
+            }
+            match page.next_slot {
+                None => break,
+                Some(next) => {
+                    if next <= from_slot {
+                        return Err(RpcError::Decode("paranoid_getObjectInstances: next_slot did not advance".into()));
+                    }
+                    pages += 1;
+                    if pages >= MAX_INSTANCE_PAGES {
+                        truncated = true;
+                        break;
+                    }
+                    from_slot = next;
+                }
+            }
+        }
+        // REVIEW-2 F10: EVERY non-empty slot across the pages, each with its own status. The first one is mirrored in the
         // legacy single-instance fields, exactly as before; the engine decides which one is ours.
         let mut instances: Vec<NoidInstanceStatus> = Vec::new();
-        for s in page.slots.into_iter().filter(|s| !s.empty) {
+        for s in raw_slots {
             let instance = NoidInstance { slot_index: s.slot_index, creation_id: s.creation_id, amount_micronoid: s.value };
+            // A coin that is neither of the agreed amount nor the tracked slot can never fit the agreement: it is listed without a status.
+            let needs_status = self.agreed_amount.is_none_or(|a| a == instance.amount_micronoid) || self.tracked_slot == Some(instance.slot_index);
+            if !needs_status {
+                instances.push(NoidInstanceStatus { instance, matches_opening: None, active_authority: None });
+                continue;
+            }
             let st: ObjectStatus = self.call("paranoid_getObjectStatus", json!([self.opening_hex, instance.slot_index]))?;
             tip = tip.max(st.tip_height);
             instances.push(NoidInstanceStatus {
@@ -211,6 +278,32 @@ impl<R: JsonRpc> NoidWatcher<R> {
                 matches_opening: Some(st.matches_opening),
                 active_authority: Some(st.active_authority),
             });
+        }
+        // A root with more coins than `MAX_ROOT_COINS`: the list is cut short. The swap's own slot is then asked for directly, and ANY definite
+        // answer for it is a usable partial read: live (listed), empty (closed) or another incarnation. Only what needs the full list is held
+        // back from such a read (`instances_truncated`, see `engine::spend_blocker`); a closed instance under a flood must not fail every tick.
+        if truncated {
+            let tracked = match self.tracked_slot.filter(|_| self.allow_truncated_with_tracked) {
+                Some(t) => t,
+                None => return Err(RpcError::Decode(too_many_coins())),
+            };
+            if !seen_slots.contains(&tracked) {
+                let st: ObjectStatus = self.call("paranoid_getObjectStatus", json!([self.opening_hex, tracked]))?;
+                tip = tip.max(st.tip_height);
+                match st.slot {
+                    Some(s) if s.slot_index == tracked => {
+                        if !s.empty {
+                            instances.push(NoidInstanceStatus {
+                                instance: NoidInstance { slot_index: s.slot_index, creation_id: s.creation_id, amount_micronoid: s.value },
+                                matches_opening: Some(st.matches_opening),
+                                active_authority: Some(st.active_authority),
+                            });
+                        }
+                        // empty: the instance is closed; it is simply not listed, and `instances_truncated` says the list is partial.
+                    }
+                    _ => return Err(RpcError::Decode(too_many_coins())),
+                }
+            }
         }
         let instance_count = instances.len();
         let first = instances.first().cloned();
@@ -278,6 +371,7 @@ impl<R: JsonRpc> NoidWatcher<R> {
             active_authority,
             instances,
             instance_count,
+            instances_truncated: truncated,
             pending_calls,
             confirmed_tx,
             tracked_tx_pending,

@@ -107,7 +107,7 @@ impl WalletFile {
             return Err(WalletError::Refused(format!("{} already exists; never overwrite a wallet file", path.display())));
         }
         let text = serde_json::to_vec_pretty(self).map_err(|e| WalletError::Persist(e.to_string()))?;
-        crate::swapfile::atomic_write(path, &text).map_err(|e| WalletError::Persist(e.to_string()))
+        crate::swapfile::atomic_write_new(path, &text).map_err(|e| WalletError::Persist(e.to_string()))
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, WalletError> {

@@ -38,7 +38,7 @@ const MAIN = { profile: "production", chain_id: 1, contract_version: 1, gas_pric
 test("L1: a node address counts as this machine's own only when it is written with http:// (swap-cli's rule)", () => {
   assert.equal(rs.isLoopbackUrl("http://127.0.0.1:9601"), true);
   assert.equal(rs.isLoopbackUrl("http://[::1]:9601"), true);
-  assert.equal(rs.isLoopbackUrl("http://localhost:9601"), true);
+  assert.equal(rs.isLoopbackUrl("http://localhost:9601"), false, "a name goes through the hosts file: not a proof of loopback");
   assert.equal(rs.isLoopbackUrl("https://localhost:9601"), false);
   assert.equal(rs.isLoopbackUrl("https://127.0.0.1:9601"), false);
   assert.equal(rs.isLoopbackUrl("http://evil.example"), false);

@@ -193,7 +193,7 @@ fn run(args: &[String]) -> Res<()> {
     let Some(cmd) = args.first() else {
         return Err(USAGE.into());
     };
-    let (positional, flags) = parse_flags(&args[1..]);
+    let (positional, flags) = parse_flags(&args[1..])?;
     match cmd.as_str() {
         "new-alice" => new_alice(&flags),
         "new-bob" => new_bob(&flags),
@@ -212,14 +212,106 @@ fn run(args: &[String]) -> Res<()> {
     }
 }
 
-/// `--key value` and bare `--flag`; repeated keys accumulate.
-fn parse_flags(args: &[String]) -> (Vec<String>, HashMap<String, Vec<String>>) {
+/// Every flag the commands read (the usage text names them all). An unknown one is refused: a mistyped safety flag must not be ignored.
+const KNOWN_FLAGS: &[&str] = &[
+    "accept-producer-concentration",
+    "acknowledge-producer-share",
+    "alice",
+    "allow-plain-http",
+    "allow-unchecked-bundle",
+    "amount",
+    "apply",
+    "bob",
+    "bundle",
+    "call-height",
+    "cancel",
+    "check-object",
+    "closed-by",
+    "contract-version",
+    "curl-path",
+    "d",
+    "definition-out",
+    "dry-run",
+    "equiv",
+    "equiv-a",
+    "equiv-h",
+    "equiv-image-id",
+    "equiv-prove",
+    "eth",
+    "eth-amount-wei",
+    "eth-chain-id",
+    "eth-code-hash",
+    "eth-contract",
+    "eth-fixture",
+    "eth-from-block",
+    "eth-key",
+    "eth-lock-kind",
+    "eth-payout",
+    "eth-receiver",
+    "eth-rpc",
+    "eth-rpc2-is-remote",
+    "eth-sender",
+    "expect",
+    "fast-kdf",
+    "fee-estimate",
+    "flag",
+    "floor-seen",
+    "h-create",
+    "h-final",
+    "h-now",
+    "i-checked-the-wallet",
+    "i-understand-this-is-the-key",
+    "import-wallet-secret",
+    "intent-out",
+    "key",
+    "key-stdin",
+    "noid",
+    "noid-fixture",
+    "noid-rpc",
+    "noid-rpc2-is-remote",
+    "now",
+    "observe-only",
+    "out",
+    "params-out",
+    "passphrase-env",
+    "payout",
+    "pending-tx",
+    "pinned-image-id",
+    "profile",
+    "receipt",
+    "record",
+    "record-eth",
+    "record-noid",
+    "registry",
+    "reveal-tx",
+    "role",
+    "rpc-timeout",
+    "secret-stdin",
+    "show",
+    "single-node-ok",
+    "stdout",
+    "submit",
+    "submit-rpc",
+    "swap",
+    "t-now",
+    "transport",
+    "variant",
+    "wallet",
+];
+
+/// `--key value` and bare `--flag`; repeated keys accumulate. A flag that is not in [`KNOWN_FLAGS`] is refused, and a token that starts with
+/// `-` is never taken as a flag's value (a mistyped or missing value must not swallow the next flag).
+fn parse_flags(args: &[String]) -> Res<(Vec<String>, HashMap<String, Vec<String>>)> {
     let mut positional = Vec::new();
     let mut flags: HashMap<String, Vec<String>> = HashMap::new();
     let mut i = 0;
     while i < args.len() {
-        if let Some(key) = args[i].strip_prefix("--") {
-            let value = if BOOL_FLAGS.contains(&key) { None } else { args.get(i + 1).filter(|v| !v.starts_with("--")).cloned() };
+        let arg = &args[i];
+        if let Some(key) = arg.strip_prefix("--") {
+            if !KNOWN_FLAGS.contains(&key) && !BOOL_FLAGS.contains(&key) {
+                return Err(format!("unknown flag --{key}\n{USAGE}"));
+            }
+            let value = if BOOL_FLAGS.contains(&key) { None } else { args.get(i + 1).filter(|v| !v.starts_with('-')).cloned() };
             match value {
                 Some(v) => {
                     flags.entry(key.to_string()).or_default().push(v);
@@ -230,12 +322,14 @@ fn parse_flags(args: &[String]) -> (Vec<String>, HashMap<String, Vec<String>>) {
                     i += 1;
                 }
             }
+        } else if arg.len() > 1 && arg.starts_with('-') {
+            return Err(format!("unknown option {arg}: flags are written with two dashes\n{USAGE}"));
         } else {
-            positional.push(args[i].clone());
+            positional.push(arg.clone());
             i += 1;
         }
     }
-    (positional, flags)
+    Ok((positional, flags))
 }
 // ---------------------------------------------------------------- chain sources
 
@@ -468,14 +562,33 @@ fn observe_tracking(producer_cache: Option<&Path>, file: &SwapFile, flags: &Hash
         _ => None,
     }
     .or_else(|| closed_by.map(str::to_string));
+    // The funding record of a `funding_submitted` file names the slot its output created (no instance is recorded before it is seen).
+    let funding_slot = match (&file.phase, producer_cache) {
+        (Phase::Alice(swap_cli::state::AlicePhase::FundingSubmitted { .. }), Some(path)) => swap_cli::wallet::persist::SendRecord::load(
+            &swap_cli::wallet::persist::record_path(path, swap_cli::wallet::persist::SendKind::Fund),
+            &file.public.digest(),
+        )
+        .ok()
+        .flatten()
+        .and_then(|r| r.output_slot),
+        _ => None,
+    };
+    let (tracked_slot, allow_truncated) = swap_cli::engine::noid_tracking(file, funding_slot);
+    let agreed_amount = file.public.params.amount_micronoid;
     let noid = NoidWatcher::new(&noid_rpc, file.public.opening_hex.clone())
+        .with_agreed_amount(agreed_amount)
+        .with_tracked_slot(tracked_slot, allow_truncated)
         .observe(tracked.as_deref())
         .map_err(|e| format!("parano1d watcher: {e}"))?;
     // REVIEW-2 F5: a second Parano1d node, polled in the same tick. It answers a different question (do you agree?), so it
     // tracks no txid; if it fails, the first node's reading stands and the reason is attached for the engine to weigh.
     let mut noid = noid;
     if let Some((rpc2, _)) = &noid_second {
-        match NoidWatcher::new(rpc2, file.public.opening_hex.clone()).observe(None) {
+        match NoidWatcher::new(rpc2, file.public.opening_hex.clone())
+            .with_agreed_amount(agreed_amount)
+            .with_tracked_slot(tracked_slot, allow_truncated)
+            .observe(None)
+        {
             Ok(o) => noid.second = Some(Box::new(o)),
             Err(e) => noid.second_error = Some(format!("parano1d watcher (second node): {e}")),
         }
@@ -576,6 +689,7 @@ fn observe_tracking(producer_cache: Option<&Path>, file: &SwapFile, flags: &Hash
             .with_pending_txs(pending)
             .with_word_scan(word_scan)
             .with_reveal_tx(reveal_tx)
+            .with_signer(signer)
             .observe();
         match second {
             Ok(o) => eth.second = Some(Box::new(o)),
@@ -1518,7 +1632,13 @@ fn secret(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     } else {
         eprintln!("WARNING: this is the swap secret. Whoever has it can trigger the Ethereum reveal; give it only to equiv-prove and the reveal command. Pipe it, never paste it into a command line: swap-cli secret FILE | equiv-prove prove raw --secret-stdin OUT.receipt");
     }
-    println!("{}", swap_cli::secret::hex32(s.bytes()));
+    // The text of the secret is wiped from memory once written (the secret itself is wiped when `s` drops).
+    let mut hex = swap_cli::secret::hex32(s.bytes());
+    let line = zeroize::Zeroizing::new(format!("{hex}\n"));
+    zeroize::Zeroize::zeroize(&mut hex);
+    use std::io::Write as _;
+    let mut out = std::io::stdout().lock();
+    out.write_all(line.as_bytes()).and_then(|()| out.flush()).map_err(|e| format!("stdout: {e}"))?;
     Ok(())
 }
 
@@ -1821,6 +1941,35 @@ fn now_unix() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parse_flags_refuses_an_unknown_flag_and_never_takes_a_flag_as_a_value() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let err = parse_flags(&a(&["f.json", "--dry-runn"])).unwrap_err();
+        assert!(err.starts_with("unknown flag --dry-runn"), "{err}");
+        let err = parse_flags(&a(&["f.json", "-apply"])).unwrap_err();
+        assert!(err.contains("unknown option -apply"), "{err}");
+        // a value-taking flag with no value does not swallow the next flag, in either spelling
+        let (pos, flags) = parse_flags(&a(&["f.json", "--noid-rpc", "--apply"])).unwrap();
+        assert_eq!(pos, vec!["f.json".to_string()]);
+        assert_eq!(flags["noid-rpc"], vec!["true".to_string()]);
+        assert!(flags.contains_key("apply"));
+        let err = parse_flags(&a(&["f.json", "--noid-rpc", "-x"])).unwrap_err();
+        assert!(err.contains("unknown option -x"), "{err}");
+        // ordinary use
+        let (pos, flags) = parse_flags(&a(&["f.json", "--noid-rpc", "http://127.0.0.1:9601", "--apply"])).unwrap();
+        assert_eq!(pos, vec!["f.json".to_string()]);
+        assert_eq!(flags["noid-rpc"], vec!["http://127.0.0.1:9601".to_string()]);
+        // every flag the usage text names is known
+        for line in USAGE.split_whitespace() {
+            let key: String = line.trim_start_matches(|c: char| !c.is_alphanumeric() && c != '-').chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+            if let Some(k) = key.strip_prefix("--") {
+                if k.len() > 1 && !k.ends_with('-') && k.chars().next().is_some_and(|c| c.is_ascii_lowercase()) {
+                    assert!(KNOWN_FLAGS.contains(&k) || BOOL_FLAGS.contains(&k), "--{k} is in the usage text but not known");
+                }
+            }
+        }
+    }
+
     use super::*;
 
     fn net_with(curl: bool, allow: bool) -> Net {
@@ -1914,7 +2063,7 @@ mod tests {
         let args = |extra: &[&str]| -> HashMap<String, Vec<String>> {
             let mut a: Vec<String> = ["--noid-rpc", "http://127.0.0.1:9601", "--noid-rpc", "http://127.0.0.1:9602"].iter().map(|s| s.to_string()).collect();
             a.extend(extra.iter().map(|s| s.to_string()));
-            parse_flags(&a).1
+            parse_flags(&a).unwrap().1
         };
         let net_ = net(&args(&[])).unwrap();
         // With the flag the note is among the source notes of every call (a tick prints them all), not silenced.
@@ -1937,7 +2086,7 @@ mod tests {
     #[test]
     fn the_remote_declarations_are_boolean_flags_and_the_label_has_no_credentials() {
         let args: Vec<String> = ["--noid-rpc2-is-remote", "file.json", "--eth-rpc2-is-remote", "--eth-rpc", "A"].iter().map(|s| s.to_string()).collect();
-        let (positional, flags) = parse_flags(&args);
+        let (positional, flags) = parse_flags(&args).unwrap();
         assert_eq!(positional, vec!["file.json".to_string()]);
         assert!(flags.contains_key("noid-rpc2-is-remote") && flags.contains_key("eth-rpc2-is-remote"));
         assert_eq!(redact("https://user:pw@rpc.example.org:8545/v3/KEY?x=1"), "https://rpc.example.org:8545");
@@ -1965,7 +2114,7 @@ mod tests {
     #[test]
     fn the_new_boolean_flags_take_no_value() {
         let args: Vec<String> = ["--single-node-ok", "file.json", "--allow-plain-http", "--noid-rpc", "A", "--noid-rpc", "B"].iter().map(|s| s.to_string()).collect();
-        let (positional, flags) = parse_flags(&args);
+        let (positional, flags) = parse_flags(&args).unwrap();
         assert_eq!(positional, vec!["file.json".to_string()]);
         assert!(flags.contains_key("single-node-ok") && flags.contains_key("allow-plain-http"));
         assert_eq!(flags["noid-rpc"], vec!["A".to_string(), "B".to_string()]);

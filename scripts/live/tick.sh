@@ -7,16 +7,16 @@ set -u
 . "$(dirname "$0")/env.sh"
 ROLE=${1:?alice|bob}; shift
 F=$(swap_file "$ROLE") || exit 2
-load_passphrase || exit 2
+[ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (run setup.sh)" >&2; exit 2; }
 mkdir -p "$L/rec"
 read_lines NODES node_flags; read_lines FROM from_block_flags; read_lines REVEAL reveal_tx_flags
 N=$(date +%H%M%S)
-"$BIN" tick "$F" ${NODES[@]+"${NODES[@]}"} ${FROM[@]+"${FROM[@]}"} ${REVEAL[@]+"${REVEAL[@]}"} \
-  --record-noid "$L/rec/$ROLE-noid-$N.json" --record-eth "$L/rec/$ROLE-eth-$N.json" "$@" \
+( load_passphrase && "$BIN" tick "$F" ${NODES[@]+"${NODES[@]}"} ${FROM[@]+"${FROM[@]}"} ${REVEAL[@]+"${REVEAL[@]}"} \
+  --record-noid "$L/rec/$ROLE-noid-$N.json" --record-eth "$L/rec/$ROLE-eth-$N.json" "$@" ) \
   > "$L/last-tick-$ROLE.json" 2> "$L/last-tick-$ROLE.err"
 EC=$?
 echo "[$ROLE] tick exit $EC at $(date +%T)"; head -5 "$L/last-tick-$ROLE.err"
-python3 - "$L/last-tick-$ROLE.json" <<'PY'
+python3 -I - "$L/last-tick-$ROLE.json" <<'PY'
 import sys, json
 try: v = json.load(open(sys.argv[1]))
 except Exception as e: print("no json:", e); sys.exit(0)

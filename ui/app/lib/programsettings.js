@@ -16,7 +16,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { urlProblem } = require("./runsettings");
+const { urlProblem, sameNodeUrl } = require("./runsettings");
 const { noidAddressProblem, ethAddressProblem } = require("./walletrun");
 const { PROGRAM_PROFILES: PROFILES, PROFILES: TEST_PROFILES } = require("./swapform");
 
@@ -184,7 +184,7 @@ function validate(o) {
       for (const k of Object.keys(e)) if (k !== "rpc" && k !== "rpc2") bad(`eth.${prof}.${k}`, "not a setting of this version");
       url(`eth.${prof}.rpc`, e.rpc === undefined ? null : e.rpc, { nullable: false });
       url(`eth.${prof}.rpc2`, e.rpc2 === undefined ? null : e.rpc2, { nullable: true });
-      if (typeof e.rpc === "string" && typeof e.rpc2 === "string" && e.rpc.toLowerCase() === e.rpc2.toLowerCase()) bad(`eth.${prof}.rpc2`, "must be a different node from rpc");
+      if (sameNodeUrl(e.rpc, e.rpc2)) bad(`eth.${prof}.rpc2`, "must be a different node from rpc");
     }
     if (o.eth_rpc2_remote === true && !Object.values(o.eth).some((e) => plain(e) && e.rpc2)) bad("eth_rpc2_remote", "true only with a second node");
   }
@@ -355,9 +355,10 @@ function view(s) {
  * value; any other value replaces it (null clears). Returns the merged object (not validated: the caller validates and saves). Keys the page cannot know are the caller's problem.
  */
 const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
-/** True when any key, at any depth, names an object's prototype. */
+/** True when any key, at any depth, names an object's prototype (fail closed above depth 8). */
 function hasReservedKey(o, depth = 0) {
-  if (!o || typeof o !== "object" || depth > 8) return false;
+  if (!o || typeof o !== "object") return false;
+  if (depth > 8) return true;
   for (const k of Object.keys(o)) if (RESERVED.has(k) || hasReservedKey(o[k], depth + 1)) return true;
   return false;
 }

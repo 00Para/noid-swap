@@ -91,9 +91,11 @@ function buildFundingTx({ keyPair, utxos, witnessScript, amount, feeRate, networ
   const pub = Buffer.from(keyPair.publicKey);
 
   // Iterate: the fee depends on the input count, which depends on the fee.
+  const changeDust = BigInt(htlc.dustThreshold(changeSpk));
+  const maxRounds = Math.max(10, utxos.length + 1);
   let needed = amt;
   let chosen, total, fee, change, tx;
-  for (let round = 0; round < 10; round++) {
+  for (let round = 0; round < maxRounds; round++) {
     ({ chosen, total } = selectUtxos(utxos, needed));
     const mk = (withChange) => {
       const t = new bitcoin.Transaction();
@@ -108,7 +110,7 @@ function buildFundingTx({ keyPair, utxos, witnessScript, amount, feeRate, networ
     const vWith = mk(true).virtualSize();
     const feeWith = BigInt(feeRate * vWith);
     change = total - amt - feeWith;
-    if (change >= BigInt(DUST_P2WPKH)) {
+    if (change >= changeDust) {
       fee = feeWith;
       tx = mk(true);
       tx.outs[1].value = change;
@@ -123,8 +125,8 @@ function buildFundingTx({ keyPair, utxos, witnessScript, amount, feeRate, networ
       tx = mk(false);
       break;
     }
-    needed = amt + feeWith + BigInt(DUST_P2WPKH); // pull in another input and retry
-    if (needed > total && round === 9) throw new Error('insufficient funds after fee');
+    needed = amt + feeWith + changeDust; // pull in another input and retry
+    if (needed > total && round === maxRounds - 1) throw new Error('insufficient funds after fee');
   }
   if (!tx) throw new Error('insufficient funds: could not cover amount + fee');
 

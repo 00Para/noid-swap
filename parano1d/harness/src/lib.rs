@@ -117,7 +117,7 @@ pub fn try_compile_htlc(
         "max_fee": max_fee.to_string(),
     });
     let opening = noid_pruv::compile(HTLC_SOURCE, &params)
-        .expect("htlc.pruv compiles")
+        .map_err(|e| GuardError::BadParams(format!("htlc.pruv compile: {e:?}")))?
         .opening()
         .clone();
     check_opening(&opening)?;
@@ -315,11 +315,45 @@ pub fn check_swap_params(
 /// The same guard applied to a compiled opening (defence in depth: checks what
 /// will actually be committed, not what was typed).
 pub fn check_opening(opening: &ObjectOpening) -> Result<(), GuardError> {
-    check_swap_params(&opening.claim_authority, &opening.claim_recipient, opening.rules.max_fee)
+    use noid_tx::experimental_object::policy::{CLAIM_CLOSE, RECOVERY_CLOSE};
+    check_swap_params(&opening.claim_authority, &opening.claim_recipient, opening.rules.max_fee)?;
+    if opening.recovery_authority == opening.claim_authority || opening.recovery_recipient == opening.claim_authority {
+        return Err(GuardError::BadParams("recovery address must not equal claim_authority".into()));
+    }
+    if opening.claim_recipient == opening.recovery_authority {
+        return Err(GuardError::BadParams("claim_recipient must not equal recovery_authority".into()));
+    }
+    if opening.recovery_authority != opening.recovery_recipient {
+        return Err(GuardError::BadParams("recovery_recipient must equal recovery_authority".into()));
+    }
+    if opening.deadline == 0 {
+        return Err(GuardError::BadParams("deadline must be > 0".into()));
+    }
+    let want_modes = CLAIM_CLOSE | RECOVERY_CLOSE;
+    if opening.rules.modes != want_modes {
+        return Err(GuardError::BadParams(format!("unexpected contract modes: {:?}", opening.rules.modes)));
+    }
+    if opening.rules.max_payout != 0 || opening.rules.min_retained != 0 {
+        return Err(GuardError::BadParams("close-only HTLC must have max_payout == 0 and min_retained == 0".into()));
+    }
+    // The program itself: an opening that carries the right authorities, modes and rules but another instruction list is not this HTLC.
+    // It is compared with the program `contracts/htlc.pruv` (or `htlc_v2.pruv`) compiles to for the opening's own parameters.
+    let params = serde_json::json!({
+        "hashlock_authority": opening.claim_authority.to_bech32(),
+        "receiver": opening.claim_recipient.to_bech32(),
+        "sender": opening.recovery_authority.to_bech32(),
+        "timeout_height": opening.deadline.to_string(),
+        "max_fee": opening.rules.max_fee.to_string(),
+    });
+    let is_program_of = |source: &str| noid_pruv::compile(source, &params).is_ok_and(|c| c.opening().program == opening.program);
+    if !is_program_of(HTLC_SOURCE) && !is_program_of(HTLC_V2_SOURCE) {
+        return Err(GuardError::BadParams("the opening's program is neither the compiled htlc.pruv nor htlc_v2.pruv program".into()));
+    }
+    Ok(())
 }
 
 /// The guard applied to a parsed params object (`htlc.params.example.json`
-/// shape: `hashlock_authority`, `receiver`, `max_fee`; u64 as decimal string).
+/// shape: `hashlock_authority`, `receiver`, `sender`, `timeout_height`, `max_fee`; u64 as decimal string).
 pub fn check_params_value(params: &serde_json::Value) -> Result<(), GuardError> {
     let address = |key: &str| {
         let text = params
@@ -329,16 +363,34 @@ pub fn check_params_value(params: &serde_json::Value) -> Result<(), GuardError> 
         Address::parse(text)
             .map_err(|e| GuardError::BadParams(format!("`{key}` is not a valid address: {e}")))
     };
-    let max_fee = match params.get("max_fee") {
+    let u64_field = |key: &str| match params.get(key) {
         Some(serde_json::Value::String(s)) => s
             .parse::<u64>()
-            .map_err(|_| GuardError::BadParams("`max_fee` is not a u64 decimal string".into()))?,
+            .map_err(|_| GuardError::BadParams(format!("`{key}` is not a u64 decimal string"))),
         Some(serde_json::Value::Number(n)) => n
             .as_u64()
-            .ok_or_else(|| GuardError::BadParams("`max_fee` is not a u64".into()))?,
-        _ => return Err(GuardError::BadParams("missing field `max_fee`".into())),
+            .ok_or_else(|| GuardError::BadParams(format!("`{key}` is not a u64"))),
+        _ => Err(GuardError::BadParams(format!("missing field `{key}`"))),
     };
-    check_swap_params(&address("hashlock_authority")?, &address("receiver")?, max_fee)
+    let hashlock = address("hashlock_authority")?;
+    let receiver = address("receiver")?;
+    let max_fee = u64_field("max_fee")?;
+    check_swap_params(&hashlock, &receiver, max_fee)?;
+    if params.get("sender").is_some() {
+        let sender = address("sender")?;
+        if sender == hashlock {
+            return Err(GuardError::BadParams("`sender` must not equal `hashlock_authority`".into()));
+        }
+        if sender == receiver {
+            return Err(GuardError::BadParams("`sender` must not equal `receiver`".into()));
+        }
+    }
+    if params.get("timeout_height").is_some() {
+        if u64_field("timeout_height")? == 0 {
+            return Err(GuardError::BadParams("`timeout_height` must be > 0".into()));
+        }
+    }
+    Ok(())
 }
 
 /// Load a params file the way `pruv --params` does (`noid_pruv::parse_parameters`)

@@ -111,8 +111,31 @@ async function defaultFetchInfo(url, timeoutMs) {
   const http = url.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
   const res = await fetch(http, { headers: { Accept: "application/nostr+json" }, signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
   if (!res.ok) return null;
-  const text = await res.text();
-  if (text.length > 65536) return null;
+  let text;
+  if (res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const buf = Buffer.from(value);
+        total += buf.length;
+        if (total > 65536) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          return null;
+        }
+        chunks.push(buf);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+    text = Buffer.concat(chunks, total).toString("utf8");
+  } else {
+    text = await res.text();
+    if (Buffer.byteLength(text, "utf8") > 65536) return null;
+  }
   return JSON.parse(text);
 }
 

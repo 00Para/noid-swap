@@ -64,11 +64,29 @@ struct FeeRaw {
     fee_micronoid: u64,
 }
 
+/// The first page keeps the size the tool always asked for (so every recorded fixture still answers); the next ones use the node's maximum.
+const INSTANCE_FIRST_PAGE: u32 = 16;
+const INSTANCE_PAGE: u32 = 256;
+const MAX_INSTANCE_PAGES: usize = 64;
+/// The most coins one read lists (the first page plus the later ones).
+const MAX_ROOT_COINS: u32 = INSTANCE_FIRST_PAGE + (MAX_INSTANCE_PAGES as u32 - 1) * INSTANCE_PAGE;
+
 #[derive(Deserialize)]
 struct InstancesRaw {
     #[serde(default)]
     height: u64,
     slots: Vec<SlotRaw>,
+    #[serde(default)]
+    next_slot: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ObjectStatusRaw {
+    matches_opening: bool,
+    #[serde(default)]
+    tip_height: u64,
+    #[serde(default)]
+    slot: Option<SlotRaw>,
 }
 
 fn decode<T: DeserializeOwned>(method: &str, v: Value) -> Result<T, WalletError> {
@@ -89,6 +107,12 @@ impl<'a> NodeReads<'a> {
     pub fn tip(&self) -> Result<u64, WalletError> {
         let v = self.rpc.call("paranoid_blockCount", json!([]))?;
         decode("paranoid_blockCount", v)
+    }
+
+    /// `paranoid_getBlockHeader [tip]`: the tip block's own timestamp; `None` when the node cannot show it (a lagging or frozen node is told from it).
+    pub fn tip_time(&self, tip: u64) -> Option<u64> {
+        let v = self.rpc.call("paranoid_getBlockHeader", json!([tip])).ok()?;
+        v.get("timestamp").and_then(Value::as_u64)
     }
 
     /// `paranoid_getEpochAnchor`: the 32-byte anchor a transaction included in the next block must carry.
@@ -174,17 +198,68 @@ impl<'a> NodeReads<'a> {
         Ok(view)
     }
 
-    /// `paranoid_getObjectInstances [opening, 0, 16]`: the live coins at the contract's address, and the height the page was read at.
+    /// `paranoid_getObjectInstances`: paginated live coins at the contract's address, and the highest height observed.
     pub fn root_instances(&self, opening_hex: &str) -> Result<(Vec<NoidInstance>, u64), WalletError> {
-        let v = self.rpc.call("paranoid_getObjectInstances", json!([opening_hex, 0, 16]))?;
-        let page: InstancesRaw = decode("paranoid_getObjectInstances", v)?;
-        let instances = page
-            .slots
-            .into_iter()
-            .filter(|s| !s.empty)
-            .map(|s| NoidInstance { slot_index: s.slot_index, creation_id: s.creation_id, amount_micronoid: s.value })
-            .collect();
-        Ok((instances, page.height))
+        self.root_instances_for_slot(opening_hex, None)
+    }
+
+    /// Paginated `paranoid_getObjectInstances`, plus a direct `paranoid_getObjectStatus` lookup for `tracked_slot`
+    /// if it was not present in the paginated response (so a root dust flood cannot hide a tracked instance).
+    pub fn root_instances_for_slot(&self, opening_hex: &str, tracked_slot: Option<u32>) -> Result<(Vec<NoidInstance>, u64), WalletError> {
+        let mut from_slot: u32 = 0;
+        let mut pages: usize = 0;
+        let mut truncated = false;
+        let mut height: u64 = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut instances = Vec::new();
+        loop {
+            let v = self.rpc.call("paranoid_getObjectInstances", json!([opening_hex, from_slot, if pages == 0 { INSTANCE_FIRST_PAGE } else { INSTANCE_PAGE }]))?;
+            let page: InstancesRaw = decode("paranoid_getObjectInstances", v)?;
+            height = height.max(page.height);
+            for s in page.slots.into_iter().filter(|s| !s.empty) {
+                if seen.insert(s.slot_index) {
+                    instances.push(NoidInstance { slot_index: s.slot_index, creation_id: s.creation_id, amount_micronoid: s.value });
+                }
+            }
+            match page.next_slot {
+                None => break,
+                Some(next) => {
+                    if next <= from_slot {
+                        return Err(WalletError::Decode("paranoid_getObjectInstances: next_slot did not advance".into()));
+                    }
+                    pages += 1;
+                    if pages >= MAX_INSTANCE_PAGES {
+                        truncated = true;
+                        break;
+                    }
+                    from_slot = next;
+                }
+            }
+        }
+        if truncated {
+            // More coins than `MAX_ROOT_COINS`: the swap's own slot is asked for directly and any definite answer (live, empty, another
+            // incarnation) stands for it; without a tracked slot, or without a definite answer, the list cannot be judged.
+            let cannot_judge = || {
+                WalletError::Decode(format!(
+                    "paranoid_getObjectInstances: more than {MAX_ROOT_COINS} coins at the contract root and the node gave no definite answer for the swap's own slot: the list cannot be judged"
+                ))
+            };
+            let tracked = tracked_slot.ok_or_else(cannot_judge)?;
+            if !seen.contains(&tracked) {
+                let v = self.rpc.call("paranoid_getObjectStatus", json!([opening_hex, tracked]))?;
+                let st: ObjectStatusRaw = decode("paranoid_getObjectStatus", v)?;
+                height = height.max(st.tip_height);
+                match st.slot {
+                    Some(s) if s.slot_index == tracked => {
+                        if !s.empty && st.matches_opening {
+                            instances.push(NoidInstance { slot_index: s.slot_index, creation_id: s.creation_id, amount_micronoid: s.value });
+                        }
+                    }
+                    _ => return Err(cannot_judge()),
+                }
+            }
+        }
+        Ok((instances, height))
     }
 }
 

@@ -1415,6 +1415,65 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SwapFileErro
     Ok(())
 }
 
+/// [`atomic_write`] that never replaces a file: the bytes are written and synced under a temporary name, then linked to `path`, which fails when
+/// `path` exists (also when it appeared after the caller looked). Where the file system has no hard links, the final name is created exclusively
+/// and written in place.
+pub(crate) fn atomic_write_new(path: &Path, bytes: &[u8]) -> Result<(), SwapFileError> {
+    let exists = || SwapFileError::Io(format!("{} already exists; it is never overwritten", path.display()));
+    let tmp = tmp_path(path)?;
+    let open_new = |p: &Path| -> Result<std::fs::File, std::io::Error> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        opts.open(p)
+    };
+    // A temporary name that cannot be removed is never ignored: it is a second name of the same bytes (a key or a wallet file).
+    let left_over = |what: &str| -> String {
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => String::new(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => format!("; {what} {} could not be removed ({e}): remove it by hand", tmp.display()),
+        }
+    };
+    let written = (|| -> Result<(), std::io::Error> {
+        let mut f = open_new(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()
+    })();
+    if let Err(e) = written {
+        return Err(SwapFileError::Io(format!("{}: {e}{}", path.display(), left_over("the temporary file"))));
+    }
+    let linked = std::fs::hard_link(&tmp, path);
+    let removal = left_over("the temporary name");
+    match linked {
+        Ok(()) => {
+            if !removal.is_empty() {
+                // the file exists under both names: say so, so that nobody keeps a second copy of a key by accident
+                return Err(SwapFileError::Io(format!("{} was written{removal}", path.display())));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Err(SwapFileError::Io(format!("{}{removal}", exists()))),
+        Err(_) => {
+            if !removal.is_empty() {
+                return Err(SwapFileError::Io(format!("{} was not written{removal}", path.display())));
+            }
+            let mut f = open_new(path).map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists { exists() } else { io_err(e) })?;
+            if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+                drop(f);
+                let _ = std::fs::remove_file(path);
+                return Err(io_err(e));
+            }
+        }
+    }
+    #[cfg(unix)]
+    sync_dir(parent_dir(path)).map_err(|e| SwapFileError::Io(format!("{} was written but its directory could not be synced: {e}", path.display())))?;
+    Ok(())
+}
+
 /// `<path>.<pid>.<8 random hex>.tmp`: unique per writer (REVIEW-2 F8).
 fn tmp_path(path: &Path) -> Result<PathBuf, SwapFileError> {
     let mut rnd = [0u8; 4];
@@ -1550,18 +1609,17 @@ impl HashlockRegistry {
         }
     }
 
-    /// Record the hashlock, refusing if it is already there.
+    /// Record the hashlock, refusing if it is already there (under a sibling lock file to prevent concurrent lost updates).
     pub fn register(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
+        self.ensure_dir()?;
+        let _lock = SwapLock::acquire(&self.path, std::time::Duration::from_secs(5))?;
         if self.contains(hashlock)? {
             return Err(SwapFileError::HashlockReused);
         }
-        self.append(hashlock)
+        self.append_unlocked(hashlock)
     }
 
-    /// Write the line without the reuse check (the caller has checked every registry it uses before writing any of them). The whole new
-    /// content goes to a temporary file in the same directory (mode 600 on Unix, synced) and is renamed over the registry, so a failed write
-    /// leaves the registry as it was and never half a line.
-    pub fn append(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
+    fn ensure_dir(&self) -> Result<(), SwapFileError> {
         if self.create_dir {
             if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists()) {
                 #[cfg(unix)]
@@ -1573,6 +1631,19 @@ impl HashlockRegistry {
                 std::fs::create_dir_all(dir).map_err(io_err)?;
             }
         }
+        Ok(())
+    }
+
+    /// Write the line without the reuse check (the caller has checked every registry it uses before writing any of them). The whole new
+    /// content goes to a temporary file in the same directory (mode 600 on Unix, synced) and is renamed over the registry under a sibling
+    /// lock file, then the parent directory is synced so a crash never loses the entry.
+    pub fn append(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
+        self.ensure_dir()?;
+        let _lock = SwapLock::acquire(&self.path, std::time::Duration::from_secs(5))?;
+        self.append_unlocked(hashlock)
+    }
+
+    fn append_unlocked(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
         let mut text = match std::fs::read_to_string(&self.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -1598,7 +1669,8 @@ impl HashlockRegistry {
             f.write_all(text.as_bytes()).map_err(io_err)?;
             f.sync_all().map_err(io_err)?;
             drop(f);
-            std::fs::rename(&tmp, &self.path).map_err(io_err)
+            std::fs::rename(&tmp, &self.path).map_err(io_err)?;
+            sync_dir(&self.path).map_err(io_err)
         })();
         if written.is_err() {
             let _ = std::fs::remove_file(&tmp);
@@ -1776,6 +1848,18 @@ pub fn example_selftest(public: &SwapPublic, now: u64) -> ClientRSelfTest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_file_is_never_written_over_an_existing_one_and_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("key.json");
+        atomic_write_new(&path, b"first").unwrap();
+        let err = atomic_write_new(&path, b"second").unwrap_err().to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(names, vec!["key.json".to_string()], "no temporary file is left behind");
+    }
+
     use super::*;
     use crate::state::{AlicePhase, BobPhase};
     use crate::watch::NoidInstance;
@@ -2185,8 +2269,16 @@ mod tests {
         let reg = HashlockRegistry::for_machine(path.clone(), "bob");
         reg.register(&first).unwrap();
         let before = std::fs::read(&path).unwrap();
-        // Only the registry itself is left in the directory after a successful write (the temporary file was renamed over it).
-        let names = |d: &Path| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect::<Vec<_>>();
+        // Only the registry (and its sibling advisory lock file) is left in the directory after a successful write (no stray temp files).
+        let names = |d: &Path| {
+            let mut v = std::fs::read_dir(d)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|n| n != "hashlocks.txt.lock")
+                .collect::<Vec<_>>();
+            v.sort();
+            v
+        };
         assert_eq!(names(dir.path()), vec!["hashlocks.txt".to_string()]);
         #[cfg(unix)]
         {

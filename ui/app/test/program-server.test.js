@@ -154,7 +154,7 @@ test("GET /api/program: version, test network, node status, vault, new-swap perm
     assert.deepEqual(p.vault, { ready: true, recovery_confirmed: true, why: null });
     assert.deepEqual(p.new_swap_allowed, { ok: true, why: null });
     assert.deepEqual(p.swaps.map((s) => s.swap).sort(), [a.id, b.id].sort());
-    for (const s of p.swaps) assert.deepEqual(Object.keys(s).sort(), ["active", "created_at", "get", "give", "in_contract", "label", "needs_you", "network", "phase", "refused", "role", "swap", "until_text"]);
+    for (const s of p.swaps) assert.deepEqual(Object.keys(s).sort(), ["active", "created_at", "get", "give", "in_contract", "label", "needs_you", "network", "phase", "refused", "role", "swap", "unstarted", "until_text"]);
     assert.deepEqual(p.board, { enabled: false, slot: null });
     assert.deepEqual(p.update, { state: "none", latest: null, url: null, unsafe: false, note: null, note_unreadable: false });
     assert.ok(!/PASSPHRASE|passphrase|0123456789abcdef/.test(JSON.stringify(p)), "no passphrase, no key check");

@@ -285,14 +285,41 @@ function createNodeCheck({
   };
 }
 
+/** Read a fetch Response body up to maxBytes without buffering an unbounded reply into memory. */
+async function readTextLimited(res, maxBytes) {
+  if (res && res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const buf = Buffer.from(value);
+        total += buf.length;
+        if (total > maxBytes) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          throw Object.assign(new Error("answer too large"), { kind: "remote" });
+        }
+        chunks.push(buf);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
+  }
+  const text = await res.text();
+  if (Buffer.byteLength(text, "utf8") > maxBytes) throw Object.assign(new Error("answer too large"), { kind: "remote" });
+  return text;
+}
+
 /** The real transport: one POST with fetch, a time limit, a size limit; the error kinds nodecheck reads. */
 async function httpPost(url, body, { timeoutMs = REQUEST_TIMEOUT_MS } = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: ctl.signal, redirect: "error" });
-    const text = await res.text();
-    if (text.length > 1_000_000) throw Object.assign(new Error("answer too large"), { kind: "remote" });
+    const text = await readTextLimited(res, 1_000_000);
     return JSON.parse(text);
   } catch (e) {
     const code = e && e.cause && e.cause.code;

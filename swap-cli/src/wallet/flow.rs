@@ -481,11 +481,15 @@ pub fn fund(env: &FlowEnv<'_>) -> Result<StepReport, WalletError> {
         if let Some(why) = &stop {
             return Ok(StepReport::new(SendKind::Fund, Outcome::Hold, format!("not funding: {why}")));
         }
+        // A node that lags the clock (or cannot show its tip header) would build the funding on a stale tip and anchor: it holds, as `tick` does.
+        if let Some(why) = crate::engine::noid_tip_time_blocker(reads.tip_time(tip), env.now) {
+            return Ok(StepReport::new(SendKind::Fund, Outcome::Hold, format!("not funding: {why}")));
+        }
         let total = view.plain_total().unwrap_or(0);
-        // A node answer that fails a sanity check (a fee above the ceiling) is an error to show, not a reason to ask for a deposit.
+        // A node answer that fails a sanity check or a transient RPC failure is an error to show, never a reason to ask for a deposit or drop `.wallet-deposit.json`.
         let have_enough = match select_for_payment(&view.plain, amount, &mut |i, o| reads.fee_for(i, o)) {
             Ok(_) => true,
-            Err(e @ WalletError::Decode(_)) => return Err(e),
+            Err(e @ (WalletError::Decode(_) | WalletError::Rpc(_))) => return Err(e),
             Err(_) => false,
         };
         if !have_enough {
@@ -532,7 +536,9 @@ pub fn recover(env: &FlowEnv<'_>, fee: u64) -> Result<StepReport, WalletError> {
         Phase::Alice(AlicePhase::Refunded { .. } | AlicePhase::Aborted { .. } | AlicePhase::Created | AlicePhase::FundingSubmitted { .. }) => {
             return refuse(format!("the swap is in phase `{}`: there is no instance of ours to recover", file.phase.name()))
         }
-        Phase::Alice(p) => p.instance().cloned().ok_or_else(|| WalletError::Refused(format!("the swap file records no instance in phase `{}`", file.phase.name())))?,
+        Phase::Alice(p) => crate::engine::recovery_target(file)
+            .or_else(|| p.instance().cloned())
+            .ok_or_else(|| WalletError::Refused(format!("the swap file records no instance in phase `{}`", file.phase.name())))?,
         Phase::Bob(_) => return refuse("recovery belongs to Alice's file"),
     };
     let digest = file.public.digest();
@@ -549,7 +555,7 @@ pub fn recover(env: &FlowEnv<'_>, fee: u64) -> Result<StepReport, WalletError> {
             return refuse("the recorded recovery is for another instance than the one this swap file records; it is left alone");
         }
     }
-    let (at_root, _) = reads.root_instances(&file.public.opening_hex)?;
+    let (at_root, _) = reads.root_instances_for_slot(&file.public.opening_hex, Some(instance.slot_index))?;
     let listed = at_root.iter().any(|r| r.slot_index == instance.slot_index && r.creation_id == instance.creation_id && r.amount_micronoid == instance.amount_micronoid);
     if existing.is_none() && !listed {
         return Ok(StepReport::new(SendKind::Recover, Outcome::Hold, "the swap's instance is not at the contract's address (closed, or not visible on this node): nothing to recover from here; run `tick` to see what happened"));
@@ -600,8 +606,8 @@ fn sweep_blocker(file: &SwapFile, at_root: &[NoidInstance], fund_rec: Option<&Se
             return Some(format!("the swap's own instance (slot {}) is still at the contract: it is recovered first (`wallet recover`), and swept after it is closed", i.slot_index));
         }
     } else if let Some(r) = fund_rec {
-        // No instance was ever recorded, but a funding was sent: it must be settled one way or the other.
-        let cannot_land = all_unspent(r, &view.plain) && tip.saturating_add(1) > r.last_valid_height();
+        // No instance was ever recorded, but a funding was sent: it must be settled one way or the other (finality included).
+        let cannot_land = all_unspent(r, &view.plain) && tip >= r.final_after_tip();
         if !cannot_land {
             return Some("a funding was sent and the swap file records no instance for it: it is not settled; run `tick --apply`, or wait until the funding can no longer land".into());
         }
@@ -636,7 +642,7 @@ pub fn sweep(env: &FlowEnv<'_>) -> Result<StepReport, WalletError> {
     }
     let reads = NodeReads::new(env.rpc);
     let tip = reads.tip()?;
-    let (at_root, _) = reads.root_instances(&file.public.opening_hex)?;
+    let (at_root, _) = reads.root_instances_for_slot(&file.public.opening_hex, recorded_instance(file).map(|i| i.slot_index))?;
     let view = reads.slots_by_owner(&own)?;
     if let Some(why) = sweep_blocker(file, &at_root, fund_rec.as_ref(), &view, tip) {
         return Ok(StepReport::new(SendKind::Sweep, Outcome::Hold, why));

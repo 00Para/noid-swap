@@ -98,10 +98,11 @@ function startProxy({ listen, upstream, log = (line) => process.stderr.write(lin
 
   const server = http.createServer((req, res) => {
     const t0 = Date.now();
+    const safeLog = (s) => String(s).replace(/[\x00-\x1f\x7f]/g, "?");
     const finish = (method, status, headers, body) => {
       res.writeHead(status, headers);
       res.end(body);
-      log(`${method} ${status} ${Date.now() - t0}ms`);
+      log(`${safeLog(method)} ${status} ${Date.now() - t0}ms`);
     };
     if (req.method !== "POST") {
       return finish(`${req.method}`, 405, { "content-type": "text/plain", allow: "POST" }, "POST only\n");
@@ -143,6 +144,7 @@ function startProxy({ listen, upstream, log = (line) => process.stderr.write(lin
           method: "POST",
           headers: { "content-type": req.headers["content-type"] || "application/json", accept: "application/json" },
           body,
+          signal: AbortSignal.timeout(30_000),
           // A redirect is never followed (the node's own transports refuse every 3xx; a proxy that followed one would let an endpoint send the
           // request, and the answer, somewhere the operator never named). It is answered with 502.
           redirect: "manual",
@@ -156,10 +158,48 @@ function startProxy({ listen, upstream, log = (line) => process.stderr.write(lin
             JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: `proxy: upstream answered a redirect (status ${up.status}); redirects are never followed` } })
           );
         }
-        const out = Buffer.from(await up.arrayBuffer());
+        const MAX_UPSTREAM_BODY = 32 * 1024 * 1024;
+        let out;
+        if (up.body && typeof up.body.getReader === "function") {
+          const reader = up.body.getReader();
+          const outChunks = [];
+          let total = 0;
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const buf = Buffer.from(value);
+              total += buf.length;
+              if (total > MAX_UPSTREAM_BODY) {
+                await reader.cancel().catch(() => {});
+                return finish(
+                  method,
+                  502,
+                  { "content-type": "application/json" },
+                  JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "proxy: upstream response exceeded 32 MiB" } })
+                );
+              }
+              outChunks.push(buf);
+            }
+          } finally {
+            try { reader.releaseLock(); } catch { /* ignore */ }
+          }
+          out = Buffer.concat(outChunks, total);
+        } else {
+          out = Buffer.from(await up.arrayBuffer());
+          if (out.length > MAX_UPSTREAM_BODY) {
+            return finish(
+              method,
+              502,
+              { "content-type": "application/json" },
+              JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "proxy: upstream response exceeded 32 MiB" } })
+            );
+          }
+        }
         finish(method, up.status, { "content-type": up.headers.get("content-type") || "application/json" }, out);
       } catch (e) {
-        const msg = (e && e.cause && e.cause.code) || (e && e.message) || "upstream error";
+        const rawMsg = (e && e.cause && e.cause.code) || (e && e.message) || "upstream error";
+        const msg = String(rawMsg).replace(/\bhttps?:\/\/\S+/gi, "<redacted-url>");
         finish(
           method,
           502,

@@ -164,6 +164,17 @@ function checkHtlcSpend(txOrHex, inIndex, ctx) {
  * NOTE: signature validity is not needed to learn s, but only trust s from a
  * tx that spends your outpoint; consensus guarantees that tx is valid if confirmed.
  */
+/** Consensus CastToBool for P2WSH OP_IF (MINIMALIF is mempool policy only, not SegWit v0 consensus). */
+function isConsensusTruthy(buf) {
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] !== 0) {
+      if (i === buf.length - 1 && buf[i] === 0x80) return false; // negative zero
+      return true;
+    }
+  }
+  return false;
+}
+
 function extractPreimage(txOrHex, { hashlock, redeemScript, inputIndex } = {}) {
   const tx = loadTx(txOrHex);
   const want = hashlock === undefined ? undefined : toBuf(hashlock, 'hashlock', 32);
@@ -174,7 +185,7 @@ function extractPreimage(txOrHex, { hashlock, redeemScript, inputIndex } = {}) {
     const w = input.witness || [];
     if (w.length !== 4) continue;
     const sel = Buffer.from(w[2]);
-    if (!(sel.length === 1 && sel[0] === 0x01)) continue;
+    if (!isConsensusTruthy(sel)) continue;
     const script = Buffer.from(w[3]);
     if (wantScript && !script.equals(wantScript)) continue;
     let f;

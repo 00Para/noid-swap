@@ -648,12 +648,24 @@ function makeConnection({ ep, tcp, stream, timings, hooks, T }) {
           }
         };
         proc.on("exit", exitHandler);
-        // The guard of the flush: if either clock has moved by more than the answer window minus one second since the check, nothing is written.
+        // The guard of the flush: re-run the caller's check and abort if either clock moved or diverged by more than clockJumpMs since setup.
         req.once("socket", () => {
           if (settled) return;
-          const moved = Math.max(monoNow() - tWriteMono, wallNow() - tWriteWall);
-          if (moved > Math.max(timing.tailMs - 1000, timing.tailMs / 2)) {
-            writeStarted = false; // nothing was flushed: finish() destroys the connection before Node writes the request
+          const monoMoved = monoNow() - tWriteMono;
+          const wallMoved = wallNow() - tWriteWall;
+          const moved = Math.max(monoMoved, wallMoved);
+          const limit = Math.min(timing.clockJumpMs, Math.max(timing.tailMs - 1000, timing.tailMs / 2));
+          try {
+            a.check();
+          } catch (e) {
+            writeStarted = false;
+            try { req.destroy(); } catch { /* ignore */ }
+            finish({ outcome: "not_sent", stage: "late", error: e, reason: "the check refused right before the flush, so the connection was destroyed before anything was written" });
+            return;
+          }
+          if (moved > limit || Math.abs(wallMoved - monoMoved) > timing.clockJumpMs) {
+            writeStarted = false; // nothing was flushed: destroy the request & socket before Node writes the request
+            try { req.destroy(); } catch { /* ignore */ }
             finish({ outcome: "not_sent", stage: "late", reason: `the clock moved ${(moved / 1000).toFixed(1)} s between the check and the flush, so the connection was destroyed before anything was written` });
           }
         });

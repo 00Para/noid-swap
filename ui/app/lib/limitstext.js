@@ -12,8 +12,8 @@
   else root.NoidLimits = factory(root.NoidLaunch);
 })(typeof self !== "undefined" ? self : this, function (L) {
   const TRACK = Object.freeze({
-    version: "0.1.6",
-    as_of: "2026-11-23",
+    version: "0.1.7",
+    as_of: "2026-11-24",
     settled: 1,
     refunded: 0,
     note: "both sides run by the developer, with the terminal tools, before this program",

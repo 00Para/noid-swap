@@ -58,6 +58,7 @@ const { Autopilot, STEP_MS } = require("./lib/autopilot");
 const { programWords } = require("./lib/programwords");
 const { BoardHost } = require("./lib/board/host");
 const { SwapSet, ID_RE: SWAP_ID_RE } = require("./lib/swapset");
+const practice = require("./lib/practice");
 const { recordCloseTxid, RECORD_CLOSE_ID } = require("./lib/stepexec");
 const programsettings = require("./lib/programsettings");
 const newSwapNotice = require("./lib/newswapnotice");
@@ -84,6 +85,8 @@ const STATIC = {
   "/actions.js": ["actions.js", "text/javascript; charset=utf-8"],
   "/program.js": ["program.js", "text/javascript; charset=utf-8"],
   "/stagecard.js": ["stagecard.js", "text/javascript; charset=utf-8"],
+  // the practice swap's screens (lib/practice.js is its server side)
+  "/practice.js": ["practice.js", "text/javascript; charset=utf-8"],
   // the offer board's screens (P3.7): the page code, its DOM-free logic and its stylesheet (the tokens are operator.css's)
   "/board.js": ["board.js", "text/javascript; charset=utf-8"],
   "/boardview.js": ["lib/boardview.js", "text/javascript; charset=utf-8"],
@@ -885,6 +888,15 @@ async function programRunPayload(program, swapSet, swap) {
     settings = null;
   }
   // R3: the history of the person's own addresses, the count without this run; null when the program has no history (nothing is shown)
+  // R23-3: the window to start closed with nothing of this side anywhere (lib/unstarted.js): the page's card says "ended before it started" (display only; the swap file is the engine's)
+  prog.unstarted = null;
+  try {
+    const tk = run.roles && role && run.roles[role] ? run.roles[role].tick || null : null;
+    const un = settings ? swapSet.unstartedOf(swap, role, run, tk) : null;
+    if (un) prog.unstarted = { ended: true, holds: un.holds, held: un.held, reason: un.reason };
+  } catch {
+    prog.unstarted = null;
+  }
   const hist = settings ? await payoutHistory.runView(program, swap.id, settings) : { state: "none", map: {} };
   prog.payout_history = hist.state === "none" ? null : hist.map;
   prog.payout_history_state = hist.state;
@@ -1201,12 +1213,20 @@ function clipboardShape(v) {
 }
 
 /** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
-function programRequestHandler(program, swapSet, getServer) {
+function programRequestHandler(program, swapSet, getServer, practiceCtx) {
+  // the practice swap (lib/practice.js): one session in memory; its routes use no program object, no folder, no settings, no step and no network
+  const practiceHost = (practiceCtx && practiceCtx.host) || practice.createHost();
+  const practiceNow = () => Math.floor((practiceCtx && typeof practiceCtx.now === "function" ? practiceCtx.now() : Date.now()) / 1000);
   const clipHits = []; // the times (ms) of the read-backs of the last minute: ten a minute for the one page
   const forPaths = pagePathRewriter(program);
   const forPage = (body) => programWords(forPaths(body)); // no path of the data or home folder, and the program's words instead of the console's
   const send = (res, status, body, type) => sendWith(CSP_SCHEME, res, status, body !== null && typeof body === "object" && !Buffer.isBuffer(body) ? forPage(body) : body, type); // every answer of program mode carries the scheme's policy, and no path of the data or home folder (the page's own files, a string or a Buffer, are sent as they are)
   const swapOf = (id, res) => {
+    // a practice swap is not a swap: no real route takes its id (the practice has its own routes, and they refuse a real id)
+    if (practice.isPracticeId(id)) {
+      send(res, 400, { error: "that is a practice swap, not a swap: the real routes do not take it" });
+      return null;
+    }
     if (typeof id !== "string" || !SWAP_ID_RE.test(id)) {
       send(res, 400, { error: "swap must be a swap id: 32 lower-case hexadecimal characters" });
       return null;
@@ -1244,6 +1264,10 @@ function programRequestHandler(program, swapSet, getServer) {
         }
         if (!body || typeof body !== "object" || Array.isArray(body)) return send(res, 400, { error: "body must be a JSON object" });
         try {
+          if (p === "/api/practice/start") return send(res, 200, practice.start(practiceHost, body, practiceNow()));
+          if (p === "/api/practice/act") return send(res, 200, practice.act(practiceHost, body, practiceNow()));
+          if (p === "/api/practice/skip") return send(res, 200, practice.skip(practiceHost, body, practiceNow()));
+          if (p === "/api/practice/end") return send(res, 200, practice.end(practiceHost, body));
           if (p === "/api/newswap") {
             const id = swapSet.create(body.fields);
             return send(res, 200, { ok: true, swap: id, remembered: body.remember === true ? rememberAddresses(program, swapSet, id) : false });
@@ -1367,6 +1391,7 @@ function programRequestHandler(program, swapSet, getServer) {
         }
         return send(res, 200, programPayload(program, swapSet));
       }
+      if (p === "/api/practice") return send(res, 200, practice.get(practiceHost, practiceNow()));
       if (p === "/api/run") {
         const swap = swapOf(url.searchParams.get("swap"), res);
         if (!swap) return;
@@ -1398,7 +1423,7 @@ async function startProgramServer(program, deps = {}) {
   const swapSet = new SwapSet({ program, deps });
   const token = crypto.randomBytes(24).toString("hex");
   const state = { runToken: token, stopped: false };
-  const handler = programRequestHandler(program, swapSet, () => state);
+  const handler = programRequestHandler(program, swapSet, () => state, { host: practice.createHost(), now: deps.now });
   swapSet.scan();
   swapSet.emitStake();
   let timer = null;

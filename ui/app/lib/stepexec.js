@@ -260,8 +260,8 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
         if (!confirmed) return refuse("recovery_code", "write down and confirm your recovery code first: it restores this swap's keys if this computer is lost");
       }
     }
-    // 6. R2, the signed notice: `prepare` and `join` make the swap file, which is the start of a swap; only while the role's swap file does not exist yet. Every other entry is never refused here.
-    if ((id === "prepare" || id === "join") && !ownSwapFile(id === "prepare" ? "alice" : "bob")) {
+    // 6. R2, the signed notice: `prepare`, `join` and `board-join` make the swap file, which is the start of a swap; only while the role's swap file does not exist yet. Every other entry is never refused here.
+    if ((id === "prepare" || id === "join" || id === "board-join") && !ownSwapFile(id === "prepare" ? "alice" : "bob")) {
       const n = newSwapNotice.read(program);
       if (n.unsafe) return refuse("new_swap_notice", n.why);
     }

@@ -97,7 +97,7 @@ if ! ( set -o noclobber
          [ "$ROLE" = alice ] && { echo "ALICE_NOID=$NOIDADDR"; echo "ALICE_ETH=$ETHADDR"; }
          [ "$ROLE" = bob ] && echo "BOB_ETH=$ETHADDR"
          true; } > "$WALLET_ADDR_FILE" ) 2>/dev/null; then
-  echo "cannot write $WALLET_ADDR_FILE (it appeared, or the folder is not writable); stopped. The sealed files in $SD are kept"; rm -f "$WALLET_ADDR_FILE" 2>/dev/null; exit 3
+  echo "cannot write $WALLET_ADDR_FILE (it already exists, or the folder is not writable); stopped. The sealed files in $SD are kept"; exit 3
 fi
 chmod 600 "$WALLET_ADDR_FILE" 2>/dev/null
 echo "wallet addresses written: $WALLET_ADDR_FILE"

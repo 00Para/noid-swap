@@ -39,6 +39,8 @@
     detailsFilled: false, // program mode: the swap page has been moved into the "Details" fold
     cardWas: false, // program mode: whether the card was drawn on the last render
     mainPicture: null, // program mode: { act } while "The two locks, from now" is drawn on the main view (redrawn every second)
+    practice: null, // program mode: the answer of GET /api/practice while the practice swap's screen is open (lib/practice.js; memory only, never a swap of the list)
+    practiceAskedAt: 0, // Date.now() of the last read the practice's wait count asked for at zero
   };
 
   // ------------------------------------------------------------ DOM helpers
@@ -287,7 +289,19 @@
         state.error = e.message || String(e);
       }
     }
-    const sig = [window.NoidProgram.signature(state.program), state.screen, state.swap || "", state.error || "", state.pgMsg ? state.pgMsg.text : "", state.screen === "swap" && state.payload && !state.error ? signature() : ""].join("|");
+    if (state.screen === "practice") {
+      // the practice swap's own read: the practice route only; nothing of a real swap is read for it
+      try {
+        state.practice = await getJson("/api/practice");
+        const sn = state.practice.session && state.practice.session.payload ? state.practice.session.payload.server_now : 0;
+        if (sn) state.skew = sn - Math.floor(Date.now() / 1000);
+        state.fetchedAt = Date.now();
+        state.error = null;
+      } catch (e) {
+        state.error = e.message || String(e);
+      }
+    }
+    const sig = [window.NoidProgram.signature(state.program), state.screen, state.swap || "", state.error || "", state.pgMsg ? state.pgMsg.text : "", state.screen === "swap" && state.payload && !state.error ? signature() : "", state.screen === "practice" && window.NoidPractice ? window.NoidPractice.signature(state.practice) : ""].join("|");
     if (!force && sig === state.lastSig) return;
     state.lastSig = sig;
     render();
@@ -367,7 +381,7 @@
     const legEth = leg("eth", "Ethereum", view.role === "alice" ? "you get" : "you give", h.amount_eth, "ETH", h.eth.chain_id ? `chain ${h.eth.chain_id}` : "");
     const st = STATUS_CHIP[view.status] || STATUS_CHIP.unknown;
     const phaseChip = view.phase ? chip("", view.phase.label, "engine phase: " + view.phase.id) : null;
-    const headline = el("div", { class: "headline" }, el("h1", { text: view.role_label }), chip(st[0], st[1]), phaseChip, h.profile ? chip(h.profile_known ? "quiet" : "attn", `profile ${h.profile}${h.profile_known ? "" : " (assumed: no bundle)"}`) : null, h.variant ? chip("quiet", `${h.variant} variant`) : null, view.demo ? chip("proof", "demo, fixtures") : null);
+    const headline = el("div", { class: "headline" }, el("h1", { text: view.role_label }), chip(st[0], st[1]), phaseChip, h.profile ? chip(h.profile_known ? "quiet" : "attn", `profile ${h.profile}${h.profile_known ? "" : " (assumed: no bundle)"}`) : null, h.variant ? chip("quiet", `${h.variant} variant`) : null);
 
     const caps = el("div", { class: "capsules", id: "caps" });
     root.appendChild(el("div", { class: "head" }, headline, el("div", { class: "legs" }, view.role === "alice" ? legNoid : legEth, el("div", { class: "arrow", "aria-hidden": "true", text: "⇄" }), view.role === "alice" ? legEth : legNoid), caps));
@@ -407,6 +421,10 @@
     const root = clear($("alarms"));
     addBanners(root);
     if (!view.alarms.length) {
+      if (view.status === "lost") {
+        root.appendChild(el("div", { class: "alarm danger", role: "alert", dataset: { id: "lost" } }, el("span", { class: "lv", text: "danger" }), el("span", { class: "tx", text: "Both legs are lost: the ETH was refunded and the NOID was closed with the public secret. Nothing can be recovered on chain." })));
+        return;
+      }
       root.appendChild(el("div", { class: "alarm-none" }, el("span", { class: "dot ok", "aria-hidden": "true" }), " No alarms: observations are fresh, the engine flags nothing."));
       return;
     }
@@ -463,11 +481,14 @@
     root.classList.remove("act", "warn-rail", "attn-rail", "danger-rail", "ok-rail", "two");
     const a = view.action;
     const aborted = !!(view.phase && view.phase.id === "aborted");
+    const lost = !!(view.phase && view.phase.id === "lost");
     const actionsOn = !!(window.NoidActions && window.NoidActions.enabled(state.payload));
     const actions = actionsOn ? state.payload.actions : null;
     // The spend of this role the console has a button for LEADS the card: its title, then the engine's reason, then the box with the buttons.
-    const lead = actionsOn && a ? V.leadAction(view, actions) : null;
-    const guide = actionsOn && a ? V.fundingGuide(view, actions) : null;
+    // R23-3: a swap that ended before it started (the program's own reading) leads with that, not with the funding it will never get
+    const unst = actionsOn && window.NoidActions.unstartedOf ? window.NoidActions.unstartedOf(state.payload, view) : null;
+    const lead = actionsOn && a && !unst ? V.leadAction(view, actions) : null;
+    const guide = actionsOn && a && !unst ? V.fundingGuide(view, actions) : null;
     const guideOpen = !!(guide && !guide.done);
     let title;
     let titleChip = null;
@@ -477,9 +498,15 @@
       // A step was decided on an earlier tick but the engine's fresh decision of this tick is not that step: no send box, the engine's reason leads.
       title = "A step is held, and the engine does not offer it now";
       titleChip = chip("warn", "do not send it");
+    } else if (lost) {
+      title = "Both legs are lost";
+      titleChip = chip("danger", "lost");
     } else if (aborted) {
       title = "The engine ended this swap file";
       titleChip = chip("danger", "aborted");
+    } else if (unst) {
+      title = "This swap ended before it started";
+      titleChip = chip("quiet", "not started");
     } else if (lead) {
       title = lead.heading;
       titleChip = lead.kind === "move" && a.stale ? chip("attn", "stale tick") : lead.kind === "move" ? chip("accent", lead.chip) : lead.kind === "decided" ? chip("warn", lead.chip) : guideOpen ? chip("quiet", "after Bob's check") : null;
@@ -487,7 +514,8 @@
       title = "Next: fund the NOID";
       titleChip = chip("quiet", "after Bob's check");
     } else {
-      title = `Next: ${a.label.toLowerCase()}`;
+      const lbl = a.label ? a.label[0].toLowerCase() + a.label.slice(1) : "";
+      title = `Next: ${lbl}`;
       titleChip = a.actionable ? chip("accent", "your move") : a.spending && a.withheld ? chip("attn", "parameters withheld") : null;
     }
     const head = el("div", { class: "card-head" }, el("h2", { id: "h-action" }, title, titleChip ? " " : null, titleChip), el("div", { class: "right" }, a && state.payload.runner && state.payload.runner.enabled && !actionsOn ? tickRunButton() : null));
@@ -500,7 +528,8 @@
     const doBox = el("div", { class: "due-do" });
     const more = el("div", { class: "due-more" });
     const folded = !!(lead || guideOpen);
-    if (hn || aborted) root.classList.add("warn-rail");
+    if (lost) root.classList.add("danger-rail");
+    else if (hn || aborted) root.classList.add("warn-rail");
     else if (lead ? lead.kind === "move" && !a.stale : a.actionable) root.classList.add("act");
     else if (view.status === "stale" || view.status === "waiting-stale" || view.status === "no-data") root.classList.add("attn-rail");
     else if (a.intent && a.intent.status === "held") root.classList.add("warn-rail");
@@ -519,10 +548,11 @@
       fillClock(cb, view.clock, cm === "calm");
       say.appendChild(cb);
     }
-    if (a.reason) say.appendChild(el("blockquote", { class: "quote" + (hn || aborted ? " lead" : ""), "aria-label": "The engine's reason, verbatim" }, a.reason));
+    if (a.reason) say.appendChild(el("blockquote", { class: "quote" + (hn || aborted || lost ? " lead" : ""), "aria-label": "The engine's reason, verbatim" }, a.reason));
     if (hn) say.appendChild(el("p", { class: "plain", text: "This is the engine's own wording. The step it froze earlier is not offered here: no send box and no command is shown for it (the engine's notes below are shown as it printed them). If the engine says to cancel it, that is done in a terminal (swap-cli intent FILE --cancel with the same chain flags as tick)." }));
     // "Nothing to do now" would contradict a step that is waiting for the operator
-    if (!lead && !guideOpen && !hn) say.appendChild(el("p", { class: "plain" }, coin(aborted ? "The engine ended this swap file. Read its reason and notes: they say why, and the \"Coins at the contract\" box in \"If the swap stops now\" lists what the last tick shows at the contract." : a.plain)));
+    if (unst && !hn) say.appendChild(el("p", { class: "plain", text: "The time to start has passed. The engine's own words are above and in the notes below; the swap file itself may still say it is waiting, until the program's watch records the end." }));
+    else if (!lead && !guideOpen && !hn) say.appendChild(el("p", { class: "plain" }, coin(lost ? "Nothing can be recovered on chain. Keep the swap files and logs for the post-mortem." : aborted ? "The engine ended this swap file. Read its reason and notes: they say why, and the \"Coins at the contract\" box in \"If the swap stops now\" lists what the last tick shows at the contract." : a.plain)));
 
     // the buttons come first, directly under the reason; the funding order (Bob's check first) is above the button that sends it
     if (actionsOn) {
@@ -788,7 +818,7 @@
         el(
           "div",
           { class: "tl-head" },
-          el("h2", { id: "pg-h-picture", text: "The two locks, from now" }),
+          el("h2", { id: (opts && opts.headId) || "pg-h-picture", text: "The two locks, from now" }),
           p.stale
             ? chip("attn", "from an old reading")
             : el("p", { class: "tl-legend", "aria-hidden": "true" }, el("span", {}, el("i"), "locked and final"), el("span", {}, el("i", { class: "dot" }), "locked, not final"), el("span", {}, el("i", { class: "dash" }), "not locked yet"), bandMark ? el("span", {}, el("i", { class: "band" }), "your time to act") : null)
@@ -1039,7 +1069,7 @@
   function renderHistory(view) {
     // a folded block: its summary is the heading; the root element is kept, so an open block stays open
     const root = clear($("history"));
-    root.appendChild(el("summary", {}, el("h2", { id: "h-history", text: "Loop history" }), view.history ? chip("quiet", `${view.history.total} ticks in the loop file`) : null));
+    root.appendChild(el("summary", {}, el("h2", { id: "h-history", text: "Loop history" }), view.history ? chip("quiet", `${view.history.total} ${view.history.total === 1 ? "tick" : "ticks"} in the loop file`) : null));
     if (!view.history || !view.history.entries.length) {
       root.appendChild(el("p", { class: "plain", text: "No loop file yet (scripts/live/watch.sh writes loop-ROLE.txt)." }));
       return;
@@ -1258,7 +1288,63 @@
     if (window.NoidBoard && window.NoidBoard.reset) window.NoidBoard.reset();
   }
 
+  /** Ends the practice swap (the server forgets it) and clears the page's side of it. Never throws: the practice is memory only. */
+  async function leavePractice() {
+    const id = state.practice && state.practice.session ? state.practice.session.id : null;
+    state.practice = null;
+    if (window.NoidPractice) {
+      window.NoidPractice.reset();
+      if (id) {
+        try {
+          await window.NoidPractice.end(id);
+        } catch {
+          /* the server drops it when the program closes */
+        }
+      }
+    }
+  }
+
+  /** The practice screens' own handlers: leaving ends the practice; "another scenario" ends it and shows the chooser. */
+  function practiceHandlers() {
+    const heading = () => {
+      const h = $("pg-root") ? $("pg-root").querySelector("h1") : null;
+      if (h && h.focus) {
+        h.setAttribute("tabindex", "-1");
+        h.focus();
+      }
+    };
+    return {
+      leave: async () => {
+        await goScreen("list");
+      },
+      start: async (scenario, role) => {
+        // a practice is not offered while a real swap needs the person: the real swap comes first, and the practice never touches it
+        if (realNeeds().length) {
+          await window.NoidPractice.say(PRACTICE_REFUSED);
+          return { ok: false, status: 409, json: { error: PRACTICE_REFUSED } };
+        }
+        const r = await window.NoidPractice.start(scenario, role);
+        if (r.ok) heading();
+        return r;
+      },
+      chooser: async () => {
+        await leavePractice();
+        await load(true);
+        heading();
+      },
+    };
+  }
+
+  /** The practice's view model for its ticket and picture: the same builder a real swap uses, on the synthetic run the server made (a demo run, so nothing in it is taken for a reading). */
+  function practiceView(d) {
+    const p = d.payload || {};
+    const r = (p.roles && p.roles[d.role]) || {};
+    const v = V.buildView({ role: d.role, now: nowS(), tick: r.tick || null, tick_mtime: r.tick_mtime || null, tick_error: null, err_text: null, loop: r.loop || null, terms: p.terms || null, helpers: [], verify: p.verify || null, commands: p.commands || {}, demo: true, program: true });
+    return window.NoidProgramWords ? window.NoidProgramWords.programWords(v) : v;
+  }
+
   async function openSwap(id) {
+    if (state.screen === "practice") await leavePractice();
     state.pgForm = null;
     state.pgMsg = null;
     leaveSwap();
@@ -1277,6 +1363,8 @@
     state.pgMsg = null;
     state.pgForm = null;
     leaveSwap();
+    // leaving the practice ends it (a practice swap is never kept); entering it starts at the chooser
+    if (state.screen === "practice" && screen !== "practice") await leavePractice();
     const PG = window.NoidProgram;
     if (screen === "new") {
       const ns = (state.program && state.program.new_swap_allowed) || { ok: false };
@@ -1291,6 +1379,16 @@
         });
         state.screen = "new";
       } else state.screen = "list";
+    } else if (screen === "practice" && window.NoidPractice) {
+      window.NoidPractice.reset();
+      state.practice = null;
+      try {
+        state.practice = await getJson("/api/practice");
+        state.screen = "practice";
+      } catch (e) {
+        state.pgMsg = { kind: "danger", text: "The practice could not be opened: " + (e.message || e) };
+        state.screen = "list";
+      }
     } else if (screen === "settings") {
       const st = await PG.loadSettings();
       if (st.ok) {
@@ -1310,6 +1408,35 @@
     }
   }
 
+  /** The real swaps that need the person now, from the program's own list (the answer `loadProgram` polls whatever screen is open). Never a practice: the practice is not in that list. */
+  function realNeeds() {
+    const list = state.program && Array.isArray(state.program.swaps) ? state.program.swaps.filter((s) => s && s.needs_you === true && typeof s.swap === "string") : [];
+    return window.NoidProgram && window.NoidProgram.sortSwaps ? window.NoidProgram.sortSwaps(list) : list;
+  }
+
+  /** The words a practice start is refused with while a real swap needs the person. */
+  const PRACTICE_REFUSED = "A real swap needs you now, so the practice is not offered. Open that swap first and do what it asks. The practice never touches it.";
+
+  /** The alarm over the practice band: a real swap needs you, with the button that leaves the practice and opens that swap. null when none does. */
+  function realNeedAlarm() {
+    const list = realNeeds();
+    if (!list.length) return null;
+    const first = list[0];
+    const one = list.length === 1;
+    return el(
+      "div",
+      { class: "alarm needs pr-real", id: "pr-real-alarm", role: "alert" },
+      icon("alert"),
+      el("span", { class: "lv", text: "A real swap needs you" }),
+      el(
+        "span",
+        { class: "tx" },
+        one ? `${first.label || "A swap"} is waiting for you. This practice is not that swap: nothing you do here changes it.` : `${list.length} real swaps are waiting for you, the first of them ${first.label || "a swap"}. This practice is not those swaps: nothing you do here changes them.`,
+        el("button", { type: "button", class: "btn sm primary", id: "pr-real-open", onclick: () => openSwap(first.swap) }, "Leave the practice and open it")
+      )
+    );
+  }
+
   function renderProgramBar() {
     const bar = $("pg-bar");
     if (!bar) return;
@@ -1321,6 +1448,13 @@
     clear(bar);
     bar.hidden = !state.program;
     if (!state.program) return;
+    // a real swap that needs the person is never hidden by the practice: its alarm is the first thing of the bar, above the practice band (the band says nothing real happens here; the alarm says it does elsewhere)
+    if (state.screen === "practice") {
+      const alarm = realNeedAlarm();
+      if (alarm) bar.appendChild(alarm);
+    }
+    // the practice band is the first thing of the bar, so it sticks with it: it is on every practice screen and on no other
+    if (state.screen === "practice" && window.NoidPractice) bar.appendChild(window.NoidPractice.band());
     bar.appendChild(window.NoidProgram.topBar(state.program, { screen: state.screen }, progHandlers()));
     const m = bar.querySelector(".pg-menu");
     if (m && wasOpen) m.open = true;
@@ -1359,9 +1493,41 @@
     document.title = "Your swaps · No1d Swap";
   }
 
+  /** The practice swap's screen (practice.js): the chooser, or the card with its ticket, the explanation and the end. Drawn into the list's own root; the real swap page is hidden. */
+  function renderPractice() {
+    const root = clear($("pg-root"));
+    const PR = window.NoidPractice;
+    if (!PR) {
+      root.appendChild(el("p", { class: "attn", role: "alert", text: "The practice is not available in this page." }));
+      return;
+    }
+    if (state.error && !state.practice) root.appendChild(el("p", { class: "attn", role: "alert", text: "The practice could not be read: " + state.error }));
+    const r = PR.screen(state.practice, practiceHandlers());
+    root.appendChild(r.node);
+    document.title = r.title;
+    if (r.picture) {
+      let ok = false;
+      try {
+        r.picture.slot.hidden = false;
+        ok = drawPicture(r.picture.slot, r.picture.view, { main: true, act: false, headId: PR.PIC_HEAD });
+        if (ok) r.picture.slot.appendChild(el("p", { class: "plain dim pr-illustrative", text: PR.ILLUSTRATIVE }));
+      } catch {
+        ok = false; // the picture is a view: without it the card still stands
+      }
+      if (!ok) {
+        clear(r.picture.slot);
+        r.picture.slot.hidden = true;
+      }
+    }
+  }
+
   function renderProgram() {
     renderProgramBar();
     const swapScreen = state.screen === "swap";
+    const practiceScreen = state.screen === "practice";
+    document.body.classList.toggle("on-practice", practiceScreen);
+    const skipLink = document.getElementById("skip-link");
+    if (skipLink) skipLink.setAttribute("href", practiceScreen ? "#pr-card" : "#pg-card");
     $("pg-root").hidden = swapScreen;
     // a swap's page has its own way back and keeps the page-wide note in its Details fold: the footer is for the list and the forms
     document.body.classList.toggle("on-swap", swapScreen);
@@ -1379,7 +1545,8 @@
       $("bd-root").hidden = true;
       $("board-line").hidden = true;
       state.view = null;
-      renderProgramScreen();
+      if (practiceScreen) renderPractice();
+      else renderProgramScreen();
       return;
     }
     $("op-view").hidden = false;
@@ -1623,6 +1790,14 @@
 
   /** Once a second: only the parts that show a clock, so focus and text selection elsewhere are left alone. */
   function clockTick() {
+    if (state.program && state.screen === "practice") {
+      // the practice's wait count; at zero the server ends the wait (the fast clock), so the page asks once in a while until it has
+      if (window.NoidPractice && window.NoidPractice.tick(state.practice, (Date.now() - state.fetchedAt) / 1000) && Date.now() - state.practiceAskedAt > 1500) {
+        state.practiceAskedAt = Date.now();
+        load(true);
+      }
+      return;
+    }
     if (!state.payload || state.error || !state.view || (state.mode === "run" && state.payload.readable === false)) return;
     const view = buildViewP();
     state.view = view;
@@ -1678,6 +1853,8 @@
       window.NoidProgram.init({ el, chip, copyButton, addrWhole, state, phaseLabel, icon, coinGlyph, toast });
       // the card of one swap, one stage at a time (stagecard.js): its helpers are the page's own
       if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS, icon, coinGlyph, copyButton, addrWhole, reload: load });
+      // the practice swap's screens: no copy button and no address helper is handed over (nothing in the practice can be copied or paid)
+      if (window.NoidPractice) window.NoidPractice.init({ el, chip, icon, coinGlyph, state, reload: load, buildView: practiceView });
       const skip = document.getElementById("skip-link");
       if (skip) skip.setAttribute("href", "#pg-card");
     } else {

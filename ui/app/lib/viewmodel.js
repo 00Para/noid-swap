@@ -506,12 +506,12 @@
         headline = "The phase is not recognised, so no abort statement is made. Read the engine's reason and the files.";
     }
     if (role === "alice") {
-      you.push("Keep the secret sealed. Do not reveal after the reveal cutoff.");
+      if (!["reveal_submitted", "revealed", "done", "refunded", "lost"].includes(phaseId)) you.push("Keep the secret sealed. Do not reveal after the reveal cutoff.");
       if (ctx.secret_may_be_public === true && (phaseId === "lock_seen" || phaseId === "lock_final")) you.push("The secret may already be public. If you stop now you can lose both legs.");
       else if (!["revealed", "done", "refunded", "lost", "aborted", "created", "received"].includes(phaseId)) you.push(`If the swap stops, do nothing until ${dTxt}${inD}, then take the NOID back with the wallet.`);
       if (["created", "aborted"].includes(phaseId) && ctx.coins && ctx.coins.instances.length) you.push(`Nothing is done for these coins before ${dTxt}${inD}. After it: the recovery helper in a terminal, the preview first (commands below). This console cannot start it yet.`);
     } else {
-      you.push("Stay online until your claim is final.");
+      if (!["done", "refunded", "aborted"].includes(phaseId)) you.push("Stay online until your claim is final.");
       if (["locked", "lock_submitted"].includes(phaseId)) you.push("If the secret never appears, refund your ETH after T_reveal.");
     }
     const recovery = role === "alice" && ["created", "aborted"].includes(phaseId) && ctx.coins && ctx.coins.instances.length ? { instances: ctx.coins.instances, d, blocks_to_d: toD, commands: commandsFor("alice", "refund_noid", { bin: ctx.bin }) } : null;

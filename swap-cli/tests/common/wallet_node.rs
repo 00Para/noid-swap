@@ -386,6 +386,8 @@ impl JsonRpc for Node {
         let arg = |i: usize| params.get(i).cloned().unwrap_or(Value::Null);
         match method {
             "paranoid_blockCount" => Ok(json!(self.tip())),
+            // The tip header's time: far ahead of any clock a test uses, so the node never counts as lagging.
+            "paranoid_getBlockHeader" => Ok(json!({"timestamp": 9_999_999_999u64})),
             "paranoid_getEpochAnchor" => Ok(json!(hex::encode(anchor_id(tx_epoch_anchor_height_for_child(self.tip() + 1))))),
             "paranoid_estimateFeeDetailed" => {
                 let (n_in, n_out) = (arg(0).as_u64().unwrap_or(0), arg(1).as_u64().unwrap_or(0));

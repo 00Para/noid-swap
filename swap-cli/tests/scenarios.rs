@@ -2537,6 +2537,68 @@ fn f5_a_second_eth_node_with_another_lock_record_blocks_the_reveal() {
     assert_eq!(s.tick_alice().action.kind(), "reveal_eth");
 }
 
+fn later_block(l: &mut swap_cli::watch::EthLock) {
+    l.block_number += 1;
+}
+
+fn earlier_block(l: &mut swap_cli::watch::EthLock) {
+    l.block_number -= 1;
+}
+
+fn other_tx(l: &mut swap_cli::watch::EthLock) {
+    l.tx_hash[0] ^= 1;
+}
+
+fn other_sender(l: &mut swap_cli::watch::EthLock) {
+    l.sender[0] ^= 1;
+}
+
+fn other_hashlock(l: &mut swap_cli::watch::EthLock) {
+    l.hashlock[0] ^= 1;
+}
+
+fn receiver_not_eoa(l: &mut swap_cli::watch::EthLock) {
+    l.receiver_is_eoa = Some(false);
+}
+
+fn sender_eoa_unknown(l: &mut swap_cli::watch::EthLock) {
+    l.sender_is_eoa = None;
+}
+
+fn other_block_time(l: &mut swap_cli::watch::EthLock) {
+    l.block_timestamp = l.block_timestamp.map(|t| t + 12);
+}
+
+/// Audit fix: node 2 must agree on where the lock is and what it is, not only on its amount, receiver, timelock and flags.
+/// Before, the finality check used node 1's block alone, so a primary that named an older block passed it while node 2 showed the lock in a
+/// block that is not final; and the EOA flags were node 1's alone.
+#[test]
+fn audit_a_second_eth_node_with_another_block_or_flag_blocks_the_reveal() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    type Tamper = fn(&mut swap_cli::watch::EthLock);
+    for (tamper, what) in [
+        (later_block as Tamper, "block (node 1"),
+        (earlier_block, "block (node 1"),
+        (other_tx, "transaction"),
+        (other_sender, "sender"),
+        (other_hashlock, "hashlock"),
+        (receiver_not_eoa, "receiver_is_eoa (node 1 Some(true), node 2 Some(false))"),
+        (sender_eoa_unknown, "sender_is_eoa (node 1 Some(true), node 2 None)"),
+        (other_block_time, "block time"),
+    ] {
+        s.world.borrow_mut().second_lock_tamper = Some(tamper);
+        let r = s.tick_alice();
+        let why = wait_reason(&r);
+        assert!(why.contains("the two eth nodes disagree about the lock") && why.contains(what), "{what}: {why}");
+        assert!(s.world.borrow().claim_pending.is_none(), "{what}: the secret must not reach the chain");
+        assert_eq!(s.alice.executor.count("reveal_eth"), 0, "{what}");
+    }
+    // Agreement again: she reveals.
+    s.world.borrow_mut().second_lock_tamper = None;
+    assert_eq!(s.tick_alice().action.kind(), "reveal_eth");
+}
+
 #[test]
 fn f5_the_reveal_uses_the_lower_of_the_two_finalized_heights() {
     // Node 2 far behind (more than two epochs): they disagree.
@@ -3370,4 +3432,169 @@ fn an_instance_at_the_root_before_h_create_gives_the_instance_wait_and_no_fundin
         assert_eq!(r.action.kind(), "wait", "{profile:?}: {r:?}");
         assert_eq!(s.alice.executor.count("fund_noid"), 0, "{profile:?}");
     }
+}
+
+/// Audit fix: a `Locked` log that was skipped (its amount or timelock does not fit) is copied into the notes, and never stops the reveal of
+/// the real, final lock.
+#[test]
+fn audit_skipped_locked_logs_are_copied_into_the_notes() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    let r = s.tick_alice_with(|_, e| {
+        e.ignored_logs = vec!["a Locked log of the agreed parties and hashlock was skipped: X".into()];
+        if let Some(second) = e.second.as_deref_mut() {
+            second.ignored_logs = vec!["a Locked log of the agreed parties and hashlock was skipped: Y".into()];
+        }
+    });
+    assert!(r.notes.iter().any(|n| n == "a Locked log of the agreed parties and hashlock was skipped: X"), "{:?}", r.notes);
+    assert!(r.notes.iter().any(|n| n == "a Locked log of the agreed parties and hashlock was skipped: Y (second eth node)"), "{:?}", r.notes);
+    assert_eq!(r.action.kind(), "reveal_eth", "{r:?}");
+}
+
+// ---------------------------------------------------------------- audit fixes: a root with more coins than one poll reads
+
+/// The slot the watcher looks up directly, and whether a read cut short is usable, follow the phase: whenever the file holds (or, for a funding in
+/// flight, its record names) the swap's own instance, in every phase; before any instance exists a cut-short read is an error.
+#[test]
+fn audit_the_tracked_slot_and_the_truncated_allowance_follow_the_phase() {
+    use swap_cli::engine::noid_tracking;
+    use swap_cli::watch::NoidInstance;
+    let inst = NoidInstance { slot_index: 41, creation_id: 3, amount_micronoid: 5 };
+    let mut s = Scenario::new(Variant::Raw);
+    for (phase, funding_slot, want) in [
+        (AlicePhase::Created, Some(9), (None, false)),
+        (AlicePhase::FundingSubmitted { txid: None }, None, (None, false)),
+        (AlicePhase::FundingSubmitted { txid: None }, Some(9), (Some(9), true)),
+        (AlicePhase::Funded { instance: inst.clone(), seen_at_tip: 1 }, None, (Some(41), true)),
+        (AlicePhase::FundingFinal { instance: inst.clone(), final_at_tip: 1 }, Some(9), (Some(41), true)),
+        (AlicePhase::RefundSubmitted { instance: inst.clone(), txid: None, call_height: 1 }, None, (Some(41), true)),
+        (AlicePhase::RefundIncluded { instance: inst.clone(), txid: "aa".repeat(32), height: 1 }, None, (Some(41), true)),
+    ] {
+        s.alice.file.phase = Phase::Alice(phase.clone());
+        assert_eq!(noid_tracking(&s.alice.file, funding_slot), want, "{phase:?}");
+    }
+    for (phase, want) in [
+        (BobPhase::Funded { instance: inst.clone(), seen_at_tip: 1 }, (Some(41), true)),
+        (BobPhase::FundingFinal { instance: inst.clone(), final_at_tip: 1 }, (Some(41), true)),
+        (BobPhase::LockSubmitted { instance: inst.clone(), t_reveal: 1, amount_wei: 1, tx_hash: None, submitted_at: 1 }, (Some(41), true)),
+    ] {
+        s.bob.file.phase = Phase::Bob(phase.clone());
+        assert_eq!(noid_tracking(&s.bob.file, Some(9)), want, "{phase:?}");
+    }
+}
+
+/// A cut-short list of the root: Bob does not lock on it (first lock or re-send) and Alice does not reveal on it, but the swap goes on once a
+/// full list is read again.
+#[test]
+fn audit_a_truncated_root_list_holds_the_lock_and_the_reveal_and_nothing_else() {
+    let mut s = Scenario::new(Variant::Raw);
+    assert_eq!(s.tick_alice().action.kind(), "fund_noid");
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    s.world.borrow_mut().advance_noid(18);
+    let rb = s.tick_bob_with(|n, _| n.instances_truncated = true);
+    assert_eq!(rb.action.kind(), "wait", "{rb:?}");
+    assert!(rb.notes.iter().any(|n| n.contains("partial list")), "{:?}", rb.notes);
+    assert_ne!(s.bob_phase(), "lock_submitted");
+    // The same poll with the whole list: Bob locks.
+    assert_eq!(s.tick_bob().action.kind(), "lock_eth");
+    s.world.borrow_mut().advance_eth(1);
+    s.tick_both();
+    let lag = s.world.borrow().finality_lag;
+    s.world.borrow_mut().advance_eth(lag + 1);
+    let r = s.tick_alice_with(|n, _| n.instances_truncated = true);
+    assert_eq!(r.action.kind(), "wait", "{r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("partial list")), "{:?}", r.notes);
+    assert_eq!(s.tick_alice().action.kind(), "reveal_eth");
+}
+
+// ---------------------------------------------------------------- audit fixes: a CLOSED instance under a flood is a usable partial read
+
+/// What a read shows once the swap's own instance is closed while the root holds more coins than one read lists: no instance of ours is listed
+/// and the list says it is partial (the direct lookup of the tracked slot answered "empty").
+fn flooded_and_closed(n: &mut swap_cli::watch::NoidObservation, _e: &mut swap_cli::watch::EthObservation) {
+    n.instances_truncated = true;
+    n.instance = None;
+    n.instance_matches_opening = None;
+    n.active_authority = None;
+    n.instances.clear();
+    n.instance_count = 0;
+}
+
+/// Alice's reveal is stuck (`reveal_submitted`) and the NOID instance was closed under a flood above the page cap: the tick still works and
+/// the file stays where it is; nothing that needs the full list is decided.
+#[test]
+fn audit_alice_in_reveal_submitted_keeps_working_when_her_closed_instance_hides_under_a_flood() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    s.world.borrow_mut().freeze_eth_claim = true;
+    s.bob.executor.offline_for.insert("claim_noid");
+    s.tick_alice();
+    assert_eq!(s.alice_phase(), "reveal_submitted");
+    for _ in 0..2 {
+        let r = s.tick_alice_with(flooded_and_closed);
+        assert!(matches!(r.action.kind(), "wait" | "reveal_eth"), "{r:?}");
+        assert_eq!(s.alice_phase(), "reveal_submitted");
+    }
+}
+
+/// Bob's claim is included and the instance is closed (by his own claim) under a flood: the file goes on to `done`.
+#[test]
+fn audit_bob_in_claim_included_reaches_done_when_the_closed_instance_hides_under_a_flood() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    s.tick_alice();
+    let rb = s.tick_bob();
+    assert_eq!(rb.action.kind(), "claim_noid", "{rb:?}");
+    s.world.borrow_mut().advance_eth(1);
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    assert_eq!(s.bob_phase(), "claim_included");
+    let r = s.tick_bob_with(flooded_and_closed);
+    assert_ne!(r.action.kind(), "abort", "{r:?}");
+    assert_eq!(s.bob_phase(), "claim_included");
+    let lag = s.world.borrow().finality_lag;
+    s.world.borrow_mut().advance_eth(lag + 1);
+    s.world.borrow_mut().advance_noid(18);
+    s.tick_bob_with(flooded_and_closed);
+    s.tick_bob_with(flooded_and_closed);
+    assert_eq!(s.bob_phase(), "done", "{}", s.bob_phase());
+}
+
+/// Bob's ETH refund is mined; the NOID instance is gone from the list under a flood: the tick works and the file reaches `refunded`.
+#[test]
+fn audit_bob_in_refund_mined_reaches_refunded_when_the_instance_hides_under_a_flood() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.alice.executor.offline_for.insert("reveal_eth");
+    s.run_to_lock_final();
+    s.tick_alice();
+    let t_reveal = s.world.borrow().lock.as_ref().unwrap().timelock;
+    s.world.borrow_mut().warp_eth_to(t_reveal);
+    let rb = s.tick_bob();
+    assert_eq!(rb.action.kind(), "refund_eth", "{rb:?}");
+    s.world.borrow_mut().advance_eth(1);
+    s.tick_bob_with(flooded_and_closed);
+    assert_eq!(s.bob_phase(), "refund_mined");
+    let lag = s.world.borrow().finality_lag;
+    s.world.borrow_mut().advance_eth(lag);
+    s.tick_bob_with(flooded_and_closed);
+    assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Refunded { .. })), "{}", s.bob_phase());
+}
+
+/// Bob's lock needs both Parano1d nodes to see the whole list: a second node whose read is cut short holds it.
+#[test]
+fn audit_a_second_noid_node_with_a_cut_short_list_holds_bobs_lock() {
+    let mut s = Scenario::new(Variant::Raw);
+    assert_eq!(s.tick_alice().action.kind(), "fund_noid");
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    s.world.borrow_mut().advance_noid(18);
+    let rb = s.tick_bob_with(|n, _| {
+        if let Some(second) = n.second.as_deref_mut() {
+            second.instances_truncated = true;
+        }
+    });
+    assert_eq!(rb.action.kind(), "wait", "{rb:?}");
+    assert!(rb.notes.iter().any(|n| n.contains("second noid node lists more coins")), "{:?}", rb.notes);
+    assert_eq!(s.tick_bob().action.kind(), "lock_eth");
 }

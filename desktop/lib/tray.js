@@ -47,10 +47,10 @@ function createTray({ electron, platform, assetsDir, onOpen, onQuit }) {
 }
 
 /**
- * The application menu: About, Settings, Recovery code, Help, (with `onCheckUpdate`) Check for a new version, Quit and the standard
+ * The application menu: About, Settings, Recovery code, Help, (with `onPractice`) Practice swap, (with `onCheckUpdate`) Check for a new version, Quit and the standard
  * Edit roles. No reload, no developer tools in the packaged program.
  */
-function buildApplicationMenu({ electron, isPackaged, onSettings, onRecoveryCode, onHelp, onCheckUpdate, onQuit }) {
+function buildApplicationMenu({ electron, isPackaged, onSettings, onRecoveryCode, onHelp, onPractice, onCheckUpdate, onQuit }) {
   const { Menu, app } = electron;
   const template = [
     {
@@ -60,6 +60,7 @@ function buildApplicationMenu({ electron, isPackaged, onSettings, onRecoveryCode
         { label: "Settings", click: () => onSettings() },
         { label: "Recovery code", click: () => onRecoveryCode() },
         { label: "Help", click: () => onHelp() },
+        ...(typeof onPractice === "function" ? [{ label: "Practice swap", click: () => onPractice() }] : []),
         ...(typeof onCheckUpdate === "function" ? [{ label: "Check for a new version", click: () => onCheckUpdate() }] : []),
         { type: "separator" },
         { label: "Quit", click: () => onQuit() },

@@ -248,7 +248,7 @@ async function loadPage(opts = {}) {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "lib/launchfacts.js", "lib/limitstext.js", "lib/needtext.js", "actions.js", "program.js", "stagecard.js", "lib/boardview.js", "board.js", "lib/programwords.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
+  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "lib/launchfacts.js", "lib/limitstext.js", "lib/needtext.js", "actions.js", "program.js", "stagecard.js", "practice.js", "lib/boardview.js", "board.js", "lib/programwords.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
   // a test's hook between the scripts and the page's boot (which waits for its first answer): it may wrap a module's init to catch the helpers operator.js hands over
   if (typeof opts.patch === "function") opts.patch(sandbox);
   const flush = async (n = 30) => {

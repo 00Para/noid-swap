@@ -564,6 +564,13 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
                 notes.push(n.clone());
             }
         }
+        // Outside audit (2026-11-23): the `Locked` logs a node skipped because their amount or timelock does not fit.
+        for n in &e.ignored_logs {
+            let n = if std::ptr::eq(e, eth) { n.clone() } else { format!("{n} (second eth node)") };
+            if !notes.contains(&n) {
+                notes.push(n);
+            }
+        }
     }
     // REVIEW-7 R7-5: say so when a reverted claim is reported by one node but the evidence (two nodes, when two are configured) is not enough.
     if file.role == Role::Alice {
@@ -1035,6 +1042,19 @@ pub const MAX_OBSERVATION_AGE_S: u64 = 120;
 /// fills or fails on, so it cannot be "unknown".
 fn spend_blocker(file: &SwapFile, action: &Action, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Option<String> {
     let p = &file.public.params.eth;
+    // A root with more coins than one poll reads: the swap's own instance is in view, a second instance of the agreed amount cannot be ruled
+    // out. What needs "there is exactly one" waits; a claim, a refund and a recovery do not need it and stay allowed.
+    if noid.instances_truncated {
+        match action {
+            Action::LockEth { .. } | Action::FundNoid { .. } => {
+                return Some("the contract root holds more coins than one read covers, so a second instance of the agreed amount cannot be ruled out; Bob does not lock and Alice does not fund on a partial list".into())
+            }
+            Action::RevealEth { .. } if !secret_may_be_public(file) => {
+                return Some("the contract root holds more coins than one read covers, so a second instance of the agreed amount cannot be ruled out; Alice does not reveal on a partial list".into())
+            }
+            _ => {}
+        }
+    }
     // (needs a fresh noid observation, needs a fresh eth observation, [(field, known)])
     let eth_common = |extra: Vec<(&'static str, bool)>| -> Vec<(&'static str, bool)> {
         let mut k = vec![
@@ -1236,11 +1256,14 @@ fn second_stale(which: &str, at: Option<u64>, now: u64) -> Option<String> {
     }
 }
 
-/// Bob's `lock_eth` against the second Parano1d node: the same instance (slot, creation id, amount) and tips within
-/// [`MAX_NOID_TIP_DIFF`] blocks. `Err` carries both nodes' answers (nothing secret is in them).
+/// Bob's `lock_eth` against the second Parano1d node: the same valid instance (slot, creation id, amount, opening, authority),
+/// fresh tip time, same epoch anchor within the same epoch, and tips within [`MAX_NOID_TIP_DIFF`] blocks.
 fn noid_nodes_agree(file: &SwapFile, noid: &NoidObservation, second: &NoidObservation, now: u64) -> Result<(), String> {
     if let Some(why) = second_stale("noid (second node)", second.observed_at, now) {
         return Err(why);
+    }
+    if let Some(why) = noid_tip_time_blocker(second.tip_time, now) {
+        return Err(format!("the second noid node's tip is not fresh: {why} (F5)"));
     }
     // Both nodes are judged the way the engine judges one: a dust instance beside the real one is set aside.
     let canon_second = canonical_noid(file, second);
@@ -1252,6 +1275,31 @@ fn noid_nodes_agree(file: &SwapFile, noid: &NoidObservation, second: &NoidObserv
             describe_instance_opt(second.instance.as_ref())
         ));
     }
+    if let Err(prob) = instance_ok(file, second) {
+        let why = match prob {
+            InstanceProblem::Ambiguous(w) | InstanceProblem::Rejected(w) => w,
+        };
+        return Err(format!("the second noid node disagrees on the contract instance: {why} (F5)"));
+    }
+    if second.instance_matches_opening == Some(false) {
+        return Err("the second noid node reports that the instance does not match the opening (F5)".into());
+    }
+    if second.instances_truncated {
+        return Err("the second noid node lists more coins at the contract root than one read covers, so a second instance of the agreed amount cannot be ruled out there (F5)".into());
+    }
+    if noid.instance_matches_opening == Some(true) && second.instance_matches_opening != Some(true) {
+        return Err("the second noid node did not verify that the instance matches the opening (F5)".into());
+    }
+    if let (Some(a), Some(b)) = (noid.active_authority.as_deref(), second.active_authority.as_deref()) {
+        if a != b {
+            return Err("the two noid nodes disagree about the instance's active authority (F5)".into());
+        }
+    }
+    if let (Some(a), Some(b)) = (noid.epoch_anchor, second.epoch_anchor) {
+        if noid.tip / params::B_EPOCH == second.tip / params::B_EPOCH && a != b {
+            return Err("the two noid nodes disagree on the epoch anchor in the same epoch (F5)".into());
+        }
+    }
     let diff = noid.tip.abs_diff(second.tip);
     if diff > MAX_NOID_TIP_DIFF {
         return Err(format!(
@@ -1262,9 +1310,9 @@ fn noid_nodes_agree(file: &SwapFile, noid: &NoidObservation, second: &NoidObserv
     Ok(())
 }
 
-/// Alice's `reveal_eth` against the second Ethereum node: the same lock record (lock id, amount, receiver, timelock,
-/// claimed and refunded flags) on the pinned chain and code, `finalized` heights within [`MAX_ETH_FINALIZED_DIFF`] blocks,
-/// and the lock final at the LOWER of the two.
+/// Alice's `reveal_eth` against the second Ethereum node: the same lock record (lock id, sender, receiver, hashlock, amount,
+/// timelock, EOA checks, claimed and refunded flags) on the pinned chain and code, `finalized` heights within
+/// [`MAX_ETH_FINALIZED_DIFF`] blocks, and the lock final at the LOWER of the two against the HIGHER reported lock block.
 fn eth_nodes_agree(file: &SwapFile, eth: &EthObservation, second: &EthObservation, lock: &EthLock, now: u64) -> Result<(), String> {
     let p = &file.public.params.eth;
     if let Some(why) = second_stale("eth (second node)", second.observed_at, now) {
@@ -1285,6 +1333,12 @@ fn eth_nodes_agree(file: &SwapFile, eth: &EthObservation, second: &EthObservatio
         return Err(format!("the second eth node does not show the lock {} that the first one shows (F5)", short_id(&lock.lock_id)));
     };
     let mut differs: Vec<String> = Vec::new();
+    if other.sender != lock.sender {
+        differs.push("sender".to_string());
+    }
+    if other.hashlock != lock.hashlock {
+        differs.push("hashlock".to_string());
+    }
     if other.amount_wei != lock.amount_wei {
         differs.push(format!("amount (node 1 {} wei, node 2 {} wei)", lock.amount_wei, other.amount_wei));
     }
@@ -1299,6 +1353,21 @@ fn eth_nodes_agree(file: &SwapFile, eth: &EthObservation, second: &EthObservatio
     }
     if other.refunded != lock.refunded {
         differs.push(format!("refunded (node 1 {}, node 2 {})", lock.refunded, other.refunded));
+    }
+    if other.sender_is_eoa == Some(false) || (lock.sender_is_eoa == Some(true) && other.sender_is_eoa != Some(true)) {
+        differs.push(format!("sender_is_eoa (node 1 {:?}, node 2 {:?})", lock.sender_is_eoa, other.sender_is_eoa));
+    }
+    if other.receiver_is_eoa == Some(false) || (lock.receiver_is_eoa == Some(true) && other.receiver_is_eoa != Some(true)) {
+        differs.push(format!("receiver_is_eoa (node 1 {:?}, node 2 {:?})", lock.receiver_is_eoa, other.receiver_is_eoa));
+    }
+    if other.block_number != lock.block_number {
+        differs.push(format!("block (node 1 {}, node 2 {})", lock.block_number, other.block_number));
+    }
+    if other.tx_hash != lock.tx_hash {
+        differs.push("transaction".to_string());
+    }
+    if other.block_timestamp != lock.block_timestamp {
+        differs.push(format!("block time (node 1 {:?}, node 2 {:?})", lock.block_timestamp, other.block_timestamp));
     }
     if !differs.is_empty() {
         return Err(format!("the two eth nodes disagree about the lock {}: {} (F5)", short_id(&lock.lock_id), differs.join("; ")));
@@ -1316,10 +1385,16 @@ fn eth_nodes_agree(file: &SwapFile, eth: &EthObservation, second: &EthObservatio
         ));
     }
     let lower = a.min(b);
-    if lower < lock.block_number {
+    let lock_block = lock.block_number.max(other.block_number);
+    if lower < lock_block {
+        if lock.block_number == other.block_number {
+            return Err(format!(
+                "the lock is final on one node only: finalized node 1 {a}, node 2 {b}, the lock is in block {lock_block} (the lower height decides; F5)"
+            ));
+        }
         return Err(format!(
-            "the lock is final on one node only: finalized node 1 {a}, node 2 {b}, the lock is in block {} (the lower height decides; F5)",
-            lock.block_number
+            "the lock is final on one node only: finalized node 1 {a}, node 2 {b}, the lock is in block {} (node 1) / {} (node 2) (the lower height decides; F5)",
+            lock.block_number, other.block_number
         ));
     }
     Ok(())
@@ -1709,11 +1784,26 @@ fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
     if eth.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S) {
         return;
     }
-    if let (Some(latest), Some(pending)) = (eth.signer_nonce_latest, eth.signer_nonce_pending) {
-        if pending > latest {
-            file.log(REVEAL_PENDING_SEEN, now);
+    if eth.chain_id != Some(file.public.params.eth.chain_id) {
+        return;
+    }
+    let primary_pending = matches!((eth.signer_nonce_latest, eth.signer_nonce_pending), (Some(l), Some(p)) if p > l);
+    if !primary_pending {
+        return;
+    }
+    // When a second Ethereum node is configured, a single primary node alone cannot flip REVEAL_PENDING_SEEN.
+    if eth.second_error.is_some() {
+        return;
+    }
+    if let Some(second) = eth.second.as_deref() {
+        if second.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S)
+            || second.chain_id != Some(file.public.params.eth.chain_id)
+            || !matches!((second.signer_nonce_latest, second.signer_nonce_pending), (Some(l), Some(p)) if p > l)
+        {
+            return;
         }
     }
+    file.log(REVEAL_PENDING_SEEN, now);
 }
 
 /// The latest time Alice's reveal may still be sent under this file's profile: the `M_A` cutoff, or `T_reveal - DE` once the reveal may
@@ -2459,6 +2549,21 @@ const RECOVERY_ADOPTED: &str = "noid_recovery_adopted:";
 
 /// The instance a recovery close is for when the file adopted another one than it recorded (the last `noid_recovery_adopted:` entry), else `None`
 /// (then it is the recorded instance). For executors and helpers: the action itself names no instance.
+/// The slot of the NOID instance this file is committed to, looked up directly when the root lists more coins than one poll reads, and whether
+/// a read that is cut short is then usable (it is, whenever such a slot is known: the engine refuses what needs the full list, see
+/// [`spend_blocker`]). `funding_slot` is the output slot of Alice's funding record, for `funding_submitted` (no instance is recorded yet).
+/// Phases before any instance exists give `(None, false)`: a cut-short read is an error there.
+pub fn noid_tracking(file: &SwapFile, funding_slot: Option<u32>) -> (Option<u32>, bool) {
+    let slot = match &file.phase {
+        Phase::Bob(p) => p.instance().map(|i| i.slot_index),
+        Phase::Alice(p) => recovery_target(file)
+            .map(|i| i.slot_index)
+            .or_else(|| p.instance().map(|i| i.slot_index))
+            .or(if matches!(p, AlicePhase::FundingSubmitted { .. }) { funding_slot } else { None }),
+    };
+    (slot, slot.is_some())
+}
+
 pub fn recovery_target(file: &SwapFile) -> Option<NoidInstance> {
     let e = file.history.iter().rev().find_map(|h| h.event.strip_prefix(RECOVERY_ADOPTED))?;
     // The reset entry (`noid_recovery_adopted:recorded`): a recovery close was decided for the recorded instance again.
@@ -3625,11 +3730,14 @@ fn bob_action(
                 Err(e) => Action::Abort { reason: e },
             }
         }
-        B::LockSubmitted { t_reveal, .. } => {
+        B::LockSubmitted { instance, t_reveal, .. } => {
             // Review H2: a dropped lock is re-sent with the SAME terms (same `T_reveal`, same lock id, so a duplicate that lands
             // anyway reverts) and only while (I1) and `M_A` still hold; never as a fresh lock under a new id.
             if last_history(file, "eth_lock_dropped") > last_history(file, "lock_submitted") {
-                let t_now = now.min(eth.latest_timestamp.max(1));
+                if eth.latest_timestamp == 0 {
+                    return Action::Wait { reason: "Ethereum latest timestamp unknown: waiting before deciding whether to re-send the dropped lock".into() };
+                }
+                let t_now = now.min(eth.latest_timestamp);
                 // (I1), and a reveal window that stays >= W_A_min measured to the block the re-sent lock is likely mined in (CHAOS F-8's rule,
                 // applied here): Alice's (I3) check measures from that block, so a lock that would come up short is not worth sending.
                 let ok = g.check_i1_eth(d, noid.tip, *t_reveal, t_now).is_ok()
@@ -3642,19 +3750,42 @@ fn bob_action(
                         reason: format!("the lock with T_reveal {t_reveal} was dropped, is not safe to re-send and its T_reveal has passed; if it still lands, look at the contract: claim the NOID before D if a secret was published, refund the ETH only if the lock is unclaimed"),
                     };
                 }
-                // CHAOS (seed 0x5eed0001, scenario 145): the lock was chosen on ONE instance. A re-send that finds several instances of the
-                // agreed amount at the root is no longer a lock on a known instance, and the funding gate (REVIEW-2 F10) says the tool does not
-                // lock on a guess: wait until it clears up (or until the re-send is unsafe on its own terms).
+                // CHAOS (seed 0x5eed0001, scenario 145): the lock was chosen on ONE instance. A re-send must still see that exact valid
+                // instance with no pending close and no ambiguity before re-sending.
                 if ok {
                     // `poseidon` kind: a lock of someone else on this A that appeared meanwhile (it is not the one we are re-sending).
                     if let Some(why) = poseidon_prelock_blocker(file, noid, eth, false, now, notes) {
                         notes.push(format!("not re-sending the lock: {why}"));
                         return Action::Wait { reason: format!("the lock was dropped, but {why}") };
                     }
-                    if let Err(InstanceProblem::Ambiguous(why)) = instance_ok(file, noid) {
-                        notes.push(format!("not re-sending the lock: {why}"));
+                    match instance_ok(file, noid) {
+                        Ok(()) => {}
+                        Err(InstanceProblem::Ambiguous(why)) => {
+                            notes.push(format!("not re-sending the lock: {why}"));
+                            return Action::Wait {
+                                reason: format!("the lock was dropped, but more than one instance at the contract root fits the agreement: {why}"),
+                            };
+                        }
+                        Err(InstanceProblem::Rejected(why)) => {
+                            notes.push(format!("not re-sending the lock: {why}"));
+                            return Action::Wait {
+                                reason: format!("the lock was dropped, but the NOID instance no longer fits the agreement: {why}"),
+                            };
+                        }
+                    }
+                    if noid.instance.as_ref() != Some(instance) {
                         return Action::Wait {
-                            reason: format!("the lock was dropped, but more than one instance at the contract root fits the agreement: {why}"),
+                            reason: "the lock was dropped, but the recorded NOID instance is missing or changed".into(),
+                        };
+                    }
+                    if noid.active_authority.as_deref() != Some(file.public.claim_authority.as_str()) {
+                        return Action::Wait {
+                            reason: "the lock was dropped, but the NOID instance's active authority is not the claim authority".into(),
+                        };
+                    }
+                    if !noid.pending_calls.is_empty() {
+                        return Action::Wait {
+                            reason: "the lock was dropped, but a call on the NOID instance is already pending in the mempool".into(),
                         };
                     }
                 }
@@ -4278,20 +4409,78 @@ pub fn cancel_intent_checked(
         }
     }
     match intent.action.as_str() {
-        "lock_eth" | "refund_eth" | "reveal_eth" => match (eth.signer_nonce_latest, eth.signer_nonce_pending) {
-            (Some(latest), Some(pending)) if pending > latest => {
+        "lock_eth" | "refund_eth" | "reveal_eth" => {
+            if eth.chain_id != Some(file.public.params.eth.chain_id) {
                 return Err(format!(
-                    "not cancelling: the {} signer has a transaction in the Ethereum mempool (pending nonce {pending} > latest nonce {latest}); that may be this intent's send. Wait until it is mined or dropped (REVIEW-3 F3)",
-                    intent.action
-                ))
+                    "not cancelling: Ethereum chain id mismatch (observed {:?}, expected {})",
+                    eth.chain_id, file.public.params.eth.chain_id
+                ));
             }
-            (Some(_), Some(_)) => {}
-            (latest, pending) => {
-                return Err(format!(
-                    "not cancelling: the signer's Ethereum nonces are unknown (latest {latest:?}, pending {pending:?}), so a pending send cannot be ruled out. Ask a node that answers eth_getTransactionCount, and look at the chain (REVIEW-3 F3)"
-                ))
+            if let (Some(pinned), Some(seen)) = (file.public.params.eth.code_hash, eth.contract_code_hash) {
+                if pinned != seen {
+                    return Err("not cancelling: Ethereum contract code hash does not match the pinned contract".into());
+                }
             }
-        },
+            if let Some(err) = &eth.second_error {
+                return Err(format!("not cancelling: the second Ethereum node could not be read ({err})"));
+            }
+            if let Some(second) = eth.second.as_deref() {
+                // Both nodes were read in the same poll: a second reading that is missing its time, or is far from the first one's, proves nothing.
+                match (eth.observed_at, second.observed_at) {
+                    (_, None) => return Err("not cancelling: the second Ethereum node's observation has no time".into()),
+                    (Some(a), Some(b)) if a.abs_diff(b) > MAX_OBSERVATION_AGE_S => {
+                        return Err(format!("not cancelling: the two Ethereum nodes were read {} s apart (limit {MAX_OBSERVATION_AGE_S} s)", a.abs_diff(b)))
+                    }
+                    _ => {}
+                }
+                if second.chain_id != Some(file.public.params.eth.chain_id) {
+                    return Err(format!(
+                        "not cancelling: second Ethereum node chain id mismatch or unknown (observed {:?}, expected {})",
+                        second.chain_id, file.public.params.eth.chain_id
+                    ));
+                }
+                if let (Some(pinned), Some(seen)) = (file.public.params.eth.code_hash, second.contract_code_hash) {
+                    if pinned != seen {
+                        return Err("not cancelling: second Ethereum node contract code hash does not match the pinned contract".into());
+                    }
+                }
+                if intent.action == "lock_eth" {
+                    if let Some(id) = expected_lock_id(file) {
+                        if second.find_lock(&id).is_some() {
+                            return Err(format!("not cancelling: the second Ethereum node shows lock {} on chain", short_id(&id)));
+                        }
+                    }
+                }
+                match (second.signer_nonce_latest, second.signer_nonce_pending) {
+                    (Some(latest), Some(pending)) if pending > latest => {
+                        return Err(format!(
+                            "not cancelling: the second Ethereum node shows a pending transaction for the {} signer (pending nonce {pending} > latest nonce {latest})",
+                            intent.action
+                        ));
+                    }
+                    (Some(_), Some(_)) => {}
+                    (latest, pending) => {
+                        return Err(format!(
+                            "not cancelling: the second Ethereum node's signer nonces are unknown (latest {latest:?}, pending {pending:?}), so a pending send cannot be ruled out"
+                        ))
+                    }
+                }
+            }
+            match (eth.signer_nonce_latest, eth.signer_nonce_pending) {
+                (Some(latest), Some(pending)) if pending > latest => {
+                    return Err(format!(
+                        "not cancelling: the {} signer has a transaction in the Ethereum mempool (pending nonce {pending} > latest nonce {latest}); that may be this intent's send. Wait until it is mined or dropped (REVIEW-3 F3)",
+                        intent.action
+                    ))
+                }
+                (Some(_), Some(_)) => {}
+                (latest, pending) => {
+                    return Err(format!(
+                        "not cancelling: the signer's Ethereum nonces are unknown (latest {latest:?}, pending {pending:?}), so a pending send cannot be ruled out. Ask a node that answers eth_getTransactionCount, and look at the chain (REVIEW-3 F3)"
+                    ))
+                }
+            }
+        }
         // CHAOS F-15: a funding that sits in the mempool (or that a reorg put back there) is not an instance yet; cancelling would let
         // the next tick print a SECOND funding.
         "fund_noid" => match noid.funding_pending {

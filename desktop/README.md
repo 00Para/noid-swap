@@ -427,3 +427,10 @@ Left (the final pass decides):
 - On a real first start Electron makes `<data>` and `<data>/electron` before `ensureDataDirs` and `icacls` run (on Windows its lock file is
   open in it then). Harmless by reading (the inheritance change needs only the right to change the folder's permissions; a Mac makes them 0700),
   but `single-instance.test.js` checks "no folder was made", which only the fake shows; the hosted Windows start-up job is the proof.
+
+## The practice swap, desktop side (2026-11-23)
+
+The application menu has "Practice swap" beside Help (`buildApplicationMenu` takes `onPractice`; the item exists only when it is given). The shell's `openPractice` shows the window and has the page click its own menu
+item named "Practice swap" with a fixed script (`OPEN_PRACTICE_SCRIPT` in `lib/window.js`, the same way as `OPEN_SETTINGS_SCRIPT`: only while the page is the program's own, no argument, `false` when the item is
+not there). The practice itself is the console's (`ui/app/README.md`, "The practice swap"): the shell requires nothing of it and the Help text says it needs no node, no coins, no network and no key store.
+Tests: `test/practice-menu.test.js` (6).

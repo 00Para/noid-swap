@@ -184,7 +184,7 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       expect(wrong.code).to.equal(1);
       expect(wrong.err).to.match(/not the expected/);
       const f = path.join(dir, "p.key");
-      fs.writeFileSync(f, p.key + "\n");
+      fs.writeFileSync(f, p.key + "\n", { mode: 0o600 });
       expect(JSON.parse((await cli(["address", "--key-file", f])).out).address).to.equal(p.address);
       for (const bad of ["not-a-key-but-private", "0x" + "00".repeat(32), "0x" + "ff".repeat(32), "0x" + "ab".repeat(31)]) {
         const r = await cli(["address", "--key-stdin"], bad + "\n");
@@ -395,7 +395,7 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       noKey(stranger.key, wrong.out, wrong.err);
       // both sources: refused
       const keyFile = path.join(dir, "alice.key");
-      fs.writeFileSync(keyFile, alice.key + "\n");
+      fs.writeFileSync(keyFile, alice.key + "\n", { mode: 0o600 });
       const both = await cli([...flags, "--key-stdin", "--key-file", keyFile], alice.key + "\n");
       expect(both.code).to.equal(1);
       expect(both.out).to.equal("");

@@ -4,7 +4,7 @@
  * and the view model run the same code on them as on a live run folder. Every phase of both roles and both abort paths
  * can be walked. Heights and times are relative to "now", so the countdowns move.
  *
- * Nothing here is real: addresses are obvious placeholders, hashes are repeated bytes, the "preimage" is a marker
+ * Nothing here is real: addresses are labels that no address check accepts, hashes are repeated bytes, the "preimage" is a marker
  * (it is put into the ticks on purpose, to prove the reader strips it), heights follow live run 2 (D = 281,514).
  *
  * The REASONS and NOTES are the texts the engine prints today (swap-cli/src/engine.rs and params.rs: `alice_action`, `bob_action`,
@@ -21,9 +21,11 @@ const LOCK_BY = D - 252;
 const ALICE_NOID = "o1ALICE-PLACEHOLDER-NOT-A-REAL-ADDRESS";
 const BOB_NOID = "o1BOB-PLACEHOLDER-NOT-A-REAL-ADDRESS";
 const ROOT = "o1CONTRACT-ROOT-PLACEHOLDER-NOT-A-REAL-ADDRESS";
-const ALICE_ETH = "0x" + "00".repeat(18) + "a11c";
-const BOB_ETH = "0x" + "00".repeat(18) + "b0b0";
-const HTLC = "0x" + "00".repeat(18) + "c0de";
+// Words, not addresses: a value that is a valid Ethereum address (even one that is all zeros but a few digits) can receive coins that are then lost, so the Ethereum placeholders are labels
+// that no address check accepts (test/practice-core.test.js runs every string of the practice payloads through the real address checks).
+const ALICE_ETH = "practice label, not an address (Alice)";
+const BOB_ETH = "practice label, not an address (Bob)";
+const HTLC = "practice label, not an address (swap contract)";
 const HASHLOCK = "0x" + "d0".repeat(32);
 const LOCK_ID = "0x" + "d1".repeat(32);
 const TX = (b) => "0x" + b.repeat(32);
@@ -112,7 +114,7 @@ const BOB_ABORT_B = [
   BOB_HAPPY[4],
   st("t_reveal_passed", "T_reveal passed: refund", "locked", { tipToD: 160, inst: true, lock: "final", trIn: -30 }, { action: "refund_eth", lock_id: LOCK_ID }),
   st("refund_submitted", "Refund sent", "refund_submitted", { tipToD: 158, inst: true, lock: "final", trIn: -90 }, WAIT("ETH refund pending")),
-  st("refund_mined", "Refund mined", "refund_mined", { tipToD: 156, inst: true, lock: "final", trIn: -150, refund: "mined" }, WAIT("ETH refund mined; waiting for it to be final")),
+  st("refund_mined", "Refund mined", "refund_mined", { tipToD: 156, inst: true, lock: "final", trIn: -150, refund: "mined" }, WAIT(`ETH refund mined at block ${ETH_LATEST - 10}; waiting for Ethereum finality (finalized block ${ETH_LATEST - 32})`)),
   st("refunded", "ETH back", "refunded", { tipToD: 120, inst: true, lock: "final", trIn: -1200, refund: "final" }, WAIT("done: ETH refunded")),
 ];
 
@@ -294,6 +296,30 @@ function demoPayload(q) {
   let idx = typeof q.step === "number" ? q.step : steps.findIndex((s) => s.id === q.step);
   if (!Number.isInteger(idx) || idx < 0) idx = 0;
   if (idx >= steps.length) idx = steps.length - 1;
+  const p = payloadFromSteps({ role, steps, idx, now, flags: q.flags });
+  p.demo = {
+    scenarios: scenarioList(),
+    scenario: sc.id,
+    role,
+    step: idx,
+    steps: steps.map((s) => ({ id: s.id, label: s.label, phase: s.phase })),
+    flags: p.demo_flags,
+    available_flags: FLAGS,
+  };
+  delete p.demo_flags;
+  return p;
+}
+
+/**
+ * The payload of one step of any list of steps (a scenario's list, or one the practice swap composes from the scenarios' steps): the same shape `/api/run` serves, with `mode: "demo"`. The loop
+ * history is the up to seven steps before `idx`. `demo_flags` is the list of flags that were applied (demoPayload moves it under `demo`).
+ * @param {{role:string, steps:object[], idx:number, now:number, flags?:string[]}} q
+ */
+function payloadFromSteps(q) {
+  const now = q.now || Math.floor(Date.now() / 1000);
+  const role = q.role === "bob" ? "bob" : "alice";
+  const steps = q.steps;
+  const idx = q.idx;
   const flagSet = {};
   for (const f of q.flags || []) if (FLAGS.includes(f)) flagSet[f] = true;
   const step = steps[idx];
@@ -339,15 +365,7 @@ function demoPayload(q) {
     helpers: [],
     verify: { file: "verify.out", mtime: now - 3600, ok: true, text: "OK: exists m with sha256(m) = H and Addr(m) = A (demo)" },
     commands: { bin: "~/live-run-DEMO/bin", linux_run: "~/live-run-DEMO" },
-    demo: {
-      scenarios: scenarioList(),
-      scenario: sc.id,
-      role,
-      step: idx,
-      steps: steps.map((s) => ({ id: s.id, label: s.label, phase: s.phase })),
-      flags: Object.keys(flagSet),
-      available_flags: FLAGS,
-    },
+    demo_flags: Object.keys(flagSet),
   };
 }
 
@@ -357,4 +375,4 @@ function clock(unix) {
   return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
 }
 
-module.exports = { demoPayload, scenarioList, coveredPhases, SCENARIOS, FLAGS, TERMS, FAKE_SECRET, buildTick, phaseCatalogue: P.PHASES };
+module.exports = { demoPayload, payloadFromSteps, scenarioList, coveredPhases, SCENARIOS, FLAGS, TERMS, FAKE_SECRET, buildTick, phaseCatalogue: P.PHASES, STEP_TABLES: { ALICE_HAPPY, BOB_HAPPY, ALICE_ABORT_A, BOB_ABORT_A, ALICE_ABORT_B, BOB_ABORT_B } };

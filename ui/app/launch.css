@@ -19,7 +19,7 @@ svg.coin.solid .cut { fill: none; stroke: var(--panel); stroke-width: 1.6; strok
 /* R4: the rate and fee lines */
 .facts-line { margin: var(--s2) 0 0; font-size: 13.5px; line-height: 1.5; color: var(--quiet); font-variant-numeric: tabular-nums; }
 .facts-line .fig { font-family: var(--mono); color: var(--text); }
-.facts-line .fig + .fig { margin-left: 1.5ch; }
+.facts-line .fig + .fig { margin-left: 1.5ch; padding-left: 1.5ch; border-left: 1px solid var(--rule-2); }
 
 /* R3: the history line under an own address */
 .hist { margin: var(--s1) 0 0; font-size: 13px; line-height: 1.45; color: var(--faint); }

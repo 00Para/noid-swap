@@ -61,6 +61,10 @@ const GONE_PAGE =
 const OPEN_SETTINGS_SCRIPT =
   "(() => { for (const b of document.querySelectorAll('.pg-menu-list button')) { if (b.textContent === 'Settings') { b.click(); return true; } } return false; })()";
 
+// The same for the practice swap (the menu's "Practice swap"): the page's own menu item is clicked. Fixed text, no argument; false when the item is not there.
+const OPEN_PRACTICE_SCRIPT =
+  "(() => { for (const b of document.querySelectorAll('.pg-menu-list button')) { if (b.textContent === 'Practice swap') { b.click(); return true; } } return false; })()";
+
 /**
  * @param {object} o
  * @param {object} o.electron
@@ -134,6 +138,27 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
     win.focus();
   }
 
+  /** Shows the window and runs one fixed script of this file in the page, only while the page is the program's own (the private scheme). True when the script answered true; false otherwise (the window is shown anyway). */
+  async function askPage(script) {
+    showAndFocus();
+    try {
+      await loaded;
+      if (win.isDestroyed()) return false;
+      if (typeof wc.getURL === "function") {
+        let current = null;
+        try {
+          current = new URL(wc.getURL());
+        } catch {
+          return false;
+        }
+        if (originOf(current) !== PAGE_ORIGIN) return false;
+      }
+      return (await wc.executeJavaScript(script, true)) === true;
+    } catch {
+      return false;
+    }
+  }
+
   return {
     window: win,
     webContents: wc,
@@ -144,23 +169,11 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
      * never the "this window stopped working" page. True when the page opened it; false when it could not (the window is shown anyway).
      */
     async openSettings() {
-      showAndFocus();
-      try {
-        await loaded;
-        if (win.isDestroyed()) return false;
-        if (typeof wc.getURL === "function") {
-          let current = null;
-          try {
-            current = new URL(wc.getURL());
-          } catch {
-            return false;
-          }
-          if (originOf(current) !== PAGE_ORIGIN) return false;
-        }
-        return (await wc.executeJavaScript(OPEN_SETTINGS_SCRIPT, true)) === true;
-      } catch {
-        return false;
-      }
+      return askPage(OPEN_SETTINGS_SCRIPT);
+    },
+    /** Shows the window and opens the page's practice swap: the same way as openSettings, with its own fixed script. */
+    async openPractice() {
+      return askPage(OPEN_PRACTICE_SCRIPT);
     },
     hide() {
       if (!win.isDestroyed()) win.hide();
@@ -175,4 +188,4 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   };
 }
 
-module.exports = { createMainWindow, baseWebPreferences, isReloadKey, WINDOW_BACKGROUND, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT };
+module.exports = { createMainWindow, baseWebPreferences, isReloadKey, WINDOW_BACKGROUND, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT, OPEN_PRACTICE_SCRIPT };

@@ -132,3 +132,18 @@ fn guard_reports_unreadable_or_malformed_params() {
     let bad_addr = serde_json::json!({ "hashlock_authority": "nope", "receiver": bob.to_bech32(), "max_fee": "6000" });
     assert!(matches!(check_params_value(&bad_addr), Err(GuardError::BadParams(_))));
 }
+
+/// The opening's instruction list is part of the guard: right authorities, modes and rules with another program are refused.
+#[test]
+fn guard_rejects_an_opening_with_another_program() {
+    let c = Cast::new();
+    let good = standard_opening(&c);
+    assert_eq!(check_opening(&good), Ok(()));
+    let mut bad = good.clone();
+    bad.program.reverse();
+    assert_ne!(bad.program, good.program, "the reversed program must differ for this test to mean anything");
+    match check_opening(&bad) {
+        Err(GuardError::BadParams(m)) => assert!(m.contains("program"), "{m}"),
+        other => panic!("expected the program to be refused, got {other:?}"),
+    }
+}

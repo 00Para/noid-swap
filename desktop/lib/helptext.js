@@ -5,6 +5,7 @@ const HELP_TITLE = "About No1d Swap";
 
 const HELP_PARAGRAPHS = Object.freeze([
   "No1d Swap swaps NOID for Ethereum (or the other way round) with a hash-time lock on both sides: either both legs settle, or both are refunded. It works on the test networks and, within fixed limits per swap (0.5 ETH and 2,500 NOID), on Ethereum mainnet, where the coins are real.",
+  "Practice swap (in the menu): a guided practice on the real screens. A script plays the other side and both chains, so it needs no node, no coins, no network and no key store, writes nothing and takes about five minutes. Every practice screen carries a band that says nothing is real.",
   "Before a swap: the Parano1d wallet app open and in sync; an Ethereum wallet (on Sepolia with a little test ETH from a faucet for a test swap, on Ethereum mainnet for a real one); the coins to swap and a little more for fees. The one who sells ETH makes the swap first and saves an invitation file; the one who sells NOID opens it in New swap.",
   "Your recovery code opens the swaps made on this computer if its key store is lost. Keep it on paper. Anyone with the code and your run folders can open your swaps.",
   "If this program no longer starts, the recovery code and a whole run folder still open that swap by hand with swap-cli: the public source's desktop/README.md says how, in \"By hand, without the program\".",

@@ -476,6 +476,11 @@ pub struct NoidObservation {
     /// Number of non-empty slots seen (`instances.len()` from a watcher). A count above 1 is never normal.
     #[serde(default)]
     pub instance_count: usize,
+    /// The contract root lists more coins than one poll reads (`MAX_INSTANCE_PAGES`): `instances` is partial. It holds the swap's own tracked
+    /// instance (looked up by its slot) but cannot show that no second instance of the agreed amount exists, so the engine refuses the
+    /// decisions that need the full list (Bob's lock, Alice's reveal, a funding) and still allows a claim, a refund and a recovery.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub instances_truncated: bool,
     /// Mempool entries whose `contract_opening_hex` equals our opening.
     #[serde(default)]
     pub pending_calls: Vec<PendingCall>,
@@ -741,6 +746,10 @@ pub struct EthObservation {
     /// Informational; the engine copies it into the notes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reveal_tx_note: Option<String>,
+    /// `Locked` logs of the agreed parties and hashlock that were skipped because their amount or timelock does not fit the widths this
+    /// tool uses (at most a few described, then a count). Informational; the engine copies it into the notes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignored_logs: Vec<String>,
     /// REVIEW-3 F3: `eth_getTransactionCount(signer, "latest")` for the address this file's role signs Ethereum
     /// transactions with (Bob: `bob_sender`; Alice: `alice_receiver`). `None` = not asked, or the node could not
     /// answer: unknown, never an error. `intent --cancel` reads it.
@@ -881,6 +890,7 @@ mod tests {
             word_scan: WordScan::Failed("x".into()),
             reverted_claim: Some(RevertedClaim { lock_id: [1; 32], preimage: [9; 32], tx_hash: [8; 32], block_number: 6 }),
             reveal_tx_note: Some("n".into()),
+            ignored_logs: vec!["i".into()],
             signer_nonce_latest: Some(4),
             signer_nonce_pending: Some(5),
             second: None,

@@ -86,6 +86,10 @@ pub struct SendRecord {
     pub target: String,
     pub amount: u64,
     pub fee: u64,
+    /// A funding's own output: the slot of the instance it creates at the contract (the first output). `tick` looks this slot up directly, so
+    /// a root crowded with other coins cannot hide a funding that has no recorded instance yet. Absent in older records and in recoveries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_slot: Option<u32>,
 }
 
 impl SendRecord {
@@ -104,6 +108,7 @@ impl SendRecord {
             target: target.to_string(),
             amount: plan.amount,
             fee: plan.fee,
+            output_slot: plan.outputs.first().map(|o| o.slot_index),
         }
     }
 
@@ -122,6 +127,7 @@ impl SendRecord {
             target: plan.recipient.to_bech32(),
             amount: plan.amount_out,
             fee: plan.fee,
+            output_slot: None,
         }
     }
 
@@ -344,6 +350,7 @@ mod tests {
             target: "o1x".into(),
             amount: 1,
             fee: 1,
+            output_slot: None,
         }
     }
 

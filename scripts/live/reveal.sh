@@ -59,13 +59,15 @@ if [ "$DRY" = 1 ]; then
   echo "claim dry-run exit $EC"; head -c 600 "$L/eth-claim-dry-$N.err"; echo; head -c 1400 "$L/eth-claim-dry-$N.json"; echo
   exit $EC
 fi
-load_passphrase || exit 2
-"$BIN" secret "$ALICE_FILE" 2>/dev/null | "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err"
-EC=${PIPESTATUS[1]}
+[ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (run setup.sh)" >&2; exit 2; }
+( load_passphrase && "$BIN" secret "$ALICE_FILE" ) 2>/dev/null | ( unset SWAP_PASSPHRASE; "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err" )
+RCS=("${PIPESTATUS[@]}")
+if [ "${RCS[0]}" -ne 0 ]; then echo "claim REFUSED: the secret could not be emitted from Alice's swap file (exit ${RCS[0]}); nothing was sent"; exit 2; fi
+EC=${RCS[1]}
 fi
 echo "claim exit $EC at $(date +%T)"; head -c 600 "$L/eth-claim.err"; echo
 reveal_sent_note "$L/eth-claim.err"
-python3 - "$L/eth-claim.json" "$L/reveal-reverted-tx.txt" <<'PY'
+python3 -I - "$L/eth-claim.json" "$L/reveal-reverted-tx.txt" <<'PY'
 import sys, json
 try: d = json.load(open(sys.argv[1]))
 except Exception as e: print("no json:", e); sys.exit(0)

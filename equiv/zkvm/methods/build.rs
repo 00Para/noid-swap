@@ -12,7 +12,9 @@ use std::collections::HashMap;
 use risc0_build::{embed_methods, embed_methods_with_options, DockerOptionsBuilder, GuestOptionsBuilder};
 
 fn main() {
-    if std::env::var_os("EQUIV_REPRODUCIBLE").is_some() {
+    println!("cargo:rerun-if-env-changed=EQUIV_REPRODUCIBLE");
+    let reproducible = matches!(std::env::var("EQUIV_REPRODUCIBLE").as_deref(), Ok("1" | "true" | "TRUE"));
+    if reproducible {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let docker = DockerOptionsBuilder::default().root_dir(root).build().unwrap();
         let guest = GuestOptionsBuilder::default().use_docker(docker).build().unwrap();

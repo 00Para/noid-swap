@@ -742,6 +742,41 @@
     return box;
   }
 
+  /** R23-3: the program's reading that this swap ended before it started, while its file is still before the person's first step; null otherwise. */
+  function unstartedOf(payload, view) {
+    const u = payload && payload.program && typeof payload.program === "object" ? payload.program.unstarted : null;
+    if (!u || u.ended !== true || !view || !view.phase || !view.role) return null;
+    const before = view.role === "alice" ? ["created"] : ["received", "funded", "funding_final"];
+    return before.includes(view.phase.id) ? u : null;
+  }
+
+  /**
+   * R23-3: the box of a swap that ended before it started while its wallet or key holds coins (or cannot be read): what the swap's own addresses hold, whole and copyable, and a button that reads
+   * the wallet again. No "send at least" and no "deposit now": nothing is asked of the person here. The way back is the engine's own once its loop records the end.
+   */
+  function heldBlock(payload, role) {
+    const a = payload && payload.actions;
+    const w = walletOf(a);
+    if (!w) return null;
+    const s = ((w.roles || {})[role] || {}).status || null;
+    const box = H.el("section", { class: "spend-box deposit-box held-box sc-part", "aria-label": "What this swap's wallet holds" }, H.el("div", { class: "row" }, H.el("strong", { text: "Held by this swap" }), H.chip("quiet", "this swap's own wallet")));
+    box.appendChild(actionButtonRow(a, role, s));
+    if (!s || !s.ok || !s.show) {
+      box.appendChild(H.el("p", { class: "plain", text: "No clean reading of this swap's wallet is available, so no address is shown. Read it again; the program also does it about every 40 seconds." }));
+      return box;
+    }
+    const line = (coin, address, figure) => {
+      const cls = coin === "NOID" ? "noid" : "eth";
+      const parsed = LF() ? LF().groups(String(address)) : null;
+      box.appendChild(H.el("div", { class: "deposit-row" }, H.el("p", { class: "who" }, coinGlyph(cls, "sm"), `${coin} now in this address`), H.el("p", { class: "line" }, H.el("span", { class: `leg ${cls}` }, H.el("span", { class: "amt", text: figure === null ? "?" : figure }), H.el("span", { class: "unit", text: coin }))), H.el("p", { class: "line" }, H.copyButton(address, `the ${coin} address of this swap`, parsed ? undefined : address, { icon: true, mono: true, whole: true }))));
+    };
+    if (role === "alice" && s.noid) line("NOID", s.noid.address, noidFigure(s.noid.plain_micronoid));
+    if (s.eth) line("ETH", s.eth.address, ethFigure(s.eth.balance_wei));
+    box.appendChild(H.el("p", { class: "dim", text: `Read ${typeof s.age_s === "number" ? s.age_s + " s ago" : "just now"}. Do not send anything here. What is held goes back to your own addresses once the program has recorded the end of the swap.` }));
+    return box;
+  }
+  const actionButtonRow = (a, role, s) => H.el("div", { class: "row" }, actionButton(a, `wallet-status-${role}`, s ? "Read the wallet again" : "Read the wallet now", "Read-only: asks the nodes what the swap's wallet holds."));
+
   /** True when the deposit this role must make has been seen (a clean status that covers it), else false. */
   function depositSeen(a, role) {
     const w = walletOf(a);
@@ -988,7 +1023,7 @@
   }
   /** "2000 NOID" -> "2,000 NOID": the display copy of an amount text (what the person types is never taken from it). Anything else is returned as it is. */
   const groupAmt = (t) => {
-    const m = /^([0-9]+(?:.[0-9]+)?)( [A-Z]{3,4})$/.exec(String(t === null || t === undefined ? "" : t));
+    const m = /^([0-9]+(?:\.[0-9]+)?)( [A-Z]{3,4})$/.exec(String(t === null || t === undefined ? "" : t));
     const L = LF();
     return m && L ? L.groupDec(m[1]) + m[2] : t;
   };
@@ -1685,7 +1720,7 @@
   }
 
   /** "5.000000" -> "5", "0.500000" -> "0.5" (only after a decimal point). */
-  const trimZeros = (v) => { const x = String(v); return x.includes(".") ? x.replace(/0+$/, "").replace(/.$/, "") : x; };
+  const trimZeros = (v) => { const x = String(v); return x.includes(".") ? x.replace(/0+$/, "").replace(/\.$/, "") : x; };
 
   /** The amounts as the swap's own terms say them, else as typed in the form: NOID lime, ETH periwinkle. */
   function updateTrade() {
@@ -2459,6 +2494,14 @@ ${entry.command || ""}` : "") }), why };
     const add = (n) => {
       if (n) wrap.appendChild(n);
     };
+    // R23-3: a swap that ended before it started (the program's own reading, lib/unstarted.js) is not asked for a check line, an approval or a deposit any more; its way back, if its wallet holds
+    // coins, is the engine's own once its loop records the end (the spend box below stays)
+    const un = unstartedOf(payload, view);
+    if (un) {
+      if (un.holds !== "nothing") add(heldBlock(payload, view.role));
+      if (!claimed.spend) add(spendBlock(view, payload));
+      return wrap; // an empty box too: the caller must not fall back to today's boxes (the approval and the deposit)
+    }
     if (!claimed.handover) add(handoverBlock(view, payload));
     if (a.watch && a.watch.mode === "read") add(H.el("p", { class: "plain", text: READ_PHASE_SAY }));
     const x = a.autopilot && a.autopilot[view.role];
@@ -2869,6 +2912,7 @@ ${entry.command || ""}` : "") }), why };
     join: { noJoinStarted, joinFacts, joinSteps, joinResult, JOIN_STEPS, JOIN_STEPS_WALLET, bobCheck, BOB_BEFORE_LOCK },
     wallet: { walletOf, depositBlock, depositNeeded, depositSeen, walletSignature, SPEND_ORDER },
     spendBlock,
+    unstartedOf,
     autopilotBlock,
     needsYouBoxes,
     autopilotFacts,
@@ -2888,5 +2932,6 @@ ${entry.command || ""}` : "") }), why };
     depositFigures: { noid: noidFigure, eth: ethFigure },
     launch: { launchOf, isMainnet, groupsSpan, groupsText, ethTxt, noidTxt, gweiTxt, levelBox, capBelowText, bobStakeText, plainLines, resendCap, isLimitsUnread, limitsFactsOf },
     depositTimes: { text: depositTimeText, refresh: refreshDepositTimes },
+    amount: { trimZeros, groupAmt },
   };
 })();

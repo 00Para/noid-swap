@@ -1,8 +1,9 @@
 use equiv_ref::*;
 
 const USAGE: &str = "usage:
-  equiv-ref <32-byte secret m as 64 hex chars>
-      prints H=sha256(m) and A for the raw and stock variants
+  <32-byte secret m as 64 hex chars on one line> | equiv-ref --secret-stdin
+      prints H=sha256(m) and A for the raw and stock variants (stdin must be a pipe or a file, not a terminal; the secret is never taken from the
+      command line, where process listings and shell history would show it)
   equiv-ref addr-vectors <out-file> [--random N] [--seed TEXT]
       writes the differential vectors for the EVM contract: for each secret 64 bytes =
       secret || Addr(secret), Addr from the VENDOR crate. Order: 299 structured secrets,
@@ -14,11 +15,12 @@ fn main() {
     if args.first().map(String::as_str) == Some("addr-vectors") {
         return addr_vectors_cmd(&args[1..]);
     }
-    if args.len() != 1 || args[0] == "-h" || args[0] == "--help" {
+    if args.len() != 1 || args[0] != "--secret-stdin" {
+        // Whatever stood in the place of the flag is never echoed: it may be a secret.
         eprintln!("{USAGE}");
         std::process::exit(2);
     }
-    let m = match parse_hex32(&args[0]) {
+    let m = match read_secret_stdin() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: {e}");
@@ -42,6 +44,31 @@ fn main() {
         "public(stock) = {}",
         hex::encode(equiv_portable::encode_public(VARIANT_STOCK, &h, &a_stock))
     );
+}
+
+/// One line of 64 hex characters (optionally `0x`) from a pipe or a file; the text read is wiped once parsed.
+fn read_secret_stdin() -> Result<[u8; 32], String> {
+    use std::io::{IsTerminal, Read};
+    if std::io::stdin().is_terminal() {
+        return Err("--secret-stdin needs a pipe or a file on stdin, not a terminal (a typed secret would be echoed)".into());
+    }
+    let mut raw = Vec::new();
+    std::io::stdin().take(4096).read_to_end(&mut raw).map_err(|e| format!("reading stdin: {e}"))?;
+    let parsed = match std::str::from_utf8(&raw) {
+        Ok(text) => {
+            let line = text.strip_suffix("\n").unwrap_or(text);
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line.contains('\n') {
+                Err("stdin must hold exactly one line (the 64-hex secret)".to_string())
+            } else {
+                parse_hex32(line.strip_prefix("0x").unwrap_or(line))
+            }
+        }
+        Err(_) => Err("stdin is not text".to_string()),
+    };
+    raw.fill(0);
+    std::hint::black_box(&raw); // the wipe is not optimised away
+    parsed
 }
 
 fn addr_vectors_cmd(args: &[String]) {

@@ -23,8 +23,11 @@
     const one = (obj, words) => {
       const st = obj && typeof obj.state === "string" && Object.prototype.hasOwnProperty.call(words, obj.state) ? obj.state : "error";
       const out = { state: st, word: words[st], level: LEVEL[st] || "attn" };
-      // the Parano1d chain identity is checked against a pinned block once the program has one; until then it says so
-      if (words === NOID_WORDS && st === "ok" && obj && obj.chain_checked === false) out.word += " (the chain is not verified yet)";
+      // the Parano1d chain identity is checked against a pinned block once the program has one; until then it says so and does not wear the verified "ok" dot
+      if (words === NOID_WORDS && st === "ok" && obj && obj.chain_checked === false) {
+        out.word += " (the chain is not verified yet)";
+        out.level = "attn";
+      }
       return out;
     };
     // `eth.production` is the mainnet endpoints' own state: { state: "idle" } while no mainnet swap or form asks for them (drawn quietly, never as an error)
@@ -53,7 +56,7 @@
     const level = idle ? "idle" : w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn";
     const label = idle && name === "Ethereum" ? "Mainnet" : name;
     const word = idle ? "not checked" : w.word;
-    const calm = level === "ok" || level === "idle";
+    const calm = level === "ok" || level === "idle" || w.state === "ok";
     // the name is the chip's own text and the state one span after it, so the chip's text is exactly "Name: state" (no space before the colon)
     return H.el("span", { class: `chip ${level} node-chip`, title: `${label}: ${word}`, text: label }, H.el("span", { class: calm ? "node-state sr-only" : "node-state", text: `: ${word}` }));
   };
@@ -130,6 +133,7 @@
     const list = el("ul", { class: "pg-menu-list" });
     const item = (label, fn) => list.appendChild(el("li", {}, el("button", { type: "button", class: "btn sm", onclick: async () => { menu.removeAttribute("open"); await fn(); } }, label)));
     item("Settings", () => goTo("settings"));
+    item("Practice swap", () => goTo("practice"));
     item("Limits and risks", () => {
       limitsOpen = true;
       return h.go("list");
@@ -185,7 +189,7 @@
         "button",
         { type: "button", class: "pg-row", onclick: () => h.openSwap(s.swap) },
         main,
-        el("span", { class: "pg-row-state" }, s.refused ? null : el("span", { text: phaseWord(s.role, s.phase) }), s.until_text ? el("span", { class: "pg-until", text: s.until_text }) : null),
+        el("span", { class: "pg-row-state" }, s.refused ? null : el("span", { text: s.unstarted === true && !s.active ? "Ended before it started" : phaseWord(s.role, s.phase) }), s.until_text ? el("span", { class: "pg-until", text: s.until_text }) : null),
         el("span", { class: "pg-row-chips" }, ...chips),
         ic("chevR", "go"),
         s.refused ? el("span", { class: "pg-refused", text: `This folder is read only: ${s.refused}` }) : null
@@ -194,7 +198,7 @@
   }
 
   /** The things a swap needs from outside the program, shown while the list is empty. The Parano1d line carries the live node word of the top bar; there is no link on it. */
-  function firstStartGuide(prog) {
+  function firstStartGuide(prog, guideGo) {
     const el = H.el;
     const noid = nodeWords(prog && prog.node).noid;
     const li = (...kids) => el("li", {}, ...kids);
@@ -203,6 +207,8 @@
       { class: "pg-guide funding-guide", "aria-labelledby": "pg-h-guide" },
       el("div", { class: "card-head" }, el("h2", { id: "pg-h-guide", text: "Before your first swap" })),
       el("p", { class: "plain", text: "A swap needs a few things outside this program. Each computer needs them for itself." }),
+      // the practice needs none of them: no node, no coins, no network (lib/practice.js)
+      el("p", { class: "plain pg-try" }, "Want to see how a swap goes first? Try the practice: no coins, no node, about five minutes. ", el("button", { type: "button", class: "btn sm", id: "pg-practice-guide", onclick: () => (guideGo ? guideGo("practice") : null) }, "Practice swap")),
       el(
         "ol",
         { id: "pg-guide-list" },
@@ -267,7 +273,7 @@
     const v = vaultNotes(prog);
     const noKey = !(H.state && H.state.token);
     const root = el("section", { class: "pg-list", "aria-labelledby": "pg-h-swaps" });
-    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
+    root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn", id: "pg-practice", onclick: () => h.go("practice") }, "Practice swap"), el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
     if (noKey) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: KEY_LOST_PROGRAM }));
     else if (!ns.ok) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: ns.why || "A new swap cannot start now." }));
     const notice = noticeBox(prog && prog.update);
@@ -276,7 +282,7 @@
     if (v.unconfirmed) root.appendChild(el("div", { class: "alarm needs big", role: "note" }, ic("alert"), el("span", { class: "lv", text: "Recovery code" }), el("span", { class: "tx" }, "Your recovery code is not confirmed yet. Without it a swap cannot be restored on another machine, so no new swap starts until you have written it down and typed it back. ", el("button", { type: "button", class: "btn primary due sm", onclick: () => h.openProgram("recovery-code") }, "Show my recovery code"))));
     if (!swaps.length) {
       root.appendChild(el("div", { class: "pg-empty" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 44, height: 44 }), el("h2", { text: "No swaps yet" }), el("p", { text: "Make one with New swap, or use the offer board if it is on." })));
-      root.appendChild(firstStartGuide(prog));
+      root.appendChild(firstStartGuide(prog, h.go));
     } else {
       // the swaps that are over follow a one-line "Ended"; a swap the program cannot read (no phase) stays above it
       const ul = el("ul", { class: "pg-swaps", "aria-label": "Your swaps" });
@@ -520,8 +526,19 @@
 
     const role = reg("role", field(F, "role", "Your side", selectInput(F, "role", [["alice", "I sell NOID and get ETH (Alice)"], ["bob", "I sell ETH and get NOID (Bob)"]], "alice"), "Each swap has one side, chosen here and never changed."));
     // the two amounts are the two blocks of a convert: the label says give or get by the side, the glyph and the ticker are the coin's, the chain is under the figure
-    const noid = reg("noid_amount", field(F, "noid_amount", "You give", textInput(F, "noid_amount", "", "0"), "The program refuses more than its test limit and says how much that is.", "amt amt-noid"));
-    const eth = reg("eth_amount", field(F, "eth_amount", "You get", textInput(F, "eth_amount", "", "0"), "Same limit rule.", "amt amt-eth"));
+    const fmtCap = (n) => {
+      const [w, f] = String(n).split(".");
+      return w.replace(/\B(?=(\d{3})+(?!\d))/g, ",") + (f !== undefined ? `.${f}` : "");
+    };
+    const amountHint = (pName, coin) => {
+      const p = profiles[pName] || null;
+      const cap = p && p[coin === "noid" ? "max_noid" : "max_eth"];
+      const unit = coin === "noid" ? "NOID" : "ETH";
+      if (pName === "production") return cap !== undefined && cap !== null ? `At most ${fmtCap(cap)} ${unit} per swap on mainnet.` : "Mainnet swap limit applies.";
+      return cap !== undefined && cap !== null ? `Test limit: at most ${fmtCap(cap)} ${unit} per swap.` : "The program refuses more than its test limit and says how much that is.";
+    };
+    const noid = reg("noid_amount", field(F, "noid_amount", "You give", textInput(F, "noid_amount", "", "0"), amountHint("sepolia", "noid"), "amt amt-noid"));
+    const eth = reg("eth_amount", field(F, "eth_amount", "You get", textInput(F, "eth_amount", "", "0"), amountHint("sepolia", "eth"), "amt amt-eth"));
     const chainNoid = el("span", { class: "on", text: "on Parano1d" });
     const chainEth = el("span", { class: "on", text: PROFILE_ON.sepolia });
     // the coin sits in a sibling span: the field's accessible name is its label and the coin (it starts with the visible label), so a screen reader hears "You give NOID", not "You give" alone
@@ -596,6 +613,8 @@
     const syncChain = () => {
       chainEth.textContent = PROFILE_ON[profile.control.value] || PROFILE_ON.sepolia;
       chainEth.className = "on" + (profile.control.value === "production" ? " real" : ""); // on mainnet the words are in the ink colour, not the quiet one
+      if (noid.hint) noid.hint.textContent = amountHint(profile.control.value, "noid");
+      if (eth.hint) eth.hint.textContent = amountHint(profile.control.value, "eth");
     };
     // the saved Ethereum address follows the network until the person types in the field
     const syncEthPayout = (fill = true) => {
@@ -608,6 +627,7 @@
       ethMainnetHint.hidden = !(profile.control.value === "production" && ethSaved !== "" && !usable && (cur === "" || sameAddr(cur, ethSaved)));
     };
     const applyRole = (r) => {
+      inviteBox.hidden = r !== "alice";
       bobEth.box.hidden = r !== "alice";
       noidPay.box.hidden = r !== "alice";
       bobSec.hidden = r !== "alice";
@@ -967,14 +987,14 @@
   const T = (path, label, hint, extra) => ({ path, label, hint, kind: "text", ...extra });
   /** The fields of settings.json (never `v`, never a secret). `alert_url` is write-only (below). */
   const SETTINGS_FIELDS = [
-    { group: "Parano1d node", line: "This machine only: the node of the Parano1d wallet app." },
+    { group: "Parano1d node", line: "This machine only: the node of the Parano1d wallet app.", one: true },
     T(["noid_rpc"], "Parano1d node address", "An http://127.0.0.1:… address."),
     T(["noid_rpc2"], "Second Parano1d node (optional)", "A second opinion on the chain.", { nullable: true }),
     { path: ["noid_rpc2_remote"], label: "The second Parano1d node is on another machine", kind: "check" },
-    { group: "Ethereum node (Sepolia)", line: "Sepolia, the public test network." },
+    { group: "Ethereum node (Sepolia)", line: "Sepolia, the public test network.", one: true },
     T(["eth", "sepolia", "rpc"], "Sepolia node", "An https:// address."),
     T(["eth", "sepolia", "rpc2"], "Sepolia, second node (optional)", "", { nullable: true }),
-    { group: "Ethereum node (mainnet)", line: "Ethereum mainnet, real funds. Two public endpoints from two operators. Each one sees this computer's IP address together with the swap key's address, the contract, the lock id, the timing and, at the sweep, your payout address." },
+    { group: "Ethereum node (mainnet)", line: "Ethereum mainnet, real funds. Two public endpoints from two operators. Each one sees this computer's IP address together with the swap key's address, the contract, the lock id, the timing and, at the sweep, your payout address.", one: true },
     T(["eth", "production", "rpc"], "Mainnet node", "An https:// address."),
     T(["eth", "production", "rpc2"], "Mainnet, second node (needed for a swap)", "A different operator from the first.", { nullable: true }),
     { path: ["eth_rpc2_remote"], label: "The second Ethereum node is on another machine", kind: "check" },
@@ -986,7 +1006,7 @@
     { group: "Updates", line: "The program never installs anything by itself." },
     { path: ["update_check"], label: "Check for a new version", kind: "select", options: [["ask", "Ask me"], ["daily", "Once a day"], ["off", "Never"]] },
     // the closed fold "Advanced": the rehearsal chain and the offer board
-    { group: "Rehearsal chain", line: "The test chain on this machine.", advanced: true },
+    { group: "Rehearsal chain", line: "The test chain on this machine.", advanced: true, one: true },
     T(["eth", "rehearsal", "rpc"], "Rehearsal node", "The test chain on this machine."),
     T(["eth", "rehearsal", "rpc2"], "Rehearsal, second node (optional)", "", { nullable: true }),
     { group: "Offer board", line: "Test offers only.", advanced: true },

@@ -35,7 +35,8 @@ test("RunLock: one console per run folder; the lock holds pid and time; it is le
     const a = RunLock.acquire(t.dir, { pid: process.pid, now: () => Date.UTC(2026, 10, 6, 12, 0, 0), role: "alice" });
     assert.equal(a.replaced, null);
     const held = JSON.parse(fs.readFileSync(path.join(t.dir, FILE), "utf8"));
-    assert.deepEqual(held, { pid: process.pid, started: "2026-11-06T12:00:00Z", role: "alice" });
+    assert.deepEqual(held, { pid: process.pid, started: "2026-11-06T12:00:00Z", proc: held.proc, role: "alice" });
+    assert.ok(held.proc === null || typeof held.proc === "string");
     assert.throws(() => RunLock.acquire(t.dir), new RegExp(`another console is already running on this run folder \\(pid ${process.pid}, started 2026-11-06T12:00:00Z`));
     a.release();
     a.release();

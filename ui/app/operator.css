@@ -89,6 +89,8 @@ h1[tabindex="-1"]:focus, h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focu
 .sc-record .btn.ghost { border-color: var(--rule-2); }
 .sc-record .btn.ghost:hover { border-color: var(--quiet); }
 .sc-record .btn.ghost[disabled] { border-color: var(--off); }
+.strip-tools .btn.ghost { border-color: var(--rule-2); }
+.strip-tools .btn.ghost:hover { border-color: var(--quiet); }
 /* the go button of a form: bright, no colour */
 .btn.primary { background: var(--text); border-color: var(--text); color: #07100e; font-weight: 600; }
 .btn.primary:hover { background: #fff; border-color: #fff; color: #07100e; }
@@ -121,7 +123,8 @@ input[type="text"]:hover, select:hover, textarea:hover { border-color: var(--qui
 input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; border-color: var(--text); }
 input[aria-invalid="true"] { border-color: var(--alarm); }
 input[readonly] { color: var(--faint); }
-select { appearance: none; -webkit-appearance: none; max-width: 100%; padding-right: 36px; background: var(--bg) right 12px center / 12px 12px no-repeat url("data:image/svg+xml,%3Csvg xmlns='http:%2F%2Fwww.w3.org%2F2000%2Fsvg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23b8c5c0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+select { appearance: none; -webkit-appearance: none; -moz-appearance: none; max-width: 100%; padding-right: 36px; background: var(--bg) right 12px center / 12px 12px no-repeat url("data:image/svg+xml,%3Csvg xmlns='http:%2F%2Fwww.w3.org%2F2000%2Fsvg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5L6 8l3.5-3.5' fill='none' stroke='%23b8c5c0' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+select::picker-icon { display: none; }
 /* a tick box: 20 px, mint with a dark tick once ticked */
 input[type="checkbox"] { appearance: none; -webkit-appearance: none; flex: none; width: 20px; height: 20px; margin: 1px 0 0; border: 1.5px solid var(--edge); border-radius: 4px; background: var(--bg); cursor: pointer; transition: background var(--t-fast) var(--ease), border-color var(--t-fast) var(--ease); }
 input[type="checkbox"]:hover { border-color: var(--text); }
@@ -195,6 +198,7 @@ span.amt.eth .tic { color: var(--eth); }
 .arrow { color: var(--ghost); font-size: 18px; }
 .capsules { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s2); }
 .capsule { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 var(--s3); padding: 2px 8px; border: 1px solid transparent; border-radius: var(--r-btn); font: 400 12px var(--mono); color: var(--quiet); min-width: 0; }
+.capsule .cp { white-space: nowrap; }
 .capsule .cp strong { color: var(--text); font-weight: 500; }
 .capsule .dot { margin-right: calc(-1 * var(--s1)); }
 .capsule.stale { border-color: var(--rule-2); }
@@ -616,7 +620,7 @@ body.program .wrap, body.program .foot { max-width: 1040px; }
 .pg-swaps-btn[aria-current="page"] { color: var(--text); }
 .pg-swaps-btn[aria-current="page"]::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--text); }
 .pg-count { font: 400 12.5px/1 var(--mono); color: var(--faint); white-space: nowrap; }
-.pg-status { display: flex; align-items: center; gap: var(--s4); margin-left: auto; min-width: 0; }
+.pg-status { display: flex; align-items: center; gap: var(--s3); margin-left: auto; min-width: 0; }
 .pg-status .chip { white-space: nowrap; }
 /* the network is a mode, not a state: it is drawn as a tag, whatever level the chip carries */
 .pg-status .chip.quiet { height: 22px; padding: 0 var(--s2); gap: 0; border: 1px solid var(--rule-2); border-radius: 4px; font-size: 12px; line-height: 1; color: var(--quiet); }
@@ -631,7 +635,7 @@ body.program .wrap, body.program .foot { max-width: 1040px; }
 .pg-bar-in { height: auto; min-height: 56px; flex-wrap: wrap; row-gap: 0; }
 .pg-status { flex-wrap: wrap; justify-content: flex-end; row-gap: var(--s1); }
 @media (min-width: 560px) {
-  .pg-bar-in { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand swaps status tools"; column-gap: var(--s5); }
+  .pg-bar-in { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand swaps status tools"; column-gap: var(--s4); }
   .pg-brand { grid-area: brand; }
   .pg-swaps-btn { grid-area: swaps; }
   .pg-status { grid-area: status; margin-left: 0; padding: var(--s2) 0; }
@@ -641,12 +645,13 @@ body.program .wrap, body.program .foot { max-width: 1040px; }
   .pg-bar-in { grid-template-areas: "brand swaps . tools" "status status status status"; }
   .pg-status { padding: 0 0 var(--s3); }
 }
+body.program :is(h1, h2, h3, section, input, select, textarea, button, summary) { scroll-margin-top: 84px; }
 .btn.icon { width: 32px; min-height: 32px; padding: 0; }
 .pg-menu { position: relative; }
 .pg-menu > summary { list-style: none; }
 .pg-menu > summary::-webkit-details-marker { display: none; }
 .pg-menu[open] > summary { color: var(--text); background: var(--raise); }
-.pg-menu-pop { position: absolute; right: 0; top: calc(100% + 8px); z-index: 20; width: 264px; max-width: 90vw; padding: var(--s2); background: var(--panel); border: 1px solid var(--rule-2); border-radius: var(--r-panel); box-shadow: 0 16px 40px rgba(0, 0, 0, .55); }
+.pg-menu-pop { position: absolute; right: 0; top: calc(100% + 8px); z-index: 30; width: 264px; max-width: 90vw; padding: var(--s2); background: var(--panel); border: 1px solid var(--rule-2); border-radius: var(--r-panel); box-shadow: 0 16px 40px rgba(0, 0, 0, .55); }
 .pg-menu-list { display: grid; gap: 2px; }
 .pg-menu-list .btn { width: 100%; justify-content: flex-start; min-height: 36px; padding: 0 var(--s3); background: none; border-color: transparent; color: var(--text); font-weight: 400; font-size: 14px; }
 .pg-menu-list .btn:hover { background: var(--raise); border-color: transparent; }
@@ -1127,3 +1132,29 @@ body.program.on-swap main > * { min-width: 0; }
 .toast .ic { color: var(--safe); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @media (max-width: 559px) { .toasts { left: var(--s4); right: var(--s4); transform: none; justify-items: stretch; } }
+
+/* ---- the practice swap (practice.js, lib/practice.js): the band, the chooser, the card with its ticket, the explanation. Same tokens; the band is neutral (amber means the swap waits on you, mint
+   means checked or done, red means danger) and carries a pattern of its own, so it is never taken for any of them. ---- */
+.pr-band { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--s1) var(--s2); padding: var(--s2) var(--s4); border-bottom: 1px solid var(--edge); background: repeating-linear-gradient(135deg, var(--raise) 0 12px, var(--panel) 12px 24px); color: var(--text); font: 500 13.5px/1.35 var(--sans); text-align: center; }
+.pr-band strong { font-weight: 700; }
+.pr-real { margin: 0; border-radius: 0; border-left-width: 0; border-top-width: 0; border-right-width: 0; }
+.pr-real .tx > .btn { margin-top: var(--s2); }
+.pr-illustrative { margin: var(--s3) 0 0; }
+body.program.on-practice .foot { display: none; }
+.pr .pr-where { margin: 0 0 var(--s4); color: var(--quiet); }
+.pr-grid { display: grid; gap: var(--s5); min-width: 0; align-items: start; }
+.pr-grid > * { min-width: 0; }
+.pr-grid .tk { margin-top: 0; position: static; }
+@media (min-width: 900px) { .pr-grid { grid-template-columns: minmax(0, 1fr) 336px; } .pr-grid .tk { position: sticky; top: 112px; } }
+.pr-picture { margin-top: var(--s5); }
+.pr-explain, .pr-summary { margin-top: var(--s5); padding: var(--s5); border: 1px solid var(--rule); border-radius: var(--r-panel); background: var(--panel); }
+@media (max-width: 559px) { .pr-explain, .pr-summary { padding: var(--s4); } }
+.pr-explain h2, .pr-summary h2 { font-size: 15px; letter-spacing: 0; margin-bottom: var(--s3); }
+.pr-summary .row { margin-top: var(--s4); }
+.pr-choose > .plain { max-width: 64ch; }
+.pr-fs { display: grid; gap: var(--s3); margin: 0 0 var(--s4); padding: var(--s4); border: 1px solid var(--rule); border-radius: var(--r-panel); background: var(--panel); min-width: 0; }
+.pr-fs legend { padding: 0 var(--s2); font-weight: 600; }
+.pr-opt { display: flex; align-items: flex-start; gap: var(--s3); cursor: pointer; }
+.pr-opt input { flex: none; margin: 4px 0 0; }
+.pr-opt .t { display: grid; gap: 2px; min-width: 0; }
+.pr-wait .left { font-family: var(--mono); }

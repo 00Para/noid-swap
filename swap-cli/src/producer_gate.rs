@@ -658,6 +658,7 @@ pub fn report(g: &Gates, noid: &NoidObservation, now: u64) -> ProducerScreenRepo
         }
     };
     let state = match &raw.finding {
+        Finding::Pass if g.producer_gate_enforced && second_node == "unreadable" => "cannot_check",
         Finding::Pass if g.producer_gate_enforced && second_node == "missing" => "one_node",
         Finding::Pass => "pass",
         Finding::Concentrated { .. } => "concentrated",

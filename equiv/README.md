@@ -65,7 +65,7 @@ equiv/
   portable/   equiv-portable: no_std, forbid(unsafe), ZERO dependencies. Poseidon2b (compile-time flat-basis
               tables, shift-and-add GF(2^128)), ADDRFIX_ sponge, Derive, SHA-256, statement + public encoding.
               This is the code that runs in the zkVM guest.
-  reference/  equiv-ref: depends on the vendor crates (noid_poseidon2b, noid_core). lib + CLI `equiv-ref <hex m>`.
+  reference/  equiv-ref: depends on the vendor crates (noid_poseidon2b, noid_core). lib + CLI `equiv-ref --secret-stdin` (the secret on one stdin line, never on the command line).
               tests/vendor_parity.rs checks portable == vendor.
   zkvm/       RISC Zero guest + host (section 5). Separate Cargo workspace.
 ```

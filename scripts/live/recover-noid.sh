@@ -68,15 +68,39 @@ else: print(p["txid"])
 PY
 
 date -u +"%T UTC, run $RUN, amount $AMOUNT"
-"$NOID_CLI" contract instances "$OBJ_CLI" < /dev/null 2>&1 | tr -d '\r' | grep -i '^[[:space:]]*slot' > "$L/instances-now.txt"
+# Every page of the contract's coins: the wallet CLI prints "Next page: --from-slot N" while more remain. A page that does not advance, or more
+# than 64 pages, stops the run (a list that cannot be read to its end is never judged).
+: > "$L/instances-raw.txt"
+FROM=0; PAGES=0
+while :; do
+  "$NOID_CLI" contract instances "$OBJ_CLI" --from-slot "$FROM" --limit 256 < /dev/null > "$L/instances-page.txt" 2>&1
+  IC=$?
+  if [ "$IC" -ne 0 ]; then
+    echo "wallet CLI failed reading instances (exit $IC):"; head -c 300 "$L/instances-page.txt"; echo; exit 2
+  fi
+  cat "$L/instances-page.txt" >> "$L/instances-raw.txt"
+  if tr -d '\r' < "$L/instances-page.txt" | grep -qi '^[[:space:]]*next page'; then
+    NEXT=$(tr -d '\r' < "$L/instances-page.txt" | sed -n 's/^[[:space:]]*[Nn]ext page: --from-slot \([0-9][0-9]*\)[[:space:]]*$/\1/p' | tail -n 1)
+    case "$NEXT" in ''|*[!0-9]*) echo "REFUSED: a 'Next page' line the helper cannot read; the list is not judged"; exit 2 ;; esac
+    if [ "$NEXT" -le "$FROM" ]; then echo "REFUSED: the next page ($NEXT) does not advance past $FROM; the list is not judged"; exit 2; fi
+    PAGES=$((PAGES + 1))
+    if [ "$PAGES" -ge 64 ]; then echo "REFUSED: more than 64 pages of coins at the contract; the list is not judged"; exit 2; fi
+    FROM=$NEXT
+  else
+    break
+  fi
+done
+tr -d '\r' < "$L/instances-raw.txt" | grep -i '^[[:space:]]*slot' > "$L/instances-now.txt"
 N=$(wc -l < "$L/instances-now.txt" | tr -d ' ')
 echo "instances at the contract: $N"
 [ "$N" -ge 1 ] || { echo "nothing to recover"; exit 0; }
 FAIL=0
 while read -r _ SLOT _ INC REST <&3; do
+  case "$SLOT" in ''|*[!0-9]*) echo "REFUSED: unexpected slot '$SLOT'"; FAIL=1; continue ;; esac
+  case "$INC" in ''|*[!0-9]*) echo "REFUSED: unexpected incarnation '$INC'"; FAIL=1; continue ;; esac
   echo "--- slot $SLOT incarnation $INC ($REST)"
   "$NOID_CLI" contract call "$OBJ_CLI" "$SLOT" "$INC" --close --preview < /dev/null 2>&1 | tr -d '\r' > "$L/recover-preview-$SLOT.json"
-  python3 -c "$CHECK_PY" "$L/recover-preview-$SLOT.json" "$ALICE_NOID" "$AMOUNT" > "$L/recover-check-$SLOT.txt" < /dev/null
+  python3 -I -c "$CHECK_PY" "$L/recover-preview-$SLOT.json" "$ALICE_NOID" "$AMOUNT" > "$L/recover-check-$SLOT.txt" < /dev/null
   TXID=$(cat "$L/recover-check-$SLOT.txt")
   case "$TXID" in
     ERR*|"") echo "preview REFUSED: $TXID"; head -c 300 "$L/recover-preview-$SLOT.json"; echo; FAIL=1; continue ;;

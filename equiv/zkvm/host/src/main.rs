@@ -62,7 +62,23 @@ fn read_secret_stdin() -> [u8; 32] {
     if let Err(e) = std::io::stdin().take(4096).read_to_string(&mut buf) {
         die(&format!("reading the secret from stdin: {e}"));
     }
-    parse_secret_stdin(&buf).unwrap_or_else(|e| die(&e))
+    let parsed = parse_secret_stdin(&buf);
+    wipe(buf.into_bytes());
+    parsed.unwrap_or_else(|e| die(&e))
+}
+
+/// Overwrites a buffer that held the secret (the text read from stdin) before it is freed.
+fn wipe(mut bytes: Vec<u8>) {
+    bytes.fill(0);
+    std::hint::black_box(&bytes);
+}
+
+/// A build made with `RISC0_SKIP_BUILD` embeds a stub guest whose image id is all zeros: it proves nothing and its receipts verify nothing.
+/// Such a build must never be used for a real swap.
+fn refuse_stub_guest() {
+    if EQUIV_GUEST_ID.iter().all(|w| *w == 0) {
+        die("this build embeds a stub guest (RISC0_SKIP_BUILD: its image id is all zeros): it can neither prove nor verify. Rebuild without RISC0_SKIP_BUILD");
+    }
 }
 
 /// `prove` always reads the secret from stdin (the old positional `<hex m>` form was removed on
@@ -194,11 +210,17 @@ enum Rejection {
     Journal,
 }
 
+/// Cap receipt file reads and bincode allocations (succinct receipts are ~223 KB).
+const MAX_RECEIPT_BYTES: u64 = 1024 * 1024;
+
 /// Bob's check: the receipt verifies against `image_id` AND its journal is exactly `variant || H || A`.
 fn check_receipt<I: Into<Digest>>(receipt: &Receipt, image_id: I, variant: u8, h: &[u8; 32], a: &[u8; 32]) -> Result<(), Rejection> {
     // REVIEW-3 G1: a dev-mode receipt is a claim with no seal. Refused by kind, whatever the verifier context says.
     if matches!(receipt.inner, InnerReceipt::Fake(_)) {
         return Err(Rejection::Receipt("dev-mode (fake) receipt: it carries no proof".into()));
+    }
+    if !matches!(receipt.inner, InnerReceipt::Succinct(_)) {
+        return Err(Rejection::Receipt("only succinct receipts are accepted".into()));
     }
     receipt.verify(image_id).map_err(|e| Rejection::Receipt(e.to_string()))?;
     let expected = p::encode_public(variant, h, a);
@@ -209,8 +231,22 @@ fn check_receipt<I: Into<Digest>>(receipt: &Receipt, image_id: I, variant: u8, h
 }
 
 fn load_receipt(path: &str) -> Result<Receipt, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
-    bincode::deserialize(&bytes).map_err(|e| format!("bad receipt: {e}"))
+    use bincode::Options as _;
+    use std::io::Read as _;
+    let f = std::fs::File::open(path).map_err(|e| format!("read {path}: {e}"))?;
+    let mut bytes = Vec::new();
+    f.take(MAX_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read {path}: {e}"))?;
+    if (bytes.len() as u64) > MAX_RECEIPT_BYTES {
+        return Err(format!("bad receipt: file exceeds {MAX_RECEIPT_BYTES} bytes"));
+    }
+    bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(MAX_RECEIPT_BYTES)
+        .reject_trailing_bytes()
+        .deserialize(&bytes)
+        .map_err(|e| format!("bad receipt: {e}"))
 }
 
 fn prove(variant: u8, m: [u8; 32], out: Option<&str>) {
@@ -221,6 +257,7 @@ fn prove(variant: u8, m: [u8; 32], out: Option<&str>) {
     refuse_dev_mode();
     let mut builder = ExecutorEnv::builder();
     builder.write(&variant).unwrap().write(&m).unwrap();
+    // (the executor environment keeps its own serialized copy of `m`; this local array is not used again)
     // Memory knob for small machines: smaller segments need less RAM per segment proof
     // (risc0 default 20 = 1 Mi cycles). Changes neither the ImageID nor the statement.
     if let Some(po2) = std::env::var("EQUIV_SEGMENT_PO2").ok().and_then(|s| s.parse::<u32>().ok()) {
@@ -273,6 +310,9 @@ const USAGE: &str = "usage: <secret as 64-hex on one line> | equiv-prove prove <
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(a.first().map(String::as_str), Some("prove" | "verify")) {
+        refuse_stub_guest();
+    }
     match a.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["prove", rest @ ..] => {
             let cmd = parse_prove_args(rest).unwrap_or_else(|e| die(&format!("{e}\n{USAGE}")));

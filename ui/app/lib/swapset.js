@@ -39,9 +39,12 @@ const { noidAddressProblem, ethAddressProblem } = require("./walletrun");
 const newSwapNotice = require("./newswapnotice");
 const payoutHistory = require("./payouthistory");
 const { createSettlement } = require("./settlement");
+const { unstarted, candidate } = require("./unstarted");
 
 const ID_RE = /^[0-9a-f]{32}$/;
+const PRACTICE_PREFIX = "practice-"; // the id of a practice swap (lib/practice.js): the real routes and this set never take one
 const BLOCK_S = 30;
+const UNSTARTED_GRACE_S = 600; // R23-3: how long a swap that ended before it started stays "active" after the program first saw it end (a deposit may still be in a mempool)
 const SNAPSHOT_MS = 2500;
 const SCAN_STALE_MS = 5000;
 const NOID_DEC = /^(0|[1-9]\d{0,3})(\.\d{1,6})?$/; // up to four whole digits: the mainnet cap is 2,500 NOID
@@ -178,6 +181,7 @@ class SwapSet {
     }
     for (const name of names.sort()) {
       if (name.startsWith(".")) continue; // .ended and the like: never a swap
+      if (name.startsWith(PRACTICE_PREFIX)) continue; // a practice swap lives in memory only (lib/practice.js): a folder of that name is never opened, listed or refused
       if (this.swaps.has(name)) {
         const s = this.swaps.get(name);
         if (s.refused && !s.runner) {
@@ -219,6 +223,7 @@ class SwapSet {
 
   /** Opens one run folder. Returns { ok:true, swap } or { ok:false, why } (the folder is then kept in the set as a refused entry, without a runner). */
   open(name) {
+    if (typeof name === "string" && name.startsWith(PRACTICE_PREFIX)) return { ok: false, why: "a practice swap is not a swap" };
     const dir = path.join(this.program.runsDir, name);
     let st;
     try {
@@ -442,9 +447,76 @@ class SwapSet {
     }
   }
 
+  /**
+   * The audit of a swap as the reading of an unstarted swap needs it: the records and whether the chain of lines verifies. The whole file is read and verified only when its size or time changed
+   * (the swap's own lines are a few hundred short ones, but facts() runs several times per poll); otherwise the last answer is returned. `{ audit: null, auditOk: false }` when it cannot be read.
+   */
+  auditOf(swap) {
+    try {
+      if (!swap.audit || typeof swap.audit.all !== "function") return { audit: null, auditOk: false };
+      let key = null;
+      try {
+        const st = swap.audit.file ? fs.statSync(swap.audit.file) : null;
+        key = st ? `${st.size}|${st.mtimeMs}` : null;
+      } catch {
+        key = null;
+      }
+      if (key !== null && swap.auditCache && swap.auditCache.key === key) return swap.auditCache.value;
+      const audit = swap.audit.all();
+      let ok = false;
+      try {
+        ok = typeof swap.audit.verify === "function" ? swap.audit.verify().ok === true : true;
+      } catch {
+        ok = false;
+      }
+      const value = { audit, auditOk: ok };
+      swap.auditCache = key === null ? null : { key, value };
+      return value;
+    } catch {
+      return { audit: null, auditOk: false };
+    }
+  }
+
+  /**
+   * R23-3: a swap that never started (lib/unstarted.js): the window to start closed for good by the tick's own words, nothing of this side on a chain, no approval in force. null when it is not one.
+   * Reads only; never throws.
+   */
+  unstartedOf(swap, role, run, tick) {
+    try {
+      if (!swap.runner || !candidate(role, tick)) return null;
+      let approvalOn = true;
+      try {
+        approvalOn = !!swap.autopilot.approvalState(role, run).in_force;
+      } catch {
+        approvalOn = true;
+      }
+      const { audit, auditOk } = this.auditOf(swap);
+      let status = null;
+      try {
+        const w = swap.runner.walletView(run);
+        status = w && w.roles && w.roles[role] ? w.roles[role].status : null;
+      } catch {
+        status = null;
+      }
+      let lockRecord = false;
+      try {
+        lockRecord = role === "bob" && fs.existsSync(path.join(swap.dir, "bob", "bob.swap.json.lock-sent"));
+      } catch {
+        lockRecord = true;
+      }
+      // the age of the tick by its own clock, else its file's time (as the page's view model reads it)
+      const mtime = run && run.roles && run.roles[role] && typeof run.roles[role].tick_mtime === "number" ? run.roles[role].tick_mtime : null;
+      const tickAt = tick && typeof tick.now === "number" && Number.isFinite(tick.now) ? tick.now : mtime;
+      const tickAgeS = tickAt === null ? null : this.now() / 1000 - tickAt;
+      return unstarted({ role, tick, tickAgeS, approvalOn, fundedMarker: role === "alice" && !!swap.runner.walletMarker("wallet-funded.marker"), lockRecord, audit, auditOk, mayHaveSent: swap.runner.mayHaveSentIds().length, status });
+    } catch {
+      return null;
+    }
+  }
+
   /** Facts of one swap: role, settings, swap file, phase, active, in_contract, needs_you, until. Never throws. */
   facts(swap) {
-    const f = { swap: swap.id, network: null, role: null, settings: null, label: "", give: null, get: null, phase: null, active: false, in_contract: false, needs_you: false, needs_own: false, late_claim: false, ended: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
+    const f = { swap: swap.id, network: null, role: null, settings: null, label: "", give: null, get: null, phase: null, active: false, in_contract: false, needs_you: false, needs_own: false, late_claim: false, ended: false, unstarted: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
     if (!swap.runner) {
       f.label = "A folder this program did not open";
       return f;
@@ -468,7 +540,16 @@ class SwapSet {
       const tick = run && run.roles && f.role && run.roles[f.role] ? run.roles[f.role].tick : null;
       f.phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
       f.ended = !!(f.role && f.phase && (ENDED_PHASES[f.role] || []).includes(f.phase));
-      f.active = hasFile && !f.ended;
+      // R23-3: a swap whose window to start has closed, with nothing of this side anywhere, is over for the list; with a deposit in its wallet or key it is not (it needs the person), and with no clean
+      // reading of the wallet the page says so on the card and the row stays as it was. It is not "ended" for the notifications or the board: the swap file does not say so.
+      const un = hasFile && !f.ended ? this.unstartedOf(swap, f.role, run, tick) : null;
+      // a short grace after the program first sees the end: a deposit that is still in a mempool is not seen on a chain yet, so for UNSTARTED_GRACE_S the swap stays "active" (the quit guard and the
+      // keep-awake stay on, the row stays where it was); the card already says it ended
+      if (un && un.holds === "nothing") {
+        if (typeof swap.unstartedSince !== "number") swap.unstartedSince = this.now();
+      } else swap.unstartedSince = null;
+      f.unstarted = !!(un && un.holds === "nothing" && this.now() - swap.unstartedSince >= UNSTARTED_GRACE_S * 1000);
+      f.active = hasFile && !f.ended && !f.unstarted;
       const marker = f.role === "alice" && !!swap.runner.walletMarker("wallet-funded.marker");
       f.in_contract = f.active && (marker || (f.phase !== null && !!IN_CONTRACT[f.role] && IN_CONTRACT[f.role].has(f.phase)));
       // needs the person: an autopilot stop, or a spend that may have been sent and has no later clean result (this process's jobs)
@@ -480,13 +561,15 @@ class SwapSet {
       }
       // a swap that is over has nothing left to send: an old "may have been sent" line of its audit log does not make it need the person
       if (!needs && !f.ended) needs = swap.runner.mayHaveSentIds().length > 0;
-      f.needs_own = !!needs;
       // Bob's late claim (R5) is a need of its own: it raises "needs you" and its own alarm
       try {
         f.late_claim = f.role === "bob" && !!swap.autopilot.lateClaim();
       } catch {
         f.late_claim = false;
       }
+      // coins in the swap's own wallet or key of a swap that ended before it started are the person's: the row says so AND the notification goes out (a late deposit into a dead swap is the case)
+      if (un && un.holds === "funds") needs = true;
+      f.needs_own = !!needs;
       f.needs_you = !!needs || f.late_claim;
       // until when the coins are in play: Alice D (a height, as the page counts it: 30 s a block from the tick's tip), Bob T_reveal
       if (f.active && f.role === "alice" && run && run.terms && typeof run.terms.deadline_height === "number" && tick && tick.noid && typeof tick.noid.tip === "number" && typeof tick.now === "number") {
@@ -509,7 +592,7 @@ class SwapSet {
 
   summary(swap) {
     const f = this.facts(swap);
-    return { swap: f.swap, network: f.network, role: f.role, label: f.label, give: f.give, get: f.get, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at };
+    return { swap: f.swap, network: f.network, role: f.role, label: f.label, give: f.give, get: f.get, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at, unstarted: f.unstarted };
   }
 
   list() {

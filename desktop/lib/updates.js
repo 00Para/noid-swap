@@ -6,7 +6,8 @@
  * anything, never installs anything and never runs while a swap is active. The user compares the installer's SHA-256 with
  * the value in the signed notice (shown with the answer) and installs by hand.
  *
- * What it sends: one GET of https://api.github.com/repos/<repo>/releases?per_page=10, no cookie, no token, the generic
+ * What it sends: one GET of https://api.github.com/repos/<repo>/releases?per_page=10 (and, only while the newest release is not signed and no older
+ * signed notice is among those ten, up to four more pages of ten), no cookie, no token, the generic
  * User-Agent "No1d-Swap-update-check". GitHub sees the machine's address; nothing in the request names the user, the
  * install or a swap. The answer is limited to 10 seconds and 256 KB and is parsed strictly.
  *
@@ -35,6 +36,9 @@ const SIG_FILE = "release.json.sig";
 const TAG_RE = /^v(\d+)\.(\d+)\.(\d+)$/;
 const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9_.-]+$/;
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** The first request asks for 10 releases; while the newest is unsigned and no older signed notice is among them, at most this many further pages of 10 are read. */
+const PAGE_SIZE = 10;
+const MAX_EXTRA_PAGES = 4;
 
 /** The words the page shows next to a newer version. */
 const NOTICE_TEXT = "Compare the installer's SHA-256 with the signed value below before installing.";
@@ -64,6 +68,11 @@ class UpdateError extends Error {
   }
 }
 
+/** The reason word of a failure (anything that is not one of ours is a network failure). */
+function reasonOf(e) {
+  return e instanceof UpdateError ? e.reason : e && REASONS.includes(e.reason) ? e.reason : "network";
+}
+
 /** The ids of the two notice assets by exact name; a missing one, a repeated one or a bad id is simply absent. */
 function assetsOf(list) {
   const found = {};
@@ -83,22 +92,30 @@ function assetsOf(list) {
  * exactly https://github.com/<repo>/releases/tag/<tag>. Anything that is not the expected shape is a bad answer (nothing
  * is guessed). Returns null when no release counts.
  */
-function selectRelease(releases, repo) {
+function listCandidateReleases(releases, repo) {
   if (!Array.isArray(releases) || releases.length > 100) throw new UpdateError("bad_answer");
-  let best = null;
+  const out = [];
   for (const r of releases) {
     if (r === null || typeof r !== "object" || Array.isArray(r)) throw new UpdateError("bad_answer");
     if (typeof r.tag_name !== "string" || typeof r.draft !== "boolean" || typeof r.prerelease !== "boolean") throw new UpdateError("bad_answer");
     if (r.draft || r.prerelease) continue;
     const m = TAG_RE.exec(r.tag_name);
     if (!m) continue;
-    const version = [Number(m[1]), Number(m[2]), Number(m[3])];
-    if (best === null || compareVersions(version, best.version) > 0) best = { version, tag: r.tag_name, htmlUrl: r.html_url, assets: r.assets };
+    out.push({ version: [Number(m[1]), Number(m[2]), Number(m[3])], tag: r.tag_name, htmlUrl: r.html_url, assets: r.assets });
   }
-  if (best === null) return null;
-  const want = `https://github.com/${repo}/releases/tag/${best.tag}`;
-  if (typeof best.htmlUrl !== "string" || best.htmlUrl !== want) throw new UpdateError("bad_answer");
-  return { latest: best.tag.slice(1), version: best.version, url: best.htmlUrl, assets: assetsOf(best.assets) };
+  out.sort((a, b) => compareVersions(b.version, a.version));
+  if (out.length === 0) return [];
+  const top = out[0];
+  const wantTop = `https://github.com/${repo}/releases/tag/${top.tag}`;
+  if (typeof top.htmlUrl !== "string" || top.htmlUrl !== wantTop) throw new UpdateError("bad_answer");
+  return out
+    .filter((r) => typeof r.htmlUrl === "string" && r.htmlUrl === `https://github.com/${repo}/releases/tag/${r.tag}`)
+    .map((r) => ({ latest: r.tag.slice(1), version: r.version, url: r.htmlUrl, assets: assetsOf(r.assets) }));
+}
+
+function selectRelease(releases, repo) {
+  const list = listCandidateReleases(releases, repo);
+  return list.length ? list[0] : null;
 }
 
 /** The body as a value: a string is size-checked and parsed; an already parsed value is size-checked by its text. */
@@ -178,14 +195,73 @@ async function checkForUpdate({ fetchJson, currentVersion, anyActive, repo, publ
       }, timeoutMs);
     });
     const work = async () => {
-      const url = `https://${API_HOST}/repos/${repo}/releases?per_page=10`;
+      const listUrl = `https://${API_HOST}/repos/${repo}/releases?per_page=${PAGE_SIZE}`;
       const headers = { "User-Agent": USER_AGENT, Accept: "application/vnd.github+json" };
-      const answer = await fetchJson(url, { headers, timeoutMs, maxBytes, signal: controller.signal });
-      const release = selectRelease(readAnswer(answer, maxBytes), repo);
+      const answer = await fetchJson(listUrl, { headers, timeoutMs, maxBytes, signal: controller.signal });
+      const firstList = readAnswer(answer, maxBytes);
+      const candidates = listCandidateReleases(firstList, repo);
+      const release = candidates.length ? candidates[0] : null;
       if (release === null) return { state: "none", unsafeForNewSwaps: false, unsafeNote: null };
-      const notice = await verifiedNotice(release, { fetchJson, repo, publicKey, timeoutMs, signal: controller.signal });
+      let notice = null;
+      let topError = null;
+      try {
+        notice = await verifiedNotice(release, { fetchJson, repo, publicKey, timeoutMs, signal: controller.signal });
+      } catch (e) {
+        topError = e; // an asset that cannot be read says nothing about the signature: the older signed notices still count
+      }
       const newer = compareVersions(release.version, current) > 0;
-      if (notice === null) return newer ? { state: "unverified", latest: release.latest, url: release.url } : { state: "none", unsafeForNewSwaps: false, unsafeNote: null };
+      if (notice === null) {
+        // An unsigned higher tag must not shadow a lower release's signed oldest_safe_version floor.
+        let fallbackNotice = null;
+        let fallbackOldest = null;
+        const seen = new Set([release.latest]);
+        const scan = async (list) => {
+          for (const lower of list) {
+            if (seen.has(lower.latest)) continue;
+            seen.add(lower.latest);
+            let n = null;
+            try {
+              n = await verifiedNotice(lower, { fetchJson, repo, publicKey, timeoutMs, signal: controller.signal });
+            } catch {
+              n = null;
+            }
+            if (n === null) continue;
+            const parts = releaseFile.versionParts(n.oldest_safe_version);
+            if (fallbackOldest === null || releaseFile.compareParts(parts, fallbackOldest) > 0) {
+              fallbackOldest = parts;
+              fallbackNotice = n;
+            }
+          }
+        };
+        await scan(candidates.slice(1));
+        // Ten unsigned tags must not push a signed notice out of view either: while none has been found and the last page was full, a few more pages are read.
+        // A page that cannot be read ends the search (fail safe: the floor the program already remembers stays).
+        let pageFull = Array.isArray(firstList) && firstList.length >= PAGE_SIZE;
+        for (let page = 2; fallbackNotice === null && pageFull && page < 2 + MAX_EXTRA_PAGES; page += 1) {
+          let more;
+          try {
+            const next = readAnswer(await fetchJson(`${listUrl}&page=${page}`, { headers, timeoutMs, maxBytes, signal: controller.signal }), maxBytes);
+            pageFull = Array.isArray(next) && next.length >= PAGE_SIZE;
+            more = listCandidateReleases(next, repo);
+          } catch {
+            break;
+          }
+          await scan(more);
+        }
+        const fallbackFlags = fallbackNotice
+          ? (() => {
+              const unsafe = releaseFile.compareParts(current, fallbackOldest) < 0;
+              return {
+                unsafeForNewSwaps: unsafe,
+                unsafeNote: unsafe ? fallbackNotice.note : null,
+                signedOldest: { version: fallbackNotice.oldest_safe_version, note: fallbackNotice.note },
+              };
+            })()
+          : null;
+        if (topError !== null) return fallbackFlags ? { state: "error", reason: reasonOf(topError), ...fallbackFlags } : { state: "error", reason: reasonOf(topError) };
+        if (newer) return fallbackFlags ? { state: "unverified", latest: release.latest, url: release.url, ...fallbackFlags } : { state: "unverified", latest: release.latest, url: release.url };
+        return fallbackFlags ? { state: "none", ...fallbackFlags } : { state: "none", unsafeForNewSwaps: false, unsafeNote: null };
+      }
       const oldest = releaseFile.versionParts(notice.oldest_safe_version);
       const unsafe = releaseFile.compareParts(current, oldest) < 0;
       // signedOldest: what only a valid signature can say; the checker keeps the highest one it ever saw (updatecheck.js)
@@ -195,7 +271,7 @@ async function checkForUpdate({ fetchJson, currentVersion, anyActive, repo, publ
     };
     return await Promise.race([Promise.resolve().then(work), deadline]);
   } catch (e) {
-    return { state: "error", reason: e instanceof UpdateError ? e.reason : e && REASONS.includes(e.reason) ? e.reason : "network" };
+    return { state: "error", reason: reasonOf(e) };
   } finally {
     clearTimeout(timer);
   }

@@ -25,7 +25,7 @@ function runScripts(files) {
 test("index.html loads program.js right after actions.js, then stagecard.js, before the board and operator scripts; the launch pieces load before actions.js", () => {
   const html = read("index.html");
   const srcs = [...html.matchAll(/<script\s+src="([^"]+)"\s*><\/script>/g)].map((m) => m[1]);
-  assert.deepEqual(srcs, ["/phases.js", "/enginetext.js", "/viewmodel.js", "/launchfacts.js", "/limitstext.js", "/needtext.js", "/actions.js", "/program.js", "/stagecard.js", "/boardview.js", "/board.js", "/programwords.js", "/operator.js"]);
+  assert.deepEqual(srcs, ["/phases.js", "/enginetext.js", "/viewmodel.js", "/launchfacts.js", "/limitstext.js", "/needtext.js", "/actions.js", "/program.js", "/stagecard.js", "/practice.js", "/boardview.js", "/board.js", "/programwords.js", "/operator.js"]);
   assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)[^>]*>[^<]/i, "no inline script");
 });
 

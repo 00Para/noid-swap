@@ -300,6 +300,7 @@ impl World {
                 Vec::new()
             },
             instance_count: listed.len(),
+            instances_truncated: false,
             pending_calls: self
                 .mempool
                 .iter()
@@ -396,6 +397,7 @@ impl World {
             word_scan: if self.lock_kind == LockKind::Poseidon { WordScan::Complete } else { WordScan::NotRun },
             reverted_claim: self.reverted_claim.clone(),
             reveal_tx_note: None,
+            ignored_logs: Vec::new(),
             signer_nonce_latest: Some(7),
             signer_nonce_pending: Some(7 + u64::from(self.lock_pending.is_some() || self.claim_pending.is_some() || self.refund_pending)),
             second: None,

@@ -198,7 +198,7 @@ impl EthKeyFile {
             return Err(EthKeyError::File(format!("{} already exists; never overwrite a key file", path.display())));
         }
         let text = serde_json::to_vec_pretty(self).map_err(|e| EthKeyError::File(e.to_string()))?;
-        crate::swapfile::atomic_write(path, &text).map_err(|e| EthKeyError::File(e.to_string()))
+        crate::swapfile::atomic_write_new(path, &text).map_err(|e| EthKeyError::File(e.to_string()))
     }
 
     pub fn load(path: &std::path::Path) -> Result<Self, EthKeyError> {

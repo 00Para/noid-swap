@@ -2605,13 +2605,28 @@ async function resolveFromBlock(provider, contractAddr, args, latest) {
  */
 async function lockedEvents(provider, contractAddr, lockId, fromBlock, toBlock, kind = "sha256") {
   const iface = htlcInterface(kind);
-  const topics = [iface.getEvent("Locked").topicHash];
+  const topic0 = iface.getEvent("Locked").topicHash.toLowerCase();
+  const wantId = lockId ? String(lockId).toLowerCase() : null;
+  const topics = [topic0];
   if (lockId) topics.push(lockId);
   const logs = await getLogsChunked(provider, { address: contractAddr, topics }, fromBlock, toBlock, LOG_RANGE_MAX);
-  return logs.map((log) => {
-    const args = iface.parseLog(log).args;
-    return { log, args, word: lockWordOf(kind, args) };
-  });
+  const out = [];
+  for (const log of logs) {
+    if (log.removed) continue;
+    const t = (log.topics || []).map((x) => String(x).toLowerCase());
+    if (String(log.address).toLowerCase() !== String(contractAddr).toLowerCase() || t.length !== 4 || t[0] !== topic0) continue;
+    if (wantId !== null && t[1] !== wantId) continue;
+    const parsed = iface.parseLog(log);
+    if (!parsed) continue;
+    const args = parsed.args;
+    const word = lockWordOf(kind, args);
+    const id = computeLockIdLocal(args.sender, args.receiver, args.amount, word, args.timelock);
+    if (id.toLowerCase() !== String(args.lockId).toLowerCase()) {
+      throw new UserError(`refusing: a Locked event (lockId ${args.lockId}, block ${log.blockNumber}) does not recompute its lock id from its own fields; do not trust this node`);
+    }
+    out.push({ log, args, word });
+  }
+  return out;
 }
 
 /**
@@ -2698,13 +2713,23 @@ function keygenStdout(args, out = process.stdout) {
   return { address: wallet.address };
 }
 
-/** keygen: write a fresh private key (mode 0600, never overwrite). Prints only the address. */
+/** keygen: write a fresh 256-bit private key (mode 0600, never overwrite). Prints only the address. */
 async function keygen(_provider, _signer, args) {
   if (args.stdout !== undefined) throw new UserError("keygen --stdout writes to the pipe itself (the command line wrapper); in-process use --out FILE");
   const out = need(args, "out");
   const file = path.resolve(out);
   if (fs.existsSync(file)) throw new UserError(`refusing to overwrite existing file ${file}`);
-  const wallet = ethers.Wallet.createRandom();
+  let wallet = null;
+  for (let tries = 0; tries < 8; tries++) {
+    const keyHex = "0x" + crypto.randomBytes(32).toString("hex");
+    try {
+      wallet = new ethers.Wallet(keyHex);
+      break;
+    } catch {
+      /* astronomically unlikely out-of-range draw: retry */
+    }
+  }
+  if (wallet === null) throw new UserError("keygen: the random generator gave no valid key (8 draws); refusing");
   fs.mkdirSync(path.dirname(file), { recursive: true });
   try {
     fs.writeFileSync(file, wallet.privateKey + "\n", { flag: "wx", mode: 0o600 });
@@ -2715,14 +2740,35 @@ async function keygen(_provider, _signer, args) {
   return { address: wallet.address, keyFile: file };
 }
 
-/** Load a Wallet from a key file (0x + 64 hex, one line). */
+/**
+ * A key file that group or other can read is refused, where file modes mean something (not on Windows): a private key file must be owner-only, the way keygen writes it (mode 0600).
+ * `mode` is the file's st_mode; a mode that is not a number cannot be judged and counts as readable.
+ */
+function checkKeyFileMode(file, mode, platform = process.platform) {
+  if (platform === "win32") return;
+  if (typeof mode !== "number" || (mode & 0o077) !== 0) {
+    const shown = typeof mode === "number" ? (mode & 0o777).toString(8).padStart(4, "0") : "unknown";
+    throw new UserError(
+      `--key-file: ${file} can be read by group or other (mode ${shown}); a private key file must be owner-only: run chmod 600 on it (or make a new key with keygen), then run again; refusing`
+    );
+  }
+}
+
+/** Load a Wallet from a key file (0x + 64 hex, one line). Registered for redaction and shielded from raw library errors. */
 function loadSigner(provider, keyFile) {
   if (!keyFile) throw new UserError("missing required --key-file");
   const file = path.resolve(keyFile);
   if (!fs.existsSync(file)) throw new UserError(`key file not found: ${file}`);
+  let st;
+  try {
+    st = fs.statSync(file);
+  } catch (e) {
+    throw new UserError(`--key-file: the mode of ${file} cannot be read (${codeOf(e)}); refusing`);
+  }
+  checkKeyFileMode(file, st.mode);
   const text = fs.readFileSync(file, "utf8").trim();
   if (!/^0x[0-9a-fA-F]{64}$/.test(text)) throw new UserError(`key file ${file} is not "0x" + 64 hex chars`);
-  return new ethers.Wallet(text, provider);
+  return signerFromKeyText(provider, text, "--key-file");
 }
 
 async function balance(provider, _signer, args) {
@@ -2842,6 +2888,7 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
   const hashlock = kind === "poseidon" ? hex32("--lock-addr", need(args, "lockAddr", "lock-addr")) : hex32("--hashlock", need(args, "hashlock"));
   const tReveal = uint("--t-reveal", need(args, "tReveal", "t-reveal"));
   const receiver = address("--receiver", need(args, "receiver"));
+  if (sameAddr(receiver, contractAddr)) throw new UserError("--receiver cannot be the HTLC contract address itself; refusing");
   const amount = uint("--amount-wei", need(args, "amountWei", "amount-wei"));
   if (amount === 0n) throw new UserError("--amount-wei must be > 0");
   if (tReveal > 4102444800n) throw new UserError("--t-reveal looks like milliseconds; it is a UNIX timestamp in seconds");
@@ -2857,6 +2904,10 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     throw new UserError(`this key is ${sender} but the swap file's bob_sender is ${sw.bobSender}; refusing`);
   }
   const expectedLockId = computeLockIdLocal(sender, receiver, amount, hashlock, tReveal);
+  // T11 (EOAs only): the receiver's code is read before the lock (also in a dry run, which then shows what the real run would do) and again right before signing. A receiver with
+  // code (a contract, or an EIP-7702 delegation) that rejects ETH makes the claim revert, so the lock could only be refunded; a receiver whose code cannot be read is refused too.
+  const receiverCodeCheck = async (when) => receiverCodeVerdict(await readReceiverCode(provider, receiver), { receiver, replaced: null, mayBePublic: false, when, forLock: true });
+  await receiverCodeCheck("before the long checks");
 
   // F3: never a second lock of OURS under the same hashlock (that is the double-spend: Bob pays twice).
   // A Locked event under the same hashlock from ANOTHER sender must not block us (a third party who knows
@@ -2940,6 +2991,7 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     const gasLimit = await signer.estimateGas({ ...tx, ...fp.fees });
     let reachedBroadcast = false;
     const preSend = async (populated) => {
+      await receiverCodeCheck("just before signing");
       writtenUser = writeUserLockSent({ ...(await recordOf(populated)), chainId: target.chainId, contract: contractAddr, lockKind: kind, swapFile: null });
     };
     // Runs after the local signature, immediately before the bytes go to the node: from here on the lock may have left this process.
@@ -2985,6 +3037,7 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
       // The slow steps since the first check (the nonce reads, the gas estimate, populating the transaction) can take long on a stalled endpoint: the approval is
       // judged again, locally, at the last step before the record is written and the bytes are signed.
       checkApproval(approvedTerms, sw.intent.decided_at, args);
+      await receiverCodeCheck("just before signing");
       // A local key (the command line's) is populated with its nonce; a node-held account is not (the node picks it at the send), so the nonce it will get is read.
       const rec = await recordOf(populated);
       written = writeLockSent(sw.realFile, rec);
@@ -3125,9 +3178,10 @@ async function readReceiverCode(provider, receiver) {
 /**
  * Judge a reading of the receiver's code. Returns null when there is nothing to say, a warning text (replace mode: `replaced` is the result of resolveReplaced)
  * or throws the refusal of a first claim. `mayBePublic`: the swap file or the reveal sidecar shows an earlier send (weaker evidence than a pending transaction,
- * so it changes the words of the refusal, not the refusal). `when`: "just before signing" or "before the long checks".
+ * so it changes the words of the refusal, not the refusal). `when`: "just before signing" or "before the long checks". `forLock`: the check of a lock (the receiver is the
+ * other side's account; there is no earlier claim, so `replaced` is null and the words of a first claim's refusal are changed to those of a lock).
  */
-function receiverCodeVerdict(rc, { receiver, replaced, replaceJudgedFirst = false, mayBePublic, when }) {
+function receiverCodeVerdict(rc, { receiver, replaced, replaceJudgedFirst = false, mayBePublic, when, forLock = false }) {
   if (rc.state === "none") return null;
   const codeFact = `the lock's receiver ${receiver} has code on chain (${rc.bytes} bytes, read ${when}; T11: EOAs only, and an EIP-7702 delegation counts too)`;
   const readFact = `could not read the code of the lock's receiver ${receiver} ${when} (${rc.detail})`;
@@ -3147,6 +3201,7 @@ function receiverCodeVerdict(rc, { receiver, replaced, replaceJudgedFirst = fals
           : "Ways out: remove the code or the delegation from the receiver's address, or, if an earlier claim is still pending, use --replace")
     );
   }
+  if (forLock) throw new UserError(`refusing: ${codeFact}; a lock to it could never be claimed if it rejects ETH, and the claim would still publish the secret; nothing was signed, nothing was sent`);
   throw new UserError(`refusing: ${codeFact}; a claim to it could revert with the secret public; nothing was signed, nothing was sent`);
 }
 
@@ -3214,18 +3269,16 @@ async function claim(provider, signer, args0) {
   }
 }
 
-/** claim --dry-run without the secret on mainnet: no gas estimate, so no worst case; the cap and the balance are shown. */
-async function mainnetDryRunNote(provider, signer, args, fees) {
+/**
+ * claim --dry-run without the secret on mainnet: the claim's gas is a fixed limit (never estimated, so the secret is not needed), so the worst case is
+ * limit x cap and the balance is checked exactly as a real claim does; a balance below it refuses.
+ */
+async function mainnetDryRunNote(provider, signer, args, fees, claimGas) {
   const { capWei } = mainnetFlags(args);
-  const balanceWei = await provider.getBalance(await signer.getAddress());
-  return {
-    maxFeeGwei: ethers.formatUnits(capWei, "gwei"),
-    ...(fees && fees.maxPriorityFeePerGas !== undefined && fees.maxPriorityFeePerGas !== null ? { priorityFeeGwei: ethers.formatUnits(fees.maxPriorityFeePerGas, "gwei") } : {}),
-    worstCaseFeeWei: null,
-    worstCaseFeeNote: "not computed without the real secret (no gas estimate); the balance check runs on the real claim",
-    senderBalanceWei: balanceWei.toString(),
-    senderBalanceEth: ethers.formatEther(balanceWei),
-  };
+  const from = await signer.getAddress();
+  const req = { value: 0n, maxPriorityFeePerGas: fees ? fees.maxPriorityFeePerGas : undefined };
+  const capGiven = fees && fees.maxFeePerGas !== undefined && fees.maxFeePerGas !== null ? fees.maxFeePerGas : capWei;
+  return mainnetCosts(provider, from, req, claimGas, capGiven);
 }
 
 /** Review V2-7: the poseidon claim is exactly selector + lock id + secret. Refuse to sign anything else (the message never shows the secret). */
@@ -3464,7 +3517,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       valueWei: "0",
       gasEstimate: null,
       gasEstimateNote: `not estimated, ever: a ${kind} claim is sent with a fixed gas limit (${claimGas}) and never simulated (the secret would reach the node)`,
-      ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args, fp.fees) : {}),
+      ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args, fp.fees, claimGas) : {}),
       ...plan,
       ...fp.report,
     };
@@ -4017,7 +4070,10 @@ async function status(provider, _signer, args) {
   const events = [];
   let revealed = null;
   for (const log of logs) {
+    if (log.removed) continue;
+    if (String(log.address).toLowerCase() !== String(contractAddr).toLowerCase()) continue;
     const p = iface.parseLog(log);
+    if (!p) continue;
     const ev = { event: p.name, blockNumber: log.blockNumber, txHash: log.transactionHash, logIndex: log.index };
     if (p.name === "Locked") {
       Object.assign(ev, {
@@ -4146,14 +4202,18 @@ function parseArgs(argv) {
     const tok = rest[i];
     if (tok.startsWith("--")) {
       const name = tok.slice(2);
-      if (name === "preimage" || name === "secret") {
+      const baseName = name.split("=")[0];
+      if (baseName === "preimage" || baseName === "secret") {
         throw new UserError(
-          `--${name} was removed: a secret on the command line lands in shell history and process listings; ` +
+          `--${baseName} was removed: a secret on the command line lands in shell history and process listings; ` +
             `use --secret-stdin (swap-cli secret FILE | node scripts/live.js claim --secret-stdin ...) or --secret-file PATH`
         );
       }
-      const kind = spec.flags[name];
-      if (!kind) throw new UserError(`unknown flag --${name} for "${command}"`);
+      const kind = Object.prototype.hasOwnProperty.call(spec.flags, name) ? spec.flags[name] : undefined;
+      if (!kind) {
+        const safeName = name.replace(/(?:0x)?[0-9a-fA-F]{64}/g, "<redacted-32-byte-hex>");
+        throw new UserError(`unknown flag --${safeName} for "${command}"`);
+      }
       if (kind === "b") args[camel(name)] = true;
       else {
         const v = rest[++i];
@@ -4237,7 +4297,7 @@ async function main(argv) {
 
 module.exports = {
   keygen, keygenStdout, balance, keyAddress, signMessage, verifyMessage, MESSAGE_DOMAIN, deploy, lock, claim, refund, send, sweep, reserve, status,
-  loadSigner, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, RESERVE_FLOOR_WEI, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
+  loadSigner, checkKeyFileMode, receiverCodeVerdict, readReceiverCode, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, RESERVE_FLOOR_WEI, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,

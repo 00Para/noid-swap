@@ -258,10 +258,13 @@ function createVault(deps) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     if (ksUsable()) {
       let blob;
+      const copy = Buffer.from(S);
       try {
-        blob = Buffer.from(keyStore.seal(Buffer.from(S)));
+        blob = Buffer.from(keyStore.seal(copy));
       } catch {
         throw new VaultError("the key store refused to seal the install secret");
+      } finally {
+        copy.fill(0);
       }
       const aside = exclusive ? null : setAside(F_SECRET);
       try {

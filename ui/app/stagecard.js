@@ -179,6 +179,8 @@
       const ct = rowTime(view, "claim_target", now);
       m.safety.late = { phase: x.late_claim.phase, blocks: x.late_claim.blocks, first_tip: Number.isFinite(x.late_claim.first_tip) ? x.late_claim.first_tip : null, target: ct && !ct.passed ? ct : null, engine: view && view.action && view.action.reason ? plainEngine(view.action.reason) : null };
     }
+    // R23-3: the window to start closed for good and nothing of this side anywhere (the program's own reading, lib/unstarted.js): the swap file may still say "waiting", the card does not
+    const unst = prg && prg.unstarted && typeof prg.unstarted === "object" && prg.unstarted.ended === true && !pre && view && view.phase && PHASES[role].before.includes(view.phase.id) && !["stale", "waiting-stale", "act-stale", "no-data", "unknown", "remote"].includes(view.status) && !(view.alarms || []).some((al) => al && al.level === "danger") ? prg.unstarted : null;
     const needs = x && Array.isArray(x.needs_you) ? x.needs_you.length > 0 : false;
     const changed = !!(x && x.terms_changed === true);
 
@@ -193,7 +195,7 @@
       else if (view.phase.id === "lost") unplaced.push("Both legs of this swap are gone: the reveal was still pending when the other side refunded and took the NOID. Nothing can be recovered on a chain; keep the files.");
       // a funding that was sent has its marker: the card says only that, before the first reading after it
       const onlyMarker = !!(view && !view.phase && funded);
-      if (view && !onlyMarker && ["stale", "waiting-stale", "act-stale", "no-data", "unknown", "remote"].includes(view.status) && !(view.phase && view.phase.terminal)) {
+      if (view && !onlyMarker && !unst && ["stale", "waiting-stale", "act-stale", "no-data", "unknown", "remote"].includes(view.status) && !(view.phase && view.phase.terminal)) {
         // with no reading at all (no-data) the age of the tick file's mtime says nothing: the sentence about the missing reading stands alone
         const age = view.status === "no-data" ? null : view.header && view.header.tick && view.header.tick.age_s;
         unplaced.push(typeof age === "number" ? `The last reading of the chains is ${V().fmtDur(age)} old. The program only acts on fresh readings.` : "The program has no fresh reading of the chains.");
@@ -203,7 +205,7 @@
           if (al.level === "attn" && LOOK_ATTN.test(al.id || "")) unplaced.push(al.text);
           else if (al.level === "danger" && !unplaced.includes("The engine raised an alarm: it is shown above.")) unplaced.push("The engine raised an alarm: it is shown above.");
         }
-        if (lb && lbLevel === "danger") unplaced.push(lb.text);
+        if (lb && lbLevel === "danger" && !unst) unplaced.push(lb.text);
         if (m.safety.held) unplaced.push("The engine froze a step earlier and does not offer it now. Do not send it: read the engine's reason in Details.");
       }
     }
@@ -234,9 +236,25 @@
       return true;
     };
 
+    // a swap that ended before it started but whose wallet or key holds coins, or whose wallet cannot be read, is never shown as quietly ended: it needs a look, with the way back
+    if (unst && unst.holds !== "nothing") unplaced.push(unstartedHeldWords(unst, role, Ac));
     if (unplaced.length) look(...unplaced);
+    else if (unst) placeUnstarted();
     else if (pre && !payloadHasSwapFile(payload, role, Ac)) placeSetup();
     else placeFromPhase();
+
+    function placeUnstarted() {
+      // Bob who stopped after Alice's funding: her NOID is in the contract, so "nothing was locked" would be false; his own side locked nothing, and her NOID goes back to her after the deadline
+      const aliceFunded = role === "bob" && view && view.phase && (view.phase.id === "funded" || view.phase.id === "funding_final");
+      const first = role === "alice" ? "The time to deposit has passed, so the swap cannot start." : "The time to lock your ETH has passed, so the swap cannot start.";
+      const rest = aliceFunded ? "You locked nothing; Alice's NOID goes back to her after the deadline. Nothing of yours is held by this swap." : "Nothing was seen locked on either chain, and nothing of yours is held by this swap.";
+      set("abort", "This swap ended before it started", `${first} ${rest}`);
+      m.claims.step = false;
+      // nothing of the swap's stages was reached: the progress line marks none, and the foot does not point at receipts there are not
+      m.stage = -1;
+      m.unstarted = true;
+      return null;
+    }
 
     function placeSetup() {
       const f = Ac.program.startFacts(payload, role);
@@ -635,7 +653,8 @@
       const label = (rec && rec.label) || stepName(busy.id);
       out.stopped = `${label}: ${Number.isFinite(busy.started_at) ? "started " + Ac.card.hhmm(busy.started_at) + ", " : ""}no result yet`;
     }
-    if (m.kind === "done" || m.kind === "refund" || m.kind === "abort") out.doing = "The transaction ids are under Details, Receipts.";
+    if (m.unstarted === true) out.doing = "Nothing was sent. Nothing for you to do.";
+    else if (m.kind === "done" || m.kind === "refund" || m.kind === "abort") out.doing = "The transaction ids are under Details, Receipts.";
     else {
       out.doing = on ? sentence(x && x.doing) || "The program is driving this swap." : "The program is not driving this swap.";
       const s = m.safety;
@@ -654,6 +673,21 @@
     const l = String(t || "").split("\n").map((x) => x.trim()).filter(Boolean).slice(-1)[0];
     return l ? (l.length > 200 ? l.slice(0, 200) + "…" : l) : null;
   };
+
+  /** The words of a swap that ended before it started while its own wallet or key holds coins (or cannot be read): what it holds and how it comes back. Display only. */
+  function unstartedHeldWords(u, role, Ac) {
+    const head = `This swap ended before it started: ${role === "alice" ? "the time to deposit has passed" : "the time to lock your ETH has passed"} and nothing was locked.`;
+    if (u.holds === "funds" && u.held) {
+      const parts = [];
+      const noid = u.held.noid_micronoid ? Ac.card.noidFigure(u.held.noid_micronoid) : null;
+      const eth = u.held.eth_wei ? Ac.card.ethFigure(u.held.eth_wei) : null;
+      if (noid) parts.push(`${noid} NOID`);
+      if (eth) parts.push(`${eth} ETH`);
+      const what = parts.length ? parts.join(" and ") : "coins";
+      return `${head} This swap's own ${role === "alice" && u.held.noid_micronoid ? "wallet and key hold" : "key holds"} about ${what}: that is yours. The program records the end of the swap on its next readings, and the step that sends it to your own address shows here then. Details lists the addresses.`;
+    }
+    return `${head} The program has no clean reading of this swap's wallet yet, so it cannot say that nothing was deposited. Read the deposit in Details.`;
+  }
 
   function payloadHasSwapFile(payload, role, Ac) {
     return Ac.card.haveSwapFile(payload, role);

@@ -50,6 +50,9 @@ class ApiError extends Error {
 
 function assertSignetBase(base, what = 'API base URL') {
   if (typeof base !== 'string' || !/^https?:\/\//.test(base)) throw new Error(`${what} must be an http(s) URL (got ${base})`);
+  if (base.startsWith('http://') && !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\//.test(base)) {
+    throw new Error(`${what} "${base}" must use https:// for non-loopback hosts`);
+  }
   if (!/\/signet\//.test(base + '/')) {
     throw new Error(
       `${what} "${base}" is not a signet endpoint (its path must contain "/signet/"). ` +

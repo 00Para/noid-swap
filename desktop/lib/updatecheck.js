@@ -42,9 +42,11 @@ function floorOf(v) {
   return v && typeof v === "object" && releaseFile.versionParts(v.oldest) ? { oldest: v.oldest, note: safeNote(v.note) } : null;
 }
 
-/** A note read back from the record: a string of at most 280 characters, else null (the record is a plain file on disk). */
+const BAD_NOTE_CHAR = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/;
+
+/** A note read back from the record: a string of at most 280 characters with no control or bidi characters, else null (the record is a plain file on disk). */
 function safeNote(v) {
-  return typeof v === "string" && v.length > 0 && [...v].length <= 280 ? v : null;
+  return typeof v === "string" && v.length > 0 && [...v].length <= 280 && !BAD_NOTE_CHAR.test(v) ? v : null;
 }
 
 /**

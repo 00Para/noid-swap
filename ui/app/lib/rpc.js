@@ -55,6 +55,38 @@ function redactUrl(url) {
   }
 }
 
+const MAX_RPC_RESPONSE_BYTES = 16 * 1024 * 1024;
+
+async function readBoundedText(res, maxBytes) {
+  if (res && res.body && typeof res.body.getReader === "function") {
+    const reader = res.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const buf = Buffer.from(value);
+        total += buf.length;
+        if (total > maxBytes) {
+          try { await reader.cancel(); } catch { /* ignore */ }
+          throw new Error(`reply larger than ${maxBytes} bytes`);
+        }
+        chunks.push(buf);
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* ignore */ }
+    }
+    return Buffer.concat(chunks, total).toString("utf8");
+  }
+  if (typeof res.text === "function") {
+    const text = await res.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) throw new Error(`reply larger than ${maxBytes} bytes`);
+    return text;
+  }
+  return null;
+}
+
 /**
  * Live transport: POST one JSON-RPC 2.0 request with fetch.
  * `chain` is "noid" or "eth" and selects the allowlist.
@@ -120,25 +152,29 @@ class HttpJsonRpc {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), this.timeoutMs);
     let res;
-    try {
-      res = await this.fetchImpl(this.url, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-        signal: ac.signal,
-      });
-    } catch (e) {
-      const why = e && e.name === "AbortError" ? `timeout after ${this.timeoutMs} ms` : (e && e.message) || String(e);
-      throw new RpcError("transport", `${this.label}: ${method}: ${why}`);
-    } finally {
-      clearTimeout(timer);
-    }
-    if (!res.ok) throw new RpcError("transport", `${this.label}: ${method}: HTTP ${res.status}`);
     let json;
     try {
-      json = await res.json();
-    } catch (e) {
-      throw new RpcError("decode", `${this.label}: ${method}: reply is not JSON`);
+      try {
+        res = await this.fetchImpl(this.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body,
+          signal: ac.signal,
+        });
+      } catch (e) {
+        const why = e && e.name === "AbortError" ? `timeout after ${this.timeoutMs} ms` : (e && e.message) || String(e);
+        throw new RpcError("transport", `${this.label}: ${method}: ${why}`);
+      }
+      if (!res.ok) throw new RpcError("transport", `${this.label}: ${method}: HTTP ${res.status}`);
+      try {
+        const text = await readBoundedText(res, MAX_RPC_RESPONSE_BYTES);
+        json = text !== null ? JSON.parse(text) : await res.json();
+      } catch (e) {
+        if (e && e.name === "AbortError") throw new RpcError("transport", `${this.label}: ${method}: timeout after ${this.timeoutMs} ms`);
+        throw new RpcError("decode", `${this.label}: ${method}: reply is not JSON`);
+      }
+    } finally {
+      clearTimeout(timer);
     }
     if (json && json.error) {
       const err = json.error;

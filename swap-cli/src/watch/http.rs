@@ -325,12 +325,19 @@ fn read_response(conn: &mut Conn) -> Result<(Head, Vec<u8>), RpcError> {
 
     let chunked = head.header("transfer-encoding").map_or(false, |v| v.to_ascii_lowercase().contains("chunked"));
     if chunked {
+        const MAX_CHUNK_LINE: usize = 4096;
         let mut body = Vec::new();
         loop {
-            // Size line.
+            // Size line (drained from buffer after each chunk so memory stays bounded).
             let eol = loop {
                 if let Some(i) = find(&conn.buf, b"\r\n", pos) {
+                    if i - pos > MAX_CHUNK_LINE {
+                        return Err(RpcError::Transport("chunk size line exceeds 4 KiB".into()));
+                    }
                     break i;
+                }
+                if conn.buf.len().saturating_sub(pos) > MAX_CHUNK_LINE {
+                    return Err(RpcError::Transport("chunk size line exceeds 4 KiB".into()));
                 }
                 if conn.fill()? == 0 {
                     return Err(RpcError::Transport("connection closed inside a chunked body".into()));
@@ -343,19 +350,28 @@ fn read_response(conn: &mut Conn) -> Result<(Head, Vec<u8>), RpcError> {
             if size == 0 {
                 break; // trailers, if any, are ignored: the connection is closed after this call.
             }
-            if body.len() + size > MAX_BODY_BYTES {
+            let new_total = body
+                .len()
+                .checked_add(size)
+                .ok_or_else(|| RpcError::Transport("reply body exceeds 32 MiB".into()))?;
+            if new_total > MAX_BODY_BYTES {
                 return Err(RpcError::Transport("reply body exceeds 32 MiB".into()));
             }
-            while conn.buf.len() < pos + size + 2 {
+            let chunk_end = pos
+                .checked_add(size)
+                .and_then(|v| v.checked_add(2))
+                .ok_or_else(|| RpcError::Transport("chunk size overflow".into()))?;
+            while conn.buf.len() < chunk_end {
                 if conn.fill()? == 0 {
                     return Err(RpcError::Transport("connection closed inside a chunk".into()));
                 }
             }
             body.extend_from_slice(&conn.buf[pos..pos + size]);
-            if &conn.buf[pos + size..pos + size + 2] != b"\r\n" {
+            if &conn.buf[pos + size..chunk_end] != b"\r\n" {
                 return Err(RpcError::Transport("chunk is not followed by CRLF".into()));
             }
-            pos += size + 2;
+            conn.buf.drain(..chunk_end);
+            pos = 0;
         }
         return Ok((head, body));
     }

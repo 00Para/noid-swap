@@ -77,7 +77,7 @@ describe("live.js sign-message and verify-message (piece 3, P3.1)", function () 
       const message = hexOf(DOMAIN + "checked " + crypto.randomBytes(24).toString("hex"));
       const piped = await sign(key, message);
       expect(piped.code, piped.err).to.equal(0);
-      fs.writeFileSync(f, key + "\n");
+      fs.writeFileSync(f, key + "\n", { mode: 0o600 });
       const filed = await cli(["sign-message", "--key-file", f, "--message-hex", message]);
       expect(filed.code, filed.err).to.equal(0);
       expect(filed.out, "the same key and message give the same signature").to.equal(piped.out);
@@ -215,7 +215,7 @@ describe("live.js sign-message and verify-message (piece 3, P3.1)", function () 
   it("exactly one of --key-stdin and --key-file; a bad key or key file is refused without showing it", async () => {
     const key = newKey();
     const f = path.join(dir, "k.key");
-    fs.writeFileSync(f, key + "\n");
+    fs.writeFileSync(f, key + "\n", { mode: 0o600 });
     const message = hexOf(DOMAIN + "x");
     const both = await cli(["sign-message", "--key-stdin", "--key-file", f, "--message-hex", message], key + "\n");
     expect(both.code).to.equal(1);
@@ -233,7 +233,7 @@ describe("live.js sign-message and verify-message (piece 3, P3.1)", function () 
     }
     // a key file with an invalid key (the zero key is not on the curve's range) and a missing one
     for (const content of ["0x" + "00".repeat(32), "0x" + "ff".repeat(32), "garbage"]) {
-      fs.writeFileSync(path.join(dir, "bad.key"), content + "\n");
+      fs.writeFileSync(path.join(dir, "bad.key"), content + "\n", { mode: 0o600 });
       const r = await cli(["sign-message", "--key-file", path.join(dir, "bad.key"), "--message-hex", message]);
       expect(r.code, content).to.equal(1);
       expect(r.out).to.equal("");
@@ -253,7 +253,7 @@ describe("live.js sign-message and verify-message (piece 3, P3.1)", function () 
   it("the key is in no output of any run (success, refusal, bad input)", async () => {
     const key = newKey();
     const f = path.join(dir, "k.key");
-    fs.writeFileSync(f, key + "\n");
+    fs.writeFileSync(f, key + "\n", { mode: 0o600 });
     const runs = [
       await sign(key, hexOf(DOMAIN + "a")),
       await sign(key, hexOf("hello")),

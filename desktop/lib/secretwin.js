@@ -66,7 +66,15 @@ function createPageServer(pageDir, readFile = fs.readFileSync) {
     } catch {
       return notFound();
     }
-    return new Response(body, { status: 200, headers: { "content-type": PAGE_FILES[u.pathname], "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+    return new Response(body, {
+      status: 200,
+      headers: {
+        "content-type": PAGE_FILES[u.pathname],
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      },
+    });
   };
 }
 

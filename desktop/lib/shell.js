@@ -274,6 +274,10 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   const openSettings = () => {
     if (windowCtl) windowCtl.openSettings().catch(() => {});
   };
+  // The menu's "Practice swap": the window forward and the page's practice swap opens (nothing real is used by it: lib/practice.js of the console).
+  const openPractice = () => {
+    if (windowCtl) windowCtl.openPractice().catch(() => {});
+  };
 
   function dispatchStake(list) {
     stakeList = list;
@@ -616,6 +620,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       onSettings: openSettings,
       onRecoveryCode: () => program.open("recovery-code"),
       onHelp: () => program.open("help"),
+      onPractice: openPractice,
       onCheckUpdate: () => program.open("update-check"),
       onQuit: () => app.quit(),
     });

@@ -76,9 +76,11 @@ test("demo: the fixtures carry a marker preimage on purpose, and the payload nev
 test("demo: placeholders only, no real addresses", () => {
   const text = JSON.stringify(D.TERMS);
   assert.match(text, /PLACEHOLDER/);
-  assert.match(D.TERMS.eth.alice_receiver, /^0x0{36}[0-9a-f]{4}$/);
-  assert.match(D.TERMS.eth.bob_sender, /^0x0{36}[0-9a-f]{4}$/);
-  assert.match(D.TERMS.eth.contract, /^0x0{36}[0-9a-f]{4}$/);
+  // the Ethereum placeholders are words, not addresses: an address-shaped value (even 0x0000...a11c) can receive coins that are then lost
+  for (const v of [D.TERMS.eth.alice_receiver, D.TERMS.eth.bob_sender, D.TERMS.eth.contract]) {
+    assert.match(v, /^practice label, not an address/);
+    assert.ok(!/^0x[0-9a-fA-F]{40}$/.test(v));
+  }
   assert.ok(!/o1[a-z0-9]{50,}/.test(text), "no bech32-looking address");
 });
 

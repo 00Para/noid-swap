@@ -77,21 +77,31 @@ impl ExecJsonRpc {
     }
 
     /// The argument list after the program name.
+    ///
+    /// Outside audit (2026-11-23): `-q` comes first, so curl reads no `.curlrc` (one could add `-k`, `-L` or a proxy); only `http` and `https`
+    /// are allowed, for the request and for any redirect; and `--` ends the options, so the URL is never read as one.
     pub fn args(&self) -> Vec<String> {
         let secs = self.timeout.as_secs().max(1);
         [
+            "-q",
             "-s",
             "-S",
             "--fail-with-body",
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--globoff",
             "-m",
             &secs.to_string(),
             "-X",
             "POST",
-            &self.url,
             "-H",
             "content-type: application/json",
             "--data-binary",
             "@-",
+            "--",
+            &self.url,
         ]
         .iter()
         .map(|s| s.to_string())
@@ -99,6 +109,8 @@ impl ExecJsonRpc {
     }
 
     fn run(&self, request: Vec<u8>) -> Result<(Option<i32>, Vec<u8>, Vec<u8>), RpcError> {
+        const MAX_STDOUT_BYTES: usize = 32 * 1024 * 1024;
+        const MAX_STDERR_BYTES: usize = 64 * 1024;
         // REVIEW-3 F4: only the allow-listed environment reaches curl (never SWAP_PASSPHRASE or RISC0_DEV_MODE).
         let mut command = Command::new(&self.program);
         crate::child_env::apply(&mut command);
@@ -106,9 +118,9 @@ impl ExecJsonRpc {
         let mut child = spawn_with_etxtbsy_retry(&mut command)
             .map_err(|e| RpcError::Transport(format!("connect: cannot start {:?}: {e}", self.program)))?;
         let mut stdin = child.stdin.take().expect("piped");
-        let mut stdout = child.stdout.take().expect("piped");
-        let mut stderr = child.stderr.take().expect("piped");
-        // Write the request and drain both outputs on their own threads: no pipe can fill up and stall us.
+        let stdout = child.stdout.take().expect("piped");
+        let stderr = child.stderr.take().expect("piped");
+        // Write the request and drain both outputs on their own threads with strict byte caps.
         let writer = std::thread::spawn(move || {
             let _ = stdin.write_all(&request); // a program that exits early closes the pipe; its exit code tells why
         });
@@ -116,12 +128,12 @@ impl ExecJsonRpc {
         let (tx_err, rx_err) = mpsc::channel();
         std::thread::spawn(move || {
             let mut b = Vec::new();
-            let _ = stdout.read_to_end(&mut b);
+            let _ = stdout.take((MAX_STDOUT_BYTES + 1) as u64).read_to_end(&mut b);
             let _ = tx_out.send(b);
         });
         std::thread::spawn(move || {
             let mut b = Vec::new();
-            let _ = stderr.read_to_end(&mut b);
+            let _ = stderr.take(MAX_STDERR_BYTES as u64).read_to_end(&mut b);
             let _ = tx_err.send(b);
         });
         let deadline = Instant::now() + self.timeout + Duration::from_secs(5);
@@ -139,6 +151,9 @@ impl ExecJsonRpc {
         };
         let _ = writer.join();
         let out = rx_out.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
+        if out.len() > MAX_STDOUT_BYTES {
+            return Err(RpcError::Transport("reply body exceeds 32 MiB".into()));
+        }
         let err = rx_err.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
         Ok((status.code(), out, err))
     }
@@ -249,7 +264,27 @@ mod tests {
         let args: Vec<&str> = args.lines().collect();
         assert_eq!(
             args,
-            ["-s", "-S", "--fail-with-body", "-m", "12", "-X", "POST", "http://127.0.0.1:9601", "-H", "content-type: application/json", "--data-binary", "@-"]
+            [
+                "-q",
+                "-s",
+                "-S",
+                "--fail-with-body",
+                "--proto",
+                "=http,https",
+                "--proto-redir",
+                "=http,https",
+                "--globoff",
+                "-m",
+                "12",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data-binary",
+                "@-",
+                "--",
+                "http://127.0.0.1:9601",
+            ]
         );
         let stdin: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("ok.stdin")).unwrap()).unwrap();
         assert_eq!(stdin, json!({"jsonrpc": "2.0", "id": 1, "method": "paranoid_blockCount", "params": []}));

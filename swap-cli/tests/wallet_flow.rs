@@ -659,7 +659,9 @@ fn an_unsettled_funding_blocks_the_sweep_of_an_aborted_swap() {
     fx2.node.fail_next(Fail::TimeoutBeforeAdmit);
     assert_eq!(fx2.fund(true).outcome, Outcome::MaybeSent);
     fx2.file.phase = Phase::Alice(AlicePhase::Aborted { reason: "x".into() });
-    fx2.node.set_tip(299_376); // child 299,377: the anchor of the recorded funding is gone
+    fx2.node.set_tip(299_376); // child 299,377: anchor window just ended, but block 299,376 is not yet final (18-block reorg window)
+    assert_eq!(sweep(&fx2, true).outcome, Outcome::Hold);
+    fx2.node.set_tip(299_376 + swap_cli::params::NOID_FINALITY_DEPTH); // now final_after_tip is reached: funding can no longer land
     assert_eq!(sweep(&fx2, true).outcome, Outcome::Sent);
 }
 

@@ -69,8 +69,8 @@ const K_FUND = 3;
 /** BIP-125 incremental relay fee: a replacement must pay this many sat/vB more (new size) than the one it replaces. */
 const RBF_INCREMENT = 1;
 const SWAP_FILE_VERSION = 1;
-// Terminal phases of swap-cli (state.rs `is_terminal`): the swap is over, no new lock or claim may start under its file.
-const TERMINAL_PHASES = { alice: new Set(['refunded', 'lost', 'aborted']), bob: new Set(['refunded', 'aborted']) };
+// Settled/terminal phases of swap-cli: the swap is over, no new lock or claim may start under its file (including 'done', whose secret is already public).
+const TERMINAL_PHASES = { alice: new Set(['done', 'refunded', 'lost', 'aborted']), bob: new Set(['done', 'refunded', 'aborted']) };
 
 class UserError extends Error {}
 
@@ -572,9 +572,10 @@ async function status(ctx, args0) {
   if (!utxo) return out;
   out.funded = true;
   out.valueSats = utxo.value;
-  out.confirmed = !!utxo.status.confirmed;
-  out.blockHeight = out.confirmed ? utxo.status.block_height : null;
-  out.confirmations = out.confirmed ? tipHeight - out.blockHeight + 1 : 0;
+  const validHeight = utxo.status.confirmed && Number.isInteger(utxo.status.block_height) && utxo.status.block_height > 0 && utxo.status.block_height <= tipHeight;
+  out.confirmed = validHeight;
+  out.blockHeight = validHeight ? utxo.status.block_height : null;
+  out.confirmations = validHeight ? tipHeight - out.blockHeight + 1 : 0;
 
   const sp = await client.outspend(txid, vout);
   if (!sp || !sp.spent) {
@@ -596,7 +597,8 @@ async function status(ctx, args0) {
     } else {
       const w = inp.witness || [];
       const sel = w.length >= 2 ? Buffer.from(w[w.length - 2]) : null;
-      if (w.length === 4 && sel && sel.length === 1 && sel[0] === 1) spend.branch = 'claim';
+      const selTruthy = !!sel && sel.some((b, idx) => b !== 0 && !(idx === sel.length - 1 && b === 0x80));
+      if (w.length === 4 && selTruthy) spend.branch = 'claim';
       else if (w.length === 3 && sel && sel.length === 0) spend.branch = 'refund';
       else spend.branch = 'unknown';
       const chk = checkHtlcSpend(stx, sp.vin, { amount: utxo.value, redeemScript: rs, scriptPubKey: htlc.p2wshScriptPubKey(rs) });
@@ -677,8 +679,9 @@ async function spendHtlc(ctx, args0, kind) {
     );
   }
   if (!replace) {
-    const confirmations = utxo.status.confirmed ? tipHeight - utxo.status.block_height + 1 : 0;
-    if (!utxo.status.confirmed && !args.allowUnconfirmed) throw new UserError('the funding tx is still unconfirmed; wait, or pass --allow-unconfirmed');
+    const validHeight = utxo.status.confirmed && Number.isInteger(utxo.status.block_height) && utxo.status.block_height > 0 && utxo.status.block_height <= tipHeight;
+    const confirmations = validHeight ? tipHeight - utxo.status.block_height + 1 : 0;
+    if (!validHeight && !args.allowUnconfirmed) throw new UserError('the funding tx is still unconfirmed (or missing a valid block height); wait, or pass --allow-unconfirmed');
     if (kind === 'claim' && !args.allowUnconfirmed) {
       const minConf = args.minConfirmations === undefined ? K_FUND : uint('--min-confirmations', args.minConfirmations, { min: 1 });
       if (confirmations < minConf) {
@@ -696,6 +699,10 @@ async function spendHtlc(ctx, args0, kind) {
         if (!args.ignoreCutoff) throw new UserError(`refusing: ${msg}. Pass --ignore-cutoff only if you accept that.`);
         warnings.push(msg);
       }
+    } else {
+      const msg = `time-based locktime (${fields.locktime}) cannot be checked safely against a block-height claim cutoff here`;
+      if (!args.ignoreCutoff) throw new UserError(`refusing: ${msg}. Pass --ignore-cutoff only if you accept that.`);
+      warnings.push(msg);
     }
   } else if (fields.locktimeKind === 'height') {
     if (!htlc.isLocktimeReached(fields.locktime, { tipHeight })) {
