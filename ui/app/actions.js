@@ -2455,11 +2455,41 @@
     box.appendChild(H.el("div", {}, H.el("div", { class: "label", text: "This swap's Ethereum key (the sender of your lock)" }), H.el("div", { class: "row" }, H.copyButton(r.key_address, "this swap's Ethereum key address", r.key_address)), H.el("p", { class: "dim", text: "Do not send coins to it yet: the deposit box shows when the swap is ready." })));
     // under Details, while the stage card holds the two files (opts.card), the box keeps the addresses and the warning and has no button of its own
     if (!(opts && opts.card)) {
-      box.appendChild(H.el("div", { class: "row" }, btn([icon("save"), "Save an invitation for Alice…"], () => saveFile("invitation"), { primary: true, disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST })));
+      box.appendChild(H.el("div", { class: "row" }, btn([icon("save"), "Save an invitation for Alice…"], () => saveFile("invitation"), { primary: true, disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST }), btn([icon("copy"), "Copy invitation code"], () => copyInviteCode(), { disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST })));
       const note = fileNote("invitation");
       if (note) box.appendChild(note);
     }
     return box;
+  }
+
+  /** Copies Bob's compact public invite code (no1dinv1:...) to the clipboard. */
+  async function copyInviteCode() {
+    if (!H.state.token) return;
+    ui.file = { swap: H.state.swap || "", kind: "invitation", busy: true, ok: null, text: null };
+    forceRender();
+    const r = await post("/api/invitation/code", {});
+    if (r.ok && r.json && typeof r.json.code === "string") {
+      let copied = false;
+      try {
+        if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(r.json.code);
+          copied = true;
+        }
+      } catch {
+        copied = false;
+      }
+      ui.file = { swap: H.state.swap || "", kind: "invitation", busy: false, ok: true, text: copied ? "Copied invitation code. Send it to Alice." : `Invitation code: ${r.json.code}` };
+      if (copied && H.toast) H.toast("Copied invitation code");
+    } else {
+      ui.file = { swap: H.state.swap || "", kind: "invitation", busy: false, ok: false, error: true, text: (r.json && r.json.error) || `HTTP ${r.status}` };
+    }
+    forceRender();
+  }
+
+  /** A button of the stage card that copies Bob's invitation code. */
+  function cardInviteCodeButton() {
+    const busy = !!(noteOf("invitation") && noteOf("invitation").busy);
+    return btn([icon("copy"), "Copy invitation code"], () => copyInviteCode(), { disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST });
   }
 
   /** A button of the stage card that saves one of the two files (the swap file for Bob, the invitation for Alice): the program's own dialog opens. */
@@ -2921,7 +2951,7 @@ ${entry.command || ""}` : "") }), why };
     fundingBlock,
     banners,
     tick,
-    card: { isBoardRun, checkLineOf, depositCompact, depositWords, depositSeen, fundingRecorded, haveSwapFile, noteOf, fileNote, fileButton: cardFileButton, actionButton: cardActionButton, groupAtoms, noidFigure, ethFigure, hhmm, CODE1_IDS, CODE1_ADVICE, SPEND_ORDER, PROGRAM_SAY, hungWarning, pendingLock, message: () => ui.msg },
+    card: { isBoardRun, checkLineOf, depositCompact, depositWords, depositSeen, fundingRecorded, haveSwapFile, noteOf, fileNote, fileButton: cardFileButton, inviteCodeButton: cardInviteCodeButton, actionButton: cardActionButton, groupAtoms, noidFigure, ethFigure, hhmm, CODE1_IDS, CODE1_ADVICE, SPEND_ORDER, PROGRAM_SAY, hungWarning, pendingLock, message: () => ui.msg },
     program: { isProgram, startKind: programStartKind, startFacts: programStartFacts, steps: programSteps, renderStart: renderProgramStart, hungWarning, TERMINAL_ONLY, PROGRAM_STEPS, PROGRAM_BACKUP, CODE1_ADVICE, firstCard: programFirstCard },
     programFirstCard,
     handoverBlock,

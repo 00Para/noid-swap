@@ -759,7 +759,7 @@ async function recordCloseRoute(swap, body) {
 // The operator page and what it loads: the same files as terminal mode, without the old chain console (/console, app.js, styles.css) and its API.
 const PROGRAM_STATIC = Object.fromEntries(Object.entries(STATIC).filter(([p]) => !["/console", "/app.js", "/styles.css"].includes(p)));
 const OPEN_WHAT = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
-const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384 };
+const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384, "/api/invitation/parse": 16384 };
 /** The form's view of the networks (the test profiles and Ethereum mainnet): chain, caps, and the program's own contract for the network (`programPinFor`: the settings' override, else the one pin; null when there is none, as on mainnet until a deployment exists). */
 const formProfileView = (settings) => Object.fromEntries(Object.entries(PROGRAM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18, contract: programPinFor(k, settings) || null, ...(k === "production" ? { mainnet: true, fee_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei, tip_gwei: PRODUCTION_FEE_DEFAULTS.priority_fee_gwei } : { estimate_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei }) }]));
 
@@ -1116,25 +1116,52 @@ async function bundleSaveRoute(program, swap) {
   return saveAndAnswer(program, swap, "bundle", b.bytes, { action: "bundle-save", role: "alice" });
 }
 
-/** POST /api/invitation/save {"swap"}: Bob saves his invitation for Alice. */
-async function invitationSaveRoute(program, swap) {
+/** Shared precheck + payload builder for Bob's invitation (file save or copyable code). */
+function prepareInvitation(program, swap) {
   // R2: a new swap is paused by a signed notice, and an invitation asks Alice to start one
   const notice = newSwapNotice.read(program);
-  if (notice.unsafe) return fileRefusal(409, notice.why);
+  if (notice.unsafe) return { err: fileRefusal(409, notice.why) };
   const no = savePrecheck(swap, "bob", { role: FILE_WORDS.invitation_role, board: FILE_WORDS.invitation_board });
-  if (no) return no;
+  if (no) return { err: no };
   const l = swap.settingsSource.load();
-  if (!l.ok) return fileRefusal(409, FILE_WORDS.invitation_bad);
-  if (l.settings.profile !== "sepolia" && l.settings.profile !== "production") return fileRefusal(409, FILE_WORDS.invitation_network);
+  if (!l.ok) return { err: fileRefusal(409, FILE_WORDS.invitation_bad) };
+  if (l.settings.profile !== "sepolia" && l.settings.profile !== "production") return { err: fileRefusal(409, FILE_WORDS.invitation_network) };
   const key = invitation.readBobKeyAddress(swap.dir);
-  if (!key) return fileRefusal(409, FILE_WORDS.invitation_key);
+  if (!key) return { err: fileRefusal(409, FILE_WORDS.invitation_key) };
+  return { settings: l.settings, key };
+}
+
+/** POST /api/invitation/save {"swap"}: Bob saves his invitation for Alice. */
+async function invitationSaveRoute(program, swap) {
+  const p = prepareInvitation(program, swap);
+  if (p.err) return p.err;
   let text;
   try {
-    text = invitation.build(l.settings, key);
+    text = invitation.build(p.settings, p.key);
   } catch {
     return fileRefusal(409, FILE_WORDS.invitation_bad);
   }
   return saveAndAnswer(program, swap, "invitation", Buffer.from(text, "utf8"), { action: "invitation-save", role: "bob" });
+}
+
+/** POST /api/invitation/code {"swap"}: Bob copies his invitation as a compact no1dinv1:... code (public fields only, no secret). */
+function invitationCodeRoute(program, swap) {
+  const p = prepareInvitation(program, swap);
+  if (p.err) return p.err;
+  let code;
+  try {
+    code = invitation.encodeCode(p.settings, p.key);
+  } catch {
+    return fileRefusal(409, FILE_WORDS.invitation_bad);
+  }
+  return { status: 200, body: { ok: true, code } };
+}
+
+/** POST /api/invitation/parse {"code"}: strict parser for a pasted no1dinv1:... code or invitation JSON. */
+function invitationParseRoute(body) {
+  const code = body && typeof body.code === "string" ? body.code : "";
+  const r = invitation.parseCode(code);
+  return r.ok ? { status: 200, body: { ok: true, fields: r.fields } } : { status: 422, body: { ok: false, error: r.why } };
 }
 
 /** POST /api/invitation/open {}: the native open dialog, then the strict reader. Answers the form fields only: never a path, no audit line. */
@@ -1324,6 +1351,16 @@ function programRequestHandler(program, swapSet, getServer, practiceCtx) {
           }
           if (p === "/api/invitation/open") {
             const out = await invitationOpenRoute(program);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/invitation/parse") {
+            const out = invitationParseRoute(body);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/invitation/code") {
+            const swap = swapOf(body.swap, res);
+            if (!swap) return;
+            const out = invitationCodeRoute(program, swap);
             return send(res, out.status, out.body);
           }
           if (p === "/api/bundle/save" || p === "/api/invitation/save") {

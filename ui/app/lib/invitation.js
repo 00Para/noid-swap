@@ -9,6 +9,7 @@
  * Plain module: no Electron, no network. It never returns or accepts a path of the program's data folder: the two dialogs live in the desktop shell.
  */
 
+const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { strictParse } = require("./programsettings");
@@ -19,7 +20,10 @@ const { PROGRAM_PROFILES } = require("./swapform");
 const NETWORKS = Object.freeze({ sepolia: "sepolia", mainnet: "production" });
 
 const KIND = "no1d-swap-invitation";
+const CODE_PREFIX = "no1dinv1:";
 const MAX_BYTES = 4096;
+const MAX_CODE_CHARS = 6144;
+const CHECKSUM_BYTES = 4;
 const KEYS = ["kind", "v", "network", "contract", "contract_version", "noid_micronoid", "eth_wei", "bob_noid", "bob_eth"];
 
 const WORDS = Object.freeze({
@@ -154,4 +158,56 @@ function readBobKeyAddress(dir) {
   }
 }
 
-module.exports = { KIND, KEYS, MAX_BYTES, WORDS, build, parse, readBobKeyAddress, toDecimal };
+/**
+ * Compact, copy-pasteable invite code wrapping the exact 9-key public invitation JSON with a 4-byte SHA-256 checksum:
+ * `no1dinv1:<base64url(utf8(compactJson) || sha256(utf8(compactJson))[0..4])>`. Holds no secret.
+ * @param {object} settings the loaded run.json
+ * @param {string|null} bobEth `readBobKeyAddress(dir)`
+ * @returns {string}
+ */
+function encodeCode(settings, bobEth) {
+  const jsonText = build(settings, bobEth);
+  const compact = JSON.stringify(JSON.parse(jsonText));
+  const payload = Buffer.from(compact, "utf8");
+  const csum = crypto.createHash("sha256").update(payload).digest().subarray(0, CHECKSUM_BYTES);
+  const code = CODE_PREFIX + Buffer.concat([payload, csum]).toString("base64url");
+  const check = parseCode(code);
+  if (!check.ok) throw new Error(check.why);
+  return code;
+}
+
+/**
+ * Parses either a compact invite code (`no1dinv1:...`) or raw invitation JSON text into the form's fields.
+ * Verifies the 4-byte SHA-256 checksum on compact codes before applying the strict 9-key JSON parser.
+ * @param {string} input
+ * @returns {{ok:true, fields:object}|{ok:false, why:string}}
+ */
+function parseCode(input) {
+  const no = (why) => ({ ok: false, why });
+  if (typeof input !== "string") return no(WORDS.DAMAGED);
+  // Strip ASCII whitespace only (never a leading UTF-8 BOM, which strict JSON parsing refuses).
+  const trimmed = input.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
+  if (!trimmed) return no(WORDS.DAMAGED);
+  if (Buffer.byteLength(trimmed, "utf8") > MAX_CODE_CHARS) return no(WORDS.TOO_LARGE);
+  if (!trimmed.startsWith(CODE_PREFIX)) return parse(trimmed);
+  const body = trimmed.slice(CODE_PREFIX.length);
+  if (!body || !/^[A-Za-z0-9_-]+$/.test(body)) return no(WORDS.DAMAGED);
+  const raw = Buffer.from(body, "base64url");
+  if (raw.toString("base64url") !== body) return no(WORDS.DAMAGED);
+  if (raw.length <= CHECKSUM_BYTES || raw.length > MAX_BYTES + CHECKSUM_BYTES) {
+    return no(raw.length > MAX_BYTES + CHECKSUM_BYTES ? WORDS.TOO_LARGE : WORDS.DAMAGED);
+  }
+  const payload = raw.subarray(0, raw.length - CHECKSUM_BYTES);
+  const got = raw.subarray(raw.length - CHECKSUM_BYTES);
+  const want = crypto.createHash("sha256").update(payload).digest().subarray(0, CHECKSUM_BYTES);
+  if (!crypto.timingSafeEqual(got, want)) return no(WORDS.DAMAGED);
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(payload);
+  } catch {
+    return no(WORDS.DAMAGED);
+  }
+  return parse(text);
+}
+
+module.exports = { KIND, CODE_PREFIX, KEYS, MAX_BYTES, MAX_CODE_CHARS, WORDS, build, parse, encodeCode, parseCode, readBobKeyAddress, toDecimal };

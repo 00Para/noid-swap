@@ -1003,9 +1003,11 @@
     } else if (act.kind === "invitation") {
       const join = C.actionButton(a, "join", "Choose Alice's file…", act.first === "join");
       const inv = C.fileButton("invitation", act.first === "invitation" ? "Save an invitation for Alice…" : "Save the invitation again…", act.first === "invitation");
+      const invCode = typeof C.inviteCodeButton === "function" ? C.inviteCodeButton() : null;
+      const invActions = invCode ? H.el("div", { class: "row" }, inv, invCode) : inv;
       const note = C.fileNote("invitation");
       // the two files as two numbered parts (the invitation Alice opens, the swap file she sends back); the buttons are the same ones
-      const invPart = H.el("div", { class: "sc-part" }, A().partTitle(1, "Send Alice an invitation"), A().fileRow("file", "Invitation for Alice", "It holds your terms and your two addresses, so Alice does not type them. It holds no secret. Send it to Alice as a file.", inv));
+      const invPart = H.el("div", { class: "sc-part" }, A().partTitle(1, "Send Alice an invitation"), A().fileRow("file", "Invitation for Alice", "It holds your terms and your two addresses, so Alice does not type them. It holds no secret. Send it to Alice as a file or copy the invitation code.", invActions));
       const joinPart = H.el("div", { class: "sc-part" }, A().partTitle(2, "Choose the file Alice sends back"), A().fileRow("open", "Alice's swap file", "The program checks it against your own terms. Nothing is sent.", join.el));
       if (act.first === "join") box.append(joinPart, invPart);
       else box.append(invPart, joinPart);

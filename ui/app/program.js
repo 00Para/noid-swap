@@ -589,7 +589,11 @@
     contract.control.setAttribute("aria-describedby", `${F}-hint-contract ${F}-inv-contract-note ${F}-err-contract`);
     const invHint = el("span", { class: "dim hint", id: "ns-inv-hint", text: "Fills the form from the file Bob's program saved. You still check every value." });
     const invButton = el("button", { type: "button", class: "btn", id: "ns-open-invitation", "aria-describedby": "ns-inv-hint", disabled: !H.state.token ? true : null }, "Open Bob's invitation…");
-    const inviteBox = el("div", { class: "invite-open" }, ic("open"), el("div", { class: "invite-text" }, invNote, invHint), invButton);
+    const invCodeLabel = el("label", { class: "sr-only", for: "ns-inv-code", text: "Bob's invitation code" });
+    const invCodeInput = el("textarea", { id: "ns-inv-code", name: "invitation_code", rows: 1, autocomplete: "off", spellcheck: "false", placeholder: "Or paste Bob's invitation code (no1dinv1:…)", "aria-describedby": "ns-inv-hint" });
+    const invCodeBtn = el("button", { type: "button", class: "btn sm", id: "ns-paste-invitation", disabled: !H.state.token ? true : null }, "Use code");
+    const invCodeRow = el("div", { class: "invite-code-row" }, invCodeLabel, invCodeInput, invCodeBtn);
+    const inviteBox = el("div", { class: "invite-open" }, ic("open"), el("div", { class: "invite-text" }, invNote, invHint), invButton, invCodeRow);
 
     let curRole = "alice";
     let bobTyped = false; // the person typed in "Bob's Parano1d address" (a fill by the program does not count)
@@ -673,6 +677,7 @@
       lastPin = pinOf("sepolia");
       invNote.hidden = true;
       invNote.textContent = "";
+      invCodeInput.value = "";
       syncEthPayout();
       syncChain();
       syncContractHint();
@@ -749,7 +754,34 @@
         invButton.disabled = !H.state.token;
       }
     };
+    const pasteInvitation = async () => {
+      const code = val(invCodeInput);
+      if (!code) {
+        general.textContent = "Paste Bob's invitation code first.";
+        return;
+      }
+      invCodeBtn.disabled = true;
+      general.textContent = "";
+      try {
+        const r = await request("POST", "/api/invitation/parse", { code });
+        if (r.ok && r.json && r.json.ok === true && r.json.fields && typeof r.json.fields === "object") {
+          fillInvitation(r.json.fields);
+          invCodeInput.value = "";
+        } else general.textContent = errorText(r);
+      } catch {
+        general.textContent = "That invitation code could not be read.";
+      } finally {
+        invCodeBtn.disabled = !H.state.token;
+      }
+    };
     invButton.addEventListener("click", openInvitation);
+    invCodeBtn.addEventListener("click", pasteInvitation);
+    invCodeInput.addEventListener("keydown", (ev) => {
+      if (ev && ev.key === "Enter") {
+        if (ev.preventDefault) ev.preventDefault();
+        pasteInvitation();
+      }
+    });
 
     const collect = () => {
       const bob = role.control.value === "bob";

@@ -1075,6 +1075,8 @@ body.program.on-swap main > * { min-width: 0; }
 .invite-text p { margin: 0; color: var(--text); font-size: 14px; }
 .invite-open.filled { border-style: solid; border-color: var(--safe-rule); background: var(--safe-bg); }
 .invite-open.filled > .ic { color: var(--safe); }
+.invite-code-row { display: flex; flex: 1 0 100%; align-items: center; gap: var(--s2); padding-top: var(--s3); border-top: 1px solid var(--rule); }
+.invite-code-row textarea { flex: 1 1 0; min-width: 0; min-height: 36px; height: 36px; padding: 7px var(--s3); border: 1px solid var(--edge); border-radius: var(--r-ctl); font-family: var(--mono); font-size: 12.5px; line-height: 1.4; resize: none; }
 /* the two amounts are the two blocks of a convert: the label says give or get, the figure is the input, the ticker and the chain are the coin's */
 .ns .convert { display: grid; grid-template-columns: minmax(0, 1fr) 28px minmax(0, 1fr); align-items: stretch; }
 .ns .convert .field.amt { grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; column-gap: var(--s3); row-gap: var(--s2); padding: var(--s4); border: 1px solid var(--rule); border-radius: var(--r-ctl); background: var(--bg); }

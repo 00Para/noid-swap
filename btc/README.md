@@ -1,5 +1,8 @@
 # NOID <-> BTC atomic swap: Bitcoin side (P2WSH SHA-256 HTLC)
 
+> **Status: Experimental / Quarantined (signet prototype only).**
+> This directory is not packaged into the No1d Swap desktop release and is excluded from the live Ethereum mainnet NOID<->ETH swap surface (see `../docs/SURFACE-AREA.md`).
+
 Library, tests, an offline demo, and a **signet-only live-run CLI** for the
 Bitcoin half of the swap. No bitcoind is needed: the library and tests are fully
 offline, and `scripts/live.js` talks to a public block-explorer REST API.

@@ -1335,3 +1335,11 @@ Tests: `test/practice-core.test.js` (18), `test/practice-server.test.js` (10), `
 `trimZeros` of `actions.js` ended with a regex whose dot matched any character, so "5.009000" showed as "5.00", "0.500000" as "0." and "1.250000" as "1.2" (display only: no amount a person types or a step sends was read through it).
 It now cuts trailing zeros and then a trailing literal dot ("5.000000" becomes "5"); `groupAmt` had the same loose dot in its shape check and now takes a literal one. No other regex of `ui/app` ends or groups an amount with an unescaped dot (searched).
 Test: `test/amount-display.test.js` (3 tests; the cases above fail on the old code).
+
+## Copyable invitation codes (2026-11-24)
+
+Bob's card has a "Copy invitation code" button beside "Save an invitation for Alice…", and Alice's new-swap form has a paste field with a "Use code" button beside "Open Bob's invitation…". The code is the invitation's nine public fields as one line: `no1dinv1:` and a base64url body (the compact JSON of `lib/invitation.js` `build`, then the first 4 bytes of its SHA-256). It holds no secret and no path. The checksum catches a damaged paste, not a forged one: Alice still reads every filled value and the check lines, as with the file.
+
+`POST /api/invitation/code {"swap"}` (Bob; the same checks as the file save, a practice id refused) answers `{ ok, code }`. `POST /api/invitation/parse {"code"}` takes a code or the invitation's JSON text and answers the form fields (200) or the words of a damaged file (422); it reads no swap and no file. The paste route has its own request limit (16 KB) because the default of 512 bytes leaves a margin of about 60 bytes over a plain code. `parseCode` strips ASCII spaces and line breaks around the code, refuses a leading byte-order mark, a non-canonical body, a wrong checksum, a body over 4,096 bytes and anything over 6,144 characters.
+
+Tests: `test/invite-code.test.js` (round trips for the test network and mainnet, the damaged cases, the two screens), `test/invite-code-server.test.js` (the real server: a code, the file text, a padded code, a damaged code, a request over the limit), `test/adversarial-ui.test.js` (decimal round trips, the invitation refusals, the send guard against a 12 s host sleep).
