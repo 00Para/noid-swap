@@ -142,6 +142,18 @@ test("errors: no repository in this build, an offline network and a bad answer a
   } finally {
     none.cleanup();
   }
+  // nor is the first-start question asked: it would offer a check this build cannot make
+  const noneAsk = setup({ repo: null, setting: "ask" });
+  try {
+    const c = noneAsk.make();
+    assert.equal(await c.atStart(), "not-configured");
+    assert.equal(noneAsk.calls.ask, 0);
+    assert.equal(noneAsk.calls.fetch, 0);
+    assert.deepEqual(noneAsk.calls.saved, []);
+    assert.deepEqual(c.status(), { state: "not_configured", latest: null, url: null });
+  } finally {
+    noneAsk.cleanup();
+  }
   for (const over of [{ fetchThrows: true }, { answer: "not json" }, { answer: [release("v9.0.0", { html_url: "https://evil.example/v9.0.0" })] }]) {
     const s = setup(over);
     try {

@@ -404,7 +404,18 @@ jobs:
 
       # The logic of the desktop program, with a fake Electron (no window is opened here), and the scripts of this job. Strict.
       - name: Test the desktop program's modules and scripts
-        run: node --test --test-reporter=spec "desktop/test/*.test.js"
+        id: desktoptest
+        run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/desktop-test.tap" "desktop/test/*.test.js"
+
+      # As in the swap-cli job: the logs need a login, the annotations do not, so the failing tests are named in one annotation.
+      - name: Name the failing desktop tests in the annotations
+        if: ${{ !cancelled() && steps.desktoptest.outcome == 'failure' }}
+        run: |
+          body=""
+          [ -f "$RUNNER_TEMP/desktop-test.tap" ] && body="$(grep -E -A10 '^ *not ok ' "$RUNNER_TEMP/desktop-test.tap" | grep -vE '^ *(at |stack:|duration_ms|[.][.][.]|---|code:|name:|operator:|failureType:)' | cut -c1-240 | head -n 400)"
+          [ -n "$body" ] || body="no failing test was named in the output (a start-up error: see the log)"
+          body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
+          echo "::error title=desktop tests (${{ matrix.platform }})::$body"
 
       # TO PIN: actions/download-artifact v4. The swap-cli artifact of THIS run (uploaded by the swap-cli job): the program, its .sha256 file
       # and BUILD-INFO.txt.

@@ -153,7 +153,8 @@ function validate(o) {
     if (v === null) return nullable ? undefined : bad(k, "required");
     let why = urlProblem(v, { httpsOnly });
     if (!why && loopback && !/^http:\/\//.test(v)) why = "an http:// address on this machine";
-    if (!why && loopback && !/^http:\/\/(?:127\.0\.0\.1|\[::1\]|localhost)(?::|\/|$)/i.test(v)) why = "an address on this machine (127.0.0.1, ::1 or localhost)";
+    // written as one of this machine's own addresses, as the program's node check requires: a name such as localhost goes through the hosts file
+    if (!why && loopback && !/^http:\/\/(?:127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(v)) why = "an address on this machine, written as 127.0.0.1 or [::1]";
     if (why) bad(k, why);
   };
   url("noid_rpc", o.noid_rpc, { nullable: false, loopback: true });
@@ -254,13 +255,51 @@ function loadSafe(dataDir) {
   }
 }
 
-/** Writes settings.json (validated first) through a temporary file and a rename, mode 0600. */
+/**
+ * A settings.json that does not pass the schema is about to be replaced by a save made over the defaults: its bytes are copied to settings.json.broken-STAMP first (mode 0600,
+ * never overwritten). A good file, a missing file and a file that is not a plain file (a rename replaces the link itself, never what it points at) need no copy.
+ * When the copy cannot be made the save is refused: the person's file must not be lost without a trace.
+ */
+function keepBrokenCopy(target) {
+  let st;
+  try {
+    st = fs.lstatSync(target);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return;
+    throw new ProgramSettingsError("settings.json cannot be read, so no copy of it was kept; nothing was saved");
+  }
+  if (!st.isFile()) return;
+  try {
+    if (st.size <= MAX_BYTES) {
+      parseValid(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(fs.readFileSync(target)));
+      return;
+    }
+  } catch {
+    /* not valid: keep a copy below */
+  }
+  const stamp = Date.now().toString(36);
+  for (let n = 0; n < 50; n++) {
+    const copy = `${target}.broken-${stamp}${n ? `-${n}` : ""}`;
+    try {
+      fs.copyFileSync(target, copy, fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(copy, 0o600);
+      return;
+    } catch (e) {
+      if (e && e.code === "EEXIST") continue; // another copy of this millisecond: the next name
+      break;
+    }
+  }
+  throw new ProgramSettingsError("settings.json is not valid and a copy of it could not be kept; nothing was saved");
+}
+
+/** Writes settings.json (validated first) through a temporary file and a rename, mode 0600. A file that is not valid is kept as settings.json.broken-STAMP first. */
 function save(dataDir, settings) {
   const errs = validate(settings);
   if (Object.keys(errs).length) throw new ProgramSettingsError("the settings are not valid", Object.keys(errs).map((k) => ({ key: k, why: errs[k] })));
   const target = path.join(dataDir, FILE);
   const tmp = `${target}.tmp-${process.pid}-${Date.now().toString(36)}`;
   const text = `${JSON.stringify(settings, null, 2)}\n`;
+  keepBrokenCopy(target);
   try {
     fs.writeFileSync(tmp, text, { flag: "wx", mode: 0o600 });
     fs.renameSync(tmp, target);

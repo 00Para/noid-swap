@@ -16,7 +16,7 @@ test("login item: on with --hidden while any swap is active, off when none; only
   assert.equal(sets(electron).length, 1);
   l.update([S(true)]);
   l.update([S(true), S(false)]);
-  assert.deepEqual(sets(electron)[1], { openAtLogin: true, args: ["--hidden"] });
+  assert.deepEqual(sets(electron)[1], { openAtLogin: true, openAsHidden: true, args: ["--hidden"] }, "a Mac login item cannot pass an argument, so it asks to open hidden");
   assert.equal(sets(electron).length, 2);
   l.update([S(false)]);
   assert.deepEqual(sets(electron)[2], { openAtLogin: false });
@@ -32,6 +32,18 @@ test("login item on Windows names the executable", () => {
     { openAtLogin: true, args: ["--hidden"], path: "C:\\P\\No1d Swap.exe" },
     { openAtLogin: false, path: "C:\\P\\No1d Swap.exe" },
   ]);
+});
+
+test("startedAtLogin reads the system's answer: opened at login or opened hidden; anything else or an error is no", () => {
+  const { startedAtLogin } = require("../lib/loginitem");
+  const app = (v) => ({ getLoginItemSettings: () => v });
+  assert.equal(startedAtLogin(app({ wasOpenedAtLogin: true })), true);
+  assert.equal(startedAtLogin(app({ wasOpenedAsHidden: true })), true);
+  assert.equal(startedAtLogin(app({ wasOpenedAtLogin: false, wasOpenedAsHidden: false })), false);
+  assert.equal(startedAtLogin(app({})), false);
+  assert.equal(startedAtLogin(app(undefined)), false);
+  assert.equal(startedAtLogin({ getLoginItemSettings() { throw new Error("no"); } }), false);
+  assert.equal(startedAtLogin({}), false);
 });
 
 test("an unpackaged run never touches the login items", () => {

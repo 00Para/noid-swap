@@ -135,7 +135,7 @@
 
   /** What a result of the lock, the reveal or the Ethereum refund with exit 1 means (program mode; the step cannot tell a failed key hand-over from a send that failed half way). */
   const CODE1_IDS = ["send-lock", "send-reveal", "send-reveal-replace", "send-refund-eth", "send-refund-eth-replace"];
-  const CODE1_ADVICE = "Look at the result. If it has no `sent:` line, cancel the intent, then try again.";
+  const CODE1_ADVICE = "Look at the result. A missing `sent:` line does not prove that nothing was sent: wait for the next status update, and look at the swap's phase and the contract, before you try again.";
 
   /** The visible form of a disabled button's title, next to a group of buttons (a hover title alone is not seen). */
   const keyNote = () => (H.state.token ? null : H.el("p", { class: "keynote", text: KEY_LOST }));
@@ -1416,6 +1416,7 @@
       { id: "prepare", action: "prepare", title: "Prepare the swap file" },
       { id: "deposit", action: "wallet-status-alice", title: "Deposit the coins" },
       { id: "send", action: null, title: "Send Bob the bundle file" },
+      { id: "watch", action: "watch-start", title: "Start the watch" },
     ],
     bob: [
       { id: "setup", action: "setup", title: "Set up" },
@@ -1433,6 +1434,7 @@
     wallet_bob: "Makes a fresh Ethereum key for this one swap, sealed in the run folder, and checks that the key opens the address it will show. Tell Alice this address: it is the sender of your lock. Nothing is deposited or sent. Your own wallet is never used.",
     prepare: "Makes your swap file with a fresh secret and this swap's wallet and key sealed in it, and the bundle file for Bob. " + PROGRAM_BACKUP + " Sends nothing. With the proof-free lock it takes seconds.",
     join: "A window opens to choose Alice's bundle file (alice.bundle.json). The tool rebuilds the swap from it, compares it with your own terms and writes your swap file. Nothing is sent to any chain. If it refuses, its reason shows below and nothing is written. " + PROGRAM_BACKUP,
+    watch_alice: "Starts the loop that makes the tool's ticks; the swap page appears at the first tick, and the funding is offered there. Start it once your deposit is seen and Bob has the bundle file. It records facts and sends nothing.",
     watch: "Starts the loop that makes the tool's ticks; the swap page appears at the first tick. Start it only once the bundle check line below is the same as the one Alice's side shows. It records facts and sends nothing.",
     deposit: "Deposit the coins to the addresses below. The program reads the deposit about every 40 seconds; this step is done when it is seen. Nothing is locked before the funding.",
     send: "Hand Bob the bundle file. It holds no secret. Send it as a file, not as pasted text, and compare the two bundle check lines over a second channel.",
@@ -1505,7 +1507,7 @@
     const f = programStartFacts(payload, role);
     const steps = programSteps(f);
     const next = steps.find((s) => s.state === "now");
-    const sayOf = (s) => (s.id === "wallet" ? PROGRAM_SAY[`wallet_${role}`] : PROGRAM_SAY[s.id]);
+    const sayOf = (s) => (s.id === "wallet" ? PROGRAM_SAY[`wallet_${role}`] : s.id === "watch" && role === "alice" ? PROGRAM_SAY.watch_alice : PROGRAM_SAY[s.id]);
 
     const strip = empty($("next-action"));
     strip.classList.remove("warn-rail", "attn-rail", "danger-rail", "ok-rail");

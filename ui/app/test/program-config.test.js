@@ -47,6 +47,9 @@ test("settings.json is strict: unknown keys, duplicate keys, a BOM, wrong kinds,
     refused(JSON.stringify({ ...base, rpc_timeout_s: "60" }), /rpc_timeout_s/);
     refused(JSON.stringify({ ...base, noid_rpc: "http://example.com:9601" }), /noid_rpc/);
     refused(JSON.stringify({ ...base, noid_rpc: "https://127.0.0.1:9601" }), /noid_rpc/);
+    // the program's node check takes only 127.0.0.1 and [::1]: a name such as localhost is refused here too, so a saved setting never fails there
+    refused(JSON.stringify({ ...base, noid_rpc: "http://localhost:9601" }), /noid_rpc/);
+    assert.doesNotThrow(() => PS.parseValid(JSON.stringify({ ...base, noid_rpc: "http://[::1]:9601" })));
     refused(JSON.stringify({ ...base, alert_url: "http://hooks.example/x" }), /alert_url/);
     refused(JSON.stringify({ ...base, update_check: "sometimes" }), /update_check/);
     refused(JSON.stringify({ ...base, eth_payout: "0x123" }), /eth_payout/);
@@ -73,6 +76,30 @@ test("settings.json: a link or a folder in its place is refused; save validates 
     assert.deepEqual(fs.readdirSync(d), []);
     PS.save(d, PS.defaults());
     assert.deepEqual(fs.readdirSync(d), ["settings.json"]);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+test("settings.json: a save over a broken file keeps a copy of it first (mode 0600, never overwritten); a good file or no file needs none", () => {
+  const d = tmp();
+  try {
+    const file = path.join(d, "settings.json");
+    fs.writeFileSync(file, '{"v": 1, "this is": "not valid"}\n');
+    assert.equal(PS.loadSafe(d).ok, false);
+    PS.save(d, PS.defaults());
+    const copies = fs.readdirSync(d).filter((n) => n.startsWith("settings.json.broken-"));
+    assert.equal(copies.length, 1);
+    assert.equal(fs.readFileSync(path.join(d, copies[0]), "utf8"), '{"v": 1, "this is": "not valid"}\n');
+    if (process.platform !== "win32") assert.equal(fs.statSync(path.join(d, copies[0])).mode & 0o777, 0o600);
+    assert.equal(PS.loadSafe(d).ok, true);
+    // the file is good now: another save makes no further copy
+    PS.save(d, { ...PS.defaults(), rpc_timeout_s: 90 });
+    assert.equal(fs.readdirSync(d).filter((n) => n.startsWith("settings.json.broken-")).length, 1);
+    // a file that is not UTF-8 is broken too
+    fs.writeFileSync(file, Buffer.from([0xff, 0xfe, 0x00]));
+    PS.save(d, PS.defaults());
+    assert.equal(fs.readdirSync(d).filter((n) => n.startsWith("settings.json.broken-")).length, 2);
   } finally {
     fs.rmSync(d, { recursive: true, force: true });
   }

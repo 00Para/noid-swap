@@ -30,6 +30,9 @@ async function setup(env, o = {}) {
   return { a, set, swap, run, ap: swap.autopilot };
 }
 
+// a change a person (or a program) makes to run.json from outside: the file is replaced, not updated through runsettings.write (which keeps the payouts as they are)
+const tamper = (dir, s) => fs.writeFileSync(path.join(dir, "run.json"), runsettings.canonicalBytes(s));
+
 const hashOf = (h, fresh = true) => h.ap.termsHash(h.run(), { fresh });
 
 test("12.3: the approval binds run.json, the program's version, the nine tool files and the step code; any one changing takes it out of force; the terminal-mode inputs are not used", async () => {
@@ -61,11 +64,11 @@ test("12.3: the approval binds run.json, the program's version, the nine tool fi
     changes.push(["eth_payout", () => {
       const s = JSON.parse(fs.readFileSync(path.join(h.a.dir, "run.json"), "utf8"));
       s.eth_payout = "0x" + "d5".repeat(20);
-      runsettings.write(h.a.dir, s);
+      tamper(h.a.dir, s);
     }, () => {
       const s = JSON.parse(fs.readFileSync(path.join(h.a.dir, "run.json"), "utf8"));
       s.eth_payout = F.E ? "0x" + "c3".repeat(20) : s.eth_payout;
-      runsettings.write(h.a.dir, s);
+      tamper(h.a.dir, s);
     }]);
     // the program's version
     changes.push(["version", () => (env.program.version = "0.1.1"), () => (env.program.version = "0.1.0")]);
@@ -187,6 +190,37 @@ test("12.3: the metadata cache serves views, but authorize hashes every input ag
     assert.equal(h.ap.authorize(h.ap.token, spend, h.run(), Date.now()), null);
     fs.writeFileSync(f, "tool swap_cli version 1\n");
     assert.ok(h.ap.authorize(h.ap.token, spend, h.run(), Date.now()), "unchanged again: authorized");
+    await h.set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+
+test("12.3: the view reads the approval's inputs again once a minute, so a tool file changed with its metadata kept stops showing 'on' before the next spend", async () => {
+  const env = makeEnv();
+  try {
+    const h = await setup(env);
+    const real = fs;
+    const f = env.toolFiles.swap_cli;
+    const st = real.statSync(f);
+    const fake = { ...real, statSync: (p) => (p === f ? st : real.statSync(p)) };
+    h.swap.runner.toolHasher = createToolHasher({ fs: fake });
+    let t = 1_800_000_000_000;
+    h.ap.now = () => t;
+    h.ap.turnOn("alice", TYPED, STATEMENTS);
+    assert.equal(h.ap.view(h.run()).alice.on, true);
+    fs.writeFileSync(f, "tool swap_cli version X\n"); // the content changed; the metadata the cache sees did not
+    t += 30_000;
+    assert.equal(h.ap.view(h.run()).alice.on, true, "within the minute a view still goes by the cache");
+    t += 31_000;
+    const v = h.ap.view(h.run()).alice;
+    assert.equal(v.on, false, "after the minute the inputs are read again");
+    assert.equal(v.terms_changed, true);
+    assert.equal(h.ap.approvalState("alice", h.run()).in_force, false, "the loop's own check agrees");
+    fs.writeFileSync(f, "tool swap_cli version 1\n");
+    t += 61_000;
+    assert.equal(h.ap.view(h.run()).alice.on, true, "the file is back: on again at the next look");
     await h.set.stopAll();
   } finally {
     await env.cleanup();

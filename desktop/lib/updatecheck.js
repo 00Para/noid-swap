@@ -98,8 +98,13 @@ function createUpdateChecker(o) {
       return { state: String(last.state || "never"), latest: null, url: null };
     },
 
-    /** At every start, after the window shows. Returns what it did: "asked-off", "off", "not-due", "checked", "ask-later". */
+    /** At every start, after the window shows. Returns what it did: "not-configured", "asked-off", "off", "not-due", "checked", "ask-later". */
     async atStart() {
+      // a build without an update address asks nothing and checks nothing: the question would offer a check that cannot happen
+      if (typeof o.repo !== "string" || o.repo === "") {
+        last = { state: "not_configured", latest: null, url: null };
+        return "not-configured";
+      }
       let setting = o.setting();
       if (setting === "ask") {
         let answer = null;

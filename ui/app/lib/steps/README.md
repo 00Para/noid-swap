@@ -27,7 +27,7 @@ Two fields of the program (step 4.5; `lib/stepexec.js` sets them, a step test ma
 - `ctx.signal`: an AbortSignal. `startTool` kills the child it started when the signal aborts (the same kill as the time limit) and the step returns its usual
   "did not finish" result. The program gives it ONLY to entries that send nothing (never to a spend or a signing step): a step that started a sender is never abandoned.
 - `ctx.notify`: `(kind) => void`, kind `"alert"` or `"alarm"`. `alertHook` and `alarmHook` call it each time they fire (an ALERT line; an ALARM line that passes its latch),
-  BEFORE any POST and whether or not `settings.alert_url` is set. It carries no text of the tick. The ALERT / ALARM latch rules do not change.
+  BEFORE any POST and whether or not `settings.alert_url` is set. It carries no text of the tick. The ALERT / ALARM latch rules do not change. The watch keeps what the ALERT hook saw on the last tick (`alertHook(ctx, text, state)`), so an ALERT line that stays on the next ticks notifies once; a new line, or one back after a quiet tick, notifies again. The POST is not changed by this.
 - `childEnv` sets `ETH_RPC_URL` only when `ctx.settings` is an object with a string `eth_rpc`, so `board-verify` can run in a board slot before run.json exists.
 
 Test-only fields, never set by the program: `ctx.stubEnv` (variables added to every child; the stubs learn their log and scenario paths from it),

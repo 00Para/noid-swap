@@ -350,7 +350,9 @@ class ActionRunner {
     // from the audit log. A start line without the markers latches by the wall clock of its own time instead.
     const undo = new Map(); // spend id -> the latch before its last start line, for a start whose end line says "refused, nothing sent"
     const started = new Map(); // spend id -> the latch its last start line set, for an end line that says the same bytes may be sent again
+    this.restartMay = new Map(); // spend id -> true while its last audit lines say "may have been sent" (a start line with no end line counts); read by mayHaveSentIds()
     for (const r of this.audit.all()) {
+      if (SPENDS[r.action] && (r.phase === "start" || r.phase === "end")) this.restartMay.set(r.action, r.phase === "start" || /^SECRET |, the transaction may have been sent/.test(String(r.result || "")));
       // A funding the operator said was done outside this console stays acknowledged for good (the contract may have a pending funding
       // that no instance, no marker here and no tick shows yet).
       if (r.action === "funded-ack" && r.phase === "note") this.funded = { at_ms: Date.parse(r.t) || 0, from_log: true };
@@ -379,6 +381,29 @@ class ActionRunner {
       this.latch.set(r.action, { tickNow: Math.max(prev.tickNow || 0, mt ? Number(mt[1]) : wall), intentAt: mi ? Number(mi[1]) : prev.intentAt });
       started.set(r.action, this.latch.get(r.action));
     }
+  }
+
+  /**
+   * Spend ids whose last run may have been sent and has no later clean run: this process's jobs, and for a spend not run since the start the audit log (a restart reads it, so a
+   * spend that was started and never ended, or that ended unclean, still counts). A spend the helper said the same bytes may be sent again is not counted.
+   */
+  mayHaveSentIds() {
+    const out = [];
+    const seen = new Set();
+    const last = new Map();
+    for (const j of this.jobs) {
+      if (j.group !== "spend") continue;
+      seen.add(j.id);
+      if (j.state === "done") last.set(j.id, j);
+    }
+    for (const j of last.values()) if (j.outcome === "may_have_sent" || j.outcome === "secret_public_reverted") out.push(j.id);
+    for (const [id, may] of this.restartMay) if (may && !seen.has(id)) out.push(id);
+    return out;
+  }
+
+  /** A spend of this process started (may: true, as a start line with no end line) or ended (may: its outcome): the record mayHaveSentIds keeps once the job leaves the list. */
+  noteSpendRun(id, may) {
+    this.restartMay.set(id, may === true);
   }
 
   nowS() {
@@ -1241,6 +1266,7 @@ class ActionRunner {
     this.busy = { id: e.id, job, started_ms: started };
     const rec = { job, id: e.id, label: e.label, group: e.group, role: meta.role || null, script: cmd.script || null, command: cmd.display, state: "running", warning: null, started_at: Math.floor(started / 1000), finished_at: null, ok: null, exit_code: null, timed_out: false, stdout: "", stderr: "", error: null, files: [], tx: null, dry_hash: meta.dryHash || null, next: null };
     this.jobs.push(rec);
+    if (e.group === "spend") this.noteSpendRun(e.id, true);
     if (this.jobs.length > 30) this.jobs.shift();
     const before = e.result ? new Map(listFiles(this.runFolder() || "", e.result).map((f) => [f.name, f.mtimeMs])) : new Map();
 
@@ -1412,9 +1438,10 @@ class ActionRunner {
           ? { outcome: NOT_SENT, nothing_sent: true, secret_may_be_public: false, why: "the program refused it before the step started", source: null }
           : classifyStepExit(so ? so.step : "", { code: rec.exit_code, stdout: String(stdout || ""), files: rec._files || [], kind: so ? so.kind : undefined });
         // a lock, a reveal or a refund that ended in code 1 (live.js's own error, or its key could not be emitted): the page says what to do (spec 5.A.10)
-        if (rec.exit_code === 1 && /^send-(?:lock|reveal|refund-eth)/.test(e.id)) rec.advice = "Look at the result. If it has no `sent:` line, cancel the intent, then try again.";
+        if (rec.exit_code === 1 && /^send-(?:lock|reveal|refund-eth)/.test(e.id)) rec.advice = "Look at the result. A missing `sent:` line does not prove that nothing was sent: wait for the next status update, and look at the swap's phase and the contract, before you try again.";
       } else cls = classifySpendExit(rec.script || e.script.name, { exitCode: rec.exit_code, timedOut: rec.timed_out, signal: rec.signal, stdout: String(stdout || ""), stderr: String(stderr || ""), hasResult: walletText ? false : !!main });
       rec.outcome = cls.outcome;
+      if (e.group === "spend") this.noteSpendRun(e.id, cls.outcome === "may_have_sent" || cls.outcome === "secret_public_reverted");
       rec.nothing_sent = cls.nothing_sent;
       rec.waiting = cls.waiting === true;
       rec.rerun_safe = cls.rerun_safe === true;

@@ -1,6 +1,8 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const { makeEnv } = require("./shell-fixture");
 
 test("a second instance quits at once and starts nothing", async () => {
@@ -8,11 +10,13 @@ test("a second instance quits at once and starts nothing", async () => {
   try {
     const r = await e.shell.start();
     assert.equal(r.state, "second_instance");
-    assert.deepEqual(e.shell.trace, ["lock"]);
+    // the lock is asked for after userData is set, so the lock's own folder is the program's, not Electron's default one
+    assert.deepEqual(e.shell.trace, ["cmdline", "setPath", "lock"]);
     assert.ok(e.electron.calls.some((c) => c.who === "app" && c.name === "quit"));
-    assert.equal(e.rec.length, 0, "no module of the program was touched");
+    assert.deepEqual(e.rec.filter((x) => x !== "defaultKnownFolder"), ["dataDirFor"], "only the data folder's name was worked out; nothing was made, opened or started");
     assert.equal(e.electron.windows.length, 0);
-    assert.equal(e.electron.app.paths.userData, undefined);
+    assert.equal(e.electron.app.paths.userData, path.join(e.dataDir, "electron"));
+    assert.ok(!fs.existsSync(e.dataDir), "no folder was made");
     assert.equal(e.electron.app.listenerCount("second-instance"), 0);
   } finally {
     e.cleanup();

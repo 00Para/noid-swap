@@ -119,10 +119,11 @@ test("the REFUSED line must be the step's own label at the start of a line", () 
 
 // ---- the same reading through the action runner (a step executor that answers a canned result)
 
-function runnerWith(result) {
+function runnerWith(result, seed = []) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "no1d-exit-"));
   fs.mkdirSync(path.join(dir, "pub"));
   const audit = new AuditLog(path.join(dir, "pub"), { role: "alice" });
+  for (const [action, phase, res] of seed) audit.append({ action, role: "alice", phase, result: res });
   const executor = {
     precheck: () => ({ ok: true }),
     run: async () => (typeof result === "function" ? result() : result),
@@ -154,6 +155,44 @@ async function runSpend(id, result) {
     h.cleanup();
   }
 }
+
+async function launchAndWait(h, id) {
+  const e = BY_ID.get(id);
+  const spend = SPENDS[id];
+  h.runner.launch(e, h.runner.command(id), { role: spend.role, spend, run: null, replaceTx: null, latch: { tickNow: 1, intentAt: 2 } });
+  for (let i = 0; i < 200 && h.runner.busy; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.runner.busy, null);
+}
+function pushOut(runner, id) {
+  // later jobs push the spend out of the 30 kept ones, as the runner trims its list
+  for (let i = 0; i < 31; i++) {
+    runner.jobs.push({ job: 1000 + i, group: "dry", id: "dry-claim", state: "done", outcome: null });
+    if (runner.jobs.length > 30) runner.jobs.shift();
+  }
+  assert.ok(!runner.jobs.some((j) => j.id === id));
+}
+
+test("a spend run here keeps its own ending once its job leaves the kept list: an older may-have-sent line of the audit log does not come back", async () => {
+  const h = runnerWith({ code: 0, stdout: "", stderr: "", files: [] }, [["send-claim", "start", "started"], ["send-claim", "end", "timeout, the transaction may have been sent"]]);
+  try {
+    assert.deepEqual(h.runner.mayHaveSentIds(), ["send-claim"], "read from the audit log at start");
+    await launchAndWait(h, "send-claim");
+    assert.deepEqual(h.runner.mayHaveSentIds(), [], "the clean run counts");
+    pushOut(h.runner, "send-claim");
+    assert.deepEqual(h.runner.mayHaveSentIds(), [], "and still counts once its job is gone");
+  } finally {
+    h.cleanup();
+  }
+  const m = runnerWith(() => Promise.reject(new Error("x")));
+  try {
+    await launchAndWait(m, "send-claim");
+    assert.deepEqual(m.runner.mayHaveSentIds(), ["send-claim"]);
+    pushOut(m.runner, "send-claim");
+    assert.deepEqual(m.runner.mayHaveSentIds(), ["send-claim"], "a run that may have been sent keeps counting once its job is gone");
+  } finally {
+    m.cleanup();
+  }
+});
 
 test("through the console: for every spend entry and every code of its step the job's outcome equals classifyStepExit", async () => {
   const cases = [];
@@ -200,7 +239,7 @@ test("through the console: a rejected promise of a spend step is may-have-sent (
 test("through the console: a lock, a reveal or a refund that ended in code 1 carries the advice, and the reveal's 3 is the public-secret reading", async () => {
   for (const id of ["send-lock", "send-reveal", "send-refund-eth"]) {
     const job = await runSpend(id, { code: 1, stdout: "", files: [] });
-    assert.match(job.advice, /cancel the intent, then try again/);
+    assert.match(job.advice, /A missing `sent:` line does not prove that nothing was sent/);
   }
   assert.equal((await runSpend("send-claim", { code: 1, stdout: "", files: [] })).advice, undefined);
   const rev = await runSpend("send-reveal", { code: 3, stdout: "", files: [] });

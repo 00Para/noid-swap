@@ -279,6 +279,23 @@ test("watch: the loop line is the time and the eight parts, each cut on its own 
   assert.equal(loopLine("T", eight).split("notes: ").length - 1, 8, "at most eight lines of a part");
 });
 
+test("watch: an ALERT line that stays on every tick makes one notification, not one per tick (the engine prints a pending-lock alert on each tick)", async () => {
+  const kinds = [];
+  let n = 0;
+  const tickFn = async (ctx, role) => {
+    n++;
+    const ph = n < 4 ? "lock_final" : "refunded";
+    const stdout = [`[${role}] tick exit 0 at 12:00:0${n}`, "noid: tip 281108", 'ACTION: {"action": "wait"}', "ALERT: the producer screen refuses to lock now (T21), but a lock_eth intent is still pending.", `applied: True phase_after: ${ph}`].join("\n") + "\n";
+    return { code: 0, stdout, stderr: "", files: [] };
+  };
+  const h = harness();
+  h.ctx.notify = (k) => kinds.push(k);
+  const end = await createWatch(h.ctx, { tick: tickFn, sleep: NOSLEEP }).start();
+  assert.equal(end.reason, "terminal");
+  assert.equal(n, 4);
+  assert.deepEqual(kinds, ["alert"]);
+});
+
 test("(s12) watch with alert_url: the alert on the first tick is sent once (the later ticks show none), the URL is never in the output, the loop line carries the alert", async () => {
   const sent = [];
   let n = 0;

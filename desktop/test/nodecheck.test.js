@@ -37,8 +37,9 @@ const goodNoid = (extra = {}) => ({
 const goodEth = (id = 11155111, age = 5) => ({ eth_chainId: "0x" + id.toString(16), eth_getBlockByNumber: { number: "0x1", timestamp: "0x" + (NOW_S - age).toString(16) } });
 
 test("isLoopback", () => {
-  for (const u of ["http://127.0.0.1:9601", "http://localhost:9601", "http://[::1]:9601"]) assert.equal(isLoopback(u), true, u);
-  for (const u of ["http://192.168.1.5:9601", "https://example.com", "nope", "http://127.0.0.1.evil.com"]) assert.equal(isLoopback(u), false, u);
+  for (const u of ["http://127.0.0.1:9601", "http://[::1]:9601"]) assert.equal(isLoopback(u), true, u);
+  // a name is resolved through the hosts file, so it is not an address of this machine by its own word
+  for (const u of ["http://localhost:9601", "http://LOCALHOST:9601", "http://localhost.:9601", "http://192.168.1.5:9601", "https://example.com", "nope", "http://127.0.0.1.evil.com"]) assert.equal(isLoopback(u), false, u);
 });
 
 test("all good: ok / ok; a null checkpoint reports chain_checked false", async () => {

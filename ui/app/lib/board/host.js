@@ -131,7 +131,7 @@ function normalizeSettings(role, s) {
   const cv = x.contract_version === undefined ? "1" : String(x.contract_version);
   if (!["1", "2"].includes(cv)) bad("contract_version: 1 or 2");
   if (x.invite_secret !== undefined && x.invite_secret !== null && !isHex64(x.invite_secret)) bad("invite_secret: 64 lower-case hex characters");
-  if (x.noid_rpc !== undefined && x.noid_rpc !== null && !/^http:\/\/(127\.0\.0\.1|localhost)(:\d{1,5})?(\/[A-Za-z0-9._~/-]*)?$/.test(String(x.noid_rpc))) bad("noid_rpc: an http:// address on this machine");
+  if (x.noid_rpc !== undefined && x.noid_rpc !== null && !/^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?(\/[A-Za-z0-9._~/-]*)?$/.test(String(x.noid_rpc))) bad("noid_rpc: an http:// address on this machine");
   return {
     profile,
     chain,

@@ -29,6 +29,13 @@ function createFakeElectron(opts = {}) {
     s.setPermissionCheckHandler = (h) => (s.handlers.permissionCheck = h);
     s.setDevicePermissionHandler = (h) => (s.handlers.devicePermission = h);
     s.webRequest = { onBeforeRequest: (h) => (s.handlers.beforeRequest = h) };
+    // like the real one: a promise; the configs given are kept in order
+    s.proxyConfigs = [];
+    s.setProxy = (config) => {
+      s.proxyConfigs.push(config);
+      rec("session", "setProxy", partition, config);
+      return opts.setProxyRejects ? Promise.reject(new Error("no proxy service")) : Promise.resolve();
+    };
     // like the real session's `protocol`: handle(scheme, fn) answers that scheme on this session only
     s.protocol = {
       handlers: {},
@@ -56,6 +63,10 @@ function createFakeElectron(opts = {}) {
     }
     setWindowOpenHandler(h) {
       this.openHandler = h;
+    }
+    setWebRTCIPHandlingPolicy(policy) {
+      this.webrtcPolicy = policy;
+      rec("webContents", "setWebRTCIPHandlingPolicy", policy);
     }
     send(channel, payload) {
       this.sent.push({ channel, payload });
@@ -136,7 +147,7 @@ function createFakeElectron(opts = {}) {
       rec("window", "restore");
     }
     isMinimized() {
-      return false;
+      return this.minimized === true;
     }
     isVisible() {
       return this.visible;
@@ -176,6 +187,7 @@ function createFakeElectron(opts = {}) {
   electron.BrowserWindow = BrowserWindow;
 
   const app = new EventEmitter();
+  let readyNow = false;
   Object.assign(app, {
     isPackaged: !!opts.isPackaged,
     paths: {},
@@ -195,12 +207,16 @@ function createFakeElectron(opts = {}) {
     enableSandbox: () => rec("app", "enableSandbox"),
     whenReady() {
       rec("app", "whenReady");
+      readyNow = true;
       return Promise.resolve();
     },
     setLoginItemSettings(s) {
       this.loginItem = s;
       rec("app", "setLoginItemSettings", s);
     },
+    // what the system says about how this start came about (opts.loginStart: { wasOpenedAtLogin, wasOpenedAsHidden })
+    // like macOS, the login-start answer is known only once the launch was handled: before ready it says "no"
+    getLoginItemSettings: () => ({ openAtLogin: false, wasOpenedAtLogin: false, wasOpenedAsHidden: false, ...(readyNow ? opts.loginStart || {} : {}) }),
     quit() {
       rec("app", "quit");
       let prevented = false;

@@ -122,6 +122,21 @@ test("startProgramServer opens no port, prints nothing, and stop releases the lo
   }
 });
 
+test("the demo routes are the terminal console's: in program mode /api/demo and /api/demo/scenarios answer 404 even with the token", async () => {
+  const env = makeEnv();
+  try {
+    const { api } = await env.start();
+    for (const p of ["/api/demo", "/api/demo?scenario=happy&role=alice", "/api/demo/scenarios"]) {
+      const r = await api("GET", p);
+      assert.equal(r.status, 404, p);
+      assert.deepEqual(r.body, { error: "not found" });
+    }
+    assert.equal((await api("GET", "/api/program")).status, 200, "a real route still answers");
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("GET /api/program: version, test network, node status, vault, new-swap permission, the swaps, the board and the update, with no secret", async () => {
   const env = makeEnv();
   try {

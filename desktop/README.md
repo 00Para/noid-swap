@@ -47,12 +47,16 @@ build scripts belong to step 4.8.
 
 ## Start-up order (`lib/shell.js`, build spec 7.2)
 
-1. `requestSingleInstanceLock()`. A second instance quits at once; `second-instance` shows and focuses the window.
-2. A command line with `--remote-debugging-port`, `--remote-debugging-pipe`, `--inspect`, `--inspect-brk` or `--js-flags` (also
-   `--no-sandbox`, `--disable-web-security` and a few more that weaken the window) is refused with a dialog and exit 1, before
-   anything starts. Only `--hidden` (start at login) and `--self-test` are read.
-3. `userData` and `sessionData` go to `<data>/electron` before `ready`; sandbox on for every renderer; the policy guard
-   (`hardening.js`) is installed for every webContents.
+0. A quiet handler for an uncaught error is put on first: it ends the program with exit 1 and no dialog. The crash handler (step 10)
+   replaces it.
+1. A command line is an allowlist: only `--hidden` (start at login) and `--self-test` are read, and any other argument written
+   like a switch (`--x`, `-x`, and `/x` on Windows; on a Mac also `-psn_<digits>_<digits>` is let through) is refused with a dialog
+   and exit 1, before anything starts. Chromium's own command line is also asked for the five debugging switches no fuse turns off.
+2. `userData` and `sessionData` go to `<data>/electron` (the data folder's name is worked out first, nothing is made yet), before the lock
+   and before `ready`.
+3. `requestSingleInstanceLock()`. A second instance quits at once; `second-instance` shows and focuses the window. Then sandbox on for every
+   renderer, and the policy guard (`hardening.js`) installed for every webContents: it sets `setProxy({ mode: "direct" })` once on each session
+   it sees and `disable_non_proxied_udp` as the WebRTC policy of every webContents, before anything is loaded.
 4. Packaged only: the runtime manifest is verified. A failure shows "This installation is damaged: reinstall it." and quits.
 5. The data folder is made owner-only and its guard is read fresh; a failure shows the reason and quits.
 6. After `ready`: the key store, `vault.open()` (the recovery code and passphrase prompts use the secret window). A vault that
@@ -84,7 +88,7 @@ fallback passphrase in two prompts (`fallback-new`, then again with `again: true
 
 ## Self-test (`--self-test`, build spec 7.12)
 
-For the hosted start-up test only. A fresh temporary data folder (set before the single-instance lock so it cannot collide with a
+For the hosted start-up test only. A fresh temporary data folder (used as the data folder before the single-instance lock so it cannot collide with a
 real running program), no vault, a hidden window; it expects 401 for `/api/program` without the token and the expected window
 preferences, runs one node check and prints one JSON line:
 
@@ -119,8 +123,8 @@ check its sha256 and build provenance, and install by hand.
 - `lib/updates.js` asks GitHub's public list of releases of the repository named in `package.json` (`no1d.updateRepo`) once: one
   https request, no redirect, no cookie, status 200 only, a size cap, a timeout, and a generic User-Agent. It answers "newer" only for a
   release that is neither a draft nor a pre-release, whose tag is `vX.Y.Z`, whose page is exactly
-  `https://github.com/<repo>/releases/tag/<tag>`, and whose version is above the program's. Every test build has `updateRepo: null`
-  and says "This version cannot check for updates" instead of asking.
+  `https://github.com/<repo>/releases/tag/<tag>`, and whose version is above the program's. Every test build has `updateRepo: null`:
+  it never asks the first-start question, never checks, and its menu item says "This version cannot check for updates".
 - `lib/updatecheck.js` decides when. The setting `update_check` (Settings) is `ask` at first, then `daily` or `off`. With `ask`, the
   program asks once after its page has loaded ("Once a day", "Never", "Ask me later"; Esc is "Ask me later"); a start at login
   (`--hidden`) asks nothing and a later start asks. With `daily` it checks at a start when the last check is a day old. Nothing is
@@ -206,8 +210,7 @@ session. The window loads `no1d://app/#token=<token>`; the token still appears i
 - `window.js`: the fixed page after a second lost renderer relies on `will-frame-navigate` not firing for a `loadURL` from the main
   process, as Electron documents. If it fired, the guard would block the `data:` page and the window would stay blank. First run on a
   real window: kill the renderer twice.
-- `scheme.js`: the early 413 on a declared `content-length` has no test of its own (removing it fails nothing); the cap on the stream
-  still applies.
+- `scheme.js`: the early 413 on a declared `content-length` now has its own test (done after the read); the cap on the stream still applies.
 - `scheme.js` and `server.js`: the adapter parses the address with the rules of a non-special scheme, where a backslash is not a
   separator, and the handler parses it again as `http:`, where it is. Harmless, because every route and token decision uses the
   handler's parse; no check may ever be made on the adapter's `url.pathname`.
@@ -275,6 +278,10 @@ runs, and it gives a wrong passphrase for an imported folder (one with `passphra
 - The Parano1d checkpoint (height 279,370) was read from one node only; the second node's read is still to be done at the first two-machine run.
 - `tray.png` and the template images are drawn by a small script as plain diamonds; the logo work replaces them.
 - The crash handler stores only times; no error text is kept anywhere, so a crash leaves no diagnostics.
+- Not run in a real window yet, and so unproved: that no real start gets an extra switch from the system that the allowlist would refuse
+  (a start that is refused for one says its name in the dialog); that `setProxy` and the WebRTC policy are accepted by the real session and
+  webContents; that a Mac login start reports `wasOpenedAtLogin` and opens hidden. The hosted start-up job covers the first of these (it
+  starts the program with `--self-test` only), the two-machine rehearsal the others.
 
 **After the independent read of the window settings.** One point was fixed: the listener for "every window closed" is now
 registered before any window exists. Without it, Electron quit when the secret window, the only window while the vault opens,
@@ -282,26 +289,40 @@ closed: the first start ended after "I have written it down", and every start in
 A test closes the secret window during the vault's opening and checks that the program keeps going; the fake electron now quits
 like the real one when no listener is registered.
 
+Fixed after the read (each with a test that fails without it):
+- A crash state file that cannot be written (a full disk) no longer makes every crash relaunch: the program says so and stops.
+- The command line is an allowlist (`--hidden`, `--self-test`; `-x` and, on Windows, `/x` count as switches too; a Mac's `-psn_*` passes). A
+  proxy, a net log, logging or host-resolver switch is refused like a debugging one.
+- Every session is told `setProxy({ mode: "direct" })` once, when it is first seen (before its first request), and every webContents gets
+  the WebRTC policy `disable_non_proxied_udp`.
+- The secret window is a sheet of the main window only while the main window is visible.
+- A Mac login item asks to open hidden, and the start reads the system's `wasOpenedAtLogin` / `wasOpenedAsHidden` (a Mac login item cannot pass `--hidden`).
+- A quiet handler for an uncaught error is installed first, so Electron's own error dialog never shows before the crash handler exists.
+- `userData` and `sessionData` are set before the single-instance lock, so the lock's folder is the program's, not the default one in the roaming profile.
+- The node check accepts `127.0.0.1` and `[::1]` only, not the name `localhost`. (`ui/app/lib/programsettings.js` now writes the same rule for the
+  node setting; `ui/app/lib/runsettings.js` still accepts `localhost` as an http host for a swap's endpoints.)
+- The lost-renderer reload and the reload keys were done in 4.9 (see "The private scheme").
+
 Low points of the read (left; the final pass decides):
-- A crash state file that cannot be written (a full disk) makes every crash relaunch: "once, then stop" becomes a loop.
-- The extra refused switches are matched only with `--`; Chromium also takes `-` (and `/` on Windows). An allowlist of the
-  program's own switches would close this and the next point.
-- The refusal list is a denylist: `--proxy-server`, `--log-net-log`, `--enable-logging`, `--host-resolver-rules`,
-  `--enable-features` are not refused, and a proxy or a net log could carry the token header (same-user limit).
-- The sessions do not call `setProxy({ mode: "direct" })`. Since 4.9 the page and its API use no network at all (the private scheme), so the token no longer passes any proxy; the point remains for the secret window's session.
-- No WebRTC policy (`disable_non_proxied_udp`) on the windows.
 - `data:` is allowed for every session, the secret window's too (harmless: the server's policy allows it only for images).
 - The permission check probably refuses `clipboard-sanitized-write`, so the copy buttons would fall back to their text.
-- On macOS the secret window is a sheet of the main window even when that window is hidden: "Recovery code" from the menu bar
-  while the window is in the tray may not show.
-- On macOS a login start does not pass `--hidden`, so the window shows at login.
-- No `render-process-gone` handler, and a reload loses the token kept in the address fragment: reload the original address once,
-  then show a fixed message.
-- Electron's default dialog for an uncaught error is active until the crash handler is installed.
 - The secret window's message check compares the sender, not the sender frame (fine today: its policy allows no frames).
-- The self-test checks five window preferences; it could check more, and inside the page that `require` and `process` are absent.
-- Outside the self-test the single-instance lock is taken before `userData` is set, so Electron makes its default (Roaming)
-  folder with a lock file.
+- The self-test checks five window preferences; it could check more, and inside the page that `require` and `process` are absent. Left: the
+  hosted start-up check compares only what it knows (it is outside the files of this change), and a preference that real Electron reads back
+  differently from how it was written would fail the hosted run, which only the real binary can show.
 - `curl.exe` is found from the environment's `SystemRoot`, not a known-folder lookup.
-- The node check accepts `localhost` as loopback (resolved through the hosts file).
 - The versions must be checked again before the first release; `desktop/package-lock.json` is made by the first hosted run.
+
+**After the independent read of the fixes above (2026-11-18).** No must-fix. Fixed, each with a test that fails without it:
+- A Mac login start reads the system's answer after ready, not before: on macOS 13 and later the answer comes with the launch event, which is
+  handled only by then (the fake electron now answers "no" before ready, as the system does).
+- The secret window is not a sheet of a minimized main window either (Windows calls a minimized window visible), so it is never hidden with it.
+
+Left (the final pass decides):
+- The single-instance lock's folder moved to `<data>/electron` (it was the roaming `No1d Swap` folder on Windows and the data folder on a Mac):
+  an instance of an older build and one of this build do not see each other (the run locks then make the second one read-only), and every
+  second instance runs PowerShell (`dataDirFor`) before it asks for the lock, so focusing the first window is slower, and an error box shows
+  in its place if PowerShell fails.
+- On a real first start Electron makes `<data>` and `<data>/electron` before `ensureDataDirs` and `icacls` run (on Windows its lock file is
+  open in it then). Harmless by reading (the inheritance change needs only the right to change the folder's permissions; a Mac makes them 0700),
+  but `single-instance.test.js` checks "no folder was made", which only the fake shows; the hosted Windows start-up job is the proof.

@@ -1004,8 +1004,10 @@ async function send(ctx, message) {
  * For every line of a tick's output that starts with `ALERT:` one short fixed message is sent to settings.alert_url (nothing when it is null). The message
  * never carries the line itself. There is no per-line latch (the engine prints each alert on one tick only); the same message twice in one call is sent
  * once. A failed send is kept in runDir/alert-pending ("TRIES|MESSAGE") and tried again on every later call, up to 20 times. Never throws, never reports the URL.
+ * `state` (optional, an object the caller keeps between calls) limits the operating-system notification to a NEW alert: a line that was on the call before does not notify
+ * again. The POST is not changed by it.
  */
-async function alertHook(ctx, text) {
+async function alertHook(ctx, text, state) {
   const hasUrl = !!ctx.settings.alert_url;
   if (!hasUrl && typeof ctx.notify !== "function") return;
   try {
@@ -1026,14 +1028,24 @@ async function alertHook(ctx, text) {
       else fs.writeFileSync(pend, `${Number(tries) + 1}|${msg}\n`, { mode: 0o600 });
     }
     const seen = new Set();
-    for (const line of String(text).split("\n")) {
-      if (!line.startsWith("ALERT:")) continue;
-      const msg = line.includes("removed Bob's NOID claim")
+    // the operating-system notification is for a NEW alert: with `state` (kept by the caller between ticks) a line that was on the tick before does not notify again
+    const prev = state && state.lines instanceof Set ? state.lines : null;
+    const now = new Set();
+    const fresh = new Set(); // kinds with at least one line that was not on the tick before
+    const alertLines = String(text).split("\n").filter((l) => l.startsWith("ALERT:"));
+    const kindOf = (l) => (l.includes("removed Bob's NOID claim") ? "removed" : "other");
+    for (const line of alertLines) {
+      now.add(line);
+      if (!prev || !prev.has(line)) fresh.add(kindOf(line));
+    }
+    if (state && typeof state === "object") state.lines = now;
+    for (const line of alertLines) {
+      const msg = kindOf(line) === "removed"
         ? `noid-swap run ${ctx.runNumber}: claim removed by a reorg; do the claim dry run`
         : `noid-swap run ${ctx.runNumber}: an alert was raised; look at the loop log`;
       if (seen.has(msg)) continue;
       seen.add(msg);
-      notifyHook(ctx, "alert");
+      if (fresh.has(kindOf(line))) notifyHook(ctx, "alert");
       if (hasUrl && !(await send(ctx, msg))) fs.writeFileSync(path.join(ctx.runDir, "alert-pending"), `1|${msg}\n`, { mode: 0o600 });
     }
   } catch {

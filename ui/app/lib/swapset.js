@@ -251,8 +251,10 @@ class SwapSet {
     const pub = path.join(dir, "pub");
     try {
       fs.mkdirSync(pub, { recursive: true, mode: 0o700 });
+      // a link in its place would put the audit log outside the folder (mkdir follows it)
+      if (!fs.lstatSync(pub).isDirectory()) throw new Error("pub is not a plain folder");
     } catch {
-      return this.refuseFolder(name, "the folder's pub/ cannot be made", dir);
+      return this.refuseFolder(name, "the folder's pub/ cannot be made, or it is a link or a file", dir);
     }
     // the folder guard (owner-only access): a folder that fails it is shown, every action is refused by the executor's check
     // the run lock: a folder another process holds is read-only
@@ -446,11 +448,8 @@ class SwapSet {
       } catch {
         needs = false;
       }
-      if (!needs) {
-        const last = new Map();
-        for (const j of swap.runner.jobs) if (j.group === "spend" && j.state === "done") last.set(j.id, j);
-        for (const j of last.values()) if (j.outcome === "may_have_sent" || j.outcome === "secret_public_reverted") needs = true;
-      }
+      // a swap that is over has nothing left to send: an old "may have been sent" line of its audit log does not make it need the person
+      if (!needs && !f.ended) needs = swap.runner.mayHaveSentIds().length > 0;
       f.needs_you = !!needs;
       // until when the coins are in play: Alice D (a height, as the page counts it: 30 s a block from the tick's tip), Bob T_reveal
       if (f.active && f.role === "alice" && run && run.terms && typeof run.terms.deadline_height === "number" && tick && tick.noid && typeof tick.noid.tip === "number" && typeof tick.now === "number") {

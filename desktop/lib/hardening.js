@@ -87,6 +87,19 @@ function createPolicyRegistry() {
   };
 }
 
+/** The only WebRTC policy that lets no page open a direct UDP path: it may use a proxy, and the program has none. */
+const WEBRTC_POLICY = "disable_non_proxied_udp";
+
+/** Fire and forget; a session or a build that cannot do it must not stop the program (the request handlers still refuse every address). */
+function callQuietly(fn) {
+  try {
+    const r = fn();
+    if (r && typeof r.catch === "function") r.catch(() => {});
+  } catch {
+    /* nothing more can be done */
+  }
+}
+
 function createGuard(electron) {
   const registry = createPolicyRegistry();
   const seenWc = new WeakSet();
@@ -95,6 +108,9 @@ function createGuard(electron) {
   function applySession(session) {
     if (!session || seenSession.has(session)) return;
     seenSession.add(session);
+    // No proxy of the system or of an environment variable: nothing of the program may take a detour through one. The call comes before any
+    // request, because a session is first seen when its first web contents is made (or at ready, for the default one).
+    if (typeof session.setProxy === "function") callQuietly(() => session.setProxy({ mode: "direct" }));
     if (typeof session.setPermissionRequestHandler === "function") session.setPermissionRequestHandler((_wc, _permission, cb) => cb(false));
     if (typeof session.setPermissionCheckHandler === "function") session.setPermissionCheckHandler(() => false);
     if (typeof session.setDevicePermissionHandler === "function") session.setDevicePermissionHandler(() => false);
@@ -112,6 +128,7 @@ function createGuard(electron) {
     if (!wc || seenWc.has(wc)) return;
     seenWc.add(wc);
     if (typeof wc.setWindowOpenHandler === "function") wc.setWindowOpenHandler(() => ({ action: "deny" }));
+    if (typeof wc.setWebRTCIPHandlingPolicy === "function") callQuietly(() => wc.setWebRTCIPHandlingPolicy(WEBRTC_POLICY));
     for (const ev of ["will-navigate", "will-redirect", "will-frame-navigate"]) {
       wc.on(ev, (event, ...rest) => {
         if (!navigationAllowed(navUrl(event, rest), registry.forWebContents(wc))) event.preventDefault();
@@ -138,4 +155,4 @@ function createGuard(electron) {
   };
 }
 
-module.exports = { createGuard, createPolicyRegistry, navigationAllowed, requestAllowed, stripFragment, originOf, DENY };
+module.exports = { createGuard, WEBRTC_POLICY, createPolicyRegistry, navigationAllowed, requestAllowed, stripFragment, originOf, DENY };

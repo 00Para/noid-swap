@@ -87,6 +87,32 @@ test("ctx.notify: an ALERT line notifies once per call, before any POST, with or
   }
 });
 
+test("ctx.notify: with the caller's state an ALERT that stays on the next ticks notifies once; a new line, or one that came back after a quiet tick, notifies again; the POST is unchanged", async () => {
+  const h = makeHarness();
+  try {
+    const kinds = [];
+    const posts = [];
+    const ctx = { ...h.ctx, settings: { ...h.settings, alert_url: "https://hooks.example/x" }, notify: (k) => kinds.push(k), alertPost: async (u, m) => (posts.push(m), true) };
+    const state = {};
+    const a1 = "ALERT: the producer screen refuses this lock now\n";
+    await C.alertHook(ctx, a1, state);
+    await C.alertHook(ctx, a1, state);
+    await C.alertHook(ctx, a1, state);
+    assert.deepEqual(kinds, ["alert"], "three ticks, one notification");
+    assert.equal(posts.length, 3, "the POST goes out on every tick as before");
+    await C.alertHook(ctx, a1 + "ALERT: another alert\n", state);
+    assert.equal(kinds.length, 2, "a new line notifies");
+    await C.alertHook(ctx, "applied: True\n", state);
+    await C.alertHook(ctx, a1, state);
+    assert.equal(kinds.length, 3, "after a quiet tick the same alert is new again");
+    await C.alertHook(ctx, a1, undefined);
+    await C.alertHook(ctx, a1, undefined);
+    assert.equal(kinds.length, 5, "without a state every call notifies, as before");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("ctx.notify: an ALARM line notifies once per episode (the latch), is re-armed by a complete tick that no longer shows it", async () => {
   const h = makeHarness();
   try {

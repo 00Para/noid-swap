@@ -47,6 +47,7 @@ const AUTO_ORDER = ["send-fund", "send-lock", "send-reveal", "send-claim", "send
 const RERUN_KINDS = new Set(["fund_noid", "refund_noid", "sweep_noid"]);
 const SWEEP_IDS = new Set(["send-sweep-noid", "send-sweep-eth-alice", "send-sweep-eth-bob"]);
 const SWEEP_RETRY_MS = 5 * 60 * 1000; // a refused sweep ("lock still open", "instance not closed") is a wait, tried again at most this often
+const FRESH_LOOK_MS = 60 * 1000; // program mode: the view and the loop read every input of an approval again (no cache) this often, so a tool file changed with its metadata kept does not show "on" until the next spend
 const RECORD_RETRY_MS = 60 * 1000; // the recording of the recovery close (tick --closed-by) is tried again about once a minute until the tool takes it
 const REPLACE_ORDER = ["send-reveal-replace", "send-refund-eth-replace"];
 const FIRST_SPEND = { alice: "send-fund", bob: "send-lock" }; // the step whose amount the approval's typed text is compared with
@@ -98,6 +99,7 @@ class Autopilot {
     this.stopSeen = new Set(); // role:step:reason already reported for a held step the engine does not offer
     this.fundingStatements = null; // { at_ms }: held in memory only, so a restart voids them
     this.forcedOff = new Set(); // a role whose approval file could not be deleted: not used by this process
+    this.freshLook = new Map(); // program mode: role -> ms of the last look at the approval's inputs with no cache
     this.timedWait = new Map(); // spend id -> ms until which a refused sweep is not tried again
     this.holdMark = new Map(); // spend id -> the tick (its own clock) a wallet helper said "nothing to send now" on: tried again only for a newer tick
     this.startedOn = new Map(); // spend id -> the tick the last automatic start of it ran on
@@ -392,6 +394,16 @@ class Autopilot {
     if (!f.exists) return { exists: false, in_force: false, terms_changed: false, file: null, hash: null, why: "no approval" };
     const v = f.value;
     if (!v || typeof v !== "object" || v.v !== FILE_VERSION || v.role !== role || typeof v.terms_sha256 !== "string") return { exists: true, in_force: false, terms_changed: false, file: null, hash: null, why: "the approval file is not one this console wrote" };
+    // program mode: the views and the 3 s loop go by cached hashes; once a minute the inputs are read again, so a file changed with its metadata kept stops showing "on"
+    if (this.programMode() && o.fresh !== true) {
+      const at = this.now();
+      const last = this.freshLook.get(role);
+      if (last === undefined) this.freshLook.set(role, at);
+      else if (at - last >= FRESH_LOOK_MS) {
+        this.freshLook.set(role, at);
+        o = { ...o, fresh: true };
+      }
+    }
     const hash = this.termsHash(run, o);
     if (!hash) return { exists: true, in_force: false, terms_changed: true, file: v, hash: null, why: "the terms cannot be read now" };
     const same = hash === v.terms_sha256;
@@ -615,6 +627,7 @@ class Autopilot {
       throw bad(500, `the approval file cannot be written (${e.code || e.message}); nothing was approved`);
     }
     this.forcedOff.delete(role);
+    this.freshLook.delete(role);
     this.needs[role] = carried.filter((e) => e && own(SPEND_TABLE, e.spend)).map((e) => ({ spend: e.spend, kind: String(e.kind || "outcome"), reason: String(e.reason || "").slice(0, 300), at: Number(e.at) || 0, retrying: e.retrying === true }));
     if (role === "alice" && !wallet) {
       this.fundingStatements = { at_ms: nowMs };

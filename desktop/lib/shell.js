@@ -4,9 +4,9 @@
  * requires Electron. Only desktop/main.js (and the secret window's preload) touch the real module.
  *
  * Order (the trace records it):
+ *   cmdline   refuse any switch that is not the program's own
+ *   setPath   userData and sessionData under <data>/electron, before the lock and before ready
  *   lock      app.requestSingleInstanceLock()
- *   cmdline   refuse a debugging switch
- *   setPath   userData and sessionData under <data>/electron, before ready
  *   manifest  packaged only: the runtime manifest
  *   dirs      ensureDataDirs and the folder guard on <data>
  *   ready     app is ready
@@ -17,7 +17,7 @@
  *   subscribe tray, keep-awake, login item and quit text follow atStakeChanged
  *   crash     crash handlers
  *
- * With --self-test the temporary data folder is made and set first (so the single-instance lock cannot collide with a real
+ * With --self-test the temporary data folder is made and used as <data> (so the single-instance lock cannot collide with a real
  * running program), the vault is not opened, and steps "vault", "subscribe" and "crash" are skipped (build spec 7.12).
  */
 
@@ -33,7 +33,7 @@ const { createNodeCheck, httpPost } = require("./nodecheck");
 const { createNotifier } = require("./notify");
 const { createCrashHandler } = require("./crash");
 const { createKeepAwake } = require("./keepawake");
-const { createLoginItem } = require("./loginitem");
+const { createLoginItem, startedAtLogin } = require("./loginitem");
 const { createQuitGuard } = require("./quit");
 const { createTray, buildApplicationMenu } = require("./tray");
 const { createProgram, helpMessage } = require("./program");
@@ -46,25 +46,20 @@ const { createUpdateChecker } = require("./updatecheck");
 const APP_ID = "no1d.swap.desktop";
 const PRODUCT = "No1d Swap";
 
-// Switches that open the program to another local program or weaken the window. The first five are the spec's; no fuse turns
-// off --remote-debugging-port.
-const REFUSED_PREFIXES = [
-  "--remote-debugging",
-  "--remote-allow-origins",
-  "--inspect",
-  "--js-flags",
-  "--debug",
-  "--no-sandbox",
-  "--disable-web-security",
-  "--disable-site-isolation-trials",
-  "--allow-running-insecure-content",
-  "--allow-file-access-from-files",
-  "--ignore-certificate-errors",
-];
+// The command line is an allowlist: the program's own two switches and nothing else that looks like a switch. Chromium reads "--x" and "-x"
+// (and "/x" on Windows), so every spelling is checked, not only the double dash; a proxy, a net log, a debugging port or a flag that weakens the
+// window all arrive this way. On macOS an older launcher also appends "-psn_<digits>_<digits>", which is not a switch of ours or Chromium's.
+const OWN_SWITCHES = ["--hidden", "--self-test"];
+// Chromium's own command line, asked by name for the switches no fuse turns off (a debugging port is one of them).
 const REFUSED_SWITCH_NAMES = ["remote-debugging-port", "remote-debugging-pipe", "inspect", "inspect-brk", "js-flags"];
 
-/** Pure: which refused switch is on the command line, and the two switches the program reads. */
-function parseCommandLine(argv, hasSwitch) {
+/** Pure: whether an argument is written like a switch on this system. */
+function looksLikeSwitch(a, platform) {
+  return a.startsWith("-") || (platform === "win32" && a.startsWith("/"));
+}
+
+/** Pure: the first switch on the command line that is not the program's own, and the two switches the program reads. */
+function parseCommandLine(argv, hasSwitch, platform = process.platform) {
   let refused = null;
   let hidden = false;
   let selfTest = false;
@@ -72,7 +67,9 @@ function parseCommandLine(argv, hasSwitch) {
     const a = String(raw).toLowerCase();
     if (a === "--hidden") hidden = true;
     else if (a === "--self-test") selfTest = true;
-    if (!refused && REFUSED_PREFIXES.some((p) => a === p || a.startsWith(`${p}=`) || a.startsWith(`${p}-`))) refused = String(raw).split("=")[0];
+    if (refused || !looksLikeSwitch(a, platform) || OWN_SWITCHES.includes(a)) continue;
+    if (platform === "darwin" && /^-psn_[0-9]+_[0-9]+$/.test(a)) continue;
+    refused = String(raw).split("=")[0];
   }
   if (!refused && typeof hasSwitch === "function") {
     for (const n of REFUSED_SWITCH_NAMES) {
@@ -169,6 +166,26 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   let stakeList = [];
   let stakeSinks = [];
   let stopping = false;
+  let quietOff = null;
+
+  // From the first step until the crash handler is installed, an uncaught error ends the program without Electron's own error dialog (which
+  // shows the error's text and waits for a click). Nothing is stored or printed.
+  function installQuietHandler() {
+    const quiet = () => {
+      try {
+        app.exit(1);
+      } catch {
+        /* nothing more can be done */
+      }
+    };
+    proc.on("uncaughtException", quiet);
+    proc.on("unhandledRejection", quiet);
+    quietOff = () => {
+      proc.removeListener("uncaughtException", quiet);
+      proc.removeListener("unhandledRejection", quiet);
+      quietOff = null;
+    };
+  }
 
   function fail(text) {
     try {
@@ -196,14 +213,37 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   }
 
   async function startInner() {
-    const cmd = parseCommandLine(argv, (n) => app.commandLine && app.commandLine.hasSwitch(n));
+    const cmd = parseCommandLine(argv, (n) => app.commandLine && app.commandLine.hasSwitch(n), platform);
+    // A login start passes --hidden on Windows (the login item's argument); a Mac login item cannot pass one, so the system's own answer is read
+    // there, after ready (below): before it, the launch event that carries the answer may not have been handled yet.
+    let startHidden = cmd.hidden;
 
-    // Self-test: the temporary data folder first, so the lock below cannot collide with a real running program.
+    t("cmdline");
+    if (cmd.refused) fail(`${PRODUCT} does not start with a switch of its own kind (${cmd.refused}). Only --hidden and --self-test are read; start it again without the other one.`);
+
+    // userData is set before the single-instance lock: the lock makes a folder (and on macOS a lock file) in userData, and without this
+    // it would be Electron's default one in the roaming profile. In the self-test the temporary data folder is used, so the lock cannot
+    // collide with a real running program.
+    t("setPath");
+    const datadirs = mod("datadirs");
+    let dataDir;
     if (cmd.selfTest) {
       tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "no1d-selftest-"));
-      app.setPath("userData", path.join(tempDir, "electron"));
-      app.setPath("sessionData", path.join(tempDir, "electron"));
+      dataDir = tempDir;
+    } else {
+      try {
+        dataDir = datadirs.dataDirFor({
+          platform,
+          env,
+          homedir: deps.homedir || os.userInfo().homedir,
+          knownFolder: deps.knownFolder || (platform === "win32" ? () => datadirs.defaultKnownFolder({ env }) : undefined),
+        });
+      } catch (e) {
+        fail(`The program's data folder cannot be used: ${e && e.message ? e.message : "unknown reason"}`);
+      }
     }
+    app.setPath("userData", path.join(dataDir, "electron"));
+    app.setPath("sessionData", path.join(dataDir, "electron"));
 
     t("lock");
     if (!app.requestSingleInstanceLock()) {
@@ -219,28 +259,6 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       if (windowCtl) app.quit();
     });
 
-    t("cmdline");
-    if (cmd.refused) fail(`${PRODUCT} does not start with a debugging or inspection switch (${cmd.refused}). Start it again without it.`);
-
-    t("setPath");
-    const datadirs = mod("datadirs");
-    let dataDir;
-    if (cmd.selfTest) {
-      dataDir = tempDir;
-    } else {
-      try {
-        dataDir = datadirs.dataDirFor({
-          platform,
-          env,
-          homedir: deps.homedir || os.userInfo().homedir,
-          knownFolder: deps.knownFolder || (platform === "win32" ? () => datadirs.defaultKnownFolder({ env }) : undefined),
-        });
-      } catch (e) {
-        fail(`The program's data folder cannot be used: ${e && e.message ? e.message : "unknown reason"}`);
-      }
-      app.setPath("userData", path.join(dataDir, "electron"));
-      app.setPath("sessionData", path.join(dataDir, "electron"));
-    }
     if (typeof app.setAppUserModelId === "function") app.setAppUserModelId(APP_ID);
     if (typeof app.enableSandbox === "function") app.enableSandbox();
     const guard = createGuard(electron);
@@ -277,6 +295,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     if (!g || g.ok !== true) fail(`The program's data folder is not private to you: ${(g && g.why) || "its access could not be checked"}`);
 
     await app.whenReady();
+    if (!startHidden && platform === "darwin" && startedAtLogin(app)) startHidden = true;
     t("ready");
     guard.applySession(electron.session && electron.session.defaultSession);
 
@@ -287,7 +306,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       guard,
       preloadPath: path.join(desktopDir, "preload-secret.js"),
       htmlPath: path.join(desktopDir, "secret", "secret.html"),
-      getParent: () => (windowCtl && !windowCtl.isDestroyed() ? windowCtl.window : null),
+      // A sheet of a window that is hidden in the tray would not show (on a Mac its parent is not on screen): the parent only while it is visible.
+      getParent: () => (windowCtl && !windowCtl.isDestroyed() && windowCtl.window.isVisible() && !windowCtl.window.isMinimized() ? windowCtl.window : null),
     });
 
     t("vault");
@@ -335,7 +355,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
           },
           // never at a start at login (--hidden): that start asks nothing and a later start asks
           ask: async () => {
-            if (cmd.hidden) return null;
+            if (startHidden) return null;
             const parent = windowCtl && !windowCtl.isDestroyed() && windowCtl.window.isVisible() ? windowCtl.window : null;
             const r = parent ? await dialog.showMessageBox(parent, UPDATE_QUESTION) : await dialog.showMessageBox(UPDATE_QUESTION);
             return r && r.response === 0 ? "daily" : r && r.response === 1 ? "off" : null;
@@ -433,7 +453,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       guard,
       isPackaged,
       url,
-      hidden: cmd.hidden || cmd.selfTest,
+      hidden: startHidden || cmd.selfTest,
       shouldHide: () => !stopping && stakeList.some((s) => s && s.active === true),
     });
 
@@ -514,6 +534,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     });
 
     t("crash");
+    if (quietOff) quietOff();
     createCrashHandler({
       app,
       fs,
@@ -535,7 +556,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   function cleanupTemp() {
     if (tempDir) {
       try {
-        fs.rmSync(tempDir, { recursive: true, force: true });
+        // a few tries: on Windows a scanner can hold a file that was just written for a moment (EBUSY, EPERM)
+        fs.rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       } catch {
         /* nothing to do */
       }
@@ -544,6 +566,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   }
 
   async function start() {
+    installQuietHandler();
     try {
       return await startInner();
     } catch (e) {
@@ -558,4 +581,4 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   return { start, trace, parseCommandLine, get window() { return windowCtl; }, get tempDir() { return tempDir; } };
 }
 
-module.exports = { createShell, parseCommandLine, updateRepoOf, updateAnswerWords, UPDATE_QUESTION, REFUSED_PREFIXES, REFUSED_SWITCH_NAMES, APP_ID };
+module.exports = { createShell, parseCommandLine, updateRepoOf, updateAnswerWords, UPDATE_QUESTION, OWN_SWITCHES, REFUSED_SWITCH_NAMES, APP_ID };

@@ -124,6 +124,20 @@ test("the two test names the no-skip step looks for are the names of the real te
   assert.ok(rs.includes("SKIPPED:"), "the skip message the step greps for still exists");
 });
 
+test("desktop job: a failing test is named in an annotation (readable without a login), right after the test step and only when it failed", (ctx) => {
+  if (needYaml(ctx)) return;
+  const steps = doc.jobs.desktop.steps;
+  const i = steps.findIndex((s) => s.id === "desktoptest");
+  assert.ok(i >= 0);
+  assert.match(steps[i].run, /--test-reporter=tap --test-reporter-destination="\$RUNNER_TEMP\/desktop-test\.tap" "desktop\/test\/\*\.test\.js"/);
+  assert.match(steps[i].run, /--test-reporter=spec --test-reporter-destination=stdout/);
+  const n = steps[i + 1];
+  assert.equal(n.if, "${{ !cancelled() && steps.desktoptest.outcome == 'failure' }}");
+  assert.match(n.run, /desktop-test\.tap/);
+  assert.match(n.run, /::error title=desktop tests/);
+  assert.ok(!/continue-on-error/.test(JSON.stringify(steps[i])), "the test step still fails the job");
+});
+
 test("desktop job: the checks come in the order that protects the package", (ctx) => {
   if (needYaml(ctx)) return;
   const steps = doc.jobs.desktop.steps;

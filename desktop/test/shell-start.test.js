@@ -12,13 +12,17 @@ test("the start-up order of build spec 7.2", async () => {
   try {
     const r = await e.shell.start();
     assert.equal(r.state, "running");
-    assert.deepEqual(e.shell.trace, ["lock", "cmdline", "setPath", "manifest", "dirs", "ready", "vault", "nodecheck", "server", "subscribe", "crash"]);
+    assert.deepEqual(e.shell.trace, ["cmdline", "setPath", "lock", "manifest", "dirs", "ready", "vault", "nodecheck", "server", "subscribe", "crash"]);
     const call = e.electron.calls.map((c) => `${c.who}.${c.name}`);
     const at = (x) => call.indexOf(x);
     const mod = e.rec;
-    // lock before everything else; setPath before ready; data dirs before ready; vault before the server; server before the window
-    assert.equal(call[0], "app.requestSingleInstanceLock");
-    assert.ok(at("app.setPath") > at("app.requestSingleInstanceLock"));
+    // userData before the lock (the lock makes a folder in it) and before everything else; the lock before the data folders; data dirs before ready;
+    // vault before the server; server before the window
+    assert.equal(call[0], "app.setPath");
+    assert.ok(at("app.setPath") < at("app.requestSingleInstanceLock"));
+    assert.ok(call.lastIndexOf("app.setPath") < at("app.requestSingleInstanceLock"), "userData and sessionData are both set before the lock");
+    assert.ok(at("app.requestSingleInstanceLock") < at("app.whenReady"));
+    assert.ok(mod.findIndex((x) => x.startsWith("ensureDataDirs")) >= 0);
     assert.ok(mod.indexOf("dataDirFor") >= 0);
     assert.ok(mod.findIndex((x) => x.startsWith("ensureDataDirs")) < mod.indexOf("createVault"));
     assert.ok(at("app.whenReady") > at("app.setPath"));
@@ -454,7 +458,7 @@ test("the private scheme: declared with exactly the spec's privileges, answered 
     const r = await e.shell.start();
     const { updateAtStart, ...rest } = r;
     assert.deepEqual(rest, { state: "running", dataDir: e.dataDir });
-    assert.equal(await updateAtStart, "off");
+    assert.equal(await updateAtStart, "not-configured", "a build without an update address asks nothing");
     assert.deepEqual(e.electron.protocol.registered, [
       { scheme: "no1d", privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: false, bypassCSP: false, allowServiceWorkers: false } },
     ]);
@@ -626,5 +630,120 @@ test("update check: from the menu, an active swap means no check; a build withou
     } finally {
       e.cleanup();
     }
+  }
+});
+
+test("the secret window is a sheet of the main window only while that window is visible", async () => {
+  const e = makeEnv({ argv: ["x.exe", "--hidden"] });
+  try {
+    await e.shell.start();
+    const main = e.electron.windows[0];
+    const secretUi = e.modules.vault.lastArgs.secretUi;
+    // hidden in the tray: the secret window stands alone, so it can be seen
+    assert.equal(main.visible, false);
+    const p1 = secretUi.say({ kind: "wrong-code" });
+    await tick();
+    const first = e.electron.windows[1];
+    assert.equal(first.options.parent, undefined);
+    assert.equal(first.options.modal, false);
+    first.close();
+    await p1;
+    // shown: it is a sheet of it
+    main.show();
+    const p2 = secretUi.say({ kind: "wrong-code" });
+    await tick();
+    const second = e.electron.windows[2];
+    assert.equal(second.options.parent, main);
+    assert.equal(second.options.modal, true);
+    second.close();
+    await p2;
+    // minimized (Windows still calls it visible): it stands alone again, so it is not hidden with its parent
+    main.minimized = true;
+    const p3 = secretUi.say({ kind: "wrong-code" });
+    await tick();
+    const third = e.electron.windows[3];
+    assert.equal(third.options.parent, undefined);
+    assert.equal(third.options.modal, false);
+    third.close();
+    await p3;
+  } finally {
+    e.cleanup();
+  }
+});
+
+test("a quiet handler is in place from the first step, so Electron's own error dialog never shows; the crash handler replaces it", async () => {
+  const gate = new Promise(() => {}); // the server never starts: the start stays in the middle
+  const e = makeEnv({ serverGate: gate });
+  try {
+    e.shell.start();
+    await tick();
+    await tick();
+    assert.equal(e.proc.listenerCount("uncaughtException"), 1);
+    assert.equal(e.proc.listenerCount("unhandledRejection"), 1);
+    e.proc.emit("uncaughtException", new Error("secret-canary-text"));
+    assert.equal(e.electron.app.exitCode, 1);
+    const names = e.electron.calls.map((c) => c.name);
+    assert.ok(!names.includes("relaunch") && !names.includes("showErrorBox"));
+    assert.ok(!JSON.stringify(e.electron.calls).includes("secret-canary-text"));
+  } finally {
+    e.cleanup();
+  }
+});
+
+test("the quiet handler is installed before anything else can throw, and only the crash handler stays after the start", async () => {
+  const e = makeEnv({ argv: ["x.exe", "--remote-debugging-port=1"] });
+  try {
+    await e.shell.start();
+    assert.equal(e.proc.listenerCount("uncaughtException"), 1, "also on a start that is refused at the first step");
+  } finally {
+    e.cleanup();
+  }
+  const f = makeEnv();
+  try {
+    await f.shell.start();
+    assert.equal(f.proc.listenerCount("uncaughtException"), 1, "the quiet handler was taken off when the crash handler was put on");
+    assert.equal(f.proc.listenerCount("unhandledRejection"), 1);
+    f.proc.emit("uncaughtException", new Error("x"));
+    assert.ok(f.electron.calls.some((c) => c.name === "relaunch"), "that one is the crash handler: it relaunches once");
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("macOS: a start at login (the system says so, known only after ready) starts hidden even without --hidden; Windows reads the switch", async () => {
+  const e = makeEnv({ platform: "darwin", electron: { loginStart: { wasOpenedAtLogin: true } } });
+  try {
+    await e.shell.start();
+    const w = e.electron.windows[0];
+    w.emit("ready-to-show");
+    assert.equal(w.visible, false);
+    assert.equal(e.electron.trays.length, 1);
+  } finally {
+    e.cleanup();
+  }
+  const f = makeEnv({ platform: "darwin", electron: { loginStart: { wasOpenedAsHidden: true } } });
+  try {
+    await f.shell.start();
+    f.electron.windows[0].emit("ready-to-show");
+    assert.equal(f.electron.windows[0].visible, false);
+  } finally {
+    f.cleanup();
+  }
+  const g = makeEnv({ platform: "darwin" });
+  try {
+    await g.shell.start();
+    g.electron.windows[0].emit("ready-to-show");
+    assert.equal(g.electron.windows[0].visible, true, "a start by the user shows the window");
+  } finally {
+    g.cleanup();
+  }
+  // the system's answer is not read on Windows: that start passes --hidden
+  const h = makeEnv({ platform: "win32", electron: { loginStart: { wasOpenedAtLogin: true } } });
+  try {
+    await h.shell.start();
+    h.electron.windows[0].emit("ready-to-show");
+    assert.equal(h.electron.windows[0].visible, true);
+  } finally {
+    h.cleanup();
   }
 });

@@ -777,7 +777,7 @@ board slot) board host. **Terminal mode** (`node ui/app/server.js ...`, WSL help
 - No secret in an API answer, audit line, job record or notification: the step asks the vault for the passphrase per call; the executor keeps none.
 
 **The two context fields** `ctx.signal` and `ctx.notify` of `steps/common.js`: `startTool` kills its child when the signal aborts; `alertHook` and `alarmHook` call `ctx.notify("alert" | "alarm")`
-each time they fire, before any POST, with or without an alert URL (the latch rules do not change). `childEnv` sets `ETH_RPC_URL` only when `ctx.settings` has a string `eth_rpc`.
+each time they fire, before any POST, with or without an alert URL (the latch rules do not change); the watch passes the ALERT hook what it saw on the last tick, so an ALERT line that stays on the next ticks notifies once, not every tick. `childEnv` sets `ETH_RPC_URL` only when `ctx.settings` has a string `eth_rpc`.
 
 **API** (all `/api/` requests keep the token, Host, Origin and CSP checks): `GET /api/program`, `GET /api/run?swap=ID`, `POST /api/action|spend|autopilot|board|helper` with `"swap": ID`
 (a missing or malformed id is 400, an unknown one 404), `POST /api/newswap {fields}` -> `{ ok, swap }` or 422 `{ ok:false, errors }`, `GET|POST /api/settings`, `POST /api/program/open {what}`,
@@ -787,8 +787,8 @@ each time they fire, before any POST, with or without an alert URL (the latch ru
 `runsettings.newSettings(fields, { runId })`) and Alice's order is run.json, `setup`, the balance check, her wallet. One slot at a time (an idle slot is replaced; an ended slot with no swap
 file and no wallet is moved to `runs/.ended/`, never deleted). The host needs the vault's sealer for its keys (`deps.boardSealer`); without it the host does not start in program mode.
 
-**Low points (left).** `needs_you` of a swap counts this process's spend jobs that may have been sent until a later clean job of the same step; after a restart only the autopilot's own
-stop entries remain. `/api/program` rescans `runs/` at most every 5 s. A refused folder is listed with its reason but has no runner (its actions answer 409). The board settings carry three keys
+**Low points (left).** `needs_you` of a swap counts a spend that may have been sent until a later clean run of the same step: this process's jobs, and for a spend not run since the start the
+last lines of the audit log (a start line with no end line counts), so a restart no longer forgets one. `/api/program` rescans `runs/` at most every 5 s. A refused folder is listed with its reason but has no runner (its actions answer 409). The board settings carry three keys
 beyond the spec (`profile`, `contract_version`, `pinned_htlc`). The node gate of the autopilot reads `ok_since_start` of the program's node status.
 
 **After the independent read of 4.5 (2026-11-18).** Its one must-fix is fixed: a settings body with a key named `__proto__`, `constructor` or `prototype` could change
@@ -797,23 +797,35 @@ those three names at any depth (400, nothing done), and `programsettings.merge` 
 `test/program-server.test.js` fail without the fix. Its first low point is fixed too: the autopilot form (ticks and typed amount) belongs to one swap and one role and is
 forgotten when you leave the swap, so swap B no longer opens with swap A's statements ticked (`test/autopilot-page.test.js`).
 
-**Low points of that read (left, for the final pass).**
-- Code-1 advice for lock, reveal and refund says "cancel the intent, then try again", but program mode has no cancel-intent action, and a missing `sent:` line does not prove that
-  nothing was broadcast. `live.js`'s lock records stop a second lock, so no coin is at risk; the advice should say what to look at in the program.
-- After a restart `needs_you` misses a manual spend that may have been sent (only the autopilot's own stop entries and this process's jobs are read); the latch still blocks a re-send.
-  `RERUN_SAFE` jobs are not counted.
-- The view shows an approval in force from cached tool hashes while `authorize` (fresh) refuses each pass after a file changed with its metadata kept: safe, but the screen says "on".
-- An ALERT line notifies on every tick while it persists (by the spec; one operating-system notification every 30 s).
-- A non-spend step killed at its limit can leave half-made files (`wallet-setup-*`, `prepare`, `join`) that the steps then refuse; the program has no terminal to clean them.
-- `POST /api/settings` over a broken `settings.json` merges into the defaults and saves over the file, with no copy kept.
-- The board host's `noid_rpc` pattern refuses `http://[::1]:9601`, which `programsettings` accepts.
-- `/api/demo` and `/api/demo/scenarios` are still served in program mode (behind the token).
-- Error texts and step output on the page carry absolute paths of the data folder, which contain the account's name (a risk for shared screenshots).
-- `pub/` is made with `mkdirSync(recursive)`, which follows a link made by a program of the same user.
+**Low points of that read.** Fixed 2026-11-18 (each has a test that fails without the fix): the code-1 advice now says that a missing `sent:` line does not prove that nothing was
+sent and to look at the swap's phase and the contract before trying again (no "cancel the intent", which program mode does not have); `needs_you` after a restart reads the last audit
+lines of each spend (a start line with no end line counts; `RERUN_SAFE` is not counted) for a spend not run since the start; the view and the loop read every input of an approval again
+(no cache) once a minute, so a tool file changed with its metadata kept stops showing "on" before the next spend; an ALERT line that stays on later ticks makes one operating-system
+notification (the POST is unchanged); a save over a broken `settings.json` first keeps a copy as `settings.json.broken-STAMP` (mode 0600; no copy, no save); the board host takes
+`http://[::1]` as `programsettings` does; `/api/demo` and `/api/demo/scenarios` answer 404 in program mode; a `pub/` that is a link or a file refuses the folder; `runsettings.write`
+in update mode keeps `run_id`, `role`, `profile` and both payout addresses as they are (an unreadable file is not updated); `hc_lead` is capped at 1,000 as the form is; the migration
+refuses a folder that holds the other role's swap file (Bob's terms were already required in every case). Checked, no change: `program.codeFiles` hashes `<rootDir>/ui/app/lib/...`
+and the shell requires `../../ui/app/server` from the same root, so it is the copy the server loads; integration only has to keep the two paths under one root. Left:
+- A non-spend step killed at its limit can leave half-made files (`wallet-setup/`, `prepare`, `join`) that the steps then refuse; the program has no terminal to clean them. A safe
+  "start again" needs its own table entry, role rule, page button and tests (for `wallet-setup/` it would move the sealed files aside, since no address was shown from them; for
+  `prepare` and `join` a swap file may be funded, so a person must decide).
+- Error texts and step output on the page carry absolute paths of the data folder, which contain the account's name (a risk for shared screenshots; final pass).
 - The window does not block reload yet; a reload loses the token (integration).
-- `program.codeFiles` hashes `<rootDir>/ui/app/lib/...`: integration must check it is the copy the server loads.
-- Test gaps: no program-mode test of a restart after a start line with no end line; "the WSL path is never reached" is shown for one funding plus the static test, not every entry.
+- Test gaps: "the WSL path is never reached" is shown for one funding plus the static test, not every entry.
 - `stop()` waits for each watch's current tick, so quitting can wait up to one tick's limit.
+
+**After the independent read of those fixes (2026-11-18).** No must-fix. Fixed, each with a test that fails without it: a swap that is over never
+shows "needs you" because of an old "may have been sent" line in its audit log (nothing could clear it); a spend run by this process records its
+own ending, so once its job leaves the 30 kept ones the audit log's older verdict does not come back (it gave a false "A swap is waiting for you").
+Left (the final pass decides):
+- The two "may have been sent" rules differ for one kind of reveal: a reveal that ended 0 with a warning (`SECRET MAY BE PUBLIC: ok (exit 0)`,
+  or `SECRET PUBLIC: ...` for a reverted claim) counts after a restart but not in the process that ran it. It errs on the careful side.
+- The stricter checks refuse files that were accepted before: a `run.json` with `hc_lead` between 1,001 and 10,000 no longer loads (every action
+  on that swap is refused, refunds included), and a `settings.json` whose node is `http://localhost` fails the node check, which holds the
+  autopilot until the settings are saved again. Low only because nothing has been released: accept old values on load and refuse them only
+  on create, if a release ever follows a build that wrote them.
+- An ALERT line's notification is matched by its exact text: the same text on two ticks in a row (a second reorg) gives no second notification
+  from the operating system (the POST is still sent).
 
 ## Program mode on the private scheme (step 4.9)
 

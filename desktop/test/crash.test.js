@@ -99,12 +99,20 @@ test("install hooks both process events; a crash writes no error text anywhere",
   }
 });
 
-test("a state file that cannot be written still relaunches", () => {
+test("a state file that cannot be written: say so and stop, never relaunch (no crash loop)", () => {
   const s = setup();
   try {
-    const bad = createCrashHandler({ app: s.electron.app, fs, stateFile: path.join(s.dir, "nope", "x", "state.json").replace(/nope/, "a\0b"), now: () => 1, notifier: {}, proc: new EventEmitter() });
+    const notices = [];
+    const bad = createCrashHandler({ app: s.electron.app, fs, stateFile: path.join(s.dir, "nope", "x", "state.json").replace(/nope/, "a\u0000b"), now: () => 1, notifier: { crashNotice: () => notices.push("n") }, proc: new EventEmitter() });
     bad.handle();
-    assert.deepEqual(names(s.electron), ["relaunch", "exit"]);
+    assert.deepEqual(names(s.electron), ["exit"]);
+    assert.equal(s.electron.app.exitCode, 1);
+    assert.equal(notices.length, 1);
+    // a notifier that cannot show anything does not bring the relaunch back
+    s.electron.calls.length = 0;
+    const quiet = createCrashHandler({ app: s.electron.app, fs, stateFile: path.join(s.dir, "nope", "x", "state.json").replace(/nope/, "a\u0000b"), now: () => 1, notifier: { crashNotice() { throw new Error("no"); } }, proc: new EventEmitter() });
+    quiet.handle();
+    assert.deepEqual(names(s.electron), ["exit"]);
   } finally {
     s.cleanup();
   }

@@ -229,7 +229,7 @@ function validate(obj) {
   }
   whole("deploy_block", 1, 9_999_999_999, { nullable: true });
   whole("eth_start_margin", 0, 1_000_000);
-  whole("hc_lead", 1, 10_000);
+  whole("hc_lead", 1, 1000);
   whole("lock_precheck_timeout_s", 1, 90, { nullable: true });
   if (o.handover !== null && o.handover !== "board") p("handover", "board or null");
   url("alert_url", { nullable: true, httpsOnly: true });
@@ -433,9 +433,12 @@ function canonicalBytes(obj) {
   return Buffer.from(JSON.stringify(obj, ORDER, 2) + "\n", "utf8");
 }
 
+// the keys of a run.json that an update (write without `create`) must leave as they are
+const FIXED_AFTER_CREATE = ["run_id", "role", "profile", "noid_payout", "eth_payout"];
+
 /**
  * Writes <runDir>/run.json: validates first, then writes beside and renames over. With `create: true` an existing run.json (or a link of that name)
- * is never replaced; without it the file must already be there. Mode 0o600. Returns { path, bytes }.
+ * is never replaced; without it the file must already be there and its run_id, role, profile and two payout addresses must stay as they are. Mode 0o600. Returns { path, bytes }.
  */
 function write(runDir, obj, { create = false } = {}) {
   refuseIfInvalid(obj);
@@ -457,6 +460,16 @@ function write(runDir, obj, { create = false } = {}) {
   if (create && existing) throw new RunSettingsError("run.json already exists: a new swap never replaces it");
   if (!create && !existing) throw new RunSettingsError("run.json is not there to update: only a new swap makes it");
   if (!create && !existing.isFile()) throw new RunSettingsError("run.json is not a plain file");
+  if (!create) {
+    // what makes this swap this swap (and where its leftovers go) is fixed when it is made: an update may change the rest
+    let cur;
+    try {
+      cur = load(runDir);
+    } catch {
+      throw new RunSettingsError("run.json cannot be read as it is, so it is not updated");
+    }
+    for (const k of FIXED_AFTER_CREATE) if (cur[k] !== obj[k]) throw new RunSettingsError(`${k} is fixed when the swap is made: run.json is not updated`);
+  }
   const tmp = path.join(runDir, `${FILE}.tmp-${process.pid}-${crypto.randomBytes(4).toString("hex")}`);
   let fd = null;
   try {
@@ -666,6 +679,16 @@ function migrateFromEnvLocal(runDir, { role } = {}) {
     /* absent */
   }
   if (existing) throw new RunSettingsError("run.json already exists: a migration never replaces it");
+  // the program refuses a folder that holds the other role's swap file (design 12.4): a run.json made for it would never open
+  const otherFile = role === "alice" ? path.join(runDir, "bob", "bob.swap.json") : path.join(runDir, "alice.swap.json");
+  let otherThere = false;
+  try {
+    fs.lstatSync(otherFile);
+    otherThere = true;
+  } catch {
+    /* absent */
+  }
+  if (otherThere) throw new RunSettingsError(`this folder holds ${role === "alice" ? "Bob" : "Alice"}'s swap file, so it cannot be ${role === "alice" ? "Alice" : "Bob"}'s run: a run folder holds one role's files`);
   const v = readEnvLocal(runDir);
   const has = (k) => Object.prototype.hasOwnProperty.call(v, k);
   for (const [k, x] of Object.entries(v)) {

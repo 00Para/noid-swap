@@ -24,10 +24,11 @@ const REQUEST_TIMEOUT_MS = 8000;
  */
 const CHECKPOINT = Object.freeze({ height: 279370, hash: "a7768d60f66e1d62cab08351a0ec38b7bf6df5554129e59574d566b727a7c654" });
 
+/** The node's address must be written as one of this machine's own addresses; a name such as localhost is resolved through the hosts file and is not accepted. */
 function isLoopback(url) {
   try {
     const h = new URL(url).hostname.toLowerCase();
-    return h === "127.0.0.1" || h === "localhost" || h === "[::1]" || h === "::1";
+    return h === "127.0.0.1" || h === "[::1]" || h === "::1";
   } catch {
     return false;
   }

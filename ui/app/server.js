@@ -929,13 +929,7 @@ function programRequestHandler(program, swapSet, getServer) {
         const cur = programsettings.loadSafe(program.dataDir);
         return send(res, 200, { ok: true, settings: programsettings.view(cur.settings), problem: cur.ok ? null : cur.why });
       }
-      if (p === "/api/demo") {
-        const q = url.searchParams;
-        const flags = (q.get("flags") || "").split(",").filter((f) => DEMO_FLAGS.includes(f));
-        const step = q.get("step");
-        return send(res, 200, demoPayload({ scenario: q.get("scenario") || "happy", role: q.get("role") || "alice", step: /^\d+$/.test(step || "") ? Number(step) : step || 0, flags }));
-      }
-      if (p === "/api/demo/scenarios") return send(res, 200, { scenarios: scenarioList(), flags: DEMO_FLAGS });
+      // the demo fixtures are for the terminal console only: the program has no route for them (404)
       return send(res, 404, { error: "not found" });
     } catch (e) {
       // the text of an unexpected error may name a path or a value: only a fixed sentence leaves

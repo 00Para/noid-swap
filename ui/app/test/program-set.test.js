@@ -432,6 +432,78 @@ test("the shell is told about the stake once at start and whenever the list chan
   }
 });
 
+test("a pub/ that is a link (a junction on Windows) is refused: the audit log is never made behind it", async () => {
+  const env = makeEnv();
+  try {
+    const a = env.addSwap({ role: "alice" });
+    const elsewhere = path.join(env.runsDir, "..", `elsewhere-${a.id.slice(0, 8)}`);
+    fs.mkdirSync(elsewhere);
+    fs.rmSync(a.pub, { recursive: true });
+    fs.symlinkSync(elsewhere, a.pub, "junction");
+    const set = mk(env);
+    const r = set.scan();
+    assert.deepEqual(r.opened, []);
+    assert.match(r.refused.find((x) => x.folder === a.id).why, /pub\/.*link/);
+    assert.deepEqual(fs.readdirSync(elsewhere), [], "nothing was written behind the link");
+    await set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("needs you after a restart: a spend whose last audit lines say it may have been sent still counts; a clean, refused or same-bytes ending does not", async () => {
+  const { AuditLog } = require("../lib/audit");
+  const env = makeEnv();
+  try {
+    const lines = {
+      noEnd: [["send-reveal", "start", "started"]],
+      unclean: [["send-reveal", "start", "started"], ["send-reveal", "end", "failed (exit 1, the transaction may have been sent)"]],
+      timeout: [["send-refund-eth", "start", "started"], ["send-refund-eth", "end", "timeout, the transaction may have been sent"]],
+      secret: [["send-reveal", "start", "started"], ["send-reveal", "end", "SECRET PUBLIC: failed (exit 3, the transaction may have been sent)"]],
+      laterClean: [["send-reveal", "start", "started"], ["send-reveal", "end", "failed (exit 1, the transaction may have been sent)"], ["send-reveal", "start", "started"], ["send-reveal", "end", "ok (exit 0)"]],
+      refused: [["send-reveal", "start", "started"], ["send-reveal", "end", "refused, nothing sent (reveal.sh exit 2)"]],
+      sameBytes: [["send-fund", "start", "started"], ["send-fund", "end", "may have been sent, the same bytes may be sent again (wallet-fund.sh exit 6)"]],
+      dry: [["dry-reveal", "start", "started"]],
+    };
+    const swaps = {};
+    for (const [k, rows] of Object.entries(lines)) {
+      swaps[k] = env.addSwap({ role: "alice" });
+      const log = new AuditLog(swaps[k].pub, { role: "program" });
+      for (const [action, phase, result] of rows) log.append({ action, role: "alice", phase, result });
+    }
+    const set = mk(env);
+    set.scan();
+    const need = (k) => set.list().find((x) => x.swap === swaps[k].id).needs_you;
+    assert.deepEqual(Object.keys(lines).map((k) => [k, need(k)]), [["noEnd", true], ["unclean", true], ["timeout", true], ["secret", true], ["laterClean", false], ["refused", false], ["sameBytes", false], ["dry", false]]);
+    await set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("needs you: a swap that is over is never flagged by an old may-have-sent line of its audit log", async () => {
+  const { AuditLog } = require("../lib/audit");
+  const env = makeEnv();
+  try {
+    const over = env.addSwap({ role: "bob" });
+    const live = env.addSwap({ role: "bob" });
+    for (const s of [over, live]) {
+      const log = new AuditLog(s.pub, { role: "program" });
+      log.append({ action: "send-claim", role: "bob", phase: "start", result: "started" });
+      log.append({ action: "send-claim", role: "bob", phase: "end", result: "timeout, the transaction may have been sent" });
+    }
+    env.writeTick(over, "bob", mkTick({ phase: "done" }));
+    const set = mk(env);
+    set.scan();
+    const need = (s) => set.list().find((x) => x.swap === s.id).needs_you;
+    assert.equal(need(over), false, "a finished swap has nothing left to send");
+    assert.equal(need(live), true);
+    await set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("at program start, after the vault is ready, the watch starts for every swap with a swap file that is not over (and for no other)", async () => {
   const env = makeEnv();
   try {

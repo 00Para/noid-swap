@@ -193,7 +193,7 @@ test("validate: whole-number ranges", () => {
   const rows = [
     ["rpc_timeout_s", [1, 600], [0, 601, 1.5, "60", null, -1], false],
     ["eth_start_margin", [0, 1000000], [-1, 1000001, "2400", null, 1.5], false],
-    ["hc_lead", [1, 10000], [0, 10001, "50", null, 2.5], false],
+    ["hc_lead", [1, 1000], [0, 1001, 10000, "50", null, 2.5], false],
     ["lock_precheck_timeout_s", [1, 90], [0, 91, "90", 1.5], true],
     ["deploy_block", [1, 9999999999], [0, 10000000000, "5", -3, 1.5], true],
   ];
@@ -359,6 +359,30 @@ test("write: create never overwrites an existing run.json (file, link or folder)
   fs.mkdirSync(path.join(d2, "run.json"));
   assert.throws(() => rs.write(d2, o, { create: true }), /already exists/);
   assert.deepEqual(fs.readdirSync(d2), ["run.json"]);
+});
+
+test("write: an update keeps run_id, role, profile and both payout addresses as they are; the other keys may change; an unreadable file is not updated", () => {
+  const d = tmp();
+  const o = rs.newSettings(aliceFields());
+  rs.write(d, o, { create: true });
+  const before = fs.readFileSync(path.join(d, "run.json"));
+  const OTHER_PAYOUT = "0x" + "ab".repeat(20);
+  const changed = [
+    ["run_id", { ...o, run_id: "f".repeat(32) }],
+    ["role", { ...bobFields(), v: 1, run_id: o.run_id }],
+    ["profile", { ...o, profile: "rehearsal", chain_id: 31337 }],
+    ["noid_payout", { ...o, noid_payout: A3 }],
+    ["eth_payout", { ...o, eth_payout: OTHER_PAYOUT }],
+  ];
+  for (const [k, obj] of changed) {
+    assert.throws(() => rs.write(d, obj, { create: false }), (e) => e instanceof rs.RunSettingsError && /is fixed when the swap is made/.test(e.message), k);
+    assert.ok(fs.readFileSync(path.join(d, "run.json")).equals(before), `${k}: the file is untouched`);
+  }
+  rs.write(d, { ...o, hc_lead: 90, rpc_timeout_s: 61 }, { create: false });
+  assert.equal(rs.load(d).hc_lead, 90);
+  fs.writeFileSync(path.join(d, "run.json"), "not json");
+  assert.throws(() => rs.write(d, o, { create: false }), /cannot be read as it is/);
+  assert.equal(fs.readFileSync(path.join(d, "run.json"), "utf8"), "not json");
 });
 
 test("write: update replaces an existing file; without create a missing file is refused; an invalid object writes nothing", () => {
@@ -617,6 +641,20 @@ test("migrate: a Bob file missing one of his terms is refused, each term in turn
   fs.mkdirSync(path.join(d2, "bob"));
   fs.writeFileSync(path.join(d2, "bob", "bob.swap.json"), "{}");
   migrationRefused(d2, { role: "bob" }, /BOB_NOID/);
+});
+
+test("migrate: a folder that holds the other role's swap file is refused (the program would refuse it as a run); the role's own swap file is fine", () => {
+  const d = envRun(walletAliceEnv());
+  fs.mkdirSync(path.join(d, "bob"));
+  fs.writeFileSync(path.join(d, "bob", "bob.swap.json"), "{}");
+  migrationRefused(d, { role: "alice" }, /holds Bob's swap file/);
+  assert.equal(fs.existsSync(path.join(d, "run.json")), false);
+  const d2 = envRun(bobEnvLines().join("\n") + "\n");
+  fs.writeFileSync(path.join(d2, "alice.swap.json"), "{}");
+  migrationRefused(d2, { role: "bob" }, /holds Alice's swap file/);
+  const d3 = envRun(walletAliceEnv());
+  fs.writeFileSync(path.join(d3, "alice.swap.json"), "{}");
+  assert.equal(rs.migrateFromEnvLocal(d3, { role: "alice" }).settings.role, "alice");
 });
 
 test("migrate: a classic run (USE_SWAP_WALLET absent, 0 or empty) is refused", () => {

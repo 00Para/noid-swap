@@ -68,6 +68,7 @@ class Watch {
     this.promise = null;
     this.timer = null;
     this.wake = null;
+    this.alertStates = new Map(); // role -> what the alert hook keeps between ticks (a new ALERT notifies, one that persists does not)
   }
 
   get running() {
@@ -118,7 +119,8 @@ class Watch {
         /* a listener cannot stop the loop */
       }
     }
-    await C.alertHook(ctx, outText);
+    if (!this.alertStates.has(role)) this.alertStates.set(role, {});
+    await C.alertHook(ctx, outText, this.alertStates.get(role));
     await C.alarmHook(ctx, role, outText);
     return terminalOf(line);
   }

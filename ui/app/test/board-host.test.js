@@ -85,6 +85,8 @@ test("settings are checked: a test profile, two to five wss relays, the pinned c
   assert.throws(() => normalizeSettings("bob", { ...ok, bob_noid: undefined }), /bob_noid/);
   assert.throws(() => normalizeSettings("alice", { ...ok, lead_blocks: 1 }), /lead_blocks/);
   assert.throws(() => normalizeSettings("alice", { ...ok, noid_rpc: "http://example.com:9601" }), /noid_rpc/);
+  assert.throws(() => normalizeSettings("alice", { ...ok, noid_rpc: "http://[::2]:9601" }), /noid_rpc/);
+  assert.equal(normalizeSettings("alice", { ...ok, noid_rpc: "http://[::1]:9601" }).noid_rpc, "http://[::1]:9601", "the loopback address the settings accept");
   try {
     normalizeSettings("alice", { ...ok, eth_payout: "0xSECRETVALUE" });
   } catch (e) {

@@ -1,8 +1,10 @@
 "use strict";
 /*
  * Crash handling (build spec 7.9). The first uncaught error relaunches the program once; a second within ten minutes stops it and
- * says so. The time of each crash goes to state.json (the last five kept; other keys of the file are left as they are). No crash
- * reporter and no error text is stored or printed: an error may carry data the program must not write anywhere.
+ * says so. The time of each crash goes to state.json (the last five kept; other keys of the file are left as they are). When that
+ * file cannot be written (a full disk) the crash is not counted, so the program does not relaunch: it says so and stops, because
+ * "once, then stop" would otherwise become a loop. No crash reporter and no error text is stored or printed: an error may carry data
+ * the program must not write anywhere.
  */
 
 const path = require("node:path");
@@ -38,6 +40,15 @@ function writeState(fs, file, state) {
 function createCrashHandler({ app, fs, stateFile, now = Date.now, notifier, proc = process }) {
   let handling = false;
 
+  function stopWithNotice() {
+    try {
+      notifier.crashNotice();
+    } catch {
+      /* nothing more can be done */
+    }
+    app.exit(1);
+  }
+
   function handle() {
     if (handling) return;
     handling = true;
@@ -50,16 +61,13 @@ function createCrashHandler({ app, fs, stateFile, now = Date.now, notifier, proc
       state.crashes = [...old, t].slice(-KEEP);
       writeState(fs, stateFile, state);
       if (previous !== null && t - previous < WINDOW_MS) {
-        try {
-          notifier.crashNotice();
-        } catch {
-          /* nothing more can be done */
-        }
-        app.exit(1);
+        stopWithNotice();
         return;
       }
     } catch {
-      /* the state file could not be written: relaunch once anyway */
+      // The crash could not be written down, so a later one could not be told from a first: stop instead of relaunching.
+      stopWithNotice();
+      return;
     }
     app.relaunch();
     app.exit(1);

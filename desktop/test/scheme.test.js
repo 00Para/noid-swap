@@ -309,3 +309,16 @@ test("the adapter keeps no state between requests and writes nothing to the outp
   }
   assert.ok(!written.join("").includes("tok-xyz"));
 });
+
+test("the size cap: a declared content-length over the ceiling is refused at once, before the body is read", async () => {
+  const { handler, seen } = makeHandler((req, res, body) => json(res, 200, { got: body.length }));
+  const adapter = createAdapter({ handler, mark, maxBody: 100 });
+  // the body is small, so only the declared length can make this a 413
+  const over = await adapter(new Request("no1d://app/api/action", { method: "POST", body: "x", headers: { "content-length": "101" } }));
+  assert.equal(over.status, 413);
+  assert.match((await over.json()).error, /too large/);
+  assert.equal(seen.length, 0);
+  // a declared length at the ceiling is not refused
+  const at = await adapter(new Request("no1d://app/api/action", { method: "POST", body: "x", headers: { "content-length": "100" } }));
+  assert.equal(at.status, 200);
+});

@@ -3,16 +3,23 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
+const path = require("node:path");
 const { makeEnv } = require("./shell-fixture");
 const { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, PAGE_PROBE } = require("../lib/selftest");
 
-const selfTmp = () => fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith("no1d-selftest-"));
+// The folder this test's self-test made (userData is its electron/ subfolder). Only that one is checked: another test file, or another
+// run of the suite, may be making its own no1d-selftest- folder in the same temporary folder at the same time.
+const ownTmp = (e) => {
+  const d = path.dirname(e.electron.app.paths.userData);
+  assert.equal(path.dirname(d), os.tmpdir());
+  assert.ok(path.basename(d).startsWith("no1d-selftest-"));
+  return d;
+};
 const GOOD_PREFS = { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, webviewTag: false };
 /** web contents whose page answers the probe: `probe` is its answer (default: scripts ran, the POST was refused for the token). */
 const goodPage = (probe = { scripts: true, post: { status: 403, error: "missing or wrong token" } }) => ({ getLastWebPreferences: () => GOOD_PREFS, executeJavaScript: async () => probe });
 
 test("with the fake: one JSON line, exit 0, the temporary folder gone, the real data folder untouched", async () => {
-  const before = selfTmp();
   const e = makeEnv({ argv: ["x.exe", "--self-test"], updateSetting: "daily", updateRepo: "owner-x/no1d-swap", updateAnswer: [] });
   try {
     const r = await e.shell.start();
@@ -46,21 +53,24 @@ test("with the fake: one JSON line, exit 0, the temporary folder gone, the real 
     assert.ok(names.indexOf("setPath") < names.indexOf("requestSingleInstanceLock"));
     assert.ok(e.electron.app.paths.userData.includes("no1d-selftest-"));
     // the temporary folder is removed
-    assert.deepEqual(selfTmp(), before);
+    assert.equal(fs.existsSync(ownTmp(e)), false);
     // the window is hidden and destroyed; no tray, no login item, no crash handler
     assert.equal(e.electron.windows[0].visible, false);
     assert.equal(e.electron.trays.length, 0);
     assert.equal(e.electron.app.loginItem, null);
-    assert.equal(e.proc.listenerCount("uncaughtException"), 0);
+    // no crash handler (no relaunch, no state file); only the quiet one, which ends the program without Electron's error dialog
+    assert.equal(e.proc.listenerCount("uncaughtException"), 1);
+    e.electron.calls.length = 0;
+    e.proc.emit("uncaughtException", new Error("x"));
+    assert.deepEqual(e.electron.calls.map((c) => c.name), ["exit"]);
     assert.ok(e.rec.includes("server.stop"));
-    assert.deepEqual(e.shell.trace, ["lock", "cmdline", "setPath", "manifest", "dirs", "ready", "vault", "nodecheck", "server"]);
+    assert.deepEqual(e.shell.trace, ["cmdline", "setPath", "lock", "manifest", "dirs", "ready", "vault", "nodecheck", "server"]);
   } finally {
     e.cleanup();
   }
 });
 
 test("self-test fails with exit 1 when /api answers without the token", async () => {
-  const before = selfTmp();
   const e = makeEnv({ argv: ["x.exe", "--self-test"], noTokenStatus: 200 });
   try {
     await e.shell.start();
@@ -68,7 +78,7 @@ test("self-test fails with exit 1 when /api answers without the token", async ()
     const j = JSON.parse(e.stdout[0]);
     assert.equal(j.selftest, "failed");
     assert.match(j.why, /without the token/);
-    assert.deepEqual(selfTmp(), before, "a failed self-test still removes its folder");
+    assert.equal(fs.existsSync(ownTmp(e)), false, "a failed self-test still removes its folder");
   } finally {
     e.cleanup();
   }

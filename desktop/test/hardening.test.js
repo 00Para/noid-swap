@@ -74,3 +74,55 @@ test("the scheme page: navigation to itself only, requests to its origin only", 
   assert.equal(requestAllowed("no1d://app/operator.js", DENY), false);
   assert.equal(requestAllowed("no1d://app/operator.js", { fileUrlPrefix: "file:///app/secret/" }), false);
 });
+
+// ---- no proxy and no direct peer-to-peer path ----------------------------------------------------------------------------------------
+
+const { createFakeElectron } = require("./fake-electron");
+const { createGuard } = require("../lib/hardening");
+
+test("every session the program makes is told to go direct, once, before its first request", async () => {
+  const electron = createFakeElectron();
+  const guard = createGuard(electron);
+  guard.install();
+  guard.applySession(electron.session.defaultSession);
+  guard.applySession(electron.session.defaultSession);
+  assert.deepEqual(electron.session.defaultSession.proxyConfigs, [{ mode: "direct" }], "the default session, once");
+  // two windows on two partitions, a third on the first partition again
+  const a = new electron.BrowserWindow({ webPreferences: { partition: "no1d-main" } });
+  const b = new electron.BrowserWindow({ webPreferences: { partition: "no1d-secret" } });
+  new electron.BrowserWindow({ webPreferences: { partition: "no1d-main" } });
+  assert.deepEqual(a.webContents.session.proxyConfigs, [{ mode: "direct" }]);
+  assert.deepEqual(b.webContents.session.proxyConfigs, [{ mode: "direct" }]);
+  assert.equal(a.webContents.session.partition, "no1d-main");
+  assert.notEqual(a.webContents.session, b.webContents.session);
+  // a stray webContents (a devtools, a webview) is covered too
+  assert.deepEqual(electron.strayWebContents().session.proxyConfigs, [{ mode: "direct" }]);
+  // before the window loads anything: the call is already made when the window exists
+  const w = new electron.BrowserWindow({ webPreferences: { partition: "no1d-third" } });
+  w.loadURL("no1d://app/");
+  const calls2 = electron.calls.map((c) => `${c.who}.${c.name}:${c.args[0] === "no1d-third" ? "third" : ""}`);
+  assert.ok(calls2.indexOf("session.setProxy:third") >= 0 && calls2.indexOf("session.setProxy:third") < calls2.indexOf("window.loadURL:"), "set before the page is loaded");
+});
+
+test("a session that cannot take a proxy setting does not stop the program", async () => {
+  const electron = createFakeElectron({ setProxyRejects: true });
+  const guard = createGuard(electron);
+  guard.install();
+  new electron.BrowserWindow({ webPreferences: { partition: "no1d-main" } });
+  guard.applySession({ setPermissionRequestHandler() {}, setProxy() { throw new Error("sync failure"); } });
+  await new Promise((r) => setImmediate(r)); // an unhandled rejection would fail the run here
+});
+
+test("every window's page is kept off direct peer-to-peer paths (WebRTC may only use a proxy, and there is none)", () => {
+  const electron = createFakeElectron();
+  const guard = createGuard(electron);
+  guard.install();
+  const a = new electron.BrowserWindow({ webPreferences: { partition: "no1d-main" } });
+  const b = new electron.BrowserWindow({ webPreferences: { partition: "no1d-secret" } });
+  assert.equal(a.webContents.webrtcPolicy, "disable_non_proxied_udp");
+  assert.equal(b.webContents.webrtcPolicy, "disable_non_proxied_udp");
+  assert.equal(electron.strayWebContents().webrtcPolicy, "disable_non_proxied_udp");
+  // a policy set by the window code (apply) does not repeat the call
+  guard.apply(a.webContents, { allowedOrigin: "no1d://app", pageUrl: "no1d://app/" });
+  assert.equal(electron.calls.filter((c) => c.name === "setWebRTCIPHandlingPolicy").length, 3);
+});

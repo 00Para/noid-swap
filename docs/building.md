@@ -215,7 +215,14 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
 - Each platform's desktop jobs go ahead on their own (since run 4): a swap-cli job of another platform that failed or never got a
   machine no longer holds them back. Run 4's macOS swap-cli job was never given a machine ("not acquired", GitHub's capacity), and the
   desktop jobs of both platforms were skipped because of it.
-- The two desktop jobs (above) have not run. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
+- Run 5 was the first to start a desktop job. macOS again had no machine. On Windows the step "Test the desktop program's modules
+  and scripts" failed, after `eth/`'s packages were installed and the contracts compiled; no installer was made, and the start-up job
+  stopped at its download. Which test failed is not known: the step did not write annotations then, and the log needs a login. It
+  now writes them, as the swap-cli job does. Six runs of the suite at once on one machine made two self-test tests fail. They
+  compared every `no1d-selftest-` folder in the shared temporary folder, and another run's folder was there. Those tests now check
+  only their own folder, and the self-test's removal of its folder tries again if a scanner briefly holds a file. That this was
+  run 5's cause is not proved.
+- The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the
   program starts on a clean machine; that the Windows binary (a GUI-subsystem program) shows its output to `Start-Process` redirection
