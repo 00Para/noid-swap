@@ -15,13 +15,15 @@ test("Appendix A: passphrase, boardKey, migratedKey, inviteKey and keyCheck repr
   assert.equal(derive.migratedKey(S, R).toString("hex"), "8843ab4c55972fb21ffc867db6c614748bde21413c4f0d88cd290f30f3610bd3");
   assert.equal(derive.inviteKey(S).toString("hex"), "b7dfde707306fb24ee84c6d804fc5233ad191112dd1a21080dd955b01b475aec");
   assert.equal(derive.keyCheck(S), "3b25908f21bea838");
+  // the history of payout addresses (launch spec 4.2): K(S, "payout-history", "install")
+  assert.equal(derive.historyKey(S).toString("hex"), "5c9c917a08988123b632d429696e657f2366b58f47139c880178ee52f2f102c5");
 });
 
 test("the passphrase is 64 lower-case hex characters and each label gives a different key", () => {
   const p = derive.passphrase(S, R);
   assert.match(p, /^[0-9a-f]{64}$/);
-  const keys = new Set([derive.K(S, "swap-passphrase", R), derive.K(S, "board", R), derive.K(S, "migrated-passphrase", R), derive.inviteKey(S)].map((b) => b.toString("hex")));
-  assert.equal(keys.size, 4);
+  const keys = new Set([derive.K(S, "swap-passphrase", R), derive.K(S, "board", R), derive.K(S, "migrated-passphrase", R), derive.inviteKey(S), derive.historyKey(S)].map((b) => b.toString("hex")));
+  assert.equal(keys.size, 5);
 });
 
 test("another run id or another secret gives another value; the same input gives the same value", () => {
@@ -42,6 +44,8 @@ test("bad input is refused: a run id that is not 32 lower-case hex, an unknown l
   assert.equal(derive.isRunId(R), true);
   assert.throws(() => derive.K(S, "other", R), derive.DeriveError);
   assert.throws(() => derive.K(S, "board-invite", R), derive.DeriveError);
+  assert.throws(() => derive.K(S, "payout-history", R), derive.DeriveError);
+  assert.throws(() => derive.historyKey(Buffer.alloc(31)), derive.DeriveError);
   assert.throws(() => derive.passphrase(Buffer.alloc(31), R), derive.DeriveError);
   assert.throws(() => derive.passphrase("x".repeat(32), R), derive.DeriveError);
   assert.throws(() => derive.keyCheck(Buffer.alloc(0)), derive.DeriveError);
@@ -53,6 +57,7 @@ test("the derivation is the plain HMAC of the spec (an independent computation w
   assert.equal(derive.boardKey(S, R).toString("hex"), mac(`no1d-swap/v1/board/${R}`));
   assert.equal(derive.migratedKey(S, R).toString("hex"), mac(`no1d-swap/v1/migrated-passphrase/${R}`));
   assert.equal(derive.inviteKey(S).toString("hex"), mac("no1d-swap/v1/board-invite/install"));
+  assert.equal(derive.historyKey(S).toString("hex"), mac("no1d-swap/v1/payout-history/install"));
   assert.equal(derive.keyCheck(S), mac("no1d-swap/v1/key-check").slice(0, 16));
 });
 

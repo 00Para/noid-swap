@@ -40,13 +40,15 @@ test("only lib/stepexec.js (and the steps themselves and tests) require the step
   assert.ok(requires(fs.readFileSync(path.join(ROOT, "ui/app/lib/stepexec.js"), "utf8")).includes("./steps"));
 });
 
-test("no file of the steps, the executor or the program-mode modules names --mainnet or a producer waiver", () => {
+test("no file of the steps, the executor or the program-mode modules names --mainnet (steps/common.js alone, for a production run.json) or the older producer waiver", () => {
   const files = [...walk(path.join(ROOT, "ui", "app", "lib", "steps")), ...["stepexec.js", "swapset.js", "settingsource.js", "programsettings.js", "toolhash.js"].map((n) => path.join(ROOT, "ui", "app", "lib", n))];
   for (const f of files) {
     const text = fs.readFileSync(f, "utf8");
     // a mention in a comment that says it is never passed is allowed; an argument in code is not
     const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    assert.ok(!/["'`]--mainnet["'`]/.test(code), `${path.basename(f)} passes --mainnet`);
+    // Ethereum mainnet in program mode: the fee flags of a production run.json are in steps/common.js and nowhere else
+    const mainnetOk = path.basename(f) === "common.js";
+    assert.equal(/["'`]--mainnet["'`]/.test(code), mainnetOk, `${path.basename(f)} passes --mainnet`);
     assert.ok(!/["'`]--accept-producer-concentration["'`]/.test(code), `${path.basename(f)} passes the producer waiver`);
   }
 });

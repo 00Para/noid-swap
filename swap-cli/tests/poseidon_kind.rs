@@ -1032,3 +1032,12 @@ fn bob_takes_the_secret_from_a_reverted_claim_and_checks_it_like_any_other_candi
     assert_eq!(rb.action.kind(), "wait", "{rb:?}");
     assert!(rb.notes.iter().any(|n| n.contains("rejected")), "{:?}", rb.notes);
 }
+
+#[test]
+fn the_default_log_range_chunk_is_at_most_ten_thousand_blocks() {
+    // Public Ethereum mainnet endpoints refuse an `eth_getLogs` range above 10,000 blocks: a refused whole range is retried in chunks of at most that size.
+    assert_eq!(swap_cli::watch::eth::DEFAULT_LOG_RANGE_MAX, 10_000);
+    let (rpc, _) = node(Node::default());
+    let w = EthWatcher::new(&rpc, a20(CONTRACT), [0u8; 32]);
+    assert_eq!(w.log_range_max, 10_000);
+}

@@ -6,7 +6,8 @@
  *
  *   AAD   = UTF-8 of "no1d-swap sealed v1\u0000" + label + "\u0000" + run_id + "\u0000" + fileName        (fileName: the base name the file is written under)
  *   nonce = 12 random bytes, a new one for every write
- *   label = "migrated-passphrase" (passphrase.sealed), "board" (board-keys.json), "board-invite" (vault/board-invite.sealed, run id "install")
+ *   label = "migrated-passphrase" (passphrase.sealed), "board" (board-keys.json), "board-invite" (vault/board-invite.sealed, run id "install"),
+ *           "payout-history" (payout-history.sealed in the data folder, run id "install")
  *
  * A file whose label, run id or file name does not match what the caller expects, whose fields are not exactly these, or that fails the tag check is
  * refused with a fixed text that carries no part of the file. Writes go through a temporary file and a rename, mode 0600.
@@ -18,14 +19,14 @@ const fs = require("fs");
 const path = require("path");
 const { isRunId } = require("./derive");
 
-const LABELS = Object.freeze(["migrated-passphrase", "board", "board-invite"]);
+const LABELS = Object.freeze(["migrated-passphrase", "board", "board-invite", "payout-history"]);
 const MAX_CT = 1024 * 1024;
 const FIELDS = ["v", "alg", "label", "run_id", "nonce", "ct", "tag"];
 
 class SealedError extends Error {}
 
 function idOk(label, runId) {
-  return label === "board-invite" ? runId === "install" : isRunId(runId);
+  return label === "board-invite" || label === "payout-history" ? runId === "install" : isRunId(runId);
 }
 
 function aad(label, runId, fileName) {

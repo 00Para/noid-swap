@@ -18,24 +18,39 @@ const path = require("path");
 const { decodeBech32m } = require("./bech32");
 const { ethAddressProblem, noidAddressProblem } = require("./walletrun");
 
-// TEST PROFILES ONLY. The `production` profile (Ethereum mainnet, chain 1) is not offered and not accepted: the console does not set up or act on a
-// production swap until the external review (M4, PROJECT.md); the terminal stays the way for any mainnet run. A run folder that says production is
-// shown read-only and every action is refused (lib/production.js). Caps in micro-NOID and wei, the same tiny ones for both test profiles.
+// TEST PROFILES ONLY, for the terminal form and the board. The `production` profile (Ethereum mainnet, chain 1) is not offered and not accepted there: the terminal console
+// and the board never set up or act on a production swap (lib/production.js). PROGRAM MODE alone has the second table below (PROGRAM_PROFILES), which adds production with
+// its caps. Caps in micro-NOID and wei, the same tiny ones for both test profiles.
 const PROFILES = {
   sepolia: { chain: 11155111, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
   rehearsal: { chain: 31337, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
 };
+// Ethereum mainnet in program mode (the owner's decision D1): at most 2,500 NOID and 0.5 ETH per swap, chain 1. swap-cli's production profile carries the same two caps (a second,
+// independent layer); the page's form only shows them, run.json's schema enforces them.
+const PRODUCTION = Object.freeze({ chain: 1, max_noid_micro: 2_500_000_000n, max_eth_wei: 5n * 10n ** 17n });
+const PROGRAM_PROFILES = Object.freeze({ ...PROFILES, production: PRODUCTION });
+// The mainnet fee settings a new production swap starts with (D5): the cap (maxFeePerGas) and the tip, in gwei, both editable per swap and part of the approved bytes.
+const PRODUCTION_FEE_DEFAULTS = Object.freeze({ gas_price_gwei: "1", priority_fee_gwei: "0.05" });
 // The one pin of the program's own contract for a network (build spec #5). The form's default and the board both ask `pinFor`; the settings' `board.pinned_htlc`
-// (empty by default) overrides it per chain id. The rehearsal chain has no pin of its own; production has no entry and gets null.
-const PINNED_CONTRACT = Object.freeze({ sepolia: "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF", rehearsal: null });
+// (empty by default) overrides it per chain id on the test networks only. The rehearsal chain has no pin of its own. Production's pin is the deployment of the committed poseidon artifact
+// on Ethereum mainnet (2026-11-20, block 26,459,748, code hash 0xf510d2a3...3ff3, the same hash swap-cli and live.js check); no setting overrides it. The code-hash checks apply in every case.
+const PINNED_CONTRACT = Object.freeze({ sepolia: "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF", rehearsal: null, production: "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70" });
 
-/** The pinned contract for a profile: `settings.board.pinned_htlc[chain id]` when set, else `PINNED_CONTRACT[profile]`, else null (also for any profile that is not a test profile). */
-function pinFor(profile, settings) {
-  if (typeof profile !== "string" || !Object.prototype.hasOwnProperty.call(PROFILES, profile)) return null;
+function pinIn(table, profile, settings) {
+  if (typeof profile !== "string" || !Object.prototype.hasOwnProperty.call(table, profile)) return null;
   const pins = settings && settings.board && settings.board.pinned_htlc;
-  const chain = String(PROFILES[profile].chain);
-  if (pins && typeof pins === "object" && Object.prototype.hasOwnProperty.call(pins, chain) && typeof pins[chain] === "string" && pins[chain] !== "") return pins[chain];
+  const chain = String(table[profile].chain);
+  if (profile !== "production" && pins && typeof pins === "object" && Object.prototype.hasOwnProperty.call(pins, chain) && typeof pins[chain] === "string" && pins[chain] !== "") return pins[chain];
   return Object.prototype.hasOwnProperty.call(PINNED_CONTRACT, profile) ? PINNED_CONTRACT[profile] || null : null;
+}
+
+/** The pinned contract for a TEST profile (the board's and the terminal's table): `settings.board.pinned_htlc[chain id]` when set, else `PINNED_CONTRACT[profile]`, else null (also for production). */
+function pinFor(profile, settings) {
+  return pinIn(PROFILES, profile, settings);
+}
+/** The same for program mode's table, production included (the new-swap form's default contract). */
+function programPinFor(profile, settings) {
+  return pinIn(PROGRAM_PROFILES, profile, settings);
 }
 const ROLES = ["alice", "bob", "both"];
 const LOCK_KINDS = ["sha256", "poseidon"];
@@ -372,4 +387,4 @@ function envLocalState(dir) {
   }
 }
 
-module.exports = { PINNED_CONTRACT, pinFor, OPTIONAL, TEMPLATE_KEYS, validateForm, renderEnvLocal, writeEnvLocal, envLocalState, PROFILES, ROLES, LOCK_KINDS, VARIANTS, CONTRACT_VERSIONS, FIELDS, decimalToInt };
+module.exports = { PINNED_CONTRACT, pinFor, programPinFor, PRODUCTION, PROGRAM_PROFILES, PRODUCTION_FEE_DEFAULTS, OPTIONAL, TEMPLATE_KEYS, validateForm, renderEnvLocal, writeEnvLocal, envLocalState, PROFILES, ROLES, LOCK_KINDS, VARIANTS, CONTRACT_VERSIONS, FIELDS, decimalToInt };

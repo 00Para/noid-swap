@@ -54,3 +54,7 @@ desktop/stage/
 desktop/stage-bin/
 desktop/dist/
 desktop/node_modules/
+
+# The release signing key (desktop/scripts/release-key.js): never in the repository
+release-key.enc.json
+*.enc.json

@@ -517,6 +517,14 @@ pub struct NoidObservation {
     /// the `production` profile only; printed on every tick that uses it. Never implied by a profile.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accept_producer_concentration: bool,
+    /// D2 (2026-11-20): `--acknowledge-producer-share <permille>`, the narrow acknowledgement: waives, under `production` only, the refusal "one address above the
+    /// limit" while the measured share in both windows is at most this value (1..=650), and the refusal "no second Parano1d node" when the one configured node
+    /// is a loopback node. Never the fail-closed refusals, a disagreement, a remembered detection or the alert latch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledge_producer_share: Option<u64>,
+    /// Exactly one `--noid-rpc` was given and its host is loopback (`127.0.0.1`, `localhost`, `[::1]`): the person's own node. Read only by the acknowledgement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub single_node_loopback: bool,
     /// T21-13: the producer-differs marker beside Bob's swap file (`crate::producer_marker`): an earlier tick saw the two nodes name different
     /// producers for a block with equal hashes. `Absent` (and not serialized) for Alice, a fixture, the library and the simulator. Holds no address.
     #[serde(default, skip_serializing_if = "crate::producer_marker::MarkerState::is_absent")]

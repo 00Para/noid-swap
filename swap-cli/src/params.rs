@@ -368,9 +368,9 @@ pub const PRODUCTION: Gates = Gates {
     b_bob: 60,
     margin: 18,
     d_offset: 738,
-    max_noid_micro: None,
-    max_eth_wei: None,
-    eth_chain_ids: None,
+    max_noid_micro: Some(2_500_000_000),
+    max_eth_wei: Some(500_000_000_000_000_000),
+    eth_chain_ids: Some(&[1]),
     producer_window_long: 2_880,
     producer_window_short: 720,
     producer_limit_permille: 350,
@@ -836,7 +836,7 @@ impl Gates {
     /// 6. The T6 rotation guard fits in `B_safety`.
     /// 8. (REVIEW-5 R5-5) `tx_grace + RA + DE <= M_A`: a reveal sent at the cutoff and silently dropped can be re-sent in time.
     /// 9. (REVIEW-5 R5-5) `W_A < W_A_min + min_cancel_age + abort_after_cancel`: a lock that lands after a recorded abort fails Alice's (I3).
-    /// 7. Every non-production profile (`rehearsal`, `sepolia`) has all three caps; the production one has none.
+    /// 7. Every profile (`production`, `rehearsal`, `sepolia`) has all three caps.
     pub fn validate(&self) -> Result<(), GateError> {
         let bad = |why: String| Err(GateError::BadProfile(format!("{}: {why}", self.name)));
         if self.tau_fast_s == 0 || self.w_a_s == 0 || self.w_a_min_s == 0 || self.m_a_s == 0 || self.p_auth_budget_s == 0 {
@@ -941,15 +941,12 @@ impl Gates {
         if self.producer_gate_enforced != (self.name == ProfileName::Production) {
             return bad("the producer screen is enforced under the production profile and warns under every other one".into());
         }
+        // Every profile carries all three caps (the production profile too, since 2026-11-20).
         let capped = self.max_noid_micro.is_some() && self.max_eth_wei.is_some() && self.eth_chain_ids.is_some();
-        let uncapped = self.max_noid_micro.is_none() && self.max_eth_wei.is_none() && self.eth_chain_ids.is_none();
-        match self.name {
-            ProfileName::Rehearsal | ProfileName::Sepolia if !capped => {
-                bad("a non-production profile (rehearsal, sepolia) must cap the NOID amount, the ETH amount and the chain".into())
-            }
-            ProfileName::Production if !uncapped => bad("the production profile has no caps".into()),
-            _ => Ok(()),
+        if !capped {
+            return bad("every profile (production, rehearsal, sepolia) must cap the NOID amount, the ETH amount and the chain".into());
         }
+        Ok(())
     }
 }
 
@@ -1166,7 +1163,10 @@ mod tests {
             ("T6 guard does not fit in B_safety", Gates { b_safety: 3, d_offset: 120, ..REHEARSAL }),
             ("rehearsal without caps", Gates { max_noid_micro: None, ..REHEARSAL }),
             ("rehearsal on any chain", Gates { eth_chain_ids: None, ..REHEARSAL }),
-            ("production with a cap", Gates { max_noid_micro: Some(1), ..PRODUCTION }),
+            ("production without caps", Gates { max_noid_micro: None, max_eth_wei: None, eth_chain_ids: None, ..PRODUCTION }),
+            ("production without a NOID cap", Gates { max_noid_micro: None, ..PRODUCTION }),
+            ("production without an ETH cap", Gates { max_eth_wei: None, ..PRODUCTION }),
+            ("production without a chain pin", Gates { eth_chain_ids: None, ..PRODUCTION }),
             ("zero tau", Gates { tau_fast_s: 0, ..REHEARSAL }),
             ("tx grace below two rebroadcast times", Gates { tx_grace_s: 119, ..REHEARSAL }),
             ("R5-5: tx_grace + RA + DE above M_A (production)", Gates { tx_grace_s: 1_561, ..PRODUCTION }),
@@ -1239,8 +1239,15 @@ mod tests {
         assert!(matches!(R.check_caps(1, 10_000_000_000_000_001, 31_337), Err(GateError::EthAmountAboveCap { .. })));
         assert!(matches!(R.check_caps(1, 1, 1), Err(GateError::ChainNotAllowed { .. })));
         assert!(matches!(R.check_caps(1, 1, 11_155_111), Err(GateError::ChainNotAllowed { .. })));
-        // Production has no caps.
-        assert_eq!(P.check_caps(u64::MAX, u128::MAX, 1), Ok(()));
+        // Production carries the caps of 2026-11-20: 2,500 NOID, 0.5 ETH, chain 1; at the cap passes, one unit above fails.
+        assert_eq!(P.check_caps(2_500_000_000, 500_000_000_000_000_000, 1), Ok(()));
+        assert!(matches!(P.check_caps(2_500_000_001, 1, 1), Err(GateError::NoidAmountAboveCap { .. })));
+        assert!(matches!(P.check_caps(1, 500_000_000_000_000_001, 1), Err(GateError::EthAmountAboveCap { .. })));
+        assert!(matches!(P.check_caps(1, 1, 11_155_111), Err(GateError::ChainNotAllowed { .. })));
+        assert!(matches!(P.check_caps(1, 1, 31_337), Err(GateError::ChainNotAllowed { .. })));
+        assert_eq!(P.max_noid_micro, Some(2_500_000_000));
+        assert_eq!(P.max_eth_wei, Some(500_000_000_000_000_000));
+        assert_eq!(P.eth_chain_ids, Some(&[1u64][..]));
     }
 
     #[test]

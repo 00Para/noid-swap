@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const realHttps = require("node:https");
 const U = require("../lib/updates.js");
+const F = require("./release-fixture.js");
 
 const realGet = realHttps.get;
 realHttps.get = () => {
@@ -16,27 +17,23 @@ test.after(() => {
 });
 
 const REPO = "owner/name";
-const rel = (tag, extra = {}) => ({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}`, ...extra });
-const fetchOf = (answer) => {
-  const calls = [];
-  const f = async (url, opts) => {
-    calls.push({ url, opts });
-    if (answer instanceof Error) throw answer;
-    return typeof answer === "function" ? answer() : answer;
-  };
-  f.calls = calls;
-  return f;
+const rel = (tag, extra = {}) => F.withAssets({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}`, ...extra });
+const fetchOf = (answer, o) => F.releaseFetch(answer, o);
+const NONE = { state: "none", unsafeForNewSwaps: false, unsafeNote: null };
+const strip = (r) => {
+  const { signedOldest, ...rest } = r;
+  return rest;
 };
-const check = (releases, over = {}) => U.checkForUpdate({ fetchJson: fetchOf(releases), currentVersion: "0.1.0", anyActive: false, repo: REPO, ...over });
+const check = async (releases, over = {}) => strip(await U.checkForUpdate({ fetchJson: over.fetchJson || fetchOf(releases, over.files), currentVersion: "0.1.0", anyActive: false, repo: REPO, publicKey: F.PUB, ...over }));
 
 test("a newer release is reported with its version and its release page", async () => {
-  assert.deepEqual(await check([rel("v0.2.0")]), { state: "newer", latest: "0.2.0", url: `https://github.com/${REPO}/releases/tag/v0.2.0` });
+  assert.deepEqual(await check([rel("v0.2.0")]), { state: "newer", latest: "0.2.0", url: `https://github.com/${REPO}/releases/tag/v0.2.0`, note: "A short note.", sha256: { "setup.exe": "a".repeat(64) }, unsafeForNewSwaps: false, unsafeNote: null });
 });
 
 test("the same version and an older one report none", async () => {
-  assert.deepEqual(await check([rel("v0.1.0")]), { state: "none" });
-  assert.deepEqual(await check([rel("v0.0.9"), rel("v0.0.1")]), { state: "none" });
-  assert.deepEqual(await check([]), { state: "none" });
+  assert.deepEqual(await check([rel("v0.1.0")]), NONE);
+  assert.deepEqual(await check([rel("v0.0.9"), rel("v0.0.1")]), NONE);
+  assert.deepEqual(await check([]), NONE);
 });
 
 test("the highest counting release wins, compared as numbers and not as text", async () => {
@@ -58,7 +55,7 @@ test("a draft, a prerelease and a tag of another shape never count", async () =>
     rel("v09.7.x"),
     rel(" v9.8.0"),
   ];
-  assert.deepEqual(await check(noise), { state: "none" });
+  assert.deepEqual(await check(noise), NONE);
   assert.equal((await check([...noise, rel("v0.3.0")])).latest, "0.3.0");
 });
 
@@ -97,7 +94,7 @@ test("a fetch that does not answer in time is a time-out, and its signal is abor
     signal = opts.signal;
     return new Promise(() => {});
   };
-  const r = await U.checkForUpdate({ fetchJson, currentVersion: "0.1.0", anyActive: false, repo: REPO, timeoutMs: 25 });
+  const r = await U.checkForUpdate({ fetchJson, currentVersion: "0.1.0", anyActive: false, repo: REPO, publicKey: F.PUB, timeoutMs: 25 });
   assert.deepEqual(r, { state: "error", reason: "timeout" });
   assert.equal(signal.aborted, true);
 });
@@ -127,7 +124,7 @@ test("without a configured repository, or with a malformed one, nothing is asked
 
 test("the request is one GET of the releases list with the generic user agent and no cookie, no token", async () => {
   const f = fetchOf([]);
-  await U.checkForUpdate({ fetchJson: f, currentVersion: "0.1.0", anyActive: false, repo: REPO });
+  await U.checkForUpdate({ fetchJson: f, currentVersion: "0.1.0", anyActive: false, repo: REPO, publicKey: F.PUB });
   assert.equal(f.calls.length, 1);
   const { url, opts } = f.calls[0];
   assert.equal(url, "https://api.github.com/repos/owner/name/releases?per_page=10");
@@ -138,7 +135,7 @@ test("the request is one GET of the releases list with the generic user agent an
 });
 
 test("the module can only notify: it has no download, install or write function", () => {
-  assert.deepEqual(Object.keys(U).sort(), ["API_HOST", "MAX_BYTES", "NOTICE_TEXT", "TIMEOUT_MS", "USER_AGENT", "UpdateError", "checkForUpdate", "compareVersions", "createHttpsFetchJson", "describe", "isDailyDue", "parseVersion", "selectRelease"]);
+  assert.deepEqual(Object.keys(U).sort(), ["API_HOST", "ASSET_HOSTS", "KEY_MISSING_TEXT", "MAX_BYTES", "NOTICE_TEXT", "TIMEOUT_MS", "UNVERIFIED_TEXT", "USER_AGENT", "UpdateError", "checkForUpdate", "cleanSums", "compareVersions", "createHttpsFetchJson", "describe", "isDailyDue", "parseVersion", "selectRelease"]);
   const src = require("node:fs").readFileSync(require.resolve("../lib/updates.js"), "utf8");
   assert.ok(!/child_process|writeFile|createWriteStream|execFile|spawn|shell\.openExternal|autoUpdater/.test(src));
 });
@@ -225,15 +222,15 @@ test("the whole check on the fake https: newer, and a hostile answer", async () 
     res.emit("data", Buffer.from(body));
     res.emit("end");
   });
-  const r = await U.checkForUpdate({ fetchJson: U.createHttpsFetchJson({ https }), currentVersion: "0.1.0", anyActive: false, repo: REPO });
-  assert.equal(r.state, "newer");
+  const r = await U.checkForUpdate({ fetchJson: U.createHttpsFetchJson({ https }), currentVersion: "0.1.0", anyActive: false, repo: REPO, publicKey: F.PUB });
+  assert.equal(r.state, "unverified", "this fake answers every request with the list, so no signed notice is found");
   const hostile = fakeHttps((req, cb) => {
     const res = response(200, {});
     cb(res);
     res.emit("data", Buffer.from("<html>"));
     res.emit("end");
   });
-  assert.deepEqual(await U.checkForUpdate({ fetchJson: U.createHttpsFetchJson({ https: hostile }), currentVersion: "0.1.0", anyActive: false, repo: REPO }), { state: "error", reason: "bad_answer" });
+  assert.deepEqual(await U.checkForUpdate({ fetchJson: U.createHttpsFetchJson({ https: hostile }), currentVersion: "0.1.0", anyActive: false, repo: REPO, publicKey: F.PUB }), { state: "error", reason: "bad_answer" });
 });
 
 // ---- small helpers ----
@@ -251,11 +248,11 @@ test("isDailyDue: never checked, a day old, and not yet a day old", () => {
 
 test("describe gives the page the version, the link and the fixed words, and nothing for the other states", () => {
   const d = U.describe({ state: "newer", latest: "0.2.0", url: "https://github.com/owner/name/releases/tag/v0.2.0" });
-  assert.deepEqual(d, { state: "newer", latest: "0.2.0", url: "https://github.com/owner/name/releases/tag/v0.2.0", text: U.NOTICE_TEXT });
-  assert.match(U.NOTICE_TEXT, /sha256 and build provenance on that page before installing/);
-  assert.deepEqual(U.describe({ state: "none" }), { state: "none", latest: null, url: null });
-  assert.deepEqual(U.describe({ state: "error", reason: "timeout" }), { state: "error", latest: null, url: null });
-  assert.deepEqual(U.describe({ state: "skipped_active" }), { state: "skipped_active", latest: null, url: null });
+  assert.deepEqual(d, { state: "newer", latest: "0.2.0", url: "https://github.com/owner/name/releases/tag/v0.2.0", text: U.NOTICE_TEXT, note: null, sha256: [], unsafeForNewSwaps: false, unsafeNote: null });
+  assert.match(U.NOTICE_TEXT, /Compare the installer's SHA-256 with the signed value below before installing/);
+  assert.deepEqual(U.describe(NONE), { state: "none", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
+  assert.deepEqual(U.describe({ state: "error", reason: "timeout" }), { state: "error", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
+  assert.deepEqual(U.describe({ state: "skipped_active" }), { state: "skipped_active", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
 });
 
 test("parseVersion and compareVersions are strict", () => {

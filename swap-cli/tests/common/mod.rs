@@ -115,6 +115,8 @@ pub struct World {
     /// Threat T21: what the producer read says, and whether the operator passed `--accept-producer-concentration`.
     pub producers: SimProducers,
     pub accept_producer_concentration: bool,
+    pub acknowledge_producer_share: Option<u64>,
+    pub single_node_loopback: bool,
     /// The swap's timing profile (the producer windows come from it).
     pub profile: ProfileName,
     /// The second Parano1d node's tip is this many blocks behind the first.
@@ -195,6 +197,8 @@ impl World {
             single_node_ok: false,
             producers: SimProducers::Healthy,
             accept_producer_concentration: false,
+            acknowledge_producer_share: None,
+            single_node_loopback: false,
             profile: public.params.profile,
             second_tip_lag: 0,
             second_instance: None,
@@ -231,6 +235,8 @@ impl World {
         let mut obs = self.noid_view(tracked);
         obs.single_node_ok = self.single_node_ok;
         obs.accept_producer_concentration = self.accept_producer_concentration;
+        obs.acknowledge_producer_share = self.acknowledge_producer_share;
+        obs.single_node_loopback = self.single_node_loopback;
         obs.producers = match &self.producers {
             SimProducers::Absent => None,
             SimProducers::Fixed(s) => Some(s.clone()),
@@ -312,6 +318,8 @@ impl World {
             single_node_ok: false,
             producers: None,
             accept_producer_concentration: false,
+            acknowledge_producer_share: None,
+            single_node_loopback: false,
             producer_marker: Default::default(),
         }
     }

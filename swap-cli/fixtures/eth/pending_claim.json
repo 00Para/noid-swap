@@ -1,5 +1,5 @@
 {
-  "description": "Alice's claim(lockId, preimage) is pending in the mempool (tx 0x063830ffe85a0e2bcb43950e146f39849b7d55fe55fe0f2214844b61392c7e25); the lock is still unclaimed on chain. Recorded by eth/scripts/record-fixtures.js on Hardhat 2.29.1 (in-process network, chainId 31337); block timestamps are forced so re-running regenerates identical files. contract=0x5fbdb2315678afecb367f032d93f642f64180aa3 sender(Bob)=0x70997970c51812dc3a010c7d01b50e0d17dc79c8 receiver(Alice)=0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc lockId=0xd767c0233cc9e31683a3cf13d5d4d3217d51e5a6c9624aa50daa7f23e795bb50 hashlock=0x630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd timelock=1893463200 amount_wei=10000000000000000 preimage=0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f (public test vector). Calls appear in the order EthWatcher::observe() makes them. REVIEW-2 F1: eth_chainId (0x7a69 = 31337, Hardhat) added by hand after the recording; the watcher now asks it on every poll. The contract eth_getCode now comes right after eth_chainId and its params are not pinned (the CLI tests replay it for another contract address). The Locked block (0x2) is also read for its timestamp (REVIEW-2 F11).",
+  "description": "Alice's claim(lockId, preimage) is pending in the mempool (tx 0x063830ffe85a0e2bcb43950e146f39849b7d55fe55fe0f2214844b61392c7e25); the lock is still unclaimed on chain. Recorded by eth/scripts/record-fixtures.js on Hardhat 2.29.1 (in-process network, chainId 31337); block timestamps are forced so re-running regenerates identical files. contract=0x5fbdb2315678afecb367f032d93f642f64180aa3 sender(Bob)=0x70997970c51812dc3a010c7d01b50e0d17dc79c8 receiver(Alice)=0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc lockId=0xd767c0233cc9e31683a3cf13d5d4d3217d51e5a6c9624aa50daa7f23e795bb50 hashlock=0x630dcd2966c4336691125448bbb25b4ff412a49c732db2c8abc1b8581bd710dd timelock=1893463200 amount_wei=10000000000000000 preimage=0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f (public test vector). Calls appear in the order EthWatcher::observe() makes them. REVIEW-2 F1: eth_chainId (0x1: set by hand to the chain the production profile pins; the recording itself ran on Hardhat, 31337) added by hand after the recording; the watcher now asks it on every poll. The contract eth_getCode now comes right after eth_chainId and its params are not pinned (the CLI tests replay it for another contract address). The Locked block (0x2) is also read for its timestamp (REVIEW-2 F11).",
   "calls": [
     {
       "method": "eth_blockNumber",
@@ -123,7 +123,7 @@
     {
       "method": "eth_chainId",
       "params": [],
-      "result": "0x7a69"
+      "result": "0x1"
     },
     {
       "method": "eth_getCode",

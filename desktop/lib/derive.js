@@ -8,6 +8,7 @@
  *   boardKey(R)   = K("board", R)                                        32 bytes, an AES-256-GCM key (sealed.js)
  *   migratedKey(R)= K("migrated-passphrase", R)                          32 bytes, an AES-256-GCM key (sealed.js)
  *   inviteKey     = HMAC-SHA256(S, "no1d-swap/v1/board-invite/install")  32 bytes
+ *   historyKey    = HMAC-SHA256(S, "no1d-swap/v1/payout-history/install") 32 bytes, an AES-256-GCM key for payout-history.sealed (sealed.js)
  *   keyCheck      = first 8 bytes of HMAC-SHA256(S, "no1d-swap/v1/key-check"), as 16 lower-case hex characters
  *
  * The run id is read from run.json, never from the folder name. The same thing by hand (no program needed) is written in desktop/README.md and
@@ -60,9 +61,14 @@ function inviteKey(S) {
   return mac(S, "no1d-swap/v1/board-invite/install");
 }
 
+/** K("payout-history", "install"): the key of the sealed history of payout addresses. The run id of this label is the fixed word "install". */
+function historyKey(S) {
+  return mac(S, "no1d-swap/v1/payout-history/install");
+}
+
 /** 16 lower-case hex characters. It tells an install apart from another one; it reveals nothing of S. */
 function keyCheck(S) {
   return mac(S, "no1d-swap/v1/key-check").subarray(0, 8).toString("hex");
 }
 
-module.exports = { LABELS, DeriveError, isRunId, K, passphrase, boardKey, migratedKey, inviteKey, keyCheck };
+module.exports = { LABELS, DeriveError, isRunId, K, passphrase, boardKey, migratedKey, inviteKey, historyKey, keyCheck };

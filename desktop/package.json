@@ -1,8 +1,8 @@
 {
   "name": "no1d-swap",
   "productName": "No1d Swap",
-  "version": "0.1.4",
-  "description": "No1d Swap: a desktop program for atomic swaps between Parano1d (NOID) and Ethereum, test networks only in this version.",
+  "version": "0.1.5",
+  "description": "No1d Swap: a desktop program for atomic swaps between Parano1d (NOID) and Ethereum, test networks and Ethereum mainnet within fixed limits.",
   "private": true,
   "main": "main.js",
   "license": "MIT",
@@ -10,7 +10,7 @@
     "test": "node --test test/"
   },
   "no1d": {
-    "updateRepo": null
+    "updateRepo": "00Para/noid-swap"
   },
   "devDependencies": {
     "electron": "45.2.3",

@@ -3034,3 +3034,342 @@ fn a_latch_is_written_again_when_an_override_came_after_the_last_one_of_its_kind
     assert!(out_notes(&out, "ALERT:").is_empty());
     assert_eq!(latch_at(&bob).len(), 2, "and only once");
 }
+
+// ================================================================== D2: the narrow acknowledgement (--acknowledge-producer-share)
+
+use swap_cli::producer_gate::{ack_history_entry, parse_ack_value, report, ACK_FLAG, ACK_HARD_MAX_PERMILLE, ACK_HISTORY};
+
+fn acks(s: &Scenario) -> usize {
+    s.bob.file.history.iter().filter(|h| h.event.starts_with(ACK_HISTORY)).count()
+}
+
+/// 52.1 % of the long window (521 permille rounded up) and 55.6 % of the short one (556).
+fn big(n: &mut NoidObservation) {
+    shape(n, 1_500, 400, 1_800, 500);
+}
+
+#[test]
+fn the_ack_value_is_refused_at_parse_time_outside_1_to_650() {
+    assert_eq!(ACK_HARD_MAX_PERMILLE, 650);
+    assert_eq!(parse_ack_value("1"), Ok(1));
+    assert_eq!(parse_ack_value("650"), Ok(650));
+    for bad in ["0", "651", "1000", "-1", "abc", "", "6.5", "true"] {
+        assert!(parse_ack_value(bad).is_err(), "{bad}");
+    }
+    // Through the binary: refused before any node is asked.
+    let dir = tempfile::tempdir().unwrap();
+    let b = dir.path().join("b.swap.json");
+    example_bob_file(example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw), 1).unwrap().save(&b).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    for value in ["651", "0"] {
+        let (ok, _, err) = run(bin()
+            .args(["tick", s(&b), "--noid-fixture"])
+            .arg(fx.join("parano1d/idle.json"))
+            .arg("--eth-fixture")
+            .arg(fx.join("eth/locked.json"))
+            .args([ACK_FLAG, value]));
+        assert!(!ok && err.contains(ACK_FLAG), "{value}: {err}");
+    }
+}
+
+#[test]
+fn the_ack_waives_the_share_only_up_to_its_ceiling_in_both_windows() {
+    // 521 permille long, 556 short. A ceiling below either window refuses; at the higher of the two it passes.
+    for (ceiling, passes) in [(650u64, true), (556, true), (555, false), (521, false), (350, false)] {
+        let mut s = scenario(ProfileName::Production);
+        let r = s.tick_bob_with(|n, _| {
+            big(n);
+            n.acknowledge_producer_share = Some(ceiling);
+        });
+        assert_eq!(r.action.kind() == "lock_eth", passes, "ceiling {ceiling}: {:?} {:?}", r.action, r.notes);
+        if passes {
+            let a = note_starting(&r, "ACKNOWLEDGED: producer share 556 permille <= ceiling ");
+            assert_eq!(a.len(), 1, "{:?}", r.notes);
+            assert!(a[0].starts_with(&format!("ACKNOWLEDGED: producer share 556 permille <= ceiling {ceiling}")), "{}", a[0]);
+            no_address(a[0]);
+            assert!(note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN").is_empty(), "not the override: {:?}", r.notes);
+            assert_eq!(acks(&s), 1);
+            let want = format!("{ACK_HISTORY}: largest 521 permille of 2880 and 556 permille of 720, ceiling {ceiling} permille, at ");
+            assert!(s.bob.file.history.iter().any(|h| h.event.starts_with(&want)));
+            assert!(!s.bob.file.history.iter().any(|h| h.event.starts_with(OVERRIDE_HISTORY)), "the override entry is not written");
+        } else {
+            assert_eq!(acks(&s), 0);
+            assert!(wait_reason(&r).starts_with("ALARM: producer concentration too high"), "{:?}", r.action);
+        }
+    }
+    // The exact boundary of the hard maximum: 65.0 % passes at 650, one block over does not (2,880 and 720 blocks).
+    for (long, short, passes) in [(1_872u64, 468u64, true), (1_873, 468, false), (1_872, 469, false)] {
+        let mut s = scenario(ProfileName::Production);
+        let r = s.tick_bob_with(|n, _| {
+            shape(n, long, short, long, short);
+            n.acknowledge_producer_share = Some(650);
+        });
+        assert_eq!(r.action.kind() == "lock_eth", passes, "{long}/{short}: {:?}", r.action);
+    }
+}
+
+#[test]
+fn the_ack_writes_one_history_entry_and_the_override_flag_keeps_its_own_entry() {
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        big(n);
+        n.acknowledge_producer_share = Some(650);
+    });
+    assert_eq!(r.action.kind(), "lock_eth");
+    assert_eq!(acks(&s), 1);
+    // The entry is on record: the same observation proposes no further entry, and the unit function still sees the reason.
+    let (noid, eth, now) = {
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        big(&mut n);
+        n.acknowledge_producer_share = Some(650);
+        (n, w.eth_obs(), w.eth_time)
+    };
+    let d = decide(&s.bob.file, &noid, &eth, now);
+    assert!(d.log.iter().all(|l| !l.starts_with(ACK_HISTORY)), "{:?}", d.log);
+    assert!(ack_history_entry(ProfileName::Production.gates(), &noid, now).is_some());
+    assert_eq!(acks(&s), 1);
+    // Both flags: the override has its own entry and the acknowledgement writes none.
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        big(n);
+        n.acknowledge_producer_share = Some(650);
+        n.accept_producer_concentration = true;
+    });
+    assert_eq!(r.action.kind(), "lock_eth");
+    assert_eq!(acks(&s), 0);
+    assert!(s.bob.file.history.iter().any(|h| h.event.starts_with(OVERRIDE_HISTORY)));
+}
+
+#[test]
+fn the_ack_never_waives_what_cannot_be_checked_or_a_disagreement_or_a_remembered_detection() {
+    type Make = Box<dyn Fn(&mut NoidObservation)>;
+    let cases: Vec<(&str, Make)> = vec![
+        ("no summary", Box::new(|n| n.producers = None)),
+        ("incomplete summary", Box::new(tweak_none)),
+        ("stale headers", Box::new(|n| tweak(n, |p| p.read_at = Some(p.read_at.unwrap() - 1_000)))),
+        ("headers end far below the tip", Box::new(|n| tweak(n, |p| p.header_tip -= 50))),
+        ("second node differs", Box::new(|n| tweak(n, |p| p.second = SecondCheck::Differs { height: 5, first: "aa".into(), second: "bb".into() }))),
+        ("second node names another producer", Box::new(|n| tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 5 }))),
+        ("second node unreadable", Box::new(|n| tweak(n, |p| p.second = SecondCheck::Unreadable { reason: "down".into() }))),
+        ("marker present", Box::new(|n| n.producer_marker = MarkerState::Present { height: 9, at: 1, kind: MarkerKind::Producer })),
+        ("marker unreadable", Box::new(|n| n.producer_marker = MarkerState::Unreadable { reason: "x".into() })),
+        ("marker remembered in history", Box::new(|n| n.producer_marker = MarkerState::Remembered { at: 1 })),
+        ("share above the value", Box::new(|n| shape(n, 1_900, 480, 2_000, 500))),
+    ];
+    for (name, make) in cases {
+        let mut s = scenario(ProfileName::Production);
+        let r = s.tick_bob_with(|n, _| {
+            big(n);
+            make(n);
+            n.acknowledge_producer_share = Some(650);
+        });
+        assert_eq!(r.action.kind(), "wait", "{name}: {:?} {:?}", r.action, r.notes);
+        assert_eq!(s.bob.executor.count("lock_eth"), 0, "{name}");
+        assert_eq!(acks(&s), 0, "{name}");
+        assert!(note_starting(&r, "ACKNOWLEDGED").is_empty(), "{name}: {:?}", r.notes);
+        // The report says the flag cannot waive it (the page refuses the approval up front).
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        big(&mut n);
+        make(&mut n);
+        n.acknowledge_producer_share = Some(650);
+        let rep = report(ProfileName::Production.gates(), &n, w.eth_time);
+        assert!(!rep.waivable_by_acknowledgement, "{name}: {rep:?}");
+        assert!(!rep.waived_by_acknowledgement, "{name}: {rep:?}");
+    }
+}
+
+#[test]
+fn the_ack_waives_a_missing_second_node_only_when_the_one_node_is_loopback() {
+    let single = |n: &mut NoidObservation, loopback: bool, share: (u64, u64)| {
+        shape(n, share.0, share.1, share.0, share.1);
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+        n.acknowledge_producer_share = Some(650);
+        n.single_node_loopback = loopback;
+    };
+    // Loopback, share under the limit: the lock is offered, with the ACKNOWLEDGED line and one history entry.
+    let mut s = scenario(ProfileName::Production);
+    s.world.borrow_mut().single_node = true;
+    let r = s.tick_bob_with(|n, _| single(n, true, (600, 200)));
+    assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
+    assert_eq!(note_starting(&r, "ACKNOWLEDGED: producer share 278 permille <= ceiling 650").len(), 1, "{:?}", r.notes);
+    assert_eq!(acks(&s), 1);
+    // Loopback and a share above the limit but within the ceiling: both waivers at once.
+    let mut s = scenario(ProfileName::Production);
+    s.world.borrow_mut().single_node = true;
+    let r = s.tick_bob_with(|n, _| single(n, true, (1_500, 400)));
+    assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
+    assert_eq!(acks(&s), 1);
+    // Not loopback: refused, with the flag.
+    let mut s = scenario(ProfileName::Production);
+    s.world.borrow_mut().single_node = true;
+    let r = s.tick_bob_with(|n, _| single(n, false, (600, 200)));
+    assert_eq!(r.action.kind(), "wait", "{:?}", r.action);
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    assert_eq!(acks(&s), 0);
+    // Loopback without the flag: refused.
+    let mut s = scenario(ProfileName::Production);
+    s.world.borrow_mut().single_node = true;
+    let r = s.tick_bob_with(|n, _| {
+        single(n, true, (600, 200));
+        n.acknowledge_producer_share = None;
+    });
+    assert_eq!(r.action.kind(), "wait", "{:?}", r.action);
+    // A second node that is configured and cannot be read: still refused.
+    let mut s = scenario(ProfileName::Production);
+    s.world.borrow_mut().second_unreadable = Some("parano1d watcher (second node): down".into());
+    let r = s.tick_bob_with(|n, _| {
+        big(n);
+        n.acknowledge_producer_share = Some(650);
+        n.single_node_loopback = true;
+    });
+    assert_eq!(r.action.kind(), "wait", "{:?}", r.action);
+    // Production only.
+    let mut n = NoidObservation::default();
+    n.acknowledge_producer_share = Some(650);
+    n.single_node_loopback = true;
+    assert!(swap_cli::producer_gate::ack_waives_single_node(ProfileName::Production.gates(), &n));
+    assert!(!swap_cli::producer_gate::ack_waives_single_node(ProfileName::Sepolia.gates(), &n));
+}
+
+#[test]
+fn the_ack_changes_nothing_under_sepolia_and_rehearsal_and_the_old_flag_is_unchanged() {
+    for profile in [ProfileName::Sepolia, ProfileName::Rehearsal] {
+        let mut s = scenario(profile);
+        let r = s.tick_bob_with(|n, _| {
+            big(n);
+            n.acknowledge_producer_share = Some(650);
+            n.single_node_loopback = true;
+        });
+        assert_eq!(r.action.kind(), "lock_eth", "{profile:?}");
+        assert!(note_starting(&r, "ACKNOWLEDGED").is_empty(), "{:?}", r.notes);
+        assert_eq!(note_starting(&r, "WARNING: producer concentration too high").len(), 1, "{:?}", r.notes);
+        assert_eq!(acks(&s), 0);
+    }
+    // `--accept-producer-concentration` still lifts the fail-closed refusal of the screen too.
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        n.producers = None;
+        n.accept_producer_concentration = true;
+    });
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
+    assert_eq!(note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN").len(), 1);
+}
+
+#[test]
+fn the_structured_report_says_what_the_ack_can_and_cannot_waive() {
+    let g = ProfileName::Production.gates();
+    let now_noid = |f: &dyn Fn(&mut NoidObservation)| {
+        let s = scenario(ProfileName::Production);
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        shape(&mut n, 300, 100, 400, 150);
+        f(&mut n);
+        (n, w.eth_time)
+    };
+    let (n, now) = now_noid(&|_| {});
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.second_node, r.waivable_by_acknowledgement, r.enforced), ("pass", "ok", true, true));
+    assert_eq!((r.share_permille_long, r.share_permille_short, r.limit_permille, r.hard_max_permille), (Some(105), Some(139), 350, 650));
+    let (n, now) = now_noid(&|n| shape(n, 1_500, 400, 1_800, 500));
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.waivable_by_acknowledgement, r.waived_by_acknowledgement), ("concentrated", true, false));
+    let (n, now) = now_noid(&|n| {
+        shape(n, 1_500, 400, 1_800, 500);
+        n.acknowledge_producer_share = Some(560);
+    });
+    assert!(report(g, &n, now).waived_by_acknowledgement);
+    let (n, now) = now_noid(&|n| {
+        shape(n, 1_500, 400, 1_800, 500);
+        n.acknowledge_producer_share = Some(500);
+    });
+    let r = report(g, &n, now);
+    assert!(r.waivable_by_acknowledgement && !r.waived_by_acknowledgement, "{r:?}");
+    let (n, now) = now_noid(&|n| shape(n, 1_900, 480, 2_000, 500));
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.waivable_by_acknowledgement), ("concentrated", false));
+    let (n, now) = now_noid(&|n| {
+        n.second = None;
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+    });
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.second_node, r.waivable_by_acknowledgement), ("one_node", "missing", false));
+    let (n, now) = now_noid(&|n| {
+        n.second = None;
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+        n.single_node_loopback = true;
+    });
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.waivable_by_acknowledgement, r.single_node_loopback), ("one_node", true, true));
+    let (n, now) = now_noid(&|n| tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 3 }));
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.second_node, r.waivable_by_acknowledgement), ("disagrees", "disagrees", false));
+    let (n, now) = now_noid(&|n| n.producer_marker = MarkerState::Remembered { at: 4 });
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.second_node, r.waivable_by_acknowledgement), ("remembered", "remembered", false));
+    let (n, now) = now_noid(&|n| n.producers = None);
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.waivable_by_acknowledgement, r.share_permille_long), ("cannot_check", false, None));
+    let (n, now) = now_noid(&|n| tweak(n, |p| p.read_at = Some(p.read_at.unwrap() - 1_000)));
+    assert_eq!(report(g, &n, now).state, "stale");
+    // JSON shape (the field names the page reads), and no address.
+    let (n, now) = now_noid(&|_| {});
+    let v = serde_json::to_value(report(g, &n, now)).unwrap();
+    for k in [
+        "state",
+        "enforced",
+        "share_permille_long",
+        "share_permille_short",
+        "limit_permille",
+        "second_node",
+        "single_node_loopback",
+        "waivable_by_acknowledgement",
+        "hard_max_permille",
+        "acknowledged_ceiling_permille",
+        "waived_by_acknowledgement",
+    ] {
+        assert!(v.get(k).is_some(), "{k}");
+    }
+    no_address(&v.to_string());
+    // Sepolia: not enforced, so nothing needs waiving.
+    let r = report(ProfileName::Sepolia.gates(), &n, now);
+    assert!(r.waivable_by_acknowledgement && !r.enforced && !r.waived_by_acknowledgement);
+}
+
+#[test]
+fn the_tick_json_carries_producer_screen_and_the_loopback_single_node_is_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = dir.path().join("b.swap.json");
+    example_bob_file(example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw), 1).unwrap().save(&b).unwrap();
+    let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let eth_fx = fx.join("eth/locked.json");
+    let replay = swap_cli::watch::FixtureRpc::from_file(&fx.join("parano1d/idle.json")).unwrap();
+    let node = MockNode::spawn(move |m, p| {
+        if m == "paranoid_getBlockHeader" {
+            let h = p[0].as_u64().unwrap();
+            if h > 280_517 {
+                return Ok(Value::Null);
+            }
+            return Ok(plain_header(h));
+        }
+        JsonRpc::call(&replay, m, p.clone())
+    });
+    let (ok, out, err) = run(bin().args(["tick", s(&b), "--eth-fixture", s(&eth_fx), "--noid-rpc", node.url.as_str(), ACK_FLAG, "650", "--single-node-ok"]));
+    assert!(ok, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    let ps = &v["producer_screen"];
+    assert_eq!(ps["single_node_loopback"], true, "{ps}");
+    assert_eq!(ps["second_node"], "missing", "{ps}");
+    assert_eq!(ps["acknowledged_ceiling_permille"], 650, "{ps}");
+    assert_eq!(ps["hard_max_permille"], 650);
+    assert_eq!(ps["limit_permille"], 350);
+    assert_eq!(v["noid"]["acknowledge_producer_share"], 650);
+    assert!(!out.contains("synthetic-miner"));
+    // Without the flag nothing about it is in the observation.
+    let (ok, out2, err) = run(bin().args(["tick", s(&b), "--eth-fixture", s(&eth_fx), "--noid-rpc", node.url.as_str(), "--single-node-ok"]));
+    assert!(ok, "{err}");
+    let v2: Value = serde_json::from_str(&out2).unwrap();
+    assert!(v2["noid"].get("acknowledge_producer_share").is_none());
+    assert_eq!(v2["producer_screen"]["acknowledged_ceiling_permille"], Value::Null);
+}

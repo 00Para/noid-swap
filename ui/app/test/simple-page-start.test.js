@@ -338,7 +338,8 @@ test("the approval box starts with what the person gives and gets, in coin colou
     const dlg = page.document.body.all((n) => n.tag === "dialog")[0];
     const lines = dlg.all((n) => n.tag === "p" && n.className.includes("plain")).map((n) => squash(textOf(n)));
     assert.equal(lines[0], `You give ${give}. You get ${get}.`, role);
-    assert.match(lines[1], /^From now on the program does every step of this swap/);
+    assert.match(lines[1], /^You give .* and get .*After this approval the program does every step by itself\.$/);
+    assert.ok(lines.length >= 4, "the give-get line and the plain lines (a line whose figures are not known is left out)");
     assert.doesNotMatch(dlg.textContent, /this console|the buttons below/, "program mode: the dialog says the program and a step sent by hand");
     assert.equal(dlg.all((n) => n.tag === "h2")[0].textContent, "Approve this swap");
     assert.equal(page.document.activeElement.attrs.id, "confirm-title", "focus is on the dialog's title, so one Enter never approves");

@@ -91,8 +91,8 @@ test("job order: desktop needs the swap-cli and eth jobs, the start-up test need
   assert.deepEqual(download("desktop"), ["swap-cli-${{ matrix.platform }}"]);
   assert.deepEqual(download("desktop-startup"), ["desktop-${{ matrix.platform }}"]);
   const platforms = (j) => j.strategy.matrix.include.map((i) => i.os);
-  assert.deepEqual(platforms(doc.jobs.desktop), ["windows-latest", "macos-14"]);
-  assert.deepEqual(platforms(doc.jobs["desktop-startup"]), ["windows-latest", "macos-14"]);
+  assert.deepEqual(platforms(doc.jobs.desktop), ["windows-latest", "macos-latest"]);
+  assert.deepEqual(platforms(doc.jobs["desktop-startup"]), ["windows-latest", "macos-latest"]);
 });
 
 test("swap-cli job: the contracts are compiled before cargo test, and a step fails the job when a code-hash test was skipped", (ctx) => {
@@ -193,12 +193,11 @@ test("desktop job: the checks come in the order that protects the package", (ctx
 test("desktop job: the sha256 file, the build info and the manifest are uploaded with the installer, and nothing else is published", (ctx) => {
   if (needYaml(ctx)) return;
   const uploads = doc.jobs.desktop.steps.filter((s) => (s.uses || "").startsWith("actions/upload-artifact"));
-  assert.equal(uploads.length, 2);
+  assert.equal(uploads.length, 1);
   assert.match(uploads[0].with.path, /SHA256SUMS\.txt/);
   assert.match(uploads[0].with.path, /DESKTOP-BUILD-INFO\.txt/);
   assert.match(uploads[0].with.path, /runtime-manifest\.json/);
   assert.equal(uploads[0].with["if-no-files-found"], "error");
-  assert.match(uploads[1].if, /lock_generated == 'true'/);
 });
 
 test("start-up test: sha256 check first, the self-test, the fuses, the installed files, the live.js parity, and on Windows the uninstall", (ctx) => {
@@ -372,4 +371,15 @@ test("no personal or tool name appears in the packaging files", () => {
     ...["runtime-lock", "stage", "codehash", "updates", "fuses", "startup-check", "workflow"].map((n) => path.join(__dirname, `${n}.test.js`)),
   ];
   for (const f of files) assert.ok(!banned.test(fs.readFileSync(f, "utf8")), path.relative(REPO, f));
+});
+
+test("desktop job: the build tools are installed from the committed lock file, and a missing lock file fails the job", (ctx) => {
+  if (needYaml(ctx)) return;
+  const step = doc.jobs.desktop.steps.find((x) => /Install the build tools/.test(x.name || ""));
+  assert.ok(step, "the install step exists");
+  assert.match(step.run, /npm ci --ignore-scripts/);
+  assert.match(step.run, /\[ ! -f package-lock\.json \]/);
+  assert.match(step.run, /exit 1/);
+  assert.ok(!/npm install/.test(step.run), "no unlocked fallback");
+  assert.ok(!/lock_generated/.test(JSON.stringify(doc)), "no generated-lock output or upload is left");
 });

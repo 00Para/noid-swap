@@ -6,8 +6,7 @@ same exit codes, same files in the run folder, so the console, the gate and the 
 shared part (`common.js`) and the read-only steps. The setup steps (4.3) and the spend steps (4.4) add their own sections here. Nothing is wired into
 the console yet (4.5). The bash helpers stay for terminal operators; they are not changed.
 
-Scope (design decision 6): wallet runs and the `poseidon` lock only. A step never passes `--mainnet`, never passes `--accept-producer-concentration`
-(run.json has neither), and takes its settings from `ctx.settings`, the validated run.json object, never from `env.local.sh`.
+Scope (design decision 6): wallet runs and the `poseidon` lock only. A step never passes `--accept-producer-concentration`. On a production (Ethereum mainnet) run.json the Ethereum spend steps pass `--mainnet --max-fee-gwei CAP` (+ `--priority-fee-gwei TIP`), never `--gas-price-gwei`; on a test network never `--mainnet`. Bob's ticks and lock step pass `--acknowledge-producer-share 650` only while his approval holds the producer-share statement (`ctx.producerAck()`). A step takes its settings from `ctx.settings`, the validated run.json object, never from `env.local.sh`.
 
 ## The context
 
@@ -75,13 +74,12 @@ live.js still gets its end of input; live.js's own result is returned for the st
 The settings of one swap, written only by the program, replacing the bash file `env.local.sh`. One JSON object, UTF-8, no BOM, at most
 64 KB, version 1. Every key of the table in the design notes (33) is required, `null` only where allowed; unknown keys, duplicate keys at
 any depth, comments, trailing commas and non-whole numbers are refused. `load(runDir)` returns a frozen object or throws
-`RunSettingsError` (a symlink, a non-file, an oversized file or a schema failure); every step then returns 2. Test networks only:
-profile `sepolia` or `rehearsal` with a matching `chain_id`; no mainnet fee cap, no producer waiver, no classic-run switch and no tool
+`RunSettingsError` (a symlink, a non-file, an oversized file or a schema failure); every step then returns 2. Test networks and Ethereum mainnet (program mode):
+profile `sepolia`, `rehearsal` or `production` with a matching `chain_id` (1 for production; its caps, fee cap, version 1, two Ethereum nodes and no board handover are in the schema); no producer waiver, no classic-run switch and no tool
 path in the schema. Node URLs: `http://` only to 127.0.0.1, ::1 or localhost, otherwise `https://`, no user-info part; the alert URL is
 `https` only. Messages name the key, never the value. `canonicalBytes` (keys in the table's order, two-space indent, final newline) is
 what the autopilot approval will bind. `write` validates, writes tmp then renames, mode 0600, and with `create` never replaces an
-existing run.json. `productionReason(runDir)` reads the raw text and refuses on any `production` value or chain 1 anywhere, and on a
-file it cannot read safely or that fails the schema. `migrateFromEnvLocal(runDir, {role})` reads env.local.sh as text (never runs it),
+existing run.json. `productionReason(runDir)` is null for a file that passes the schema (production included); a file that fails it and says `production` or chain 1 anywhere is refused with the production text, and so is a file it cannot read safely. `migrateFromEnvLocal(runDir, {role})` reads env.local.sh as text (never runs it),
 refuses classic runs, `sha256`, `both`, production and any setting run.json does not carry, requires Bob's terms to be assigned
 in every case (a default written here would later pass as his agreement), writes the other defaults explicitly, keeps env.local.sh, and never replaces a run.json. The console keeps
 reading env.local.sh until step 4.5.
@@ -109,7 +107,7 @@ Role and settings
 - Settings are the run.json names (`noid_rpc2`, `single_node_ok`, `alice_noid`, ...), so refusal texts name those, not `NOID_RPC2` and `env.local.sh`.
   `require_parties` / `require_bob_terms` / `require_payout_settings` take the settings object plus the wallet addresses (the file wins for `alice_noid`,
   `alice_eth`, `bob_eth`, as in bash).
-- No `--mainnet` fee cap, no producer waiver (the warning about it and the sentence "only ACCEPT_PRODUCER_CONCENTRATION relaxes that" are gone),
+- The mainnet fee cap is run.json's `gas_price_gwei` on production (`feeFlags`, `reserveFeeFlags`; `checkFeeSettings` refuses a production swap without it); no `--accept-producer-concentration` (the warning about it and the sentence "only ACCEPT_PRODUCER_CONCENTRATION relaxes that" are gone),
   no `LIVE_PLATFORM`, `win_path`, `$PUB`: the public copy is `runDir/pub`.
 - `--curl-path` is always passed: `checkTool` refuses (2) a tool, or a `tools.curl`, that is not an absolute path, so swap-cli never looks curl up in `PATH` (bash native mode passed `curl` from `PATH`). The transport stays `curl`.
 
@@ -410,7 +408,7 @@ or `eth-claim-dry-N.json/.err/.emit.err`, `reveal-reverted-tx.txt`, `pub/eth-cla
 `eth-refund-N.json/.err/.emit.err` (refund); `wallet-fund-[dry-]N.addr.json/.addr.err/.reserve.json/.reserve.err/.json/.err`, `wallet-funded.marker` (`wx`); `wallet-recover-[dry-]N.*`,
 `wallet-recovered-txid.txt` (tmp + rename), `wallet-record-N.out`; `wallet-sweep-noid-[dry-]N.*`, `wallet-swept-noid.marker`, `eth-sweep-ROLE-[dry-]N.json/.err/.emit.err`, `wallet-swept-eth-ROLE.marker` (markers `wx`).
 `board-sign` writes no file. The passphrase goes only to the swap-cli commands that had it in bash: `tick`, `ethkey emit`, `secret`, `claim`, `wallet fund|recover|sweep`; never to
-`wallet address`, `ethkey address`, `bundle`, or live.js. No step passes `--mainnet`, a mainnet fee cap, a producer waiver, a key file or a margin flag (a test scans every call).
+`wallet address`, `ethkey address`, `bundle`, or live.js. No step passes `--mainnet` or a mainnet fee cap on a test network, the older producer waiver, a key file or a margin flag (a test scans every call); on production `--mainnet --max-fee-gwei` replaces `--gas-price-gwei`, and `--acknowledge-producer-share 650` is Bob's only, while his approval holds it.
 
 ### Every difference from the bash helpers, and why
 

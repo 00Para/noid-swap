@@ -238,7 +238,7 @@ test("invitation save refusals: an Alice swap, a board run, not Sepolia, no key 
     };
     assert.equal(await words(alice.id), "Only the swap of the side that sells ETH makes an invitation.");
     assert.equal(await words(board.id), "A board run hands the terms over by itself.");
-    assert.equal(await words(rehearsal.id), "Invitations are made for Sepolia swaps only.");
+    assert.equal(await words(rehearsal.id), "Invitations are made for Sepolia and Ethereum mainnet swaps only.");
     const KEY = "There is no invitation yet: the program is still making this swap's key.";
     assert.equal(await words(noKey.id), KEY);
     assert.equal(await words(aliceFile.id), KEY);

@@ -18,9 +18,13 @@ const fs = require("fs");
 const path = require("path");
 const { urlProblem } = require("./runsettings");
 const { noidAddressProblem, ethAddressProblem } = require("./walletrun");
-const { PROFILES } = require("./swapform");
+const { PROGRAM_PROFILES: PROFILES, PROFILES: TEST_PROFILES } = require("./swapform");
 
 const FILE = "settings.json";
+// What each mainnet endpoint sees (shown beside the setting): this machine's IP address, the swap key's address, the contract, the lock id, the timing and, at the sweep, the payout address.
+const PRODUCTION_ETH_RPC = "https://ethereum-rpc.publicnode.com";
+const PRODUCTION_ETH_RPC2 = "https://rpc.mevblocker.io";
+const MAINNET_NODES_NOTE = "Each of the two mainnet endpoints sees this computer's IP address together with the swap key's address, the contract, the lock id, the timing and, at the sweep, your payout address.";
 const MAX_BYTES = 64 * 1024;
 const MAX_DEPTH = 8;
 const UPDATE_CHECK = ["ask", "daily", "off"];
@@ -43,6 +47,8 @@ function defaults() {
     eth: {
       sepolia: { rpc: "https://ethereum-sepolia-rpc.publicnode.com", rpc2: null },
       rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null },
+      // Ethereum mainnet (decision D4): two public endpoints from two operators, so the second-node rule holds without a single-node switch
+      production: { rpc: PRODUCTION_ETH_RPC, rpc2: PRODUCTION_ETH_RPC2 },
     },
     eth_rpc2_remote: false,
     rpc_timeout_s: 60,
@@ -52,6 +58,7 @@ function defaults() {
     bob_noid: null,
     board: { relays: [], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0, profile: "sepolia", contract_version: "1", pinned_htlc: {} },
     update_check: "ask",
+    limits_read_version: null,
   };
 }
 
@@ -146,7 +153,7 @@ function validate(o) {
     if (!(k in errs)) errs[k] = why;
   };
   if (!plain(o)) return { "": "the settings are not an object" };
-  const allowed = ["v", "noid_rpc", "noid_rpc2", "noid_rpc2_remote", "eth", "eth_rpc2_remote", "rpc_timeout_s", "alert_url", "noid_payout", "eth_payout", "bob_noid", "board", "update_check"];
+  const allowed = ["v", "noid_rpc", "noid_rpc2", "noid_rpc2_remote", "eth", "eth_rpc2_remote", "rpc_timeout_s", "alert_url", "noid_payout", "eth_payout", "bob_noid", "board", "update_check", "limits_read_version"];
   for (const k of Object.keys(o)) if (!allowed.includes(k)) bad(k, "not a setting of this version");
   for (const k of allowed) if (!Object.prototype.hasOwnProperty.call(o, k)) bad(k, "missing");
   if (Object.keys(errs).length) return errs;
@@ -164,7 +171,7 @@ function validate(o) {
   if (typeof o.noid_rpc2_remote !== "boolean") bad("noid_rpc2_remote", "true or false");
   else if (o.noid_rpc2_remote && o.noid_rpc2 === null) bad("noid_rpc2_remote", "true only with a second node");
   if (typeof o.eth_rpc2_remote !== "boolean") bad("eth_rpc2_remote", "true or false");
-  if (!plain(o.eth)) bad("eth", "an object with sepolia and rehearsal");
+  if (!plain(o.eth)) bad("eth", "an object with sepolia, rehearsal and production");
   else {
     for (const k of Object.keys(o.eth)) if (!Object.prototype.hasOwnProperty.call(PROFILES, k)) bad(`eth.${k}`, "not a profile");
     for (const prof of Object.keys(PROFILES)) {
@@ -191,6 +198,8 @@ function validate(o) {
   addr("noid_payout", o.noid_payout, "noid");
   addr("eth_payout", o.eth_payout, "eth");
   addr("bob_noid", o.bob_noid, "noid");
+  // R6: the program version whose "Limits and risks" card the person has read (page sequencing only: nothing checks it)
+  if (o.limits_read_version !== null && (typeof o.limits_read_version !== "string" || !/^[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}$/.test(o.limits_read_version))) bad("limits_read_version", "a version like 0.1.5, or null");
   if (!UPDATE_CHECK.includes(o.update_check)) bad("update_check", `one of ${UPDATE_CHECK.join(", ")}`);
   const b = o.board;
   if (!plain(b)) bad("board", "an object");
@@ -206,7 +215,7 @@ function validate(o) {
       if (typeof b.allow_public !== "boolean") bad("board.allow_public", "true or false");
       if (typeof b.allow_local_test !== "boolean") bad("board.allow_local_test", "true or false");
       if (!isInt(b.min_pow_bits) || b.min_pow_bits < 0 || b.min_pow_bits > 24) bad("board.min_pow_bits", "a whole number from 0 to 24");
-      if (!Object.prototype.hasOwnProperty.call(PROFILES, b.profile)) bad("board.profile", `one of ${Object.keys(PROFILES).join(", ")}`);
+      if (!Object.prototype.hasOwnProperty.call(TEST_PROFILES, b.profile)) bad("board.profile", `one of ${Object.keys(TEST_PROFILES).join(", ")} (the board does not run on Ethereum mainnet)`);
       if (b.contract_version !== "1" && b.contract_version !== "2") bad("board.contract_version", "1 or 2");
       if (!plain(b.pinned_htlc)) bad("board.pinned_htlc", "an object { chain id: address }");
       else for (const [k, v] of Object.entries(b.pinned_htlc)) if (!/^[0-9]{1,12}$/.test(k) || typeof v !== "string" || ethAddressProblem(v)) bad("board.pinned_htlc", "chain ids with an Ethereum address each");
@@ -215,9 +224,12 @@ function validate(o) {
   return errs;
 }
 
-/** Text to the validated settings object; throws ProgramSettingsError. */
+/** Text to the validated settings object; throws ProgramSettingsError. A settings.json written before mainnet opened has no eth.production: the default endpoints are filled in (nothing else changes). */
 function parseValid(text) {
   const o = strictParse(text);
+  // a settings.json written before the limits card has no `limits_read_version`: it means "not read yet"
+  if (plain(o) && !Object.prototype.hasOwnProperty.call(o, "limits_read_version")) o.limits_read_version = null;
+  if (plain(o) && plain(o.eth) && !Object.prototype.hasOwnProperty.call(o.eth, "production")) o.eth.production = { rpc: PRODUCTION_ETH_RPC, rpc2: PRODUCTION_ETH_RPC2 };
   const errs = validate(o);
   const keys = Object.keys(errs);
   if (keys.length) throw new ProgramSettingsError(`settings.json is refused: ${keys.slice(0, 4).map((k) => `${k || "settings"}: ${errs[k]}`).join("; ")}${keys.length > 4 ? `; and ${keys.length - 4} more` : ""}`, keys.map((k) => ({ key: k, why: errs[k] })));
@@ -368,4 +380,4 @@ function merge(stored, patch) {
   return out;
 }
 
-module.exports = { FILE, ProgramSettingsError, defaults, validate, parseValid, strictParse, load, loadSafe, save, view, merge, redactUrl };
+module.exports = { PRODUCTION_ETH_RPC, PRODUCTION_ETH_RPC2, MAINNET_NODES_NOTE, FILE, ProgramSettingsError, defaults, validate, parseValid, strictParse, load, loadSafe, save, view, merge, redactUrl };

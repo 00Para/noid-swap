@@ -182,7 +182,7 @@ impl Degrade {
             Degrade::NoidStale => n.observed_at = Some(now.saturating_sub(200)),
             Degrade::EthStale => e.observed_at = Some(now.saturating_sub(200)),
             Degrade::ChainIdNone => e.chain_id = None,
-            Degrade::ChainIdWrong => e.chain_id = Some(1),
+            Degrade::ChainIdWrong => e.chain_id = Some(5),
             Degrade::CodeHashNone => e.contract_code_hash = None,
             Degrade::CodeHashWrong => e.contract_code_hash = Some([9; 32]),
             Degrade::TipTimeNone => n.tip_time = None,

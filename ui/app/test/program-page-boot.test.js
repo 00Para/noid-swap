@@ -57,7 +57,7 @@ test("program mode: the top bar (mark, Your swaps with the active count, the net
   const t = textOf(bar);
   assert.match(t, /No1d\s+Swap/);
   assert.match(t, /Your swaps\s+1 active/);
-  assert.match(t, /Test network/);
+  assert.match(t, /Ethereum test network/);
   assert.match(t, /Parano1d: connected/);
   assert.match(t, /Ethereum: connected/);
   for (const w of ["Settings", "Recovery code", "Import a run folder", "Board invite", "Help", "Check for a new version"]) assert.ok(t.includes(w), w);
@@ -199,8 +199,8 @@ test("program mode: Settings, the update line and the board buttons", async () =
   assert.ok(page3.calls.some((c) => c.url === `/api/run?swap=${F.SWAP_A}`));
   // the program's own checker says "newer" (with the release page) and "never" before its first check
   const newer = await programPage({}, { update: { state: "newer", latest: "0.3.0", url: "https://github.com/o/r/releases/tag/v0.3.0", text: "x" } });
-  assert.match(newer.text("pg-bar"), /A new version is available: 0\.3\.0\. Check its sha256 and build provenance on its release page before installing\./);
-  for (const [state, words] of [["never", /Not checked yet/], ["none", /You have the newest version/], ["not_configured", /not set up in this version/], ["skipped_active", /a swap was active/], ["error", /did not work/]]) {
+  assert.match(newer.text("pg-bar"), /A new version is available: 0\.3\.0\. Compare the installer's SHA-256 with the signed value in the menu's update check before installing\./);
+  for (const [state, words] of [["never", /Not checked yet/], ["none", /You have the newest version/], ["not_configured", /not set up in this version/], ["skipped_active", /a swap was active/], ["error", /did not work/], ["unverified", /signature does not check: do not install it/], ["release_check_not_configured", /This version cannot check for updates/]]) {
     const p = await programPage({}, { update: { state, latest: null, url: null } });
     assert.match(p.text("pg-bar"), words, state);
     assert.doesNotMatch(p.text("pg-bar"), /sha256/, state);
@@ -315,15 +315,15 @@ test("program mode: the new-swap form posts the fields, shows the server's error
   assert.equal(page.byId("pg-root").hidden, true);
 });
 
-test("program mode: the new-swap form offers the test profiles only, Bob's Ethereum address only to Alice, and a visible warning on the single-node box", async () => {
+test("program mode: the new-swap form offers the test networks and Ethereum mainnet (with its caps in words), Bob's Ethereum address only to Alice, and a visible warning on the single-node box", async () => {
   const page = await programPage({ "GET /api/settings": { ok: true, settings: { v: 1 } } });
   await page.byId("pg-new").click();
   await page.flush();
   const form = page.byId("pg-root");
   const profile = form.all((n) => n.attrs.id === "ns-profile")[0];
-  assert.deepEqual(profile.children.map((o) => o.attrs.value), ["sepolia", "rehearsal"]);
+  assert.deepEqual(profile.children.map((o) => o.attrs.value), ["sepolia", "rehearsal", "production"]);
   const whole = textOf(form);
-  assert.doesNotMatch(whole, /mainnet|production/i);
+  assert.match(whole, /Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap/);
   assert.match(whole, /Never tick this for a swap with someone you do not know/);
   const bobEth = form.all((n) => n.attrs.id === "ns-bob_eth")[0].parent;
   const role = form.all((n) => n.attrs.id === "ns-role")[0];
@@ -466,14 +466,14 @@ test("static: the page files of program mode have no inline script, style or HTM
   assert.doesNotMatch(css.replace(/url\("\/fonts\/[^"]+"\)/g, ""), /url\(\s*["']?https?:/i);
 });
 
-test("static: the program-mode page code names no secret, no key and no mainnet or production choice", () => {
+test("static: the program-mode page code names no secret and no key, and never the old mainnet flag", () => {
   const fs = require("fs");
   const path = require("path");
   const all = ["operator.js", "actions.js", "program.js", "board.js"].map((f) => fs.readFileSync(path.join(__dirname, "..", f), "utf8")).join("\n");
   const program = fs.readFileSync(path.join(__dirname, "..", "program.js"), "utf8");
   // program.js is the shell of program mode (the top bar, the list, the forms): without its comments
   const prog = program.slice(program.indexOf("(() => {", program.indexOf("noid-swap operator console, program mode"))).replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-  assert.doesNotMatch(prog, /master_secret|private_key|passphrase|\bmnemonic\b|invite_secret|--mainnet|"production"|"mainnet"/i);
+  assert.doesNotMatch(prog, /master_secret|private_key|passphrase|\bmnemonic\b|invite_secret|--mainnet/i);
   assert.doesNotMatch(all, /wallet export|ethkey emit|i-understand-this-is-the-key/);
 });
 

@@ -174,7 +174,7 @@ test("the autopilot after an update: the page says to approve again after an upd
   const ap = (why) => ({ alice: { available: true, on: false, terms_changed: true, ...(why === "program_version" ? { version_changed: true, why: "the program was updated since the approval: approve again after an update" } : { version_changed: false, terms_changed_why: why }), expected_typed: "5 NOID", statements: [], needs_you: [], wallet: true, funding_offered: true, payouts: null } });
   const mk = (why) => (r) => ({ ...tickPayload(r, { autopilot: ap(why) }) });
   const upd = await openSwap(F.SWAP_A, mk("program_version"));
-  assert.match(squash(upd.text("next-action")), /The program was updated since you approved, so the autopilot is off\. Approve again after an update/);
+  assert.match(squash(upd.text("next-action")), /The program was updated since you approved, so automatic steps are off. Approve again after an update/);
   const other = await openSwap(F.SWAP_A, mk("run_json"));
   assert.match(squash(other.text("next-action")), /the settings of this swap, the program or one of its tools changed since you approved/);
   assert.doesNotMatch(squash(other.text("next-action")), /env\.local\.sh/);

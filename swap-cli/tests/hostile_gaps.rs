@@ -264,7 +264,7 @@ fn new_alice_args(cast: &swap_cli::htlc_harness::Cast, out: &Path, amount: &str)
     let bob = cast.bob.to_bech32();
     [
         "new-alice", "--out", out.to_str().unwrap(), "--alice", &alice, "--bob", &bob, "--amount", amount, "--fee-estimate", "5800", "--h-create", "300000",
-        "--eth-chain-id", "31337", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-amount-wei", "10000000000000000",
+        "--eth-chain-id", "1", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-amount-wei", "10000000000000000",
         "--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--eth-code-hash", CODE_HASH,
         "--fast-kdf",
     ]
@@ -307,7 +307,7 @@ impl Cli {
     fn new_bob_cmd(&self, bundle: &Path, out: &Path, amount: &str) -> Command {
         let mut cmd = bin();
         cmd.args(["new-bob", "--bundle", bundle.to_str().unwrap(), "--out", out.to_str().unwrap(), "--bob", &self.cast.bob.to_bech32()])
-            .args(["--amount", amount, "--eth-chain-id", "31337", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3"])
+            .args(["--amount", amount, "--eth-chain-id", "1", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3"])
             .args(["--eth-amount-wei", "10000000000000000", "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--eth-code-hash", CODE_HASH])
             .args(&self.stub)
             .env("NOID_SWAP_HOME", &self.home);

@@ -1,0 +1,78 @@
+/* The launch screens' shared classes (R2 to R7). Linked after operator.css; the tokens are operator.css's.
+   Every class that the swap page (stagecard.js, actions.js) and the program screens (program.js) use for the new elements is here, so neither of them touches a stylesheet. */
+
+/* R3: an address shown whole, in groups of four. The gaps are margins, not characters, so a copy by hand gives the address with no spaces. */
+.addr-whole { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 0.5ch; font-family: var(--mono); font-variant-numeric: tabular-nums; overflow-wrap: normal; word-break: keep-all; }
+.addr-whole > .g { user-select: auto; white-space: nowrap; }
+.addr-whole > .g > .stop { user-select: none; }
+.addr-whole > .copy, .addr-whole > .copy-txt { margin-left: var(--s2); }
+
+/* R7: the solid coin marks (the NOID slashed zero and the ETH sign in negative); they differ in shape, not only in colour */
+svg.coin.solid { fill: currentColor; stroke: none; }
+svg.coin.solid.noid { color: var(--noid); }
+svg.coin.solid.eth { color: var(--eth); }
+svg.coin.solid .cut { fill: none; stroke: var(--panel); stroke-width: 1.6; stroke-linecap: butt; }
+
+/* R6: the mainnet tag, inverted ink with words (16.8:1 contrast), so the difference never rests on colour alone */
+.tag.real { background: var(--text); color: var(--bg); border-color: transparent; font-weight: 600; }
+
+/* R4: the rate and fee lines */
+.facts-line { margin: var(--s2) 0 0; font-size: 13.5px; line-height: 1.5; color: var(--quiet); font-variant-numeric: tabular-nums; }
+.facts-line .fig { font-family: var(--mono); color: var(--text); }
+.facts-line .fig + .fig { margin-left: 1.5ch; }
+
+/* R3: the history line under an own address */
+.hist { margin: var(--s1) 0 0; font-size: 13px; line-height: 1.45; color: var(--faint); }
+.hist.new { color: var(--text); }
+
+/* R7: the approval's four plain lines */
+.plain4 { margin: 0 0 var(--s4); padding-left: var(--s5); list-style: decimal; }
+.plain4 > li { font-size: 15px; line-height: 1.5; color: var(--text); margin: 0 0 var(--s2); }
+.plain4 > li:last-child { margin-bottom: 0; }
+
+/* R7: a needs-you entry in three parts */
+.need3 { margin: 0; }
+.need3 dt { font-size: 13px; color: var(--faint); margin: var(--s3) 0 var(--s1); }
+.need3 dt:first-child { margin-top: 0; }
+.need3 dd { margin: 0; color: var(--text); }
+.need3 dd > ol { margin: 0; padding-left: var(--s5); list-style: decimal; }
+
+/* R6: the "Limits and risks" card */
+.limits { background: var(--panel); border: 1px solid var(--rule); border-radius: var(--r-panel); padding: var(--s5); }
+.limits .lim-h { margin: 0 0 var(--s4); font-size: 20px; font-weight: 600; color: var(--text); }
+.limits .lim-row { padding: var(--s3) 0; border-top: 1px solid var(--rule); }
+.limits .lim-row:first-of-type { border-top: 0; padding-top: 0; }
+.limits .lim-t { margin: 0 0 var(--s1); font-size: 13px; font-weight: 500; color: var(--faint); }
+.limits .lim-v { margin: 0 0 var(--s1); font-size: 15px; color: var(--text); }
+.limits .lim-p { margin: 0; font-size: 15px; line-height: 1.5; color: var(--text); }
+.limits .lim-list { margin: 0; padding-left: var(--s5); }
+.limits .lim-list > li { font-size: 15px; line-height: 1.5; color: var(--text); margin: 0 0 var(--s2); }
+.limits .lim-list > li:last-child { margin-bottom: 0; }
+
+/* the narrow view (380 px): nothing scrolls sideways, an address wraps only between groups */
+@media (max-width: 480px) {
+  .limits { padding: var(--s4); }
+  .addr-whole { max-width: 100%; }
+}
+
+/* the program screens (batch C): the new-swap form's lines, the tag in the title row and the top bar */
+/* the operator page already has a ul.hist (the audit table, a mono grid): a line of words under an address is a p.hist and keeps the page's sans face */
+p.hist { display: block; font: 400 13px/1.45 var(--sans); }
+.ns-facts { margin: var(--s3) 0 var(--s4); }
+.ns-facts .newswap-opt { margin-top: var(--s3); }
+.ns-facts .newswap-opt > :not(summary) { margin-top: var(--s2); }
+.ns-warns { display: grid; gap: var(--s3); margin: var(--s4) 0; }
+.ns-warns:empty { display: none; }
+.pg-limits .card-head { margin-bottom: var(--s4); }
+p.hist .addr-whole { color: var(--quiet); }
+.on.real { color: var(--text); }
+/* under 560 px the mainnet tag keeps its words and gets a row of its own below the bar's one row (the test-network tag goes away there; this one never does) */
+@media (max-width: 559px) {
+  .pg-bar-in:has(.tag.real) { height: auto; flex-wrap: wrap; row-gap: 0; }
+  .pg-bar-in:has(.tag.real) .pg-status { display: contents; }
+  .pg-bar-in:has(.tag.real) .pg-status .chip:first-of-type { margin-left: auto; }
+  .pg-bar-in:has(.tag.real) .pg-status .tag.real { order: 10; flex: 1 0 100%; justify-content: center; margin: 0 0 var(--s2); }
+}
+.limits .lim-list { list-style: decimal; }
+/* the compare tick sits under its address, on the left, like the history line (the facts list right-aligns its values) */
+.facts dd label.cmp-tick { flex-basis: 100%; justify-content: flex-start; text-align: left; }

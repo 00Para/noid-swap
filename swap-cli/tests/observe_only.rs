@@ -345,11 +345,11 @@ fn cli_setup(dir: &Path, final_phase: bool) -> (std::path::PathBuf, String, Stri
     let eth = dir.join("eth.json");
     std::fs::write(
         &eth,
-        serde_json::json!({"description": "minimal Ethereum answers: chain 11155111, the HTLC runtime code, no lock", "calls": [
+        serde_json::json!({"description": "minimal Ethereum answers: chain 1, the HTLC runtime code, no lock", "calls": [
             {"method": "eth_blockNumber", "result": "0xa"},
             {"method": "eth_getBlockByNumber", "result": {"number": "0xa", "timestamp": "0x3e8"}},
             {"method": "eth_getBlockByNumber", "result": {"number": "0x8", "timestamp": "0x3d0"}},
-            {"method": "eth_chainId", "result": "0xaa36a7"},
+            {"method": "eth_chainId", "result": "0x1"},
             {"method": "eth_getCode", "result": real_code},
             {"method": "eth_getLogs", "result": []},
             {"method": "eth_call", "error": {"code": 3, "message": "execution reverted: LockNotFound"}}

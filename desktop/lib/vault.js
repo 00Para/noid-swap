@@ -678,6 +678,35 @@ function createVault(deps) {
         },
       };
     },
+    /**
+     * The sealer of the history of payout addresses (label "payout-history", run id "install", key K(S, "payout-history", "install")). Same shape as
+     * boardSealer: seal(plain, fileName) gives the file's text as a Buffer, open(blob, fileName) gives the plain Buffer. A locked vault throws VaultError
+     * from either call; a file that does not open throws SealedError. The caller (program.js) tells the two apart.
+     */
+    historySealer() {
+      return {
+        seal(plain, fileName) {
+          return withSecret((S) => {
+            const key = derive.historyKey(S);
+            try {
+              return Buffer.from(sealed.sealToText({ key, label: "payout-history", runId: "install", fileName, plain }), "utf8");
+            } finally {
+              key.fill(0);
+            }
+          });
+        },
+        open(blob, fileName) {
+          return withSecret((S) => {
+            const key = derive.historyKey(S);
+            try {
+              return sealed.open({ key, label: "payout-history", runId: "install", fileName, envelope: blob });
+            } finally {
+              key.fill(0);
+            }
+          });
+        },
+      };
+    },
     inviteSecret() {
       if (!st.ready) throw new VaultError(st.why || "the vault is not open");
       const p = file(F_INVITE);

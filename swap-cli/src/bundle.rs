@@ -376,7 +376,7 @@ mod tests {
         // The 16-hex check line is the start of it.
         assert!(checked.line().starts_with(&format!("bundle check: {} (opening_hex ", &hex[..16])), "{}", checked.line());
         // Pinned, so another implementation (or a later change of the canonical form) is caught.
-        assert_eq!(alice, "bundle digest: 507d6d477a12536fed7ec70df9c3667608bbd57b3b06877c0c1ab38324b9edb6");
+        assert_eq!(alice, "bundle digest: 0c4459562d1495a564230ebcd7a883cd842528482ad432eee921fd3a9591bc7c");
         // Bob's side (new-bob): the line of the same bundle read back from its text, in any whitespace or key order.
         let (_, status) = open(&checked.to_pretty_json().unwrap()).unwrap();
         assert_eq!(status.digest_line().as_deref(), Some(alice.as_str()));

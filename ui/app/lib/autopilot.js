@@ -34,6 +34,9 @@ const { TOOL_KEYS, stepCodeHash } = require("./toolhash");
 const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES, LINE_MATCH_MISSING, TICK_FRESH_S } = require("./gate");
 const E = require("./enginetext");
 const FS = require("./firststeps");
+const { producerScreen } = require("./producerscreen");
+const { lateK } = require("./launchfacts");
+const PRODUCER_ACK_PERMILLE = 650; // the ceiling the approval's statement carries to swap-cli (steps/common.js passes it)
 
 const ROLES = ["alice", "bob"];
 const FILE_VERSION = 1;
@@ -63,6 +66,7 @@ const WAIT_REASONS = new Set(["deposit_short", "reserve_short", "sweep_not_ready
 const STOP_REASONS = new Set(["engine_do_not_send", "engine_cutoff", "engine_alarm", "engine_alert", "statement_alice_check"]);
 // The open case of rule W (the program has no step for it): an abort the engine does not record because a funding or a lock was decided and never cancelled (swap-cli engine.rs tick_apply).
 const NOT_RECORDED_RE = /^abort not recorded: a (fund_noid|lock_eth) was decided for this swap and never cancelled\b/;
+const CLAIM_WATCH_CLEARED = "claim watch: cleared";
 const CANNOT_END_TEXT = "This swap cannot end by itself: a funding (or lock) was prepared and never sent. Its coins are safe in the swap wallet. See 'If a swap cannot end' in the help.";
 
 const STATEMENTS = {
@@ -71,11 +75,17 @@ const STATEMENTS = {
   no_pending_funding: "No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else.",
   bob_check_matches: "Bob's check line matches mine: the 16 digits of his bundle check line are the ones of my line, compared over a second channel.",
   alice_check_matches: "Alice's check line matches mine: the 16 digits of her bundle check line are the ones of my line, compared over a second channel.",
+  // Ethereum mainnet, Bob only (decision D2): {SHARE} is filled in with the measured share (`statementText`); the statement is the person's acknowledgement that lets the program pass the swap-cli flag
+  producer_share_ack: "One address mined {SHARE} % of Parano1d's recent blocks; I accept a share up to 65 %. If Alice controls most of the mining she can take both sides. I swap only with someone I have a reason to trust.",
 };
 // A wallet run's funding statements: only Bob's check line remains (the wallet holds one funding and the tool refuses a funding submitted by another path, so "no pending funding" is not asked).
 // A BOARD run (piece 3): Alice's "Bob's check line matches mine" is NOT asked, and is not accepted in its place anywhere: the funding needs the board's verified handover check (lib/gate.js boardReasons).
 // In the program (outside a board run) Bob also confirms that Alice's check line matches his, as Alice confirms Bob's.
-const requiredStatements = (role, wallet = false, board = false, program = false) => (role === "alice" ? (wallet ? (board ? ["stay_on", "no_manual_steps"] : ["stay_on", "no_manual_steps", "bob_check_matches"]) : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"]) : program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches"] : ["stay_on", "no_manual_steps"]);
+const requiredStatements = (role, wallet = false, board = false, program = false, mainnet = false) => (role === "bob" && mainnet && program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches", "producer_share_ack"] : role === "alice" ? (wallet ? (board ? ["stay_on", "no_manual_steps"] : ["stay_on", "no_manual_steps", "bob_check_matches"]) : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"]) : program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches"] : ["stay_on", "no_manual_steps"]);
+
+/** The text of a statement for the page and the audit: {SHARE} is the measured share (null: the words "an unknown share" never reach an approval, the approval is refused first). */
+const shareOf = (sc) => (sc && sc.ok ? sc.share_text : null);
+const statementText = (id, share) => String(STATEMENTS[id]).replace("{SHARE}", share === null || share === undefined ? "?" : share);
 
 const sha256 = (x) => crypto.createHash("sha256").update(x).digest("hex");
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -108,7 +118,6 @@ function ethPlain(wei) {
     return null;
   }
 }
-const abbrevAddress = (a) => (typeof a === "string" && a.length > 14 ? `${a.slice(0, 6)}…${a.slice(-5)}` : String(a));
 const LAST_LOCK_EXACT = /; the last lock height is \d+/; // the engine's exact last lock height (the inexact form says "at most")
 const CLOSED_ID = "deposit-closed";
 const CLOSED_TEXT = "The engine says it is too late for this swap: do not send coins to it.";
@@ -151,6 +160,7 @@ class Autopilot {
     this.holdMark = new Map(); // spend id -> the tick (its own clock) a wallet helper said "nothing to send now" on: tried again only for a newer tick
     this.startedOn = new Map(); // spend id -> the tick the last automatic start of it ran on
     this.recordMark = 0; // the last time the recovery close's recording was started
+    this.claimWatch = { loaded: false, first_tip: null, late: null }; // the late-claim watch (Bob, program mode; reads only): the tip of the first tick that showed `secret_seen`, and the alarm once the claim is late
     this.stepping = false;
     actions.autopilot = this;
     for (const role of ROLES) this.loadNeeds(role);
@@ -632,6 +642,15 @@ class Autopilot {
     if (wallet && !wr.eth_payout) this.refuse(role, 422, "payout_missing", "A wallet run needs ETH_PAYOUT in env.local.sh before it is approved: it decides where the leftover ETH goes.");
     // program mode outside a board run: Bob's own check of Alice's file must have passed, and both roles confirm the line match before they approve (the record is written by the page)
     const program = this.programMode();
+    // Ethereum mainnet (program mode only): the board never runs there, and Bob's approval carries the producer-share statement
+    const mainnet = program && this.mainnetSettings() !== null;
+    if (mainnet && (a.boardRun().on || a.boardRun().ambiguous)) this.refuse(role, 422, "board_mainnet", "The board does not run on Ethereum mainnet: there is nothing to approve here.");
+    let share = null;
+    if (mainnet && role === "bob") {
+      const sc = this.bobScreen(run, nowMs);
+      if (!sc.ok) this.refuse(role, 422, "producer_screen", sc.why);
+      share = sc.share_text;
+    }
     if (program && wallet && !board) {
       if (role === "bob" && !this.bobFileExists()) this.refuse(role, 422, "terms_missing", "Your check of Alice's file has not passed, so there is nothing to approve.");
       // only while the page can still offer its Confirm box (a swap made before the line match existed, already funded or locked, is approved without it: the gate guards the funding and the lock)
@@ -643,10 +662,10 @@ class Autopilot {
     const exp = expectedAmount(spend, run.terms);
     if (!exp) this.refuse(role, 422, "amount_unknown", "The terms do not state the amount to confirm.");
     if (!typedMatches(spend, run.terms, typed)) this.refuse(role, 422, "typed", `The typed amount does not match (type ${exp.text}).`);
-    const missing = requiredStatements(role, wallet, board, program).filter((k) => statements[k] !== true);
+    const missing = requiredStatements(role, wallet, board, program, mainnet).filter((k) => statements[k] !== true);
     if (missing.length) {
       this.note(role, "refused: statements");
-      throw bad(422, "a statement was not confirmed", { reasons: missing.map((k) => ({ code: `statement_${k}`, text: `The statement was not confirmed: "${STATEMENTS[k]}"` })) });
+      throw bad(422, "a statement was not confirmed", { reasons: missing.map((k) => ({ code: `statement_${k}`, text: `The statement was not confirmed: "${statementText(k, share)}"` })) });
     }
     if (role === "alice" && !wallet) {
       const ctx = a.spendContext(spend, run, nowMs);
@@ -664,7 +683,8 @@ class Autopilot {
       role,
       terms_sha256: hash,
       approved_at: approvedAt,
-      statements: requiredStatements(role, wallet, board, program),
+      statements: requiredStatements(role, wallet, board, program, mainnet),
+      ...(share !== null ? { producer_share: share } : {}), // the share the person saw when approving (the audit and the page can show it; not part of the hash)
       funding_statements_at: role === "alice" && !wallet ? iso(nowMs) : null,
       console_pid_start: `${(l && l.pid) || process.pid}@${(l && l.started) || iso(nowMs)}`,
       needs_you: [],
@@ -672,7 +692,7 @@ class Autopilot {
     };
     // the audit line first: when it cannot be written nothing is approved
     try {
-      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${requiredStatements(role, wallet, board, program).join(",")}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
+      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${requiredStatements(role, wallet, board, program, mainnet).join(",")}${share !== null ? `; producer share ${share} %` : ""}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
     } catch (e) {
       throw bad(500, `the audit log cannot be written (${e.code || e.message}); nothing was approved`);
     }
@@ -703,6 +723,46 @@ class Autopilot {
   loadNeedsMerge(role) {
     const have = new Set(this.needs[role].map((e) => e.spend));
     for (const e of this.rebuildFromAudit(role)) if (!have.has(e.spend)) this.needs[role].push(e);
+  }
+
+  /** run.json's settings when this swap is a production (Ethereum mainnet) swap in program mode, else null. */
+  mainnetSettings() {
+    try {
+      if (!this.programMode()) return null;
+      const l = this.actions.settingsSource.load();
+      return l.ok && l.settings.profile === "production" ? l.settings : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Bob's producer screen from the last tick he wrote (lib/producerscreen.js); never throws. */
+  bobScreen(run, nowMs) {
+    try {
+      const st = this.mainnetSettings();
+      const tick = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+      return producerScreen(tick, Math.floor(nowMs / 1000), { ownNodeIsLoopback: !!st && st.noid_rpc2 === null && runsettings.isLoopbackUrl(st.noid_rpc) });
+    } catch {
+      return { ok: false, why: "The producer reading could not be made: refusing." };
+    }
+  }
+
+  /**
+   * 650 while Bob's approval on Ethereum mainnet is in force and holds the producer-share statement, else null: the only thing that lets his ticks and his lock step pass
+   * --acknowledge-producer-share (steps/common.js producerAckFlags). Asked at every tick; never throws.
+   */
+  producerAckPermille() {
+    try {
+      const st = this.mainnetSettings();
+      if (!st || st.role !== "bob") return null;
+      const a = this.actions;
+      const run = a.readRunFn(a.cfg.runDirs, Math.floor(this.now() / 1000));
+      const ap = this.approvalState("bob", run);
+      if (!ap.in_force || !ap.file || ap.file.role !== "bob" || !Array.isArray(ap.file.statements) || !ap.file.statements.includes("producer_share_ack")) return null;
+      return PRODUCER_ACK_PERMILLE;
+    } catch {
+      return null;
+    }
   }
 
   /** Does Bob's swap file exist in the run folder (his check of Alice's file passed)? */
@@ -750,10 +810,79 @@ class Autopilot {
   }
 
   needViews(role, withDeposit = true) {
-    const own = this.needs[role].map((e) => ({ spend: e.spend, label: SPEND_TABLE[e.spend] ? SPEND_TABLE[e.spend].label : e.spend, reason: e.reason, at: e.at, ...(e.retrying ? { retrying: true } : {}) }));
+    const own = this.needs[role].map((e) => ({ spend: e.spend, label: SPEND_TABLE[e.spend] ? SPEND_TABLE[e.spend].label : e.spend, reason: e.reason, at: e.at, need_kind: String(e.kind || "outcome"), ...(e.retrying ? { retrying: true } : {}) }));
     // a short deposit has no "I have dealt with it": `kind: "deposit"` tells the page to leave the button out; the entry goes by itself when the coin is covered
     const dep = withDeposit ? this.deposit[role].map((e) => ({ spend: e.spend, label: "Your deposit", reason: e.reason, at: e.at, kind: "deposit", figs: e.figs || "", until: this.depositUntil(e) })) : [];
     return [...own, ...dep];
+  }
+
+  // ------------------------------------------------------------------ the late-claim watch (Bob)
+  /**
+   * The profile of this swap for the late-claim count (run.json's in program mode), or null.
+   */
+  claimProfile() {
+    try {
+      const l = this.actions.settingsSource.load();
+      return l.ok ? l.settings.profile : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The first tip of the claim watch from the audit log (after a restart): the last "claim watch: secret seen at N" note that no "claim watch: cleared" note follows. */
+  rebuildClaimWatch() {
+    let first = null;
+    try {
+      for (const r of this.actions.audit.all()) {
+        if (r.action !== "autopilot" || r.phase !== "note" || r.role !== "bob") continue;
+        const m = /^claim watch: secret seen at ([0-9]{1,12})$/.exec(String(r.result || ""));
+        if (m) first = Number(m[1]);
+        else if (r.result === CLAIM_WATCH_CLEARED) first = null;
+      }
+    } catch {
+      first = null;
+    }
+    this.claimWatch.first_tip = first;
+    this.claimWatch.loaded = true;
+  }
+
+  /**
+   * Bob's late-claim watch (program mode). It reads only: it records the Parano1d tip of the first fresh tick that shows `secret_seen` (an audit note), and while the phase is
+   * `secret_seen` or `claim_submitted` and the tip is K blocks (lib/launchfacts lateK) past that, it holds `late_claim` for the page and for the "needs you" count. It clears at any other phase.
+   * A stale tick does not count: no new tip is taken from an old reading (an alarm already raised stays until the phase moves on). It works with or without an approval, never calls a
+   * step or a spend, and changes nothing about when the claim is proved or sent.
+   */
+  watchLateClaim(run, nowMs) {
+    if (!this.programMode() || this.roleBlockedFor("bob")) return;
+    const cw = this.claimWatch;
+    if (!cw.loaded) this.rebuildClaimWatch();
+    const tick = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+    const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
+    if (phase === null) return; // nothing is known: nothing is recorded and nothing is cleared
+    if (phase !== "secret_seen" && phase !== "claim_submitted") {
+      if (cw.first_tip !== null) this.note("bob", CLAIM_WATCH_CLEARED, `phase ${phase}`);
+      cw.first_tip = null;
+      cw.late = null;
+      return;
+    }
+    const tip = tick.noid && Number.isSafeInteger(tick.noid.tip) ? tick.noid.tip : null;
+    const age = typeof tick.now === "number" ? Math.floor(nowMs / 1000) - tick.now : null;
+    const fresh = tip !== null && age !== null && Math.abs(age) <= TICK_FRESH_S;
+    if (!fresh) return;
+    if (cw.first_tip === null && phase === "secret_seen") {
+      cw.first_tip = tip;
+      this.note("bob", `claim watch: secret seen at ${tip}`);
+    }
+    if (cw.first_tip === null) return;
+    const k = lateK(this.claimProfile());
+    if (k === null) return;
+    const blocks = tip - cw.first_tip;
+    cw.late = blocks >= k ? { phase, blocks, first_tip: cw.first_tip } : null;
+  }
+
+  /** The late-claim alarm (`{ phase, blocks, first_tip }`) or null. */
+  lateClaim() {
+    return this.claimWatch.late;
   }
 
   // ------------------------------------------------------------------ a short deposit after the approval
@@ -855,11 +984,11 @@ class Autopilot {
     const left = margin && margin.note ? `The engine says: ${margin.note}.` : "";
     let reason;
     if (h > 0n) {
-      reason = `Your ${coin} deposit is short: this swap's ${holder} holds ${hs} ${coin} of ${ns} ${coin}. Send ${ds} ${coin} more to ${abbrevAddress(address)}.${left ? " " + left : ""}`;
+      reason = `Your ${coin} deposit is short: this swap's ${holder} holds ${hs} ${coin} of ${ns} ${coin}. Send ${ds} ${coin} more to ${address}.${left ? " " + left : ""}`;
     } else {
       // nothing deposited: only when the engine's own note is short (the page's level), no threshold of this module; without a fresh note nothing changes
       if (!margin || margin.level === "quiet") return { state: "keep" };
-      reason = `Deposit now: this swap's ${holder} holds no ${coin} and needs ${ns} ${coin}. Send ${ns} ${coin} to ${abbrevAddress(address)}. ${left}`;
+      reason = `Deposit now: this swap's ${holder} holds no ${coin} and needs ${ns} ${coin}. Send ${ns} ${coin} to ${address}. ${left}`;
     }
     return { state: "entry", entry: { spend: `deposit-${coin.toLowerCase()}`, kind: "deposit", coin, reason: reason.slice(0, DEPOSIT_REASON_MAX), figs: `${held}|${need}`, seconds: margin && margin.seconds !== null && margin.seconds !== undefined ? margin.seconds : null, tick_now: margin ? margin.tickNow : null, at: Math.floor(nowMs / 1000) } };
   }
@@ -973,7 +1102,9 @@ class Autopilot {
           needs_you: ap.exists ? this.needViews(role, !!ap.in_force) : [],
           funding_statements_valid_until: role === "alice" && !wallet && this.fundingStatementsValid(nowMs) ? Math.floor((this.fundingStatements.at_ms + FUNDING_WINDOW_MS) / 1000) : null,
           expected_typed: exp ? exp.text : null,
-          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode()).map((id) => ({ id, text: STATEMENTS[id] })),
+          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode(), this.mainnetSettings() !== null).map((id) => ({ id, text: statementText(id, id === "producer_share_ack" && run ? shareOf(this.bobScreen(run, nowMs)) : null) })),
+          ...(role === "bob" && this.programMode() ? { late_claim: this.lateClaim() } : {}),
+          ...(role === "bob" && this.mainnetSettings() !== null && run ? { producer_screen: (({ ok, why, share_text }) => ({ ok, why: why || null, share_text: share_text || null }))(this.bobScreen(run, nowMs)) } : {}),
           // what the person gets for what they give (the approval names both): Alice gets ETH, Bob gets NOID
           gets_text: run && run.terms ? ((expectedAmount({ unit: role === "alice" ? "ETH" : "NOID" }, run.terms) || {}).text || null) : null,
           board: wallet && this.actions.boardRun().on === true,
@@ -982,7 +1113,7 @@ class Autopilot {
           payouts: wallet ? { noid: wr.noid_payout, eth: wr.eth_payout } : null,
         };
       } catch {
-        out[role] = { available: true, on: false, doing: null, waiting_reason: null, needs_you: [], statements: requiredStatements(role, false, false, this.programMode()).map((id) => ({ id, text: STATEMENTS[id] })) };
+        out[role] = { available: true, on: false, doing: null, waiting_reason: null, needs_you: [], statements: requiredStatements(role, false, false, this.programMode()).map((id) => ({ id, text: statementText(id, null) })) };
       }
     }
     return out;
@@ -1048,6 +1179,14 @@ class Autopilot {
     try {
       const a = this.actions;
       if (this.pending.length) this.settleJobs();
+      // Bob's late-claim watch reads only, and runs with or without an approval (program mode)
+      if (this.programMode()) {
+        try {
+          if (!this.roleBlockedFor("bob") && this.bobFileExists()) this.watchLateClaim(a.readRunFn(a.cfg.runDirs, Math.floor(this.now() / 1000)), this.now());
+        } catch {
+          /* a look never blocks the step */
+        }
+      }
       const roles = ROLES.filter((r) => !this.roleBlockedFor(r) && this.hasApproval(r));
       // a short deposit is looked at on every step, also while an action runs (it starts nothing)
       if (!roles.length) {
@@ -1186,7 +1325,7 @@ class Autopilot {
         st.waiting_reason = `The tool did not accept this yet (it may not be ready, or there may be nothing left to sweep). It is tried again in ${Math.max(1, Math.ceil(((this.timedWait.get(waiting.id) || 0) - nowMs) / 60000))} min.`;
         return false;
       }
-      st.doing = "waiting for the engine to offer your next step";
+      st.doing = "waiting for the next step";
       st.waiting_reason = null;
       return false;
     }

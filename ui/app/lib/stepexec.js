@@ -11,6 +11,7 @@
  *   Executor.watchStart({ mode? }) -> { started, upgrade? }   watchStop() -> Promise<void>   watchStatus() -> { running, started_at, ticks, last_end, last_line_at, mode, applied_once, stopped_by_person, upgrading }
  *     mode "apply" (the default) records what the engine decides; mode "read" ticks without --apply and records nothing (lib/firststeps.js, rule W). A running read loop asked for
  *     apply is stopped (after its tick in progress) and an apply loop started in its place (`upgrade`, a promise); an apply loop is never turned into a read loop.
+ *   Executor.recordClose(txid) -> Promise<{ ok, status, recorded, txid?, phase_after?, lines, why?, tag? }>   (see the comment above recordClose)
  *   Executor.supervise() -> Promise<boolean>   restarts a watch whose loop file is older than 180 s, in the mode it had
  *   Executor.clearStopped()   the person's Stop is forgotten (a turnOn of the autopilot does this)
  *
@@ -28,11 +29,26 @@
 const fs = require("fs");
 const path = require("path");
 const { PRODUCTION_TEXT } = require("./runsettings");
+const newSwapNotice = require("./newswapnotice");
 
 const MIN = 60 * 1000;
+const REPLACE_ID_RE = /^(?:dry|send)-(?:reveal|refund-eth)-replace$/;
+const GWEI_RE = /^(?:0|[1-9]\d{0,3})(?:\.\d{1,9})?$/;
 const FOLDER_GUARD_CACHE_MS = 10 * 1000;
 const WATCH_INTERVAL_MS = 30 * 1000;
 const WATCH_STALE_S = 180;
+// "record-close" (Record a close made elsewhere): the id is not a table entry, so it cannot be started through /api/action or /api/spend; only Executor.recordClose runs it
+const RECORD_CLOSE_ID = "record-close";
+const RECORD_TXID_RE = /^(?:0x)?([0-9a-f]{64})$/;
+const TICK_JSON_MAX = 8 * 1024 * 1024;
+const REASON_LINES_MAX = 5;
+
+/** A transaction id as the request may give it (exactly 64 lower-case hex digits, after an optional 0x) in the form swap-cli is given (the 64 digits alone); null for anything else. */
+function recordCloseTxid(raw) {
+  if (typeof raw !== "string") return null;
+  const m = RECORD_TXID_RE.exec(raw);
+  return m ? m[1] : null;
+}
 
 // table id -> the step it runs (spec 5.A.2) and, for the classification of a spend, the step name of exitcodes.js STEP_ROWS
 const STEP_OF = {
@@ -60,6 +76,25 @@ const NEEDS_RECOVERY_CODE = /^(?:wallet-setup-|dry-fund$|send-fund$|dry-lock$|se
 /** Does this entry start a child that can send or sign? Such an entry is never given a signal and never abandoned. */
 function isSender(e) {
   return !!e && (e.group === "spend" || /^board-sign-/.test(e.id));
+}
+
+/**
+ * Did the program ever start a lock send in this audit, one that may have been sent? (S1.) A `send-lock` start line counts unless the end line that follows it says the step was refused and
+ * nothing was sent; a start with no end line counts (a crash in the send). Only the lines of the program's own audit are read; a malformed record is skipped.
+ */
+function lockEverSentIn(records) {
+  let open = false;
+  for (const r of Array.isArray(records) ? records : []) {
+    if (!r || typeof r !== "object" || r.action !== "send-lock") continue;
+    if (r.phase === "start") {
+      if (open) return true;
+      open = true;
+    } else if (r.phase === "end" && open) {
+      open = false;
+      if (!/^refused, nothing sent/.test(String(r.result || ""))) return true;
+    }
+  }
+  return open;
 }
 
 /**
@@ -117,6 +152,9 @@ function resolve(id, x = {}) {
       return { name: "boardVerify", call: (s, c) => s.boardVerify(c, "checked") };
     case "board-balance":
       return { name: "boardBalance", call: (s, c) => s.boardBalance(c) };
+    // the one flag set of a recorded close: `--apply` and `--closed-by TXID`, each once; `run` has checked x.role and x.txid (bare lower-case) before this is called
+    case RECORD_CLOSE_ID:
+      return { name: "tick", call: (s, c) => s.tick(c, role(x.role), { args: ["--apply", "--closed-by", x.txid] }) };
     default:
   }
   if ((m = /^dry-sweep-eth-(alice|bob)$/.exec(id))) return { name: "walletSweep", call: (s, c) => s.walletSweep(c, "eth", m[1], { dryRun: true }) };
@@ -222,7 +260,22 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
         if (!confirmed) return refuse("recovery_code", "write down and confirm your recovery code first: it restores this swap's keys if this computer is lost");
       }
     }
+    // 6. R2, the signed notice: `prepare` and `join` make the swap file, which is the start of a swap; only while the role's swap file does not exist yet. Every other entry is never refused here.
+    if ((id === "prepare" || id === "join") && !ownSwapFile(id === "prepare" ? "alice" : "bob")) {
+      const n = newSwapNotice.read(program);
+      if (n.unsafe) return refuse("new_swap_notice", n.why);
+    }
     return { ok: true };
+  }
+
+  /** Does the swap file of this role exist in the run folder? (Alice: alice.swap.json; Bob: bob/bob.swap.json.) */
+  function ownSwapFile(role) {
+    try {
+      fs.lstatSync(role === "alice" ? path.join(swap.dir, "alice.swap.json") : path.join(swap.dir, "bob", "bob.swap.json"));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   function buildCtx(settings, signal) {
@@ -234,6 +287,14 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
       home: program.home,
       now: clock,
       runNumber: swap.id.slice(0, 8),
+      // Bob on Ethereum mainnet: 650 while his approval is in force and holds the producer-share statement, else null (steps/common.js producerAckFlags). Asked at every use, never kept.
+      producerAck: () => {
+        try {
+          return typeof swap.producerAck === "function" ? swap.producerAck() : null;
+        } catch {
+          return null;
+        }
+      },
       notify: (kind) => {
         try {
           if (typeof program.notify === "function") program.notify(kind, swap.id);
@@ -260,11 +321,25 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     return { running, started_at: watch ? Math.floor(watch.startedAt / 1000) : null, ticks: watch ? watch.w.ticks : 0, last_end: lastEnd, last_line_at: watch && watch.lastLineAt ? Math.floor(watch.lastLineAt / 1000) : null, mode: running ? watch.mode : null, applied_once: appliedOnce, stopped_by_person: stoppedByPerson, upgrading };
   }
 
+  /**
+   * S1: has a lock send of this swap ever been started? The program's own audit lines (a send-lock start not ended by a clean refusal) or Bob's lock record `FILE.lock-sent` beside his swap
+   * file (live.js writes it before it broadcasts). When the audit cannot be read the answer is true: the loop then keeps its applied ticks, as before.
+   */
+  function lockEverSent() {
+    try {
+      if (fs.existsSync(path.join(swap.dir, "bob", "bob.swap.json.lock-sent"))) return true;
+      if (!swap.audit || typeof swap.audit.all !== "function") return false;
+      return lockEverSentIn(swap.audit.all());
+    } catch {
+      return true;
+    }
+  }
+
   function startWatchNow(settings, mode = "apply") {
     const ac = new AbortController();
     const ctx = buildCtx(settings, ac.signal);
     const rec = { lastLineAt: 0 };
-    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], onLine: () => (rec.lastLineAt = clock()), onNote: (text) => audit({ action: "watch", role: settings.role, phase: "note", result: text }), ...(watchOpts || {}), apply: mode === "apply" });
+    const w = S.createWatch(ctx, { intervalMs: WATCH_INTERVAL_MS, roles: [settings.role], lockEverSent: lockEverSent, onLine: () => (rec.lastLineAt = clock()), onNote: (text) => audit({ action: "watch", role: settings.role, phase: "note", result: text }), ...(watchOpts || {}), apply: mode === "apply" });
     const entry = { w, ac, mode, startedAt: clock(), get lastLineAt() { return rec.lastLineAt; } };
     if (mode === "apply") appliedOnce = true;
     watch = entry;
@@ -388,7 +463,13 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     const pre = precheck(entry, { sender });
     if (!mapped || !pre.ok) return { code: null, refused: true, why: pre.ok ? "no step for this entry" : pre.why, stdout: "", stderr: "", files: [], step: mapped ? mapped.name : id };
     const loaded = swap.settingsSource.load();
-    const settings = loaded.ok ? loaded.settings : null;
+    let settings = loaded.ok ? loaded.settings : null;
+    // M1: the new fee cap of a re-send replaces run.json's cap for THIS step only (the step's fee flags read it from the settings it is given; run.json is never written); every other id keeps run.json's cap
+    if (x.newCap !== undefined && x.newCap !== null) {
+      if (!REPLACE_ID_RE.test(id) || typeof x.newCap !== "string" || !GWEI_RE.test(x.newCap) || !settings) return { code: null, refused: true, why: "a new fee cap belongs only to a re-send of a stuck reveal or refund", stdout: "", stderr: "", files: [], step: mapped.name };
+      settings = { ...settings, gas_price_gwei: x.newCap };
+    }
+    if (id === RECORD_CLOSE_ID && !((x.role === "alice" || x.role === "bob") && typeof x.txid === "string" && /^[0-9a-f]{64}$/.test(x.txid))) return { code: null, refused: true, why: "no valid transaction id", stdout: "", stderr: "", files: [], step: mapped.name };
     if (id === "join" && (typeof x.bundlePath !== "string" || !x.bundlePath)) return { code: null, refused: true, why: "no file chosen", stdout: "", stderr: "", files: [], step: mapped.name };
     if (/^(?:dry|send)-reveal-replace$|^(?:dry|send)-refund-eth-replace$/.test(id) && !(typeof x.tx === "string" && /^0x[0-9a-f]{64}$/.test(x.tx))) return { code: null, refused: true, why: "no pending transaction hash", stdout: "", stderr: "", files: [], step: mapped.name };
     // a step that sends nothing gets a signal and is stopped after the entry's own time limit; a sender is never abandoned
@@ -415,7 +496,104 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     }
   }
 
-  return { precheck, run, watchStart, watchStop, watchStatus, supervise, folderGuard, clearStopped, STEP_OF };
+  // ------------------------------------------------------------------------------------------------ record a close made elsewhere
+  const cleanLine = (t) => String(t).replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+
+  /** The tool's own words of a tick that did not record: the lines the tick step printed after its header and before its summary, then the step's own stderr. At most REASON_LINES_MAX. */
+  function reasonLines(res) {
+    const out = [];
+    const take = (text, header) => {
+      for (const raw of String(text || "").split("\n")) {
+        const l = cleanLine(raw);
+        if (!l) continue;
+        if (header && /^\[(?:alice|bob)\] tick exit \d+ at /.test(l)) continue;
+        if (header && /^(?:noid: tip|no json:|tick summary)/.test(l)) break; // the summary of a tick that ran begins here: not a reason
+        if (!out.includes(l)) out.push(l);
+      }
+    };
+    take(res.stdout, true);
+    take(res.stderr, false);
+    return out.slice(0, REASON_LINES_MAX);
+  }
+
+  /** Did the tick record this txid? Its JSON says (`closed_by.recorded`); when the file cannot be read, the summary lines the step printed (applied: True and the RECORDED note). */
+  function recordedBy(res, role, txid) {
+    if (res.code !== 0) return { recorded: false, phase_after: null };
+    try {
+      const f = path.join(swap.dir, `last-tick-${role}.json`);
+      const st = fs.lstatSync(f);
+      if (st.isFile() && !st.isSymbolicLink() && st.size > 0 && st.size <= TICK_JSON_MAX) {
+        const j = JSON.parse(fs.readFileSync(f, "utf8"));
+        if (j && typeof j === "object") {
+          const c = j.closed_by;
+          return { recorded: !!(c && typeof c === "object" && c.recorded === true && c.txid === txid), phase_after: typeof j.phase_after === "string" ? j.phase_after.slice(0, 40) : null };
+        }
+      }
+    } catch {
+      /* the summary below */
+    }
+    return { recorded: /^applied: True/m.test(res.stdout) && /^notes: \["RECORDED the close /m.test(res.stdout), phase_after: null };
+  }
+
+  /**
+   * "Record a close made elsewhere": the NOID contract of this swap was closed by a transaction this program did not send (a second computer, or anyone who read the secret from Ethereum).
+   * It runs one tick of the swap's own role with `--apply --closed-by TXID` and nothing else (resolve above); swap-cli asks the Parano1d node about the txid and records it only when it is the
+   * close of this swap's instance, on the right side of the deadline, and final; otherwise it refuses and the swap file is not changed (swap-cli README, "Closes made outside the tool"). This
+   * sends nothing and signs nothing: no gate, no typed amount, no latch. The audit has a start line (the txid, fail closed: if it cannot be written nothing runs) and an end line with the outcome.
+   * No retry here: the person presses it again.
+   *   status 400  the id is not 64 lower-case hex digits (after an optional 0x): nothing was asked, nothing is logged
+   *   status 409  refused before the tool ran (the executor's own checks), or the tool refused: nothing was recorded; `lines` is the tool's own wording
+   *   status 500  the audit log cannot be written (nothing ran), or the step stopped on an internal error
+   *   status 200  recorded
+   */
+  async function recordClose(rawTxid) {
+    const txid = recordCloseTxid(rawTxid);
+    if (!txid) return { ok: false, status: 400, recorded: false, tag: "txid", why: "A transaction id is 64 characters, 0 to 9 and a to f, in lower case (it may start with 0x).", lines: [] };
+    const role = swap.settingsSource.role();
+    const entry = { id: RECORD_CLOSE_ID, group: "record", ...(role ? { role } : {}), timeout: 3 * MIN };
+    const refusedAnswer = (why, tag, status = 409, lines = []) => ({ ok: false, status, recorded: false, tag, why, lines, txid });
+    const pre = precheck(entry, { sender: false });
+    if (!pre.ok) {
+      audit({ action: RECORD_CLOSE_ID, role: role || null, phase: "refused", result: `refused: ${pre.tag}`, tx: txid });
+      return refusedAnswer(pre.why, pre.tag);
+    }
+    if (!swap.audit || typeof swap.audit.append !== "function") return refusedAnswer("the audit log is not available: nothing was run", "audit", 500);
+    try {
+      swap.audit.append({ action: RECORD_CLOSE_ID, role, phase: "start", result: "started", tx: txid, detail: "tick --apply --closed-by TXID; the swap file is changed only if the tool accepts the close; nothing is sent" });
+    } catch (err) {
+      return refusedAnswer(`the audit log cannot be written (${(err && err.code) || "error"}): nothing was run`, "audit", 500);
+    }
+    const end = (result) => audit({ action: RECORD_CLOSE_ID, role, phase: "end", result, tx: txid });
+    const res = await run(entry, { role, txid });
+    if (res.refused) {
+      end(`refused before the tool ran (${String(res.why).slice(0, 60)})`);
+      return refusedAnswer(res.why, "refused");
+    }
+    if (res.threw) {
+      end("not recorded: the step stopped on an internal error");
+      return refusedAnswer("The program could not run the check: the step stopped on an internal error. Nothing was recorded.", "internal", 500);
+    }
+    const r = recordedBy(res, role, txid);
+    if (r.recorded) {
+      end(`recorded (exit 0${r.phase_after ? `, phase ${r.phase_after}` : ""})`);
+      return { ok: true, status: 200, recorded: true, txid, phase_after: r.phase_after, lines: [] };
+    }
+    let lines = reasonLines(res);
+    if (!lines.length) {
+      lines =
+        res.code === 124
+          ? ["The check took too long and was stopped."]
+          : res.code === 127
+          ? ["The program could not start its swap tool."]
+          : res.code === 0
+          ? ["The tool ran but did not record this close."]
+          : [`The tool refused this close (exit ${res.code === null ? "?" : res.code}) and gave no reason.`];
+    }
+    end(`not recorded (exit ${res.code === null ? "?" : res.code}): ${lines[0]}`);
+    return { ok: false, status: 409, recorded: false, tag: "tool", why: "The program did not record this close. The swap was not changed.", lines, txid };
+  }
+
+  return { precheck, run, recordClose, watchStart, watchStop, watchStatus, supervise, folderGuard, clearStopped, STEP_OF };
 }
 
-module.exports = { createStepExecutor, resolve, isSender, STEP_OF, TERMINAL_ONLY, NO_PASSPHRASE, NEEDS_RECOVERY_CODE, FOLDER_GUARD_CACHE_MS, WATCH_STALE_S };
+module.exports = { createStepExecutor, resolve, isSender, lockEverSentIn, recordCloseTxid, RECORD_CLOSE_ID, STEP_OF, TERMINAL_ONLY, NO_PASSPHRASE, NEEDS_RECOVERY_CODE, FOLDER_GUARD_CACHE_MS, WATCH_STALE_S };

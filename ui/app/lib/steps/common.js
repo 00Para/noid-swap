@@ -454,7 +454,7 @@ async function runPipeline(ctx, spec) {
 // ---------------------------------------------------------------------------------------------------------------------------------
 // flags
 
-/** swap-cli's node flags for a tick or a claim (env.sh `node_flags`). No producer waiver is ever passed. */
+/** swap-cli's node flags for a tick or a claim (env.sh `node_flags`). No producer waiver is passed here: Bob's acknowledgement is added by tickBase (producerAckFlags), never --accept-producer-concentration. */
 function nodeFlags(ctx) {
   const s = ctx.settings;
   const f = ["--transport", "curl", "--noid-rpc", s.noid_rpc, "--eth-rpc", s.eth_rpc, "--rpc-timeout", String(s.rpc_timeout_s)];
@@ -486,25 +486,78 @@ function walletNoidFlags(ctx) {
   return f;
 }
 
-/** live.js fee flags for an Ethereum spend (env.sh `fee_flags`, without the mainnet cap the settings do not have). */
+/** True for a production run.json (Ethereum mainnet): the fee setting there is the mainnet fee cap, never a gas price. */
+const onMainnet = (settings) => !!settings && settings.profile === "production";
+
+/**
+ * live.js fee flags for an Ethereum spend. On a test network: --gas-price-gwei (and the tip). On production (run.json's gas_price_gwei is the mainnet fee cap): --mainnet --max-fee-gwei CAP
+ * (and --priority-fee-gwei TIP), never --gas-price-gwei (live.js refuses the two together); no cap on production gives no flag here and the spend steps refuse first (checkFeeSettings).
+ */
 function feeFlags(settings) {
   if (!settings.gas_price_gwei) return [];
-  const f = ["--gas-price-gwei", settings.gas_price_gwei];
+  const f = onMainnet(settings) ? ["--mainnet", "--max-fee-gwei", settings.gas_price_gwei] : ["--gas-price-gwei", settings.gas_price_gwei];
   if (settings.priority_fee_gwei) f.push("--priority-fee-gwei", settings.priority_fee_gwei);
   return f;
 }
 
-/** A refusal text when a tip has no cap to sit under (env.sh `check_fee_settings`), else null. The spend steps return 2 on it. */
+/** A refusal text when a tip has no cap to sit under (env.sh check_fee_settings) or a production run has no fee cap, else null. The spend steps return 2 on it. */
 function checkFeeSettings(settings) {
+  if (onMainnet(settings) && !settings.gas_price_gwei) {
+    return "this swap is on Ethereum mainnet and has no fee cap: gas_price_gwei is the mainnet fee cap (--max-fee-gwei) and must be set in run.json. Nothing was sent; refusing";
+  }
   if (settings.priority_fee_gwei && !settings.gas_price_gwei) {
     return "priority_fee_gwei is set but gas_price_gwei is not: the tip needs a cap to sit under. Set gas_price_gwei in run.json, or clear priority_fee_gwei. Nothing was sent; refusing";
   }
   return null;
 }
 
-/** live.js `reserve` takes the cap flag only, no tip (env.sh `reserve_fee_flags`). */
+/** live.js reserve takes the cap flag only, no tip (env.sh reserve_fee_flags): --mainnet --max-fee-gwei CAP on production, --gas-price-gwei elsewhere. */
 function reserveFeeFlags(settings) {
-  return settings.gas_price_gwei ? ["--gas-price-gwei", settings.gas_price_gwei] : [];
+  if (!settings.gas_price_gwei) return [];
+  return onMainnet(settings) ? ["--mainnet", "--max-fee-gwei", settings.gas_price_gwei] : ["--gas-price-gwei", settings.gas_price_gwei];
+}
+
+// The producer-share acknowledgement (owner decision D2). Bob's tick and his lock step pass --acknowledge-producer-share 650 ONLY while his approval holds the statement: the step context
+// carries producerAck() (the autopilot's answer: 650 while the approval is in force and holds the statement, else null). 650 permille is the compiled hard maximum of swap-cli's flag.
+// Never for Alice, never on a test network, never for the claim, and never the older --accept-producer-concentration.
+const PRODUCER_ACK_PERMILLE = 650;
+function producerAckFlags(ctx) {
+  const s = ctx && ctx.settings;
+  if (!s || s.profile !== "production" || s.role !== "bob" || !ctx || typeof ctx.producerAck !== "function") return [];
+  let v = null;
+  try {
+    v = ctx.producerAck();
+  } catch {
+    v = null;
+  }
+  return v === PRODUCER_ACK_PERMILLE ? ["--acknowledge-producer-share", String(PRODUCER_ACK_PERMILLE)] : [];
+}
+
+// S1 (review of the mainnet opening, narrowed in fix round 2): Bob on production, before his lock is sent, while his approval is off or lapsed: an APPLIED tick with a PENDING lock intent and no
+// acknowledgement finds the producer screen refusing and writes a latch that refuses the lock for the rest of the swap. So, while the last tick shows a held or recorded lock_eth intent and no lock
+// send has ever been started, the watch loop ticks read-only (nothing is recorded, no latch). Phases before Bob's own act: received, funded, funding_final (the same set the wallet poll and rule W use).
+const BOB_BEFORE_LOCK = new Set(["received", "funded", "funding_final"]);
+const READING_ONLY_NOTE = "Reading only: your approval is off, so nothing is recorded until you approve again.";
+/**
+ * True when this round's tick of `role` must run without --apply: production, Bob's own run, no acknowledgement in force (`ackFlags`, the flags the round already decided, is empty;
+ * producerAckFlags is asked only when none are given), his phase before the lock (`phase` null = no tick read yet = before it), the last tick showing a held or recorded lock_eth intent
+ * (`lockIntentPending`: the one state in which the engine writes the latch) and no lock send of this swap ever started (`lockEverSent`: the caller's evidence, the program's audit lines and
+ * the lock record). In every other case the applied tick runs as on a test network, so Rule W's height abort is recorded as before (fix round 2, S1).
+ */
+function readingOnlyForAck(ctx, role, phase, lockEverSent, lockIntentPending, ackFlags) {
+  const s = ctx && ctx.settings;
+  if (!s || s.profile !== "production" || s.role !== "bob" || role !== "bob") return false;
+  if ((Array.isArray(ackFlags) ? ackFlags : producerAckFlags(ctx)).length > 0) return false;
+  if (phase !== null && phase !== undefined && !BOB_BEFORE_LOCK.has(phase)) return false;
+  if (lockIntentPending !== true) return false;
+  return lockEverSent !== true;
+}
+
+/** Does a tick's JSON show a held or just recorded lock_eth intent (swap-cli: "intent": {"status": "held"|"recorded", "intent": {"action": "lock_eth", ..}})? */
+function lockIntentPendingIn(v) {
+  const i = v && typeof v === "object" ? v.intent : null;
+  if (!i || typeof i !== "object" || (i.status !== "held" && i.status !== "recorded")) return false;
+  return !!i.intent && typeof i.intent === "object" && i.intent.action === "lock_eth";
 }
 
 /**
@@ -552,8 +605,8 @@ function revealTxFlags(ctx) {
   return { flags: [], notes: [`WARNING: ${file} does not hold one transaction hash (0x + 64 hex digits): it is IGNORED and no --reveal-tx is passed. Fix or delete it (the reverted claim it should name is not being checked)`] };
 }
 
-/** The node flags, log start and reveal tx of a tick or a claim, with the warnings they print: { args, warnings } or { error }. */
-function tickBase(ctx) {
+/** The node flags, log start and reveal tx of a tick or a claim, with the warnings they print: { args, warnings } or { error }. `opts.ack`: Bob's tick and lock step add the producer-share acknowledgement while his approval holds it (producerAckFlags). */
+function tickBase(ctx, opts = {}) {
   const w = [];
   const sw = singleNodeWarning(ctx);
   if (sw) w.push(sw);
@@ -561,7 +614,7 @@ function tickBase(ctx) {
   if (fb.error) return { error: fb.error };
   const rt = revealTxFlags(ctx);
   w.push(...fb.notes, ...rt.notes);
-  return { args: [...nodeFlags(ctx), ...fb.flags, ...rt.flags], warnings: w };
+  return { args: [...nodeFlags(ctx), ...fb.flags, ...rt.flags, ...(opts.ack === true ? (Array.isArray(opts.ackFlags) ? opts.ackFlags : producerAckFlags(ctx)) : [])], warnings: w };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -1127,6 +1180,11 @@ module.exports = {
   feeFlags,
   checkFeeSettings,
   reserveFeeFlags,
+  producerAckFlags,
+  readingOnlyForAck,
+  lockIntentPendingIn,
+  READING_ONLY_NOTE,
+  PRODUCER_ACK_PERMILLE,
   fromBlockFlags,
   revealTxFlags,
   tickBase,

@@ -32,7 +32,6 @@ test("build: the nine keys in the spec's order, indented, one newline at the end
 test("build refuses an Alice run.json, a rehearsal one, a missing value and a key address the reader would refuse", () => {
   assert.throws(() => inv.build(makeSettings({ role: "alice", contract: CONTRACT }), BOB_ETH), /sells ETH/);
   assert.throws(() => inv.build(makeSettings({ role: "bob", profile: "rehearsal", chain_id: 31337 }), BOB_ETH), /Sepolia/);
-  assert.throws(() => inv.build(makeSettings({ role: "bob", profile: "production", chain_id: 1 }), BOB_ETH), /Sepolia/);
   assert.throws(() => inv.build(BOB, null), /key/);
   assert.throws(() => inv.build(BOB, ""), /key/);
   assert.throws(() => inv.build({ ...BOB, bob_noid: null }, BOB_ETH), /bob_noid/);
@@ -105,8 +104,8 @@ test("not an invitation, or damaged: not JSON, a BOM, a root that is not an obje
   assert.equal(why(text({ ...GOOD(), v: 1.5 })), D);
 });
 
-test("a network other than sepolia is refused: rehearsal, production, mainnet, a number, a wrong case", () => {
-  for (const n of ["rehearsal", "production", "mainnet", "Sepolia", "", 11155111, null]) assert.equal(why(text({ ...GOOD(), network: n })), inv.WORDS.NETWORK, String(n));
+test("a network other than sepolia or mainnet is refused: rehearsal, production (the profile name is not the file's word), a number, a wrong case", () => {
+  for (const n of ["rehearsal", "production", "Mainnet", "Sepolia", "", 11155111, null]) assert.equal(why(text({ ...GOOD(), network: n })), inv.WORDS.NETWORK, String(n));
 });
 
 test("every value is checked, and the refusal names the field", () => {
@@ -149,9 +148,9 @@ test("amounts above the Sepolia test limits are refused with their own words; th
 test("the refusal words are exactly the spec's", () => {
   assert.equal(inv.WORDS.TOO_LARGE, "That file is too large to be an invitation. Nothing was filled.");
   assert.equal(inv.WORDS.DAMAGED, "That file is not an invitation of this program, or it is damaged. Nothing was filled.");
-  assert.equal(inv.WORDS.NETWORK, "This invitation is for a network this program does not use for invitations (Sepolia only). Nothing was filled.");
+  assert.equal(inv.WORDS.NETWORK, "This invitation is for a network this program does not use for invitations (Sepolia or Ethereum mainnet only). Nothing was filled.");
   assert.equal(inv.WORDS.value("contract"), "That invitation has a value this program cannot use (contract). Nothing was filled.");
-  assert.equal(inv.WORDS.CAPS, "The amounts in this invitation are above this program's test limit. Nothing was filled.");
+  assert.equal(inv.WORDS.CAPS, "The amounts in this invitation are above this program's limit for that network. Nothing was filled.");
 });
 
 // ---- readBobKeyAddress

@@ -363,6 +363,20 @@ function createFakeElectron(opts = {}) {
     },
   };
 
+  // like the real one in the main process: readText gives the text now; a test sets it with opts.clipboardText or by assigning `electron.clipboard.text`
+  electron.clipboard = {
+    text: opts.clipboardText === undefined ? "" : opts.clipboardText,
+    reads: 0,
+    readText() {
+      this.reads++;
+      if (opts.clipboardThrows) throw new Error("no clipboard");
+      return this.text;
+    },
+    writeText(t) {
+      this.text = String(t);
+    },
+  };
+
   electron.ipcMain = {
     handlers: new Map(),
     handle(channel, fn) {

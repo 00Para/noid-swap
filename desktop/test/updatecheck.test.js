@@ -5,23 +5,28 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const updates = require("../lib/updates");
+const F = require("./release-fixture.js");
 const { createUpdateChecker } = require("../lib/updatecheck");
 
 const REPO = "example-owner/example-repo";
 const DAY = 24 * 60 * 60 * 1000;
-const release = (tag, o = {}) => ({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}`, ...o });
+const release = (tag, o = {}) => F.withAssets({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}`, ...o });
 
 function setup(over = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "updcheck-"));
   const calls = { fetch: 0, ask: 0, saved: [] };
   let setting = over.setting || "daily";
   let t = over.now || 10 * DAY;
+  const served = F.releaseFetch(() => over.answer || [release("v0.2.0"), release("v0.1.0")], over.files);
   const o = {
-    fetchJson: async () => {
+    // calls.fetch counts the requests of the releases list; the two notice assets are served by the fixture
+    fetchJson: async (url, opts) => {
+      if (!url.endsWith("/releases?per_page=10")) return served(url, opts);
       calls.fetch++;
       if (over.fetchThrows) throw new Error("offline");
       return over.answer || [release("v0.2.0"), release("v0.1.0")];
     },
+    publicKey: F.PUB,
     currentVersion: "0.1.0",
     repo: over.repo === undefined ? REPO : over.repo,
     anyActive: () => !!over.active,
@@ -48,10 +53,10 @@ test("daily: the first start checks, a newer version is shown with its page and 
   try {
     fs.writeFileSync(s.o.stateFile, JSON.stringify({ v: 1, crashes: [5] }));
     const c = s.make();
-    assert.deepEqual(c.status(), { state: "never", latest: null, url: null });
+    assert.deepEqual(c.status(), { state: "never", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
     assert.equal(await c.atStart(), "checked");
     assert.equal(s.calls.fetch, 1);
-    assert.deepEqual(c.status(), { state: "newer", latest: "0.2.0", url: `https://github.com/${REPO}/releases/tag/v0.2.0`, text: updates.NOTICE_TEXT });
+    assert.deepEqual(c.status(), { state: "newer", latest: "0.2.0", url: `https://github.com/${REPO}/releases/tag/v0.2.0`, text: updates.NOTICE_TEXT, note: "A short note.", sha256: [{ name: "setup.exe", sha256: "a".repeat(64) }], unsafeForNewSwaps: false, unsafeNote: null });
     const st = s.state();
     assert.deepEqual(st.crashes, [5], "the crash handler's key is left as it was");
     assert.equal(st.update_check.last_checked_ms, 10 * DAY);
@@ -138,7 +143,7 @@ test("errors: no repository in this build, an offline network and a bad answer a
     const c = none.make();
     await c.atStart();
     assert.equal(none.calls.fetch, 0);
-    assert.deepEqual(c.status(), { state: "not_configured", latest: null, url: null });
+    assert.deepEqual(c.status(), { state: "not_configured", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
   } finally {
     none.cleanup();
   }
@@ -150,7 +155,7 @@ test("errors: no repository in this build, an offline network and a bad answer a
     assert.equal(noneAsk.calls.ask, 0);
     assert.equal(noneAsk.calls.fetch, 0);
     assert.deepEqual(noneAsk.calls.saved, []);
-    assert.deepEqual(c.status(), { state: "not_configured", latest: null, url: null });
+    assert.deepEqual(c.status(), { state: "not_configured", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
   } finally {
     noneAsk.cleanup();
   }
@@ -159,7 +164,7 @@ test("errors: no repository in this build, an offline network and a bad answer a
     try {
       const c = s.make();
       await c.atStart();
-      assert.deepEqual(c.status(), { state: "error", latest: null, url: null });
+      assert.deepEqual(c.status(), { state: "error", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
     } finally {
       s.cleanup();
     }
@@ -168,7 +173,7 @@ test("errors: no repository in this build, an offline network and a bad answer a
   try {
     const c = same.make();
     await c.atStart();
-    assert.deepEqual(c.status(), { state: "none", latest: null, url: null });
+    assert.deepEqual(c.status(), { state: "none", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
   } finally {
     same.cleanup();
   }

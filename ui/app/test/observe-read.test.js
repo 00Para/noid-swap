@@ -64,8 +64,8 @@ test("the watch loop in read mode asks for an observe-only tick, in apply mode f
       await createWatch(ctx, { tick: tickFn, sleep: async () => {}, roles: ["bob"], ...opts }).start();
       return seen[0];
     };
-    assert.deepEqual(await ask({ apply: false }), { args: [], observeOnly: true });
-    assert.deepEqual(await ask({}), { args: ["--apply"] });
+    assert.deepEqual(await ask({ apply: false }), { args: [], observeOnly: true, ackFlags: [] });
+    assert.deepEqual(await ask({}), { args: ["--apply"], ackFlags: [] });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

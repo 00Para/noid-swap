@@ -12,7 +12,7 @@ const F = require("./program-page-fixtures");
 const PIN = "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF";
 const MY_NOID = "o1" + "m".repeat(40);
 const MY_ETH = "0x" + "9a".repeat(20);
-const SETTINGS = { v: 1, noid_rpc: "http://127.0.0.1:9601", noid_rpc2: null, noid_rpc2_remote: false, eth: { sepolia: { rpc: "https://s.example", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null } }, eth_rpc2_remote: false, rpc_timeout_s: 60, alert_url: null, noid_payout: MY_NOID, eth_payout: MY_ETH, bob_noid: null, board: { relays: ["wss://r1.example"], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0 }, update_check: "ask" };
+const SETTINGS = { v: 1, noid_rpc: "http://127.0.0.1:9601", noid_rpc2: null, noid_rpc2_remote: false, eth: { sepolia: { rpc: "https://s.example", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null }, production: { rpc: "https://ethereum-rpc.publicnode.com", rpc2: "https://rpc.mevblocker.io" } }, eth_rpc2_remote: false, rpc_timeout_s: 60, alert_url: null, noid_payout: MY_NOID, eth_payout: MY_ETH, bob_noid: null, board: { relays: ["wss://r1.example"], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0 }, update_check: "ask" };
 const form = { profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: PIN }, rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null } }, roles: ["alice", "bob"] };
 const has = (n, c) => n.className.split(/\s+/).includes(c);
 
@@ -32,8 +32,8 @@ test("the new-swap form: the side first and on its own, then the convert with th
   const { root, g } = await formPage();
   const section = root.children[0];
   assert.ok(has(section, "pg-form") && has(section, "ns"));
-  const order = section.children.map((c) => (has(c, "card-head") ? "head" : has(c, "invite-open") ? "invite" : has(c, "field") ? "field:" + c.all((n) => n.tag === "select")[0].attrs.id : has(c, "convert") ? "convert" : has(c, "ns-sec") ? "sec:" + c.querySelector("h2").textContent : has(c, "ack") ? "ack" : has(c, "form-end") ? "end" : c.tag));
-  assert.deepEqual(order.slice(0, 6), ["head", "invite", "field:ns-role", "convert", "sec:Bob's addresses", "sec:Your own addresses"]);
+  const order = section.children.map((c) => (has(c, "card-head") ? "head" : has(c, "invite-open") ? "invite" : has(c, "field") ? "field:" + c.all((n) => n.tag === "select")[0].attrs.id : has(c, "convert") ? "convert" : has(c, "ns-facts") ? "facts" : has(c, "ns-sec") ? "sec:" + c.querySelector("h2").textContent : has(c, "ack") ? "ack" : has(c, "form-end") ? "end" : c.tag));
+  assert.deepEqual(order.slice(0, 7), ["head", "invite", "field:ns-role", "convert", "facts", "sec:Bob's addresses", "sec:Your own addresses"]);
   assert.equal(order[order.length - 1], "end");
   // each amount is a block: the label, the coin glyph, the figure, the ticker, the chain, then its hint and its error
   const convert = section.children.find((c) => has(c, "convert"));
@@ -142,16 +142,16 @@ async function settingsPage() {
 test("settings: each group is a section with a title and one line on the left and its fields on the right; there is no fieldset", async () => {
   const { root } = await settingsPage();
   const secs = root.all((n) => n.tag === "section" && has(n, "set-sec"));
-  assert.equal(secs.length, 7);
+  assert.equal(secs.length, 8);
   assert.equal(root.all((n) => n.tag === "fieldset" || n.tag === "legend").length, 0);
   const lines = secs.map((s) => [s.querySelector("h2").textContent, (s.children[0].children[1] || { textContent: null }).textContent]);
-  assert.deepEqual(lines.slice(0, 5), [["Parano1d node", "This machine only: the node of the Parano1d wallet app."], ["Ethereum node (Sepolia)", "Sepolia, the public test network."], ["Your addresses", "They fill the form of a new swap."], ["Updates", "The program never installs anything by itself."], ["Alerts", "No alert address is set."]]);
+  assert.deepEqual(lines.slice(0, 6), [["Parano1d node", "This machine only: the node of the Parano1d wallet app."], ["Ethereum node (Sepolia)", "Sepolia, the public test network."], ["Ethereum node (mainnet)", "Ethereum mainnet, real funds. Two public endpoints from two operators. Each one sees this computer's IP address together with the swap key's address, the contract, the lock id, the timing and, at the sweep, your payout address."], ["Your addresses", "They fill the form of a new swap."], ["Updates", "The program never installs anything by itself."], ["Alerts", "No alert address is set."]]);
   for (const s of secs) {
     assert.deepEqual(s.children.map((c) => c.className), ["set-head", "set-body"]);
     assert.equal(root.all((n) => n.attrs.id === s.attrs["aria-labelledby"]).length, 1);
   }
   // the address grids keep the form-grid class, and the addresses are one column
-  const addr = secs[2].all((n) => has(n, "form-grid"))[0];
+  const addr = secs[3].all((n) => has(n, "form-grid"))[0];
   assert.equal(has(addr, "one"), true);
   assert.equal(secs[0].all((n) => has(n, "form-grid")).length, 1);
 });

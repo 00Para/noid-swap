@@ -51,7 +51,9 @@ const bobFields = () => ({ ...base(), role: "bob", alice_noid: null, bob_noid: A
 const alice = () => ({ v: 1, run_id: RUN_ID, ...aliceFields() });
 const bob = () => ({ v: 1, run_id: RUN_ID, ...bobFields() });
 const withKey = (o, k, x) => ({ ...o, [k]: x });
-const problemKeys = (o) => rs.validate(o).map((s) => s.split(":")[0]);
+// the rules of a swap being made (fix round 2, L8: the loopback-only http:// rule is checked at create, a loaded run.json accepts http:// for any host)
+const validateNew = (o) => rs.validate(o, { create: true });
+const problemKeys = (o) => validateNew(o).map((s) => s.split(":")[0]);
 
 // ---------------------------------------------------------------- the schema
 
@@ -88,8 +90,9 @@ test("validate: profile and chain_id must match; production and chain 1 are refu
   assert.deepEqual(rs.validate({ ...alice(), profile: "rehearsal", chain_id: 31337 }), []);
   assert.ok(problemKeys({ ...alice(), profile: "rehearsal" }).includes("chain_id"));
   assert.ok(problemKeys({ ...alice(), chain_id: 31337 }).includes("chain_id"));
-  for (const p of ["production", "mainnet", "", null, "Sepolia"]) assert.ok(problemKeys(withKey(alice(), "profile", p)).includes("profile"), String(p));
-  assert.ok(problemKeys({ ...alice(), profile: "production", chain_id: 1 }).includes("profile"));
+  for (const p of ["mainnet", "", null, "Sepolia"]) assert.ok(problemKeys(withKey(alice(), "profile", p)).includes("profile"), String(p));
+  // production is a profile now (its own rules are in mainnet-program.test.js)
+  assert.ok(!problemKeys({ ...alice(), profile: "production", chain_id: 1 }).includes("profile"));
   assert.ok(problemKeys(withKey(alice(), "chain_id", 1)).includes("chain_id"));
   for (const c of ["11155111", 11155111.5, null, -1]) assert.ok(problemKeys(withKey(alice(), "chain_id", c)).includes("chain_id"), String(c));
 });
@@ -150,8 +153,8 @@ test("validate: null only where the table allows; the payouts and the roles' own
 test("validate: node URLs accepted and refused", () => {
   const good = ["http://127.0.0.1:9601", "http://localhost:9601", "http://[::1]:9601", "http://localhost", "https://rpc.example.org", "https://rpc.example.org:8545/v3/abc123?x=1", "http://127.0.0.1/rpc"];
   for (const u of good) {
-    assert.deepEqual(rs.validate(withKey(alice(), "noid_rpc", u)), [], u);
-    assert.deepEqual(rs.validate(withKey(alice(), "eth_rpc", u)), [], u);
+    assert.deepEqual(validateNew(withKey(alice(), "noid_rpc", u)), [], u);
+    assert.deepEqual(validateNew(withKey(alice(), "eth_rpc", u)), [], u);
   }
   const bad = [
     "http://example.com", "http://127.0.0.1.evil.com", "http://localhost.evil.com", "https://user:pw@rpc.example.org", "https://user@rpc.example.org", "http://localhost@evil.com",
@@ -167,12 +170,12 @@ test("validate: node URLs accepted and refused", () => {
   // exactly 2048 characters is allowed
   const long = "https://a.example/" + "x".repeat(2048 - 18);
   assert.equal(long.length, 2048);
-  assert.deepEqual(rs.validate(withKey(alice(), "eth_rpc", long)), []);
+  assert.deepEqual(validateNew(withKey(alice(), "eth_rpc", long)), []);
 });
 
 test("validate: second nodes, their remote flags and a second node that is the first", () => {
-  assert.deepEqual(rs.validate({ ...alice(), noid_rpc2: "http://127.0.0.1:9602", noid_rpc2_remote: true }), []);
-  assert.deepEqual(rs.validate({ ...alice(), eth_rpc2: "https://other.example.org", eth_rpc2_remote: true }), []);
+  assert.deepEqual(validateNew({ ...alice(), noid_rpc2: "http://127.0.0.1:9602", noid_rpc2_remote: true }), []);
+  assert.deepEqual(validateNew({ ...alice(), eth_rpc2: "https://other.example.org", eth_rpc2_remote: true }), []);
   assert.ok(problemKeys(withKey(alice(), "noid_rpc2_remote", true)).includes("noid_rpc2_remote"));
   assert.ok(problemKeys(withKey(alice(), "eth_rpc2_remote", true)).includes("eth_rpc2_remote"));
   assert.ok(problemKeys(withKey(alice(), "noid_rpc2", "http://example.com")).includes("noid_rpc2"));
@@ -227,7 +230,7 @@ test("validate: handover and the alert URL (https only)", () => {
 test("validate: a message never holds the value", () => {
   const secret = "https://user:topsecret@hooks.example.org/xyz-API-KEY";
   const long = "unknown_name_" + "x".repeat(80);
-  const msgs = rs.validate({ ...alice(), alert_url: secret, noid_rpc: "http://evil.example/KEYKEYKEY" }).concat(rs.validate({ ...alice(), [long]: 1 }));
+  const msgs = validateNew({ ...alice(), alert_url: secret, noid_rpc: "http://evil.example/KEYKEYKEY" }).concat(validateNew({ ...alice(), [long]: 1 }));
   const all = msgs.join("\n");
   assert.ok(msgs.length >= 3);
   assert.ok(!all.includes("x".repeat(60))); // an unknown key's name is cut short

@@ -29,20 +29,26 @@ const { createStepExecutor } = require("./stepexec");
 const { FirstSteps, wantedFor } = require("./firststeps");
 const { createRunJsonSource, readSlot } = require("./settingsource");
 const { createToolHasher } = require("./toolhash");
-const { PROFILES, decimalToInt, pinFor } = require("./swapform");
+const { PROFILES, PROGRAM_PROFILES, PRODUCTION_FEE_DEFAULTS, decimalToInt, pinFor } = require("./swapform");
 const { ENDED_PHASES } = require("./gate");
+const needtext = require("./needtext");
+const launchfacts = require("./launchfacts");
 const { readRun } = require("./runfolder");
 const { BoardHost, microToDec, weiToDec } = require("./board/host");
 const { noidAddressProblem, ethAddressProblem } = require("./walletrun");
+const newSwapNotice = require("./newswapnotice");
+const payoutHistory = require("./payouthistory");
+const { createSettlement } = require("./settlement");
 
 const ID_RE = /^[0-9a-f]{32}$/;
 const BLOCK_S = 30;
 const SNAPSHOT_MS = 2500;
 const SCAN_STALE_MS = 5000;
-const NOID_DEC = /^(0|[1-9]\d{0,2})(\.\d{1,6})?$/;
+const NOID_DEC = /^(0|[1-9]\d{0,3})(\.\d{1,6})?$/; // up to four whole digits: the mainnet cap is 2,500 NOID
 const ETH_DEC = /^(0|[1-9]\d{0,1})(\.\d{1,18})?$/;
 const GWEI_DEC = /^(0|[1-9]\d{0,3})(\.\d{1,9})?$/;
 const WHOLE = /^[1-9]\d{0,15}$/;
+const MAINNET_TIP_MAX_GWEI = runsettings.MAINNET_TIP_MAX_GWEI;
 // the form field a run.json key is asked under (the others share their names)
 const FORM_NAME = { amount_micronoid: "noid_amount", amount_wei: "eth_amount" };
 const FORM_FIELDS = ["role", "profile", "contract_version", "noid_amount", "eth_amount", "contract", "bob_noid", "bob_eth", "noid_payout", "eth_payout", "single_node_ok", "deploy_block", "hc_lead", "gas_price_gwei", "priority_fee_gwei"];
@@ -58,6 +64,13 @@ function boardPins(b, ps) {
   const prof = Object.prototype.hasOwnProperty.call(PROFILES, b.profile) ? PROFILES[b.profile] : null;
   return pin && prof ? { ...b.pinned_htlc, [String(prof.chain)]: pin } : b.pinned_htlc;
 }
+
+// R3: the words of a wrong mixed case (the checksum of an Ethereum address), for the fields that hold a wallet address of a person
+const CHECKSUM_WORDS = "The capitals and small letters of this address do not match its checksum, so a character is probably wrong. Copy it again from the wallet.";
+const checksumProblem = (addr) => {
+  const why = ethAddressProblem(addr);
+  return why && /^the capital letters are not this address's checksum/.test(why) ? CHECKSUM_WORDS : why;
+};
 
 const bad = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
 
@@ -122,6 +135,7 @@ class SwapSet {
     this.lastStake = null;
     this.onAtStake = typeof program.atStakeChanged === "function" ? (l) => program.atStakeChanged(l) : null;
     this.stopped = false;
+    this.settlement = createSettlement({ now: this.now, readReceipt: deps.readReceipt });
   }
 
   // ------------------------------------------------------------------------------------------------ program facts
@@ -294,7 +308,7 @@ class SwapSet {
       guardCache.v = v;
       return v;
     };
-    swap.executor = createStepExecutor({ program: this.program, swap: { id: name, dir, settingsSource: source, audit: swap.audit, slotRole: () => source.slotRole() }, steps: this.steps, now: this.now, watchOpts: this.deps.watchOpts });
+    swap.executor = createStepExecutor({ program: this.program, swap: { id: name, dir, settingsSource: source, audit: swap.audit, slotRole: () => source.slotRole(), producerAck: () => (swap.autopilot && typeof swap.autopilot.producerAckPermille === "function" ? swap.autopilot.producerAckPermille() : null) }, steps: this.steps, now: this.now, watchOpts: this.deps.watchOpts });
     try {
       swap.runner = new ActionRunner({ runDirs: [dir, pub] }, { audit: swap.audit, runLock, executor: swap.executor, settingsSource: source, program: this.program, toolHasher: this.hasher, nodeGate: () => this.nodeGate(), exec: this.deps.exec, spawnDetached: this.deps.spawnDetached, now: this.now, pollWatch: false });
     } catch (e) {
@@ -430,7 +444,7 @@ class SwapSet {
 
   /** Facts of one swap: role, settings, swap file, phase, active, in_contract, needs_you, until. Never throws. */
   facts(swap) {
-    const f = { swap: swap.id, role: null, settings: null, label: "", give: null, get: null, phase: null, active: false, in_contract: false, needs_you: false, ended: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
+    const f = { swap: swap.id, network: null, role: null, settings: null, label: "", give: null, get: null, phase: null, active: false, in_contract: false, needs_you: false, needs_own: false, late_claim: false, ended: false, until_unix: null, until_text: null, refused: swap.refused || null, created_at: swap.createdAt || 0 };
     if (!swap.runner) {
       f.label = "A folder this program did not open";
       return f;
@@ -439,6 +453,7 @@ class SwapSet {
       const l = swap.settingsSource.load();
       const s = l.ok ? l.settings : null;
       f.settings = s;
+      f.network = s ? (s.profile === "production" ? "mainnet" : "test") : null;
       f.role = s ? s.role : swap.slot ? swap.slot.role : null;
       if (s) {
         const noid = microToDec(s.amount_micronoid);
@@ -465,7 +480,14 @@ class SwapSet {
       }
       // a swap that is over has nothing left to send: an old "may have been sent" line of its audit log does not make it need the person
       if (!needs && !f.ended) needs = swap.runner.mayHaveSentIds().length > 0;
-      f.needs_you = !!needs;
+      f.needs_own = !!needs;
+      // Bob's late claim (R5) is a need of its own: it raises "needs you" and its own alarm
+      try {
+        f.late_claim = f.role === "bob" && !!swap.autopilot.lateClaim();
+      } catch {
+        f.late_claim = false;
+      }
+      f.needs_you = !!needs || f.late_claim;
       // until when the coins are in play: Alice D (a height, as the page counts it: 30 s a block from the tick's tip), Bob T_reveal
       if (f.active && f.role === "alice" && run && run.terms && typeof run.terms.deadline_height === "number" && tick && tick.noid && typeof tick.noid.tip === "number" && typeof tick.now === "number") {
         f.until_unix = tick.now + Math.max(0, run.terms.deadline_height - tick.noid.tip) * BLOCK_S;
@@ -475,7 +497,10 @@ class SwapSet {
         if (t === null && tick.intent && tick.intent.intent && tick.intent.intent.params && Number.isFinite(Number(tick.intent.intent.params.t_reveal))) t = Number(tick.intent.intent.params.t_reveal);
         if (t !== null) f.until_unix = t;
       }
-      f.until_text = f.until_unix !== null ? fmtTime(f.until_unix, this.now()) : null;
+      // the list says the card's own "back by about" time (the same function), not the bare moment the coins stay in play until
+      const fin = s && launchfacts.PROFILES[s.profile] ? launchfacts.PROFILES[s.profile].eth_finality_s : null;
+      const back = f.until_unix !== null ? needtext.backFrom(f.role, f.until_unix, fin) : null;
+      f.until_text = back !== null ? `back by ${fmtTime(back, this.now())}` : null;
     } catch {
       /* a facts read never throws: what could not be read stays null */
     }
@@ -484,7 +509,7 @@ class SwapSet {
 
   summary(swap) {
     const f = this.facts(swap);
-    return { swap: f.swap, role: f.role, label: f.label, give: f.give, get: f.get, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at };
+    return { swap: f.swap, network: f.network, role: f.role, label: f.label, give: f.give, get: f.get, phase: f.phase, active: f.active, in_contract: f.in_contract, needs_you: f.needs_you, until_text: f.until_text, refused: f.refused, created_at: f.created_at };
   }
 
   list() {
@@ -514,7 +539,7 @@ class SwapSet {
   /** What `needs_you` and `done` looked like at the start: the first tick after a start sends no notification for a state that was already there. */
   seedKinds(swap) {
     const f = this.facts(swap);
-    swap.lastKinds = { needs_you: f.needs_you, ended: f.ended };
+    swap.lastKinds = { needs_you: f.needs_own, late_claim: f.late_claim, ended: f.ended };
   }
 
   emitStake() {
@@ -541,12 +566,13 @@ class SwapSet {
       if (!swap.runner || !swap.lastKinds) continue;
       const f = this.facts(swap);
       try {
-        if (f.needs_you && !swap.lastKinds.needs_you) this.program.notify("needs_you", swap.id);
+        if (f.needs_own && !swap.lastKinds.needs_you) this.program.notify("needs_you", swap.id);
+        if (f.late_claim && !swap.lastKinds.late_claim) this.program.notify("alarm", swap.id);
         if (f.ended && !swap.lastKinds.ended) this.program.notify("done", swap.id);
       } catch {
         /* a notification cannot stop the timer */
       }
-      swap.lastKinds = { needs_you: f.needs_you, ended: f.ended };
+      swap.lastKinds = { needs_you: f.needs_own, late_claim: f.late_claim, ended: f.ended };
     }
   }
 
@@ -616,11 +642,44 @@ class SwapSet {
       }
     }
     try {
+      this.noteSettled();
+    } catch {
+      /* tried again */
+    }
+    try {
       this.retireEndedSlots();
       this.notifyChanges();
       this.emitStake();
     } catch {
       /* tried again */
+    }
+  }
+
+  /** R7: once per swap, when its phase is `done`, an audit note with the time of the change to done (or that the time is not known), and (L5) the record of its payout addresses in the history. Reads and writes one audit line; sends nothing. */
+  noteSettled() {
+    for (const swap of this.swaps.values()) {
+      if (!swap.runner || swap.readOnly || swap.settledDone) continue;
+      const role = swap.settingsSource.role();
+      if (role !== "alice" && role !== "bob") continue;
+      const run = this.runOf(swap);
+      const tick = run && run.roles && run.roles[role] ? run.roles[role].tick : null;
+      if (!tick || tick.phase_after !== "done") continue;
+      swap.settledDone = true;
+      // R3 / L5: the person's own addresses of a settled swap go into the sealed history (idempotent per swap; never throws, never waits for the storage)
+      try {
+        const l = swap.settingsSource.load();
+        if (l && l.ok) void payoutHistory.record(this.program, swap.id, l.settings);
+      } catch {
+        /* the history is a check against slips, never a gate */
+      }
+      const text = this.settlement.settledNote({ role, run, audit: swap.audit });
+      if (text) {
+        try {
+          swap.audit.append({ action: "settlement", role, phase: "note", result: text });
+        } catch {
+          swap.settledDone = false; // the line could not be written: tried again
+        }
+      }
     }
   }
 
@@ -696,6 +755,8 @@ class SwapSet {
       nsa = { ok: false, why: "the vault cannot be read" };
     }
     if (!nsa || nsa.ok !== true) throw bad(409, (nsa && nsa.why) || "a new swap is not allowed yet");
+    const notice = newSwapNotice.read(this.program);
+    if (notice.unsafe) throw bad(409, notice.why);
     const open = this.slotSwap();
     if (open) {
       if (!this.isIdleSlot(open)) throw bad(409, "a board slot is already open: finish or cancel its offer first (one slot at a time)");
@@ -751,6 +812,8 @@ class SwapSet {
       nsa = { ok: false, why: "the vault cannot be read" };
     }
     if (!nsa || nsa.ok !== true) throw bad(409, (nsa && nsa.why) || "a new swap is not allowed yet");
+    const notice = newSwapNotice.read(this.program);
+    if (notice.unsafe) throw bad(409, notice.why);
     const ps = this.programSettings();
     if (!ps) throw bad(409, "the program settings cannot be read: fix them first");
     const key = this.vaultCheck();
@@ -788,6 +851,7 @@ class SwapSet {
       this.swaps.delete(id);
       throw bad(500, `the new swap could not be opened: ${r.why}`);
     }
+    // L5 (fix round 2): the payout history is written when the swap is done (noteSettled), not here: an address typed wrong in a swap that was abandoned must not read "used before"
     return id;
   }
 
@@ -808,7 +872,13 @@ class SwapSet {
     const role = need("role");
     if (role !== null && role !== "alice" && role !== "bob") errors.role = "alice or bob";
     const profile = need("profile");
-    if (profile !== null && !Object.prototype.hasOwnProperty.call(PROFILES, profile)) errors.profile = `one of ${Object.keys(PROFILES).join(", ")}`;
+    if (profile !== null && !Object.prototype.hasOwnProperty.call(PROGRAM_PROFILES, profile)) errors.profile = `one of ${Object.keys(PROGRAM_PROFILES).join(", ")}`;
+    const mainnet = profile === "production";
+    // Ethereum mainnet: version 1 only, the two-node rule (no single-node switch); run.json's schema holds the same rules (and the caps), these give the form field-level words
+    if (mainnet && !errors.profile) {
+      if (raw.contract_version !== undefined && String(raw.contract_version).trim() !== "1") errors.contract_version = "1 only on Ethereum mainnet";
+      if (raw.single_node_ok === true) errors.single_node_ok = "not on Ethereum mainnet: it has two nodes of its own";
+    }
     let cv = raw.contract_version;
     if (typeof cv === "string") cv = cv.trim() === "1" ? 1 : cv.trim() === "2" ? 2 : cv;
     if (cv !== 1 && cv !== 2) errors.contract_version = errors.contract_version || (cv === undefined || cv === "" ? "required" : "1 or 2");
@@ -828,7 +898,7 @@ class SwapSet {
     const contract = need("contract");
     if (contract !== null && ethAddressProblem(contract)) errors.contract = ethAddressProblem(contract);
     const ethPayout = need("eth_payout");
-    if (ethPayout !== null && ethAddressProblem(ethPayout)) errors.eth_payout = ethAddressProblem(ethPayout);
+    if (ethPayout !== null && checksumProblem(ethPayout)) errors.eth_payout = checksumProblem(ethPayout);
     let bobNoid = null;
     let bobEth = null;
     let noidPayout = null;
@@ -844,7 +914,8 @@ class SwapSet {
     }
     if (bobNoid !== null && noidAddressProblem(bobNoid)) errors.bob_noid = noidAddressProblem(bobNoid);
     if (noidPayout !== null && noidAddressProblem(noidPayout)) errors.noid_payout = noidAddressProblem(noidPayout);
-    if (bobEth !== null && !/^0x[0-9a-fA-F]{40}$/.test(bobEth)) errors.bob_eth = "0x followed by 40 hexadecimal characters";
+    // R3: the checksum of Bob's Ethereum address is checked here, at create only (never at load: a tighter load would block a refund)
+    if (bobEth !== null && checksumProblem(bobEth)) errors.bob_eth = checksumProblem(bobEth);
     // optional fields
     const optWhole = (k) => {
       const x = raw[k];
@@ -868,8 +939,20 @@ class SwapSet {
     };
     const deployBlock = optWhole("deploy_block");
     const hcLead = optWhole("hc_lead");
-    const gas = optGwei("gas_price_gwei");
-    const tip = optGwei("priority_fee_gwei");
+    let gas = optGwei("gas_price_gwei");
+    let tip = optGwei("priority_fee_gwei");
+    // mainnet: the fee cap and the tip start at the program's defaults when left empty (both stay editable and are part of the approved bytes)
+    if (mainnet) {
+      if (gas === null && !errors.gas_price_gwei) gas = PRODUCTION_FEE_DEFAULTS.gas_price_gwei;
+      if (tip === null && !errors.priority_fee_gwei && !errors.gas_price_gwei && decimalToInt(gas, 9) >= decimalToInt(PRODUCTION_FEE_DEFAULTS.priority_fee_gwei, 9)) tip = PRODUCTION_FEE_DEFAULTS.priority_fee_gwei;
+    }
+    // mainnet: a new swap's fee cap is at most 100 gwei (checked when a swap is made, never when its run.json is loaded; a stuck step can be re-sent at a higher cap, up to 300)
+    if (mainnet && gas !== null && !errors.gas_price_gwei && decimalToInt(gas, 9) > runsettings.MAINNET_CAP_MAX_GWEI * 10n ** 9n) errors.gas_price_gwei = "at most " + runsettings.MAINNET_CAP_MAX_GWEI + " gwei for a new swap on Ethereum mainnet: it is only the most you allow per gas";
+    // mainnet: the tip is paid on every Ethereum step, so it has a mainnet-sized limit of its own (a slip of the decimal point must not be accepted)
+    if (mainnet && tip !== null && gas !== null && !errors.priority_fee_gwei && !errors.gas_price_gwei) {
+      if (decimalToInt(tip, 9) > MAINNET_TIP_MAX_GWEI * 10n ** 9n) errors.priority_fee_gwei = "at most " + MAINNET_TIP_MAX_GWEI + " gwei on Ethereum mainnet: the tip is paid on every step (0.05 is the usual figure; check the decimal point)";
+      else if (decimalToInt(tip, 9) > decimalToInt(gas, 9)) errors.priority_fee_gwei = "the tip cannot be above the fee cap";
+    }
     if (Object.keys(errors).length) return { ok: false, errors };
     let base;
     try {
@@ -882,7 +965,7 @@ class SwapSet {
       ...base,
       role,
       profile,
-      chain_id: PROFILES[profile].chain,
+      chain_id: PROGRAM_PROFILES[profile].chain,
       contract,
       lock_kind: "poseidon",
       variant: "raw",
@@ -895,7 +978,7 @@ class SwapSet {
       bob_eth: role === "alice" ? bobEth : null,
       noid_payout: noidPayout,
       eth_payout: ethPayout,
-      single_node_ok: raw.single_node_ok === true,
+      single_node_ok: mainnet ? false : raw.single_node_ok === true,
       gas_price_gwei: gas,
       priority_fee_gwei: tip,
       deploy_block: deployBlock,

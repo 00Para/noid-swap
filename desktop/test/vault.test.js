@@ -706,6 +706,24 @@ test("the board sealer: seal and open round trip; the file name and the run are 
   assert.throws(() => vault.boardSealer("nope"), VaultError);
 });
 
+test("the history sealer: round trip under its own label, the file name is bound, another installation cannot open it, a locked vault throws VaultError", async () => {
+  const { vault } = makeVault();
+  await vault.open();
+  const s = vault.historySealer();
+  const plain = Buffer.from('{"v":1,"entries":[]}');
+  const blob = s.seal(plain, "payout-history.sealed");
+  assert.equal(JSON.parse(blob.toString("utf8")).label, "payout-history");
+  assert.equal(JSON.parse(blob.toString("utf8")).run_id, "install");
+  assert.ok(s.open(blob, "payout-history.sealed").equals(plain));
+  assert.throws(() => s.open(blob, "other.sealed"));
+  const other = makeVault();
+  await other.vault.open();
+  assert.throws(() => other.vault.historySealer().open(blob, "payout-history.sealed"));
+  const locked = makeVault({ keyStore: (() => { const k = createFakeKeyStore(); k.knobs.sealThrows = true; return k; })() });
+  await locked.vault.open();
+  assert.throws(() => locked.vault.historySealer().seal(plain, "payout-history.sealed"), VaultError);
+});
+
 test("the invite secret: asked in the secret window, sealed with its own key, read back; a bad value is a wrong code; cancel changes nothing", async () => {
   const INV = "ab".repeat(32);
   const ui = createFakeSecretUi({ autoTypeBack: true, askText: { invite: [`  ${INV.toUpperCase()}  `, "nope", null] } });
@@ -748,7 +766,7 @@ test("12.2: the vault exposes no function that hands the secret or the recovery 
   const { vault, ui, dataDir } = makeVault();
   assert.deepEqual(
     Object.keys(vault).sort(),
-    ["boardSealer", "inviteSecret", "keyCheck", "mode", "newSwapAllowed", "open", "passphraseFor", "ready", "recoveryConfirmed", "restore", "setInviteSecret", "showRecoveryCode", "state", "writeMigratedPassphrase"].sort(),
+    ["boardSealer", "historySealer", "inviteSecret", "keyCheck", "mode", "newSwapAllowed", "open", "passphraseFor", "ready", "recoveryConfirmed", "restore", "setInviteSecret", "showRecoveryCode", "state", "writeMigratedPassphrase"].sort(),
   );
   await vault.open();
   const S = secretFromShown(ui);

@@ -1643,7 +1643,7 @@ pub fn example_public(secret: &Secret, variant: Variant) -> SwapPublic {
 }
 
 /// [`example_public`] under a named profile. The rehearsal one runs on chain id 31337 (the only chain
-/// that profile allows), production and sepolia on 11155111 (the only chain the sepolia profile allows); all use
+/// that profile allows), production on 1 and sepolia on 11155111 (the only chains those profiles allow); all use
 /// 10 NOID and 0.01 ETH, which the caps accept.
 pub fn example_public_with(secret: &Secret, variant: Variant, profile: ProfileName) -> SwapPublic {
     let lock_kind = LockKind::Sha256;
@@ -1658,7 +1658,11 @@ pub fn example_public_with(secret: &Secret, variant: Variant, profile: ProfileNa
         5_800,
         300_000,
         EthParams {
-            chain_id: if profile == ProfileName::Rehearsal { 31_337 } else { 11_155_111 },
+            chain_id: match profile {
+                ProfileName::Rehearsal => 31_337,
+                ProfileName::Production => 1,
+                ProfileName::Sepolia => 11_155_111,
+            },
             contract: [0x11; 20],
             code_hash: Some(params::code_hash_for(lock_kind)),
             lock_kind,
@@ -1694,7 +1698,11 @@ pub fn example_public_kind(secret: &Secret, variant: Variant, profile: ProfileNa
         5_800,
         300_000,
         EthParams {
-            chain_id: if profile == ProfileName::Rehearsal { 31_337 } else { 11_155_111 },
+            chain_id: match profile {
+                ProfileName::Rehearsal => 31_337,
+                ProfileName::Production => 1,
+                ProfileName::Sepolia => 11_155_111,
+            },
             contract: [0x11; 20],
             code_hash: Some(params::code_hash_for(lock_kind)),
             lock_kind,
@@ -1946,7 +1954,7 @@ mod tests {
         terms.variant = Variant::Stock;
         assert!(matches!(SwapFile::new_bob(p.clone(), &terms, &att, 1), Err(SwapFileError::Invalid(m)) if m.contains("variant")));
         let mut terms = ok.clone();
-        terms.eth_chain_id = 1;
+        terms.eth_chain_id = 11_155_111;
         assert!(matches!(SwapFile::new_bob(p.clone(), &terms, &att, 1), Err(SwapFileError::Invalid(m)) if m.contains("chain_id")));
         // The equivalence attestation must be for THIS bundle and the pinned image id.
         let mut wrong_journal = att.clone();

@@ -113,7 +113,7 @@ function checkExtraArgs(args) {
 /**
  * @param {object} ctx the step context (see README.md)
  * @param {"alice"|"bob"} role
- * @param {{args?: string[], limitMs?: number, observeOnly?: boolean}} [opts] args: extra flags (`--apply`, `--closed-by TXID`); observeOnly: `--apply --observe-only` (no other flag)
+ * @param {{args?: string[], limitMs?: number, observeOnly?: boolean, ackFlags?: string[]}} [opts] args: extra flags (`--apply`, `--closed-by TXID`); observeOnly: `--apply --observe-only` (no other flag); ackFlags: the producer-share acknowledgement the caller already decided for this round ([] or the one flag pair; anything else is ignored)
  * @returns {Promise<{code:number|null, stdout:string, stderr:string, files:string[]}>}
  */
 function tick(ctx, role, opts = {}) {
@@ -126,7 +126,10 @@ function tick(ctx, role, opts = {}) {
     C.checkTool(ctx, "swapCli");
     const F = C.swapFile(ctx, role);
     C.mkdir700(path.join(ctx.runDir, "rec"));
-    const base = C.tickBase(ctx);
+    // L2 (fix round 2): the watch loop decides the acknowledgement once per round and hands the flags here; only [] or the one exact flag pair is taken, anything else is asked again
+    const given = opts.ackFlags;
+    const ackFlags = Array.isArray(given) && (given.length === 0 || (given.length === 2 && given[0] === "--acknowledge-producer-share" && given[1] === String(C.PRODUCER_ACK_PERMILLE))) ? given : undefined;
+    const base = C.tickBase(ctx, { ack: role === "bob", ackFlags });
     if (base.error) throw new C.Refusal(2, base.error);
     for (const w of base.warnings) out.warn(w);
     const stamp = C.clock(C.nowMs(ctx), false);

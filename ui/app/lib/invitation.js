@@ -2,7 +2,7 @@
 /*
  * The invitation file (build spec #4): what the person who sells ETH (Bob) saves so that the person who sells NOID (Alice) does not type his terms and his two
  * addresses. It is a file from ANOTHER PERSON, so it is read as untrusted input: a small size limit, a strict JSON reader (no duplicate key), exactly nine keys,
- * strings for every amount and address (a JSON number loses precision), Sepolia only, the form's own address checks and the test limits. `parse` returns the seven
+ * strings for every amount and address (a JSON number loses precision), Sepolia or Ethereum mainnet only (with that network's caps), the form's own address checks. `parse` returns the seven
  * fields of the new-swap form and nothing else: the invitation never carries or sets a payout address, `single_node_ok`, `hc_lead`, `deploy_block`, gas or a tip.
  * Alice still sees every value in her form and her approval names both amounts; Bob's `new-bob` checks the bundle against his own run.json and key.
  *
@@ -13,7 +13,10 @@ const fs = require("fs");
 const path = require("path");
 const { strictParse } = require("./programsettings");
 const { ethAddressProblem, noidAddressProblem } = require("./walletrun");
-const { PROFILES } = require("./swapform");
+const { PROGRAM_PROFILES } = require("./swapform");
+
+// the network word of the file -> the program's profile (the file says "mainnet" for Ethereum mainnet: caps of the production profile, contract version 1 only)
+const NETWORKS = Object.freeze({ sepolia: "sepolia", mainnet: "production" });
 
 const KIND = "no1d-swap-invitation";
 const MAX_BYTES = 4096;
@@ -22,8 +25,9 @@ const KEYS = ["kind", "v", "network", "contract", "contract_version", "noid_micr
 const WORDS = Object.freeze({
   TOO_LARGE: "That file is too large to be an invitation. Nothing was filled.",
   DAMAGED: "That file is not an invitation of this program, or it is damaged. Nothing was filled.",
-  NETWORK: "This invitation is for a network this program does not use for invitations (Sepolia only). Nothing was filled.",
-  CAPS: "The amounts in this invitation are above this program's test limit. Nothing was filled.",
+  NETWORK: "This invitation is for a network this program does not use for invitations (Sepolia or Ethereum mainnet only). Nothing was filled.",
+  CAPS: "The amounts in this invitation are above this program's limit for that network. Nothing was filled.",
+  VERSION: "This invitation asks for a contract version that is not used on Ethereum mainnet (version 1 only). Nothing was filled.",
   value: (field) => `That invitation has a value this program cannot use (${field}). Nothing was filled.`,
 });
 
@@ -53,7 +57,7 @@ function toDecimal(digits, places) {
 function build(settings, bobEth) {
   if (!settings || typeof settings !== "object") throw new Error("the swap's settings are missing");
   if (settings.role !== "bob") throw new Error("only the side that sells ETH makes an invitation");
-  if (settings.profile !== "sepolia") throw new Error("invitations are made for Sepolia swaps only");
+  if (settings.profile !== "sepolia" && settings.profile !== "production") throw new Error("invitations are made for Sepolia and Ethereum mainnet swaps only");
   const need = (k, v) => {
     if (v === null || v === undefined || v === "") throw new Error(`the swap has no ${k}`);
     return v;
@@ -61,7 +65,7 @@ function build(settings, bobEth) {
   const obj = {
     kind: KIND,
     v: 1,
-    network: "sepolia",
+    network: settings.profile === "production" ? "mainnet" : "sepolia",
     contract: need("contract", settings.contract),
     contract_version: need("contract_version", settings.contract_version),
     noid_micronoid: String(need("amount_micronoid", settings.amount_micronoid)),
@@ -95,7 +99,8 @@ function parse(text) {
   const keys = Object.keys(o);
   if (keys.length !== KEYS.length || !KEYS.every((k) => Object.prototype.hasOwnProperty.call(o, k))) return no(WORDS.DAMAGED);
   if (o.kind !== KIND || o.v !== 1) return no(WORDS.DAMAGED);
-  if (o.network !== "sepolia") return no(WORDS.NETWORK);
+  if (typeof o.network !== "string" || !Object.prototype.hasOwnProperty.call(NETWORKS, o.network)) return no(WORDS.NETWORK);
+  const profile = NETWORKS[o.network];
   if (o.contract_version !== 1 && o.contract_version !== 2) return no(WORDS.value("contract_version"));
   for (const k of ["contract", "noid_micronoid", "eth_wei", "bob_noid", "bob_eth"]) if (typeof o[k] !== "string") return no(WORDS.value(k));
   if (ethAddressProblem(o.contract)) return no(WORDS.value("contract"));
@@ -103,13 +108,14 @@ function parse(text) {
   if (!ETH_WEI.test(o.eth_wei)) return no(WORDS.value("eth_wei"));
   if (noidAddressProblem(o.bob_noid)) return no(WORDS.value("bob_noid"));
   if (ethAddressProblem(o.bob_eth)) return no(WORDS.value("bob_eth"));
-  const caps = PROFILES.sepolia;
+  if (profile === "production" && o.contract_version !== 1) return no(WORDS.VERSION);
+  const caps = PROGRAM_PROFILES[profile];
   if (BigInt(o.noid_micronoid) > caps.max_noid_micro || BigInt(o.eth_wei) > caps.max_eth_wei) return no(WORDS.CAPS);
   return {
     ok: true,
     fields: {
       role: "alice",
-      profile: "sepolia",
+      profile,
       contract_version: String(o.contract_version),
       noid_amount: toDecimal(o.noid_micronoid, 6),
       eth_amount: toDecimal(o.eth_wei, 18),

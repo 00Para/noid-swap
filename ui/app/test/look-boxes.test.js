@@ -114,11 +114,11 @@ const has = (n, c) => n.className.split(/\s+/).includes(c);
 const card0 = (page) => page.byId("pg-card");
 const approvalBox = (page) => card0(page).all((n) => has(n, "autopilot-box"))[0];
 
-test("the approval in program mode: the caption with the tag, the two blocks (for the eye), the sentence (for a screen reader), the facts, three short lines, the statements, then the typed amount with the button beside the field", async () => {
+test("the approval in program mode: the caption with the tag, the two blocks (for the eye), the sentence (for a screen reader), the four plain lines, the fold How it works, the facts, the statements, then the typed amount with the button beside the field", async () => {
   const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: LM, status: status("alice") }));
   const box = approvalBox(page);
   const kids = box.children.map((c) => `${c.tag}.${c.className}`);
-  assert.deepEqual(kids, ["div.row", "div.convert", "p.plain sr-only", "dl.facts", "p.plain", "div.stmts", "div.typed"]);
+  assert.deepEqual(kids, ["div.row", "div.convert", "p.plain sr-only", "ol.plain4", "details.deposit-details fact-fold how-it-works", "dl.facts", "div.stmts", "div.typed"]);
   const caption = box.children[0];
   assert.equal(caption.querySelector("strong").textContent, "Run this swap for me");
   assert.equal(caption.all((n) => has(n, "tag"))[0].textContent, "moves funds");
@@ -133,17 +133,22 @@ test("the approval in program mode: the caption with the tag, the two blocks (fo
   // no other paragraph of the card starts with "You give"
   assert.equal(card0(page).all((n) => n.tag === "p" && squash(textOf(n)).startsWith("You give")).length, 1);
   // the facts: fees from the clean deposit status, where the ETH goes, where the NOID comes back to
-  const facts = box.children[3].children.map((d) => [d.querySelector("dt").textContent, squash(textOf(d.querySelector("dd")))]);
-  assert.equal(facts[0][0], "Network fees");
-  assert.match(facts[0][1], /^0\.009 NOID and 0\.0002 ETH Part of your deposit; what is left is sent to your own addresses\.$/);
+  // the four plain lines (R7); without the swap's launch numbers the lines that need them are shortened
+  assert.equal(box.children[3].children.length, 4);
+  assert.match(squash(textOf(box.children[3].children[0])), /^You give 5 NOID and get 0\.001 ETH\. After this approval the program does every step by itself\.$/);
+  const facts = box.children[5].children.map((d) => [d.querySelector("dt").textContent, squash(textOf(d.querySelector("dd")))]);
+  assert.equal(facts[0][0], "Kept back for fees");
+  assert.match(facts[0][1], /^0\.009 NOID and 0\.0002 ETH Part of your deposit, kept to pay fees. What is not used comes back to you with the sweep\.$/);
   assert.equal(facts[1][0], "Your ETH goes to");
   assert.equal(facts[2][0], "If the swap stops");
   assert.match(facts[2][1], /^Your NOID comes back to /);
-  // every address is a copy button with the whole address
-  const copies = box.children[3].all((n) => n.tag === "button");
-  assert.ok(copies.every((b) => /^Copy your (Ethereum|Parano1d) address: /.test(b.attrs["aria-label"])));
+  // every address is shown whole (groups of four) with a copy button whose label names it without the address
+  const copies = box.children[5].all((n) => n.tag === "button");
+  assert.equal(copies.length, 2);
+  assert.ok(copies.every((b) => /^Copy your (Ethereum|Parano1d) address$/.test(b.attrs["aria-label"])));
+  assert.equal(box.children[5].all((n) => has(n, "addr-whole")).length, 2);
   // the typed amount and its button side by side, after the statements
-  const typed = box.children[6];
+  const typed = box.children[7];
   assert.equal(typed.children[1].children.map((c) => c.tag).join(","), "input,button");
   assert.equal(btnWith(typed, "Approve…").disabled, true);
   assert.equal(btnWith(card0(page), "Turn on"), null);
@@ -152,11 +157,14 @@ test("the approval in program mode: the caption with the tag, the two blocks (fo
 test("the approval's three lines keep every promise of the longer text, for both roles, and the classic funding paragraph is not drawn", async () => {
   for (const [id, role, must] of [[F.SWAP_A, "alice", [/funds the NOID from this swap's own wallet and reveals the secret by itself/, /same dry run and the same checks as a step sent by hand/, /waits for your deposit and for the fee reserve/, /takes the NOID back after the deadline and records that in the swap file/, /sends what is left to your own addresses/]], [F.SWAP_B, "bob", [/locks the ETH from this swap's own key and claims the NOID by itself/, /same dry run and the same checks as a step sent by hand/, /waits for your deposit and for the fee reserve/, /refunds the ETH/, /sends what is left of the key to your own address/]]]) {
     const page = await openSwap(id, (r) => cardPayload(r, { line_match: LM }));
-    const intro = approvalBox(page).all((n) => n.tag === "p" && n.className === "plain")[0];
-    assert.equal(intro.all((n) => has(n, "line")).length, 3, role);
-    const t = squash(textOf(intro));
+    const fold = approvalBox(page).all((n) => n.tag === "details" && has(n, "how-it-works"))[0];
+    assert.equal(fold.open, false, "closed by default");
+    assert.equal(squash(textOf(fold.querySelector("summary"))), "How it works");
+    const lines = fold.all((n) => n.tag === "p" && n.className === "plain");
+    assert.equal(lines.length, 3, role);
+    const t = squash(lines.map((n) => textOf(n)).join(" "));
     for (const re of must) assert.match(t, re, role);
-    assert.match(t, /stops and asks you when anything is unclear, and it never re-sends a stuck transaction\. Test networks only\.$/, role);
+    assert.match(t, /stops and asks you when anything is unclear, and it never re-sends a stuck transaction\. Test networks and Ethereum mainnet \(within the program's limits per swap\)\.$/, role);
     assert.doesNotMatch(card0(page).textContent, /A wallet run does not ask the classic funding statement|A wallet run asks/);
   }
 });

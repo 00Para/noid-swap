@@ -106,6 +106,9 @@ class Node {
   remove() {
     if (this.parent) this.parent.removeChild(this);
   }
+  get parentNode() {
+    return this.parent;
+  }
   get firstChild() {
     return this.children[0] || null;
   }
@@ -194,7 +197,7 @@ function skeleton(doc) {
 
 /**
  * Loads the page's scripts in index.html's order into one fresh context and lets operator.js boot.
- * opts: { fetch(url, init) -> { status, body } | Promise of it, hash, search, time }.
+ * opts: { fetch(url, init) -> { status, body } | Promise of it, hash, search, time, navigator, setTimeout, patch(sandbox) }.
  * Returns { window, document, calls, intervals, flush(), byId(id), text(id) }.
  */
 async function loadPage(opts = {}) {
@@ -222,14 +225,14 @@ async function loadPage(opts = {}) {
     document: doc,
     location: { hash: opts.hash === undefined ? "#token=" + "ab".repeat(16) : opts.hash, search: opts.search || "", pathname: "/" },
     history: { replaceState() {} },
-    navigator: {},
+    navigator: opts.navigator || {},
     URLSearchParams,
     console,
     Date: opts.Date || Date,
     JSON,
     Math,
     Promise,
-    setTimeout: () => 0,
+    setTimeout: opts.setTimeout || (() => 0),
     clearTimeout() {},
     setInterval: (f, ms) => {
       intervals.push({ f, ms });
@@ -245,7 +248,9 @@ async function loadPage(opts = {}) {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "actions.js", "program.js", "stagecard.js", "lib/boardview.js", "board.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
+  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "lib/launchfacts.js", "lib/limitstext.js", "lib/needtext.js", "actions.js", "program.js", "stagecard.js", "lib/boardview.js", "board.js", "lib/programwords.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
+  // a test's hook between the scripts and the page's boot (which waits for its first answer): it may wrap a module's init to catch the helpers operator.js hands over
+  if (typeof opts.patch === "function") opts.patch(sandbox);
   const flush = async (n = 30) => {
     for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
   };

@@ -33,6 +33,13 @@ use crate::watch::NoidObservation;
 pub const OVERRIDE_FLAG: &str = "--accept-producer-concentration";
 /// History entry written once when the override waives a refusal and the lock is offered.
 pub const OVERRIDE_HISTORY: &str = "producer_concentration_overridden";
+/// D2 (2026-11-20): the narrow acknowledgement. Waives, under `production` only, "one address above the limit" up to the given ceiling and "no second
+/// Parano1d node" for a loopback node; nothing else.
+pub const ACK_FLAG: &str = "--acknowledge-producer-share";
+/// The compiled hard maximum of the ceiling, in permille (65 %). A larger value is refused at parse time.
+pub const ACK_HARD_MAX_PERMILLE: u64 = 650;
+/// History entry written once when the acknowledgement is the reason a lock is offered. `live.js lock` does NOT count it as an override.
+pub const ACK_HISTORY: &str = "producer_share_acknowledged";
 
 const HEADLINE_CANNOT: &str = "producer concentration cannot be checked";
 const HEADLINE_STALE: &str = "producer concentration data is stale";
@@ -126,6 +133,16 @@ fn shares_sentence(g: &Gates, long: &WindowShare, short: &WindowShare) -> String
 
 /// Look at the observation's producer summary against the profile's numbers. Pure: no clock but `now`, no state.
 pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
+    evaluate_with(g, noid, now, ack_waives_single_node(g, noid))
+}
+
+/// Does the acknowledgement waive the missing second Parano1d node on this tick? Production only, one configured node, and that node is loopback.
+pub fn ack_waives_single_node(g: &Gates, noid: &NoidObservation) -> bool {
+    g.producer_gate_enforced && noid.acknowledge_producer_share.is_some() && noid.single_node_loopback
+}
+
+/// [`evaluate`], with the loopback-node waiver given. `false` shows what the screen says on its own.
+fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopback: bool) -> Screen {
     let screen = |finding: Finding| Screen { finding, ok_note: None, top_two_warning: None };
     let cannot = |detail: String| screen(Finding::Unverifiable { headline: HEADLINE_CANNOT, detail });
     // A remembered detection (`crate::producer_marker`) holds for the rest of the swap, whatever this tick's own reading says.
@@ -273,6 +290,9 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
                 return cannot("a second Parano1d node is configured but the producer cross-check did not run".into());
             }
         }
+    } else if waive_single_loopback {
+        // D2: the person's own node on this machine is the only Parano1d node; the acknowledgement waives the second-node refusal (and nothing else).
+        "single loopback node, the second-node refusal is waived by the acknowledgement".to_string()
     } else if g.producer_gate_enforced && noid.single_node_ok {
         // Production: the headers come from one node that could be lying; the cross-check against a second node is part of the check, and
         // `--single-node-ok` (which waives the F5 second-node rule) does not relax it. Only the printed concentration override does. (Without
@@ -346,6 +366,9 @@ pub fn lock_gate(g: &Gates, noid: &NoidObservation, now: u64, notes: &mut Vec<St
     match &screen.finding {
         Finding::Pass => {
             notes.extend(screen.ok_note);
+            if !noid.accept_producer_concentration && ack_used(g, noid, &screen.finding) {
+                notes.push(acknowledged_note(noid, noid.acknowledge_producer_share.unwrap_or(0)));
+            }
             LockGate { wait: None }
         }
         finding => {
@@ -361,6 +384,13 @@ pub fn lock_gate(g: &Gates, noid: &NoidObservation, now: u64, notes: &mut Vec<St
                 notes.push(overridden_note(finding));
                 return LockGate { wait: None };
             }
+            // D2: the share is above the limit but within the acknowledged ceiling in both windows; nothing else is waived.
+            if let (Finding::Concentrated { .. }, Some(c)) = (finding, noid.acknowledge_producer_share) {
+                if share_within(noid, c) {
+                    notes.push(acknowledged_note(noid, c));
+                    return LockGate { wait: None };
+                }
+            }
             let text = match finding {
                 Finding::Concentrated { .. } => format!(
                     "ALARM: producer concentration too high, not locking (T21): {detail}. {RISK_SENTENCE}. Wait for the share to fall, or pass {OVERRIDE_FLAG} to accept the risk"
@@ -371,6 +401,49 @@ pub fn lock_gate(g: &Gates, noid: &NoidObservation, now: u64, notes: &mut Vec<St
             LockGate { wait: Some(text) }
         }
     }
+}
+
+/// `count / n` in permille, rounded UP (so a printed share is at or below a ceiling exactly when the integer comparison passes).
+fn permille_up(count: u64, n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        count.saturating_mul(1000).div_ceil(n)
+    }
+}
+
+/// The two measured shares (long, short window) in permille and the window sizes, when the summary holds them.
+fn measured(noid: &NoidObservation) -> Option<(u64, u64, u64, u64)> {
+    let s = noid.producers.as_ref()?;
+    let (l, sh) = (s.long.as_ref()?, s.short.as_ref()?);
+    Some((permille_up(l.largest, l.n), permille_up(sh.largest, sh.n), l.n, sh.n))
+}
+
+/// Both windows' largest share is at most `ceiling` permille (integer comparison, like the limit).
+fn share_within(noid: &NoidObservation, ceiling: u64) -> bool {
+    let Some(s) = noid.producers.as_ref() else { return false };
+    let (Some(l), Some(sh)) = (s.long.as_ref(), s.short.as_ref()) else { return false };
+    !over(l.largest, l.n, ceiling) && !over(sh.largest, sh.n, ceiling)
+}
+
+/// Is the acknowledgement the reason a lock is offered on a passing screen: the second-node waiver was used (one loopback node, no cross-check)?
+fn ack_used(g: &Gates, noid: &NoidObservation, finding: &Finding) -> bool {
+    matches!(finding, Finding::Pass)
+        && ack_waives_single_node(g, noid)
+        && noid.second.is_none()
+        && noid.second_error.is_none()
+        && matches!(noid.producers.as_ref().map(|p| &p.second), Some(SecondCheck::NotConfigured))
+}
+
+fn acknowledged_note(noid: &NoidObservation, ceiling: u64) -> String {
+    let (l, s, ln, sn) = measured(noid).unwrap_or((0, 0, 0, 0));
+    format!(
+        "ACKNOWLEDGED: producer share {} permille <= ceiling {ceiling} ({ACK_FLAG}): {l} permille of the last {} blocks and {s} permille of the last {}{}. A miner who is Alice can take both legs; Bob accepted this risk for this swap. This is a screen, not a defence",
+        l.max(s),
+        group(ln),
+        group(sn),
+        if noid.single_node_loopback && noid.second.is_none() { "; one loopback Parano1d node, no second node" } else { "" }
+    )
 }
 
 fn describe(g: &Gates, finding: &Finding) -> (&'static str, String, String) {
@@ -524,6 +597,116 @@ pub fn override_history_entry(g: &Gates, noid: &NoidObservation, now: u64) -> Op
         }
         Finding::Unverifiable { headline, .. } => Some(format!("{OVERRIDE_HISTORY}: {headline}")),
     }
+}
+
+/// D2: the history entry to write when the acknowledgement is the reason `lock_eth` is offered: `None` unless the profile enforces the screen, the flag is
+/// set, `--accept-producer-concentration` is not (its own entry applies), and the acknowledgement waived the share or the loopback single node.
+pub fn ack_history_entry(g: &Gates, noid: &NoidObservation, now: u64) -> Option<String> {
+    if !g.producer_gate_enforced || noid.accept_producer_concentration {
+        return None;
+    }
+    let c = noid.acknowledge_producer_share?;
+    let screen = evaluate(g, noid, now);
+    let used = match &screen.finding {
+        Finding::Concentrated { .. } => share_within(noid, c),
+        Finding::Pass => ack_used(g, noid, &screen.finding),
+        Finding::Unverifiable { .. } => false,
+    };
+    if !used {
+        return None;
+    }
+    let (l, s, ln, sn) = measured(noid)?;
+    Some(format!("{ACK_HISTORY}: largest {l} permille of {ln} and {s} permille of {sn}, ceiling {c} permille, at {now}"))
+}
+
+/// The structured form of the screen for the page (`producer_screen` in the tick JSON).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ProducerScreenReport {
+    /// `pass`, `concentrated`, `cannot_check`, `stale`, `disagrees`, `one_node`, `remembered`.
+    pub state: &'static str,
+    /// The profile enforces the screen (`production`).
+    pub enforced: bool,
+    pub share_permille_long: Option<u64>,
+    pub share_permille_short: Option<u64>,
+    pub limit_permille: u64,
+    /// `ok`, `missing`, `disagrees`, `remembered`, `unreadable`.
+    pub second_node: &'static str,
+    pub single_node_loopback: bool,
+    /// `true`: the screen passes, or (production) fails only for a reason `--acknowledge-producer-share` at its compiled maximum can waive. Always `true` under
+    /// the profiles that do not enforce.
+    pub waivable_by_acknowledgement: bool,
+    pub hard_max_permille: u64,
+    /// The value of `--acknowledge-producer-share` on this tick, if given.
+    pub acknowledged_ceiling_permille: Option<u64>,
+    /// The flag on this tick waives something that would otherwise refuse the lock.
+    pub waived_by_acknowledgement: bool,
+}
+
+/// The structured form of the screen, computed WITHOUT the acknowledgement so that it shows the reason the screen refuses on its own. Never an address.
+pub fn report(g: &Gates, noid: &NoidObservation, now: u64) -> ProducerScreenReport {
+    let raw = evaluate_with(g, noid, now, false);
+    let second_node = if !noid.producer_marker.is_absent() {
+        "remembered"
+    } else if noid.second_error.is_some() {
+        "unreadable"
+    } else {
+        match noid.producers.as_ref().map(|p| &p.second) {
+            Some(SecondCheck::Agrees { sampled, .. }) if *sampled > 0 => "ok",
+            Some(SecondCheck::Differs { .. } | SecondCheck::SampledDiffers { .. } | SecondCheck::ProducerDiffers { .. }) => "disagrees",
+            Some(SecondCheck::NotConfigured) | None if noid.second.is_none() => "missing",
+            _ => "unreadable",
+        }
+    };
+    let state = match &raw.finding {
+        Finding::Pass if g.producer_gate_enforced && second_node == "missing" => "one_node",
+        Finding::Pass => "pass",
+        Finding::Concentrated { .. } => "concentrated",
+        Finding::Unverifiable { headline, .. } => match kind_of(headline) {
+            "stale" => "stale",
+            "disagree" => "disagrees",
+            "one-node" => "one_node",
+            "remembered" => "remembered",
+            _ => "cannot_check",
+        },
+    };
+    let (long, short) = match measured(noid) {
+        Some((l, s, _, _)) => (Some(l), Some(s)),
+        None => (None, None),
+    };
+    let second_ok = second_node == "ok" || (second_node == "missing" && noid.single_node_loopback);
+    let waivable = !g.producer_gate_enforced
+        || state == "pass"
+        || (matches!(state, "concentrated" | "one_node") && second_ok && share_within(noid, ACK_HARD_MAX_PERMILLE));
+    let c = noid.acknowledge_producer_share;
+    let waived = g.producer_gate_enforced
+        && state != "pass"
+        && waivable
+        && c.is_some_and(|c| {
+            // One-node with the share under the limit needs no ceiling; a share over the limit needs it within the ceiling.
+            !(long.zip(short).is_some_and(|(l, s)| l.max(s) > g.producer_limit_permille) && !share_within(noid, c))
+        });
+    ProducerScreenReport {
+        state,
+        enforced: g.producer_gate_enforced,
+        share_permille_long: long,
+        share_permille_short: short,
+        limit_permille: g.producer_limit_permille,
+        second_node,
+        single_node_loopback: noid.single_node_loopback,
+        waivable_by_acknowledgement: waivable,
+        hard_max_permille: ACK_HARD_MAX_PERMILLE,
+        acknowledged_ceiling_permille: c,
+        waived_by_acknowledgement: waived,
+    }
+}
+
+/// Parse the value of `--acknowledge-producer-share`: a whole number of permille from 1 to [`ACK_HARD_MAX_PERMILLE`].
+pub fn parse_ack_value(v: &str) -> Result<u64, String> {
+    let n: u64 = v.trim().parse().map_err(|_| format!("{ACK_FLAG} needs a whole number of permille from 1 to {ACK_HARD_MAX_PERMILLE}, not '{v}'"))?;
+    if n == 0 || n > ACK_HARD_MAX_PERMILLE {
+        return Err(format!("{ACK_FLAG} {n}: the value must be from 1 to {ACK_HARD_MAX_PERMILLE} permille (a compiled maximum)"));
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

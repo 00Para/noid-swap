@@ -33,6 +33,7 @@
     pgForm: null, // the form of the new-swap or settings screen, built once per visit
     pgMsg: null, // a line above the list: { kind, text }
     barSig: "",
+    cardShows: false, // program mode: the stage card is really drawn for this swap, so it shows the alarms the page below leaves out (a board or production run has no card)
     cardClaims: null, // program mode: the boxes the stage card draws itself (stagecard.js), so the page below does not draw them a second time
     cardLook: "", // program mode: the reasons the card showed last time it said "needs a look" (Details opens when they change)
     detailsFilled: false, // program mode: the swap page has been moved into the "Details" fold
@@ -78,8 +79,34 @@
     return (m[1] || "") + body.slice(0, 8) + "…" + body.slice(-6);
   }
 
+  /** The address cut into groups of four (lib/launchfacts.js), or null for anything that is not an address. */
+  const addrGroups = (a) => (window.NoidLaunch && typeof a === "string" ? window.NoidLaunch.groups(a) : null);
+  /** The groups of an address as the children of a span.addr-whole: one span.g each. The gaps are margins (launch.css), not characters, so a copy by hand has no spaces. */
+  const groupSpans = (g) => g.map((x) => el("span", { class: "g", text: x }));
+
+  /**
+   * R3: an address shown whole, in groups of four: a span.addr-whole holding one span.g per group, then a copy button. The copy copies the stored string exactly, in its stored case. The button's
+   * aria-label is "Copy LABEL" (no address in it): a screen reader reads the whole address once, from the text. An address that does not parse is shown as the plain string.
+   */
+  function addrWhole(addr, label) {
+    const g = addrGroups(addr);
+    const btn = el("button", { type: "button", class: "copy", title: "Copy", "aria-label": `Copy ${label || "address"}` }, icon("copy"), el("span", { class: "glyph", "aria-hidden": "true", dataset: { rest: "" } }));
+    btn.addEventListener("click", () => copyText(String(addr), btn, label || "address"));
+    return el("span", { class: "addr-whole" }, g ? groupSpans(g) : el("span", { class: "g", text: String(addr) }), btn);
+  }
+
   function copyButton(full, label, text, opts) {
+    const g = opts && opts.whole === true && !text ? addrGroups(String(full)) : null;
     const shown = text || short(full);
+    if (g) {
+      // R3: the whole address, in its groups, inside the button's text (every other call keeps the shortened value)
+      const mk = (cls) => {
+        const b = el("button", { type: "button", class: cls, title: String(full), "aria-label": `Copy ${label || "value"}` }, opts.icon ? icon("copy") : null, el("span", { class: "txt" }, el("span", { class: "addr-whole" }, groupSpans(g))), opts.icon ? null : icon("copy"), el("span", { class: "glyph", "aria-hidden": "true", dataset: { rest: "" } }));
+        b.addEventListener("click", () => copyText(String(full), b, label));
+        return b;
+      };
+      return mk(opts.icon ? (opts.mono ? "copy-txt addr" : "copy-txt") : "copy");
+    }
     if (opts && opts.icon) {
       // the copy icon and the words (or the shortened value); the flash of "copied" goes in the empty glyph beside them
       const t = el("button", { type: "button", class: opts.mono ? "copy-txt addr" : "copy-txt", title: String(full), "aria-label": `Copy ${label || "value"}: ${full}` }, icon("copy"), el("span", { class: "txt", text: shown }), el("span", { class: "glyph", "aria-hidden": "true", dataset: { rest: "" } }));
@@ -131,6 +158,7 @@
       ta.remove();
     }
     if (ok) toast(copiedWords(label, text));
+    if (ok && state.program) readBack(text, btn);
     const g = btn.querySelector(".glyph");
     if (g) {
       g.textContent = ok ? "✓ copied" : "✗ copy failed";
@@ -139,6 +167,40 @@
         g.textContent = g.dataset && g.dataset.rest !== undefined ? g.dataset.rest : "";
         g.classList.remove("flash");
       }, 1400);
+    }
+  }
+
+  // ------------------------------------------------------------ R3: the clipboard read-back (program mode)
+  const AMOUNT_SHAPE = /^[0-9]{1,40}(?:\.[0-9]{1,39})?$/;
+  const READBACK_MS = [500, 3000];
+  const clipKind = (v) => (addrGroups(v) ? "address" : typeof v === "string" && v.length <= 40 && AMOUNT_SHAPE.test(v) ? "amount" : null);
+  /** Removes the clipboard boxes and the paste note of an earlier copy: they live until the next copy. */
+  function clearClipboardNotes() {
+    for (const n of document.querySelectorAll(".clip-warn, .paste-note")) n.remove();
+  }
+  /**
+   * After a copy of an address or an amount, program mode only: about half a second and again three seconds later the program is asked whether the clipboard still holds it (POST
+   * /api/clipboard/verify; the answer is a boolean, never the content). A false answer draws a danger box beside the copy (role="alert", no toast: toasts never carry warnings); null (it cannot be
+   * checked) shows nothing. An address also leaves a quiet line under it until the next copy.
+   */
+  function readBack(value, btn) {
+    const kind = clipKind(value);
+    if (!kind || !btn || !btn.parentNode) return;
+    clearClipboardNotes();
+    const host = btn.parentNode;
+    if (kind === "address") host.appendChild(el("p", { class: "facts-line paste-note", text: "After you paste, compare the first and last groups with this screen." }));
+    for (const ms of READBACK_MS) {
+      setTimeout(async () => {
+        let r = null;
+        try {
+          r = await getJson("/api/clipboard/verify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ value }) });
+        } catch {
+          return; // a check that cannot be made shows nothing
+        }
+        if (!r || r.match !== false || document.querySelector(".clip-warn")) return;
+        const what = kind === "amount" ? "the amount" : "the address";
+        host.appendChild(el("p", { class: "alarm danger clip-warn", role: "alert" }, icon("alert"), el("span", { class: "lv", text: "The clipboard changed after the copy" }), el("span", { class: "tx", text: `It no longer holds ${what} you copied. Something on this computer may be replacing addresses. Do not paste it. Copy again, and compare the first and last groups after you paste.` })));
+      }, ms);
     }
   }
 
@@ -159,13 +221,18 @@
     return j;
   }
 
+  const AGE_KEYS = new Set(["age_s", "base_fee_age_s"]);
+  const ageless = (k, v) => (AGE_KEYS.has(k) ? undefined : v);
+
   function signature() {
     const p = state.payload || {};
     const { server_now, generated_at, actions, ...rest } = p;
     void server_now;
     void generated_at;
     rest.actions_sig = window.NoidActions ? window.NoidActions.signature(actions) : "";
-    return [state.mode, state.role, state.token ? "t" : "-", state.running || "", state.runResult ? state.runResult.started_at : "", JSON.stringify(rest)].join("|");
+    // ages that grow at every read (the base fee's age) are left out, so a poll that changes only them does not redraw the page (a redraw would
+    // drop the focus of a field being typed in, such as the approval's typed amount); their `stale` flag stays in and redraws once when it flips
+    return [state.mode, state.role, state.token ? "t" : "-", state.running || "", state.runResult ? state.runResult.started_at : "", JSON.stringify(rest, ageless)].join("|");
   }
 
   async function load(force) {
@@ -246,6 +313,12 @@
     else if (!state.role) state.role = withTick[0] || "alice";
   }
 
+  /** The view model of the swap on show; in program mode its own texts say "the program", as the server's do (lib/programwords.js). */
+  function buildViewP() {
+    const v = V.buildView(viewInput());
+    return state.program && window.NoidProgramWords ? window.NoidProgramWords.programWords(v) : v;
+  }
+
   function viewInput() {
     const p = state.payload || {};
     const r = (p.roles && p.roles[state.role]) || {};
@@ -264,6 +337,8 @@
       verify: p.verify || null,
       commands: p.commands || {},
       demo: state.mode === "demo",
+      // program mode decides the network itself (run.json and the server's own check: payload.actions.production), so the page does not call a mainnet swap read-only
+      program: !!state.program,
     };
   }
 
@@ -337,7 +412,15 @@
     }
     // the strip renders its loud-notes box whenever the view has an action with loud notes (renderAction): an alarm whose text is exactly one of them is not shown twice
     const inStrip = new Set(view.action && view.action.loud_notes ? view.action.loud_notes : []);
-    const alarms = view.alarms.filter((a) => !inStrip.has(a.text));
+    // an alarm with the same words as an earlier one (the engine's note and its reason can be the same text) is shown once
+    const seen = new Set();
+    const alarms = view.alarms.filter((a) => {
+      // (the strip quotes the engine's reason whole, so an alarm made of that same reason is not a second box)
+      // (likewise the strip's own box for a held or recorded step says what the "Intent ... is held" alarm says)
+      if (inStrip.has(a.text) || (state.cardShows && a.id === "intent" && view.action && view.action.intent) || (state.cardShows && view.action && view.action.reason === a.text && /-reason$/.test(a.id || "")) || seen.has(a.level + "|" + a.text)) return false;
+      seen.add(a.level + "|" + a.text);
+      return true;
+    });
     if (!alarms.length) {
       root.appendChild(el("div", { class: "alarm-none" }, el("span", { class: "dot ok", "aria-hidden": "true" }), " No other alarms: observations are fresh, the engine flags nothing else."));
       return;
@@ -1105,7 +1188,7 @@
     state.view = null;
     for (const id of ["swap-head", "timeline", "picture", "explain", "deadlines", "abort", "receipts", "history"]) clear($(id));
     // Before a bundle exists the screen IS the "no tick yet" state, so that alarm is not repeated; once a bundle exists the engine should be ticking, and the alarms stay (the banners are among them)
-    if (state.payload.bundle_file) renderAlarms(V.buildView(viewInput()));
+    if (state.payload.bundle_file) renderAlarms(buildViewP());
     else addBanners(clear($("alarms")));
     if (kind === "join") window.NoidActions.renderJoin(state.payload);
     else window.NoidActions.renderStart(state.payload);
@@ -1246,7 +1329,7 @@
     const bar = clear($("pg-swapbar"));
     const s = ((state.program && state.program.swaps) || []).find((x) => x && x.swap === state.swap) || null;
     bar.hidden = false;
-    const row = el("div", { class: "pg-swapbar-in" }, el("button", { type: "button", class: "pg-back", onclick: () => goScreen("list") }, icon("chevL"), "Your swaps"), s ? el("span", { class: "sep", "aria-hidden": "true", text: "/" }) : null, s ? el("strong", { class: "pg-label here", text: s.label || "A swap" }) : null);
+    const row = el("div", { class: "pg-swapbar-in" }, el("button", { type: "button", class: "pg-back", onclick: () => goScreen("list") }, icon("chevL"), "Your swaps"), s ? el("span", { class: "sep", "aria-hidden": "true", text: "/" }) : null, s ? el("strong", { class: "pg-label here", text: s.label || "A swap" }) : null, s && s.network === "mainnet" ? el("span", { class: "tag real", text: "Ethereum mainnet: real ETH and real NOID" }) : null);
     bar.appendChild(row);
     if (s && s.refused) bar.appendChild(el("div", {}, el("p", { class: "alarm danger", role: "alert" }, icon("alert"), el("span", { class: "lv", text: "Read only" }), el("span", { class: "tx", text: `This swap's folder is read only: ${s.refused}. Nothing can be run from here.` }))));
   }
@@ -1315,6 +1398,7 @@
       }
     }
     state.cardClaims = plan && plan.drawn ? plan.claims : null;
+    state.cardShows = !!(plan && plan.drawn && node && window.NoidStage && state.payload && state.payload.actions && plan.lookSig !== "draw-failed" && plan.lookSig !== "plan-failed");
     renderOperatorPage();
     renderStageCard(plan, node);
     if (boardShown && window.NoidBoard.title) document.title = window.NoidBoard.title();
@@ -1329,7 +1413,7 @@
     const p = state.payload;
     if (p && !state.error && p.readable !== false && state.role) {
       try {
-        view = V.buildView(viewInput());
+        view = buildViewP();
       } catch {
         view = null;
       }
@@ -1465,7 +1549,7 @@
       let view = null;
       if (usable) {
         try {
-          view = V.buildView(viewInput());
+          view = buildViewP();
         } catch {
           view = null;
         }
@@ -1516,7 +1600,7 @@
       renderEmpty();
       return;
     }
-    const view = V.buildView(viewInput());
+    const view = buildViewP();
     state.view = view;
     renderHead(view);
     renderAlarms(view);
@@ -1539,7 +1623,7 @@
   /** Once a second: only the parts that show a clock, so focus and text selection elsewhere are left alone. */
   function clockTick() {
     if (!state.payload || state.error || !state.view || (state.mode === "run" && state.payload.readable === false)) return;
-    const view = V.buildView(viewInput());
+    const view = buildViewP();
     state.view = view;
     renderCapsules(view);
     renderAlarms(view);
@@ -1590,9 +1674,9 @@
     }
     if (state.program) {
       document.body.classList.add("program");
-      window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel, icon, coinGlyph, toast });
+      window.NoidProgram.init({ el, chip, copyButton, addrWhole, state, phaseLabel, icon, coinGlyph, toast });
       // the card of one swap, one stage at a time (stagecard.js): its helpers are the page's own
-      if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS, icon, coinGlyph, copyButton });
+      if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS, icon, coinGlyph, copyButton, addrWhole, reload: load });
       const skip = document.getElementById("skip-link");
       if (skip) skip.setAttribute("href", "#pg-card");
     } else {
@@ -1619,7 +1703,7 @@
     }
     if (window.NoidBoard) window.NoidBoard.init({ el, nowS, clock, hm: (u) => (typeof u === "number" ? new Date(u * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false }) : "—"), fmtDur, state, reload: load, rerender: () => { state.lastSig = null; render(); } });
     if (window.NoidActions) {
-      window.NoidActions.init({ el, chip, copyButton, toast, short, clock, dayClock, nowS, state, icon, coinGlyph, reload: load, rerender: () => { state.lastSig = null; render(); } });
+      window.NoidActions.init({ el, chip, copyButton, addrWhole, toast, short, clock, dayClock, nowS, state, icon, coinGlyph, reload: load, rerender: () => { state.lastSig = null; render(); } });
       const foot = $("foot-note");
       if (foot && state.program) foot.textContent = PROGRAM_NOTE;
       else if (foot && op.actions_enabled) foot.textContent = "Actions mode: this page can run the fixed helpers of scripts/live through WSL. Anything that sends to a chain needs a fresh dry run, the engine's tick naming that step and a typed confirmation, and every action is written to the audit log. It still never opens a *.swap.json, a key file or a passphrase, and never shows the secret or a transaction opening.";

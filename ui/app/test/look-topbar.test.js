@@ -41,7 +41,7 @@ test("top bar: the network and the two node states keep their chips; the swaps b
   const page = await loadPage({ fetch: F.router({ "GET /api/program": () => ({ status: 200, body: F.prog({ swaps: [F.summary({ active: true })] }) }) }) });
   const bar = page.byId("pg-bar");
   const chips = bar.all((n) => has(n, "chip"));
-  assert.deepEqual(chips.map((c) => textOf(c).trim()), ["Test network", "Parano1d: connected", "Ethereum: connected"]);
+  assert.deepEqual(chips.map((c) => textOf(c).trim()), ["Ethereum test network", "Parano1d: connected", "Ethereum: connected"]);
   assert.ok(has(chips[0], "quiet"), "the network is the quiet chip the stylesheet draws as a tag");
   assert.ok(has(chips[1], "ok") && has(chips[2], "ok"));
   const swaps = bar.querySelector(".pg-swaps-btn");

@@ -138,7 +138,7 @@ GitHub's machines and the toolchain they download. A program you build yourself 
 Written 2026-11-18 from the build specification and tested offline only (`node --test "desktop/test/*.test.js"`). **No hosted run
 has executed these two jobs.** The first run will show what the notes under "Not verified" could not.
 
-Two jobs, each on Windows (`windows-latest`, x64) and macOS (`macos-14`, Apple Silicon). Nothing is signed, notarized or
+Two jobs, each on Windows (`windows-latest`, x64) and macOS (`macos-latest`, Apple Silicon; `macos-14` was dropped by the hosted runners). Nothing is signed, notarized or
 published: the jobs use no secret and upload build artifacts only; the build-provenance step is the one place with write
 permissions (`id-token`, `attestations`, on that job only).
 

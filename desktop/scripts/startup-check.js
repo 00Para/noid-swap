@@ -6,7 +6,8 @@
  *   selftest --file OUT [--exit-code N]
  *       Read what the installed program printed for --self-test and judge it: exit code 0, one JSON line with
  *       "selftest":"ok", the page loaded, no Parano1d node on a clean machine, the API refusing a request without its
- *       token (401), the secret window's page loaded with its script and its bridge, and the window's web preferences hardened.
+ *       token (401), the secret window's page loaded with its script and its bridge, the Ed25519 known-answer check of the release
+ *       signature primitive passed, and the window's web preferences hardened.
  *
  *   parity --electron EXE --live-js FILE [--node NODE]
  *       Run offline commands of eth/scripts/live.js twice, once under the installed program's own binary with
@@ -71,6 +72,7 @@ function parseSelfTest(text, exitCode = 0) {
   if (data.page_script !== true) problems.push(`page_script is ${JSON.stringify(data.page_script)}, not true: the page's own scripts were not seen to run`);
   if (data.page_post !== 403) problems.push(`page_post is ${JSON.stringify(data.page_post)}, not 403: a POST from the page did not reach the token check through the private scheme`);
   if (data.secret_page !== true) problems.push(`secret_page is ${JSON.stringify(data.secret_page)}, not true: the secret window's page (recovery code, passphrase) was not seen to load with its script and its bridge`);
+  if (data.ed25519 !== true) problems.push(`ed25519 is ${JSON.stringify(data.ed25519)}, not true: the runtime's known-answer check of the release signature primitive did not pass`);
   const prefs = data.prefs;
   if (prefs === null || typeof prefs !== "object") problems.push("the web preferences were not reported");
   else {

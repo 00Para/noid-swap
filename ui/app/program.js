@@ -1,6 +1,6 @@
 /* noid-swap operator console, program mode: the top bar, the list of swaps, the new-swap form and the settings screen.
    Pure builders (data and handlers in, element trees out); operator.js mounts them. The only requests made here are the ones of the program API
-   (POST /api/newswap, POST /api/settings, POST /api/program/open, POST /api/board/slot, GET /api/settings), each with the per-start token.
+   (POST /api/newswap, POST /api/settings, POST /api/program/open, POST /api/board/slot, GET /api/settings, GET /api/program), each with the per-start token.
    No secret ever passes through this file: the recovery code, the restore input, a passphrase, a key and the board invite are shown and typed only in a window of the
    program itself. A menu item here only asks the program to open that window (POST /api/program/open {what}); nothing secret comes back and nothing is typed here.
    No inline styles or handlers (CSP). */
@@ -15,8 +15,8 @@
 
   // I4: the node status is states and numbers only; the page shows a fixed phrase per state and never a URL, a host or an error text
   const NOID_WORDS = { ok: "connected", not_running: "not running: start the Parano1d wallet app", wrong_chain: "not the expected chain", behind: "behind: still catching up", error: "cannot be checked" };
-  const ETH_WORDS = { ok: "connected", unreachable: "not reachable", wrong_chain: "not the expected network", behind: "behind: still catching up", error: "cannot be checked" };
-  const LEVEL = { ok: "ok", behind: "attn", error: "attn", not_running: "danger", unreachable: "danger", wrong_chain: "danger" };
+  const ETH_WORDS = { ok: "connected", idle: "not checked", unreachable: "not reachable", wrong_chain: "not the expected network", behind: "behind: still catching up", error: "cannot be checked" };
+  const LEVEL = { ok: "ok", idle: "quiet", behind: "attn", error: "attn", not_running: "danger", unreachable: "danger", wrong_chain: "danger" };
 
   /** `{ noid: {word, level}, eth: {word, level} }` from a NodeStatus; anything not in the fixed tables reads as "cannot be checked". */
   function nodeWords(node) {
@@ -27,21 +27,23 @@
       if (words === NOID_WORDS && st === "ok" && obj && obj.chain_checked === false) out.word += " (the chain is not verified yet)";
       return out;
     };
-    return { noid: one(node && node.noid, NOID_WORDS), eth: one(node && node.eth, ETH_WORDS) };
+    // `eth.production` is the mainnet endpoints' own state: { state: "idle" } while no mainnet swap or form asks for them (drawn quietly, never as an error)
+    const prod = node && node.eth && node.eth.production && typeof node.eth.production === "object" ? one(node.eth.production, ETH_WORDS) : null;
+    return { noid: one(node && node.noid, NOID_WORDS), eth: one(node && node.eth, ETH_WORDS), mainnet: prod };
   }
 
-  const UPDATE_WORDS = { not_configured: "Update check: not set up in this version", off: "Update check: off", none: "You have the newest version", current: "You have the newest version", available: "A new version is available", checking: "Checking for a new version", error: "The update check did not work", unknown: "Not checked yet", ask: "Not checked yet", newer: "A new version is available", never: "Not checked yet", skipped_active: "Not checked: a swap was active" };
+  const UPDATE_WORDS = { not_configured: "Update check: not set up in this version", off: "Update check: off", none: "You have the newest version", current: "You have the newest version", available: "A new version is available", checking: "Checking for a new version", error: "The update check did not work", unknown: "Not checked yet", ask: "Not checked yet", newer: "A new version is available", never: "Not checked yet", skipped_active: "Not checked: a swap was active", unverified: "A newer release is listed but its signature does not check: do not install it.", release_check_not_configured: "This version cannot check for updates." };
   function updateWords(update) {
     const st = update && typeof update.state === "string" && Object.prototype.hasOwnProperty.call(UPDATE_WORDS, update.state) ? update.state : "unknown";
     const latest = update && typeof update.latest === "string" && /^[0-9A-Za-z.+-]{1,32}$/.test(update.latest) ? update.latest : null;
     const url = update && typeof update.url === "string" && /^https:\/\/[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]{1,200}$/.test(update.url) ? update.url : null;
     // the program's checker says "newer" (desktop/lib/updatecheck.js); "available" is the same
     const isNew = st === "available" || st === "newer";
-    return { state: st, text: UPDATE_WORDS[st] + (isNew && latest ? `: ${latest}` : "") + (isNew ? ". Check its sha256 and build provenance on its release page before installing." : ""), url: isNew ? url : null };
+    return { state: st, text: UPDATE_WORDS[st] + (isNew && latest ? `: ${latest}` : "") + (isNew ? ". Compare the installer's SHA-256 with the signed value in the menu's update check before installing." : ""), url: isNew ? url : null };
   }
 
   /** The chip of one node in words (the top bar and the first-start guide draw the same one). */
-  const nodeChip = (name, w) => H.chip(w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn", `${name}: ${w.word}`);
+  const nodeChip = (name, w) => w.state === "idle" ? H.chip("idle", name === "Ethereum" ? "Mainnet: not checked" : `${name}: not checked`) : H.chip(w.level === "ok" ? "ok" : w.level === "danger" ? "danger" : "attn", `${name}: ${w.word}`);
 
   const activeCount = (swaps) => (Array.isArray(swaps) ? swaps.filter((s) => s && s.active === true).length : 0);
 
@@ -60,8 +62,11 @@
   function signature(prog) {
     if (!prog) return "none";
     const node = prog.node ? { noid: { ...prog.node.noid, checked_at: 0 }, eth: { ...prog.node.eth, checked_at: 0 } } : null;
-    return JSON.stringify({ v: prog.version, n: prog.network, node, vault: prog.vault, ns: prog.new_swap_allowed, swaps: prog.swaps, board: prog.board, update: prog.update, token: !!(H && H.state.token) });
+    return JSON.stringify({ v: prog.version, n: prog.network, node, vault: prog.vault, ns: prog.new_swap_allowed, swaps: prog.swaps, board: prog.board, update: prog.update, token: !!(H && H.state.token), lim: limitsOpen, prod: prog.form && prog.form.profiles && prog.form.profiles.production ? [prog.form.profiles.production.max_noid, prog.form.profiles.production.max_eth] : null }, (k, v) => (k === "age_s" || k === "base_fee_age_s" ? undefined : v));
   }
+
+  // the "Limits and risks" screen is a state of the list screen: the page's screen switch (operator.js) knows "list", "new", "settings" and "swap", so the menu item sets this flag and asks for the list
+  let limitsOpen = false;
 
   // ------------------------------------------------------------------ transport
   async function request(method, path, body) {
@@ -91,7 +96,14 @@
     const el = H.el;
     const nodes = nodeWords(prog && prog.node);
     const n = activeCount(prog && prog.swaps);
-    const net = prog && prog.network === "test" ? H.chip("quiet", "Test network") : H.chip("danger", "Network not recognised");
+    // R6: Ethereum mainnet is a mode, not a danger: an inverted tag with words, so the difference never rests on colour alone. The NOID is real on every network, so a test network says it is the Ethereum side that is a test.
+    const net = prog && prog.network === "mainnet" ? el("span", { class: "tag real", text: "Ethereum mainnet: real funds" }) : prog && prog.network === "test" ? H.chip("quiet", "Ethereum test network") : H.chip("danger", "Network not recognised");
+    if (ui && ui.screen && ui.screen !== "list") limitsOpen = false;
+    // every way out of the limits screen but its own menu item: the flag is cleared, then the screen is asked for
+    const goTo = (screen) => {
+      limitsOpen = false;
+      return h.go(screen);
+    };
     const ic = (name) => (H.icon ? H.icon(name) : null);
     const summary = el("summary", { class: "btn ghost sm", "aria-label": "Menu" }, ic("menu"), el("span", { text: "Menu" }));
     const menu = el("details", { class: "pg-menu" }, summary);
@@ -104,7 +116,11 @@
     });
     const list = el("ul", { class: "pg-menu-list" });
     const item = (label, fn) => list.appendChild(el("li", {}, el("button", { type: "button", class: "btn sm", onclick: async () => { menu.removeAttribute("open"); await fn(); } }, label)));
-    item("Settings", () => h.go("settings"));
+    item("Settings", () => goTo("settings"));
+    item("Limits and risks", () => {
+      limitsOpen = true;
+      return h.go("list");
+    });
     for (const [what, label] of OPEN_ITEMS) item(label, () => h.open(what));
     // the program runs the check and answers in its own dialog; the line below the menu shows the result at the next read
     item("Check for a new version", async () => {
@@ -117,8 +133,8 @@
       "div",
       { class: "wrap pg-bar-in" },
       el("div", { class: "pg-brand" }, el("img", { class: "mark", src: "/mark.svg", alt: "", width: 22, height: 22 }), el("span", { class: "wordmark", "aria-label": "No1d Swap" }, "No1d", el("i", { class: "dia", "aria-hidden": "true" }), "Swap")),
-      el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" ? "page" : null, onclick: () => h.go("list") }, el("span", { class: "lbl", text: "Your swaps" }), el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
-      el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, nodeChip("Parano1d", nodes.noid), nodeChip("Ethereum", nodes.eth)),
+      el("button", { type: "button", class: "pg-swaps-btn", "aria-current": ui && ui.screen === "list" && !limitsOpen ? "page" : null, onclick: () => goTo("list") }, el("span", { class: "lbl", text: "Your swaps" }), el("span", { class: "pg-count", text: n === 1 ? "1 active" : `${n} active` })),
+      el("div", { class: "pg-status", "aria-label": "Network and nodes" }, net, nodeChip("Parano1d", nodes.noid), nodeChip("Ethereum", nodes.eth), nodes.mainnet ? nodeChip("Mainnet", nodes.mainnet) : null),
       el("div", { class: "pg-tools" }, el("button", { type: "button", class: "btn ghost icon", "aria-label": "Refresh", onclick: () => h.refresh() }, ic("refresh"), el("span", { class: "sr-only", text: "Refresh" })), menu)
     );
   }
@@ -140,9 +156,10 @@
   function swapRow(s, h) {
     const el = H.el;
     const chips = [];
+    if (s.network === "mainnet") chips.push(el("span", { class: "tag real", text: "Mainnet" }));
     if (s.needs_you) chips.push(H.chip("accent", "Needs you"));
     if (s.in_contract) chips.push(H.chip("warn", "Coins are in the contract"));
-    if (s.refused) chips.push(H.chip("danger", "Read only"));
+    if (s.refused) chips.push(H.chip("warn", "Read only"));
     else if (isEnded(s)) chips.push(H.chip(s.phase === "done" ? "ok" : "quiet", "Ended"));
     // the label is also the swap's name for a screen reader: with the pair drawn (which is hidden from one) it stays as a word that only a screen reader sees
     const main = validHalf(s.give) && validHalf(s.get)
@@ -177,8 +194,8 @@
         "ol",
         { id: "pg-guide-list" },
         li("The Parano1d wallet app is open on this computer and in sync. ", nodeChip("Parano1d", noid)),
-        li("An Ethereum wallet that works on Sepolia, the test network, and its address. The ETH you get, or what is left, goes there. Use your own wallet, not an exchange."),
-        li("Sepolia test ETH in that wallet. It has no value and is free from a Sepolia faucet; search for \"Sepolia faucet\", as they change often. If you sell NOID, a little is enough: it pays one fee."),
+        li("An Ethereum wallet and its address: on Sepolia (the test network) for a test swap, on Ethereum mainnet for a real one. The ETH you get, or what is left, goes there. Use your own wallet, not an exchange."),
+        li("For a real swap on Ethereum mainnet: real ETH and real NOID, at most 0.5 ETH and 2,500 NOID per swap. Start small. For a test swap: Sepolia test ETH in that wallet. It has no value and is free from a Sepolia faucet; search for \"Sepolia faucet\", as they change often. If you sell NOID, a little is enough: it pays one fee."),
         li("If you sell NOID: the NOID to swap and a little more for the fee, in the Parano1d wallet app. If you sell ETH: the ETH to swap and a little more for two fees."),
         li("The amounts, agreed with the other person. The one who sells ETH makes the swap first and sends the other an invitation file."),
         li("About an hour with both computers on and awake.")
@@ -186,9 +203,52 @@
     );
   }
 
+  /** A safety box in the page's levels (danger, needs, warn, info): the icon, a short title and the words. `body` are the children of the text span. */
+  function safetyBox(level, title, ...body) {
+    return H.el("div", { class: `alarm ${level}`, role: level === "danger" ? "alert" : "note" }, ic("alert"), title ? H.el("span", { class: "lv", text: title }) : null, H.el("span", { class: "tx" }, ...body));
+  }
+
+  /**
+   * R2: the signed "oldest safe version" notice, above the list. `update` is prog.update: { unsafe, note, note_unreadable, url }. Drawn only while `unsafe` is true. The note is signed text and goes in
+   * as text only (textContent), never as markup. The release page is a copy button: the program's windows deny every navigation, so a link would do nothing.
+   */
+  function noticeBox(update) {
+    if (!update || update.unsafe !== true) return null;
+    const el = H.el;
+    const note = typeof update.note === "string" && update.note ? update.note : null;
+    const url = typeof update.url === "string" && /^https:\/\/[A-Za-z0-9\-._~:/?#@!$&'()*+,;=%]{1,200}$/.test(update.url) ? update.url : null;
+    return safetyBox(
+      "warn",
+      "A security notice for this version",
+      "The signed release notice says this version should not start new swaps: ",
+      note ? el("span", { class: "more", dataset: { part: "note" }, text: `“${note}”` }) : el("span", { class: "more", dataset: { part: "note" }, text: "The notice's text cannot be shown." }),
+      el("span", { class: "more", text: "Your running swaps go on as usual: every step, refund, recovery and sweep still works. Update the program to start a new swap." }),
+      url ? el("span", { class: "more", dataset: { part: "release" } }, "Release page: ", H.copyButton ? H.copyButton(url, "the release page address", "Copy the release page address") : null) : null
+    );
+  }
+
+  /** R6: the "Limits and risks" screen: the card of lib/limitstext.js on a screen of its own (menu, "Limits and risks"). */
+  function limitsFacts(prog) {
+    const p = prog && prog.form && prog.form.profiles && prog.form.profiles.production;
+    return p ? { max_noid: p.max_noid, max_eth: p.max_eth } : {};
+  }
+  function limitsScreen(prog, h) {
+    const el = H.el;
+    const back = el("button", { type: "button", class: "btn sm", id: "pg-limits-back", onclick: () => { limitsOpen = false; return h.go("list"); } }, "Back to your swaps");
+    const root = el("section", { class: "pg-form pg-limits", "aria-labelledby": "pg-h-limits" }, el("div", { class: "card-head" }, back));
+    if (window.NoidLimits) root.appendChild(window.NoidLimits.card(el, limitsFacts(prog), { level: 1, headingId: "pg-h-limits" }));
+    else root.appendChild(el("h1", { id: "pg-h-limits", text: "Limits and risks" }));
+    // the page sets its own title right after the list is drawn: this runs after it
+    Promise.resolve().then(() => {
+      if (limitsOpen && typeof document !== "undefined") document.title = "Limits and risks, No1d Swap";
+    });
+    return root;
+  }
+
   /** `h`: { openSwap(swapId), go(screen), openProgram(what), board(role), openBoard(slotId) }. */
   function swapList(prog, h) {
     const el = H.el;
+    if (limitsOpen) return limitsScreen(prog, h);
     const swaps = sortSwaps(prog && prog.swaps);
     const ns = (prog && prog.new_swap_allowed) || { ok: false, why: "The program did not say." };
     const v = vaultNotes(prog);
@@ -197,6 +257,8 @@
     root.appendChild(el("div", { class: "card-head" }, el("h1", { id: "pg-h-swaps", text: "Your swaps" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn primary", id: "pg-new", disabled: ns.ok && !noKey ? null : true, onclick: () => h.go("new") }, ic("plus"), "New swap"))));
     if (noKey) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: KEY_LOST_PROGRAM }));
     else if (!ns.ok) root.appendChild(el("p", { class: "pg-why", id: "pg-new-why", text: ns.why || "A new swap cannot start now." }));
+    const notice = noticeBox(prog && prog.update);
+    if (notice) root.appendChild(notice);
     if (v.not_ready) root.appendChild(el("div", { class: "alarm danger big", role: "alert" }, ic("alert"), el("span", { class: "lv", text: "Key store" }), el("span", { class: "tx" }, "The program's key store is not open, so no swap can act. Restore from your recovery code, or close the program and open it again. ", el("button", { type: "button", class: "btn sm", onclick: () => h.openProgram("restore") }, "Restore from a recovery code"))));
     if (v.unconfirmed) root.appendChild(el("div", { class: "alarm needs big", role: "note" }, ic("alert"), el("span", { class: "lv", text: "Recovery code" }), el("span", { class: "tx" }, "Your recovery code is not confirmed yet. Without it a swap cannot be restored on another machine, so no new swap starts until you have written it down and typed it back. ", el("button", { type: "button", class: "btn primary due sm", onclick: () => h.openProgram("recovery-code") }, "Show my recovery code"))));
     if (!swaps.length) {
@@ -281,9 +343,135 @@
     return left;
   }
 
+  // ------------------------------------------------------------------ the numbers of the form (R3, R4: display only)
+  const NL = () => (typeof window !== "undefined" && window.NoidLaunch) || null;
+  const NOID_DEC = /^(0|[1-9][0-9]{0,3})(\.[0-9]{1,6})?$/;
+  const ETH_DEC = /^(0|[1-9][0-9]{0,1})(\.[0-9]{1,18})?$/;
+  /** A decimal text (digits, one dot) in the smallest unit, as a BigInt; null when it is not of the form. */
+  function decUnits(text, decimals, re) {
+    if (typeof text !== "string" || !re.test(text)) return null;
+    const [w, f = ""] = text.split(".");
+    return BigInt(w) * 10n ** BigInt(decimals) + BigInt(f.padEnd(decimals, "0") || "0");
+  }
+  const STEP_WORDS = { lock: "the lock", reveal: "the reveal", refund: "the refund", sweep: "the sweep" };
+  const gasText = (g) => NL().groupInt(String(g));
+
+  /**
+   * Every figure and sentence of the form's launch lines, from what is typed and what the program read. Pure: the form calls it at every change and draws the result; the same functions of
+   * lib/launchfacts.js give the server's `launch` object, so the two cannot differ. Nothing here is sent to the program or read by a step.
+   * i: { role, profile, noid, eth, gas, tip, hcLead, formProfile (prog.form.profiles[profile]), node (prog.node), nowMs }
+   * Returns null when the launch facts are not loaded. Every line is a string, or null when its figures are missing (a figure that is not known is never guessed).
+   */
+  function launchLines(i) {
+    const lf = NL();
+    if (!lf || !i || !lf.PROFILES[i.profile]) return null;
+    const role = i.role === "bob" ? "bob" : "alice";
+    const fp = i.formProfile || {};
+    const mainnet = i.profile === "production";
+    const prof = lf.PROFILES[i.profile];
+    // an empty gas field: mainnet starts with its own cap; a test network's estimate uses the program's default cap and says so (the real send takes the node's own suggestion, which is far below it)
+    const typedGas = typeof i.gas === "string" && i.gas ? i.gas : "";
+    const defaultGas = !typedGas && !mainnet && typeof fp.estimate_cap_gwei === "string" ? fp.estimate_cap_gwei : "";
+    const gasTxt = typedGas || (mainnet && typeof fp.fee_cap_gwei === "string" ? fp.fee_cap_gwei : "") || defaultGas;
+    const capIsDefault = defaultGas !== "" && gasTxt === defaultGas;
+    let tipTxt = typeof i.tip === "string" ? i.tip : "";
+    if (!tipTxt && mainnet && typeof fp.tip_gwei === "string") {
+      const g = lf.gweiToWei(gasTxt);
+      const t = lf.gweiToWei(fp.tip_gwei);
+      if (g !== null && t !== null && g >= t) tipTxt = fp.tip_gwei;
+    }
+    const capWei = lf.gweiToWei(gasTxt);
+    const tipWei = lf.gweiToWei(tipTxt);
+    const fee = lf.baseFeeFor(i.node && i.node.eth, i.profile);
+    const nowMs = typeof i.nowMs === "number" ? i.nowMs : Date.now();
+    const ageS = fee && Number.isFinite(fee.at) ? Math.max(0, Math.floor((nowMs - fee.at) / 1000)) : null;
+    const fresh = fee !== null && ageS !== null && ageS <= lf.BASE_FEE_STALE_S;
+    const baseWei = fresh ? BigInt(fee.base_fee_wei) : null;
+    const micro = decUnits(i.noid, 6, NOID_DEC);
+    const wei = decUnits(i.eth, 18, ETH_DEC);
+    const both = micro !== null && wei !== null && micro > 0n && wei > 0n;
+    const hc = typeof i.hcLead === "string" && /^[1-9][0-9]{0,3}$/.test(i.hcLead) && Number(i.hcLead) <= 1000 ? Number(i.hcLead) : undefined;
+    const L = both ? lf.launch({ profile: i.profile, role, amountMicro: micro.toString(), amountWei: wei.toString(), capGwei: gasTxt || null, tipGwei: tipTxt || null, baseFee: fee, nowMs, fundingFeeMicro: null, maxFeeMicro: null, hcLead: hc === undefined ? null : hc }) : null;
+    const eth = (w) => (w === null || w === undefined ? null : lf.fmtEth(w).text);
+    const noid = (m) => lf.fmtNoid(m, { exact: true }).text;
+    const capText = capWei === null ? null : lf.weiToGwei(capWei);
+    const out = { cap_default: capIsDefault, rate: null, get: null, fee: null, loud: null, cap_below: null, usual: null, back: null, fees_fold: [], times_fold: [], share_bp: null };
+
+    // the times and the worst case do not need the amounts
+    out.usual = `Usually about ${prof.usual_min} minutes once both deposits are in.`;
+    const rel = lf.fmtBack(lf.backAfter(i.profile, role, hc));
+    const stopEth = lf.ethFees({ role, baseFeeWei: baseWei, capWei, tipWei, path: "stopped" });
+    const stopNoid = lf.noidFees({ role, path: "stopped", fundingFeeMicro: null, maxFeeMicro: null });
+    const relText = rel ? rel.replace(/^about /, "") : null;
+    if (role === "alice") {
+      if (relText) out.back = `If Bob never locks: your NOID is back in your own address about ${relText} after you press Prepare, less about ${noid(stopNoid.micro)} NOID in fees.`;
+    } else if (relText) {
+      const tail = stopEth.now_wei !== null ? `less about ${eth(stopEth.now_wei)} ETH in fees.` : stopEth.max_wei !== null ? `less Ethereum fees of at most ${eth(stopEth.max_wei)} ETH at your fee cap.` : "less the Ethereum fees.";
+      out.back = `If Alice never takes the ETH: your ETH is back in your own address about ${relText} after your lock, ${tail}`;
+    }
+
+    // the fee cap against the base fee now (the program refuses the step while it holds)
+    const refused = capIsDefault ? false : lf.refusedNow({ role, baseFeeWei: baseWei, capWei });
+    if (refused && baseWei !== null && capText !== null) {
+      const base = lf.weiToGwei(baseWei);
+      out.cap_below = role === "alice"
+        ? `Your fee cap (${capText} gwei) is below twice Ethereum's base fee now (${base} gwei). While fees stay this high, the program will not send the reveal, and the swap would end with both sides refunded. Raise the cap under Optional settings, or wait for lower fees.`
+        : `Your fee cap (${capText} gwei) is below Ethereum's base fee now (${base} gwei). While fees stay this high, the program will not send your lock. Raise the cap under Optional settings, or wait.`;
+    }
+
+    // the fold on the times
+    out.times_fold.push("Parano1d blocks come about every 30 seconds; faster blocks bring it sooner.");
+    if (role === "alice") {
+      const lead = hc === undefined ? prof.hc_lead : hc;
+      out.times_fold.push(`Your NOID is back ${lead + prof.d_offset + 20} blocks after you press Prepare: ${lead} blocks of lead, ${prof.d_offset} blocks to the deadline, and 20 for the finality of the funding and the sweep, at 30 seconds a block.`);
+    } else out.times_fold.push(`Your ETH is back after Alice's window to take it (${Math.round(prof.w_a_s / 60)} minutes), Ethereum's finality (${Math.round(prof.eth_finality_s / 60)} minutes) and a minute for the refund, counted from your lock.`);
+    out.times_fold.push(`The usual time (${prof.usual_min} minutes) is what real swaps on this network took from the funding to the end.`);
+
+    if (!L) return out;
+    out.rate = lf.rateParts(L.rate);
+    out.share_bp = L.fees.share_bp;
+    const f = L.fees;
+    if (role === "alice") {
+      if (L.get_after_fees) out.get = `You get about ${L.get_after_fees} ETH after network fees.`;
+      else if (capWei !== null) out.get = `You get ${lf.fmtEth(wei).text} ETH, less the Ethereum fees below.`;
+    } else if (L.get_after_fees) out.get = `You get ${L.get_after_fees} NOID after the Parano1d fee.`;
+
+    if (f.happy.eth_max_wei !== null && capText !== null) {
+      const happy = f.happy;
+      const capWords = capIsDefault ? `the default cap of ${capText} gwei (you set no gas price)` : `your fee cap of ${capText} gwei`;
+      if (happy.eth_now_wei === null) out.fee = `Ethereum's fee level is not read yet; at most ${eth(happy.eth_max_wei)} ETH at ${capWords}.`;
+      else {
+        const share = lf.pct(f.share_bp);
+        const upto = happy.noid_upto_micro !== null ? ` and ${noid(happy.noid_upto_micro)} NOID` : "";
+        out.fee = role === "alice"
+          ? `Network fees, about: ${eth(happy.eth_now_wei)} ETH on Ethereum, ${noid(happy.noid_micro)} NOID on Parano1d (${share} % of what you swap). At most ${eth(happy.eth_max_wei)} ETH at ${capWords}.`
+          : `Network fees, about: ${eth(happy.eth_now_wei)} ETH on Ethereum, ${noid(happy.noid_micro)} NOID on Parano1d, taken from the NOID you get (${share} % of what you swap). At most ${eth(happy.eth_max_wei)} ETH at ${capWords}${upto}.`;
+      }
+      if (f.loud && f.share_bp !== null) out.loud = `Network fees are about ${lf.pct(f.share_bp)} % of what you swap. A larger amount, or a time when Ethereum fees are lower, costs a smaller share.`;
+
+      // the arithmetic in words
+      const steps = (list) => list.map((s) => `${STEP_WORDS[s.id]} (about ${gasText(s.gas)} gas)`).join(", ");
+      out.fees_fold.push("Each step costs the gas it used on real swaps, times the price of a gas: Ethereum's base fee now plus your tip, never more than your fee cap.");
+      out.fees_fold.push(fresh ? `Base fee now: ${lf.weiToGwei(baseWei)} gwei (block ${fee.block === null ? "not known" : gasText(fee.block)}, read ${ageS} s ago).` : "Ethereum's base fee is not read yet, or the reading is more than two minutes old, so only the most the fees can come to is shown.");
+      out.fees_fold.push(`Your tip: ${tipWei === null ? "none" : lf.weiToGwei(tipWei) + " gwei"}. ${capIsDefault ? `No fee cap is set; this estimate uses the default of ${capText} gwei.` : `Your fee cap: ${capText} gwei.`}`);
+      out.fees_fold.push(`If the swap completes you send: ${steps(happy.eth_steps)}.`);
+      out.fees_fold.push(`If it stops you send: ${steps(f.stopped.eth_steps)}.`);
+      out.fees_fold.push("The sweep sends what is left of the swap's key to your own address. It is counted at the fee cap, because the part of the cap it does not use stays in the swap's key.");
+      out.fees_fold.push(role === "alice" ? `On Parano1d the funding costs about ${noid(happy.noid_micro)} NOID, and closing and sweeping what is left about 0.0058 NOID each, as measured on real swaps.` : "On Parano1d the close costs about 0.0058 NOID, as measured on real swaps. It is taken from the locked NOID, so you get that much less.");
+    }
+    return out;
+  }
+
+  // the texts of the address checks (R3)
+  const TICK_TEXT = "I compared every group of this address with my wallet's own screen.";
+  const COMPARE_NOTE = "Compare it with your wallet's own screen.";
+  const NO_CHECKSUM_NOTE = "This address has no checksum (all one case), so a wrong character would not be caught. Compare it with your wallet's own screen.";
+  // the payout history GET /api/settings answered with, kept for the form that is built right after it (operator.js hands the form the settings only)
+  let historySnapshot = null;
+
   // ------------------------------------------------------------------ the new-swap form
-  /** The test profiles the form offers: nothing for mainnet or production. */
-  const NEW_PROFILES = [["sepolia", "Sepolia (the public test network of Ethereum)"], ["rehearsal", "Rehearsal (a test chain on this machine)"]];
+  /** The networks the form offers: the two test networks and Ethereum mainnet (real funds, with caps per swap). */
+  const NEW_PROFILES = [["sepolia", "Sepolia (the public test network)"], ["rehearsal", "Rehearsal (a test chain on this machine)"], ["production", "Ethereum mainnet (real ETH, real NOID)"]];
   const PIN_HINT = "The program's own contract on this network. Change it only if you and the other person agreed on another one; the program checks the contract's code before any lock.";
   const NO_PIN_HINT = "This network has no contract of the program's own: type the one you agreed on.";
   const INVITATION_NOTE = "Filled from Bob's invitation. Check every value against what you agreed with Bob; nothing is made until you press Make the swap.";
@@ -293,7 +481,7 @@
     bob: "What is left of this swap's ETH is sent here at the end. Use your own wallet, not an exchange deposit address.",
   };
   // what the Ethereum block says under its figure, by the network chosen
-  const PROFILE_ON = { sepolia: "on Ethereum Sepolia, a test network", rehearsal: "on a test chain on this machine" };
+  const PROFILE_ON = { sepolia: "on Ethereum Sepolia, a test network", rehearsal: "on a test chain on this machine", production: "on Ethereum mainnet" };
   const BOB_NOID_LABEL = { alice: "Bob's Parano1d address", bob: "Your Parano1d address (where the NOID you buy goes)" };
 
   /**
@@ -345,13 +533,13 @@
     const remember = checkInput(F, "remember", true);
     const single = checkInput(F, "single_node_ok", false);
     // the optional settings: the defaults are right for most swaps
-    const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Test networks only: the Ethereum side has no value, the NOID is real."));
+    const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Sepolia and Rehearsal are test networks: the Ethereum side has no value, the NOID is real. Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap."));
     const version = reg("contract_version", field(F, "contract_version", "Parano1d contract version", selectInput(F, "contract_version", [["1", "1"], ["2", "2"]], "1"), "1 unless you and the other person agreed on 2."));
     const contract = reg("contract", field(F, "contract", "Ethereum contract", textInput(F, "contract", pinOf("sepolia"), "0x…"), pinOf("sepolia") ? PIN_HINT : NO_PIN_HINT, "code"));
     const optBlock = reg("deploy_block", field(F, "deploy_block", "Log start block", textInput(F, "deploy_block", "", ""), "Optional. The first Ethereum block the tool scans for this swap's contract events; empty lets the tool pick a recent one. Never a block after the lock."));
     const hcLead = reg("hc_lead", field(F, "hc_lead", "Blocks before the funding block", textInput(F, "hc_lead", "", "50"), "Optional, 1 to 1000. Empty uses 50."));
-    const gas = reg("gas_price_gwei", field(F, "gas_price_gwei", "Ethereum gas price, gwei", textInput(F, "gas_price_gwei", "", "20"), "Optional, for the test networks."));
-    const tip = reg("priority_fee_gwei", field(F, "priority_fee_gwei", "Ethereum tip, gwei", textInput(F, "priority_fee_gwei", "", "0.01"), "Optional, needs the gas price above and not above it. A lock cannot be replaced, so give it a generous tip."));
+    const gas = reg("gas_price_gwei", field(F, "gas_price_gwei", "Ethereum gas price, gwei", textInput(F, "gas_price_gwei", "", "20"), "Optional on the test networks. On Ethereum mainnet this is the fee cap, the most you will pay per gas: empty uses 1 gwei."));
+    const tip = reg("priority_fee_gwei", field(F, "priority_fee_gwei", "Ethereum tip, gwei", textInput(F, "priority_fee_gwei", "", "0.01"), "Optional, needs the gas price above and not above it. A lock cannot be replaced, so give it a generous tip. On Ethereum mainnet empty uses 0.05 gwei."));
     const optional = el("details", { class: "newswap-opt", id: "ns-optional" }, el("summary", { text: "Optional settings (the defaults are right for most swaps)" }), el("div", { class: "form-grid" }, profile.box, version.box, contract.box, optBlock.box, hcLead.box, gas.box, tip.box));
     const OPTIONAL_KEYS = ["profile", "contract_version", "contract", "deploy_block", "hc_lead", "gas_price_gwei", "priority_fee_gwei"];
     const general = el("p", { class: "attn", id: "ns-general", role: "alert" });
@@ -369,6 +557,7 @@
     let bobTyped = false; // the person typed in "Bob's Parano1d address" (a fill by the program does not count)
     let invitation = false; // the form holds values filled from an invitation
     let lastPin = pinOf("sepolia");
+    let refreshAll = () => {}; // set below: redraws the launch lines, the read-backs and the compare ticks
     if (!lastPin) optional.open = true; // no contract of our own on this network: the person has to see the field
 
     const syncContractNote = () => {
@@ -385,6 +574,7 @@
     };
     const syncChain = () => {
       chainEth.textContent = PROFILE_ON[profile.control.value] || PROFILE_ON.sepolia;
+      chainEth.className = "on" + (profile.control.value === "production" ? " real" : ""); // on mainnet the words are in the ink colour, not the quiet one
     };
     const applyRole = (r) => {
       bobEth.box.hidden = r !== "alice";
@@ -434,6 +624,7 @@
       syncChain();
       syncContractHint();
       syncContractNote();
+      refreshAll();
     };
     const onRole = () => {
       const r = role.control.value;
@@ -487,6 +678,7 @@
       syncContractNote();
       const pin = pinOf(profile.control.value);
       if (version.control.value !== "1" || !pin || !sameAddr(val(contract.control), pin)) optional.open = true;
+      refreshAll();
     };
     const openInvitation = async () => {
       invButton.disabled = true;
@@ -513,7 +705,8 @@
     };
     const go = H.el("button", { type: "button", class: "btn primary", id: "ns-go", disabled: !H.state.token ? true : null }, "Make the swap");
     const submit = async () => {
-      go.disabled = true;
+      busy = true;
+      syncGo();
       setErrors(null);
       try {
         const r = await request("POST", "/api/newswap", collect());
@@ -527,28 +720,212 @@
         } else general.textContent = errorText(r);
         return r;
       } finally {
-        go.disabled = !H.state.token;
+        busy = false;
+        syncGo();
       }
     };
     go.addEventListener("click", submit);
 
+    // ---- R3 and R4: what the program can say before the first click. Display only: nothing here changes what collect() posts, the approval's bytes or a step.
+    const lf = NL();
+    const histIn = S.payout_history !== undefined ? { state: S.payout_history_state, items: S.payout_history } : historySnapshot;
+    const histState = histIn && typeof histIn.state === "string" && histIn.state !== "none" ? histIn.state : null; // null: loading, or a program with no history (the terminal console): no line
+    const histItems = histIn && Array.isArray(histIn.items) ? histIn.items : [];
+    const sameAddress = (a, b) => (/^0x/i.test(a) ? a.toLowerCase() === b.toLowerCase() : a === b);
+    let nodeSnap = prog && prog.node ? prog.node : null; // the node read the form was opened with; read again every 30 s while the form is on the page
+    let busy = false;
+    const addrWholeText = (g) => H.el("span", { class: "addr-whole" }, g.map((x) => H.el("span", { class: "g", text: x })));
+    // the address fields: `own` is true for the person's own addresses (the history and the compare tick apply to them); `ticks` false for Bob's address and the contract (the case note only)
+    const ADDR = [
+      { key: "bob_noid", f: bobNoid, kind: "noid", own: (r) => r === "bob", active: () => true, remembered: () => str(S.bob_noid), readback: true },
+      { key: "bob_eth", f: bobEth, kind: "eth", own: () => false, active: (r) => r === "alice", remembered: () => "", readback: true },
+      { key: "noid_payout", f: noidPay, kind: "noid", own: () => true, active: (r) => r === "alice", remembered: () => str(S.noid_payout), readback: true },
+      { key: "eth_payout", f: ethPay, kind: "eth", own: () => true, active: () => true, remembered: () => str(S.eth_payout), readback: true },
+      { key: "contract", f: contract, kind: "eth", own: () => false, active: () => true, remembered: () => "", readback: false, noTick: true },
+    ];
+    for (const a of ADDR) {
+      const id = (n) => `${F}-${n}-${a.key}`;
+      a.rb = el("p", { class: "hist", id: id("rb"), hidden: true });
+      a.hist = el("p", { class: "hist", id: id("hist"), hidden: true });
+      a.note = el("p", { class: "hist new", id: id("note"), hidden: true });
+      a.tick = checkInput(F, `tick-${a.key}`, false);
+      a.tickLab = el("label", { class: "ack", for: `${F}-tick-${a.key}` }, a.tick, el("span", { text: TICK_TEXT })); // in the field only while the tick is asked for
+      a.wanted = false;
+      a.tickedFor = "";
+      a.tick.addEventListener("change", () => {
+        a.tickedFor = val(a.f.control);
+        syncGo();
+      });
+      for (const n of [a.rb, a.hist, a.note]) a.f.box.appendChild(n);
+      const d = a.f.control.getAttribute("aria-describedby") || "";
+      a.f.control.setAttribute("aria-describedby", `${d} ${id("rb")} ${id("hist")} ${id("note")}`.trim());
+    }
+    const pendingTick = () => ADDR.some((a) => a.wanted && !a.tick.checked);
+    // above the button, and only while a tick is missing: why the button is off
+    const goWhy = el("p", { class: "hist new", id: "ns-go-why", text: "The button stays off until each address above is compared with your wallet's own screen." });
+    const warnsBox = el("div", { class: "ns-warns" });
+    const syncGo = () => {
+      const missing = pendingTick();
+      go.disabled = !H.state.token || busy || missing;
+      if (missing && !goWhy.parentNode) warnsBox.appendChild(goWhy);
+      if (!missing && goWhy.parentNode) goWhy.remove();
+      if (missing) go.setAttribute("aria-describedby", "ns-go-why");
+      else go.removeAttribute("aria-describedby");
+    };
+    function drawAddresses() {
+      const r = role.control.value;
+      const mainnet = profile.control.value === "production";
+      for (const a of ADDR) {
+        const v = val(a.f.control);
+        const g = lf && a.active(r) ? lf.groups(v) : null;
+        // the read-back: the address as typed, whole, in groups of four, once it has the form of an address
+        a.rb.textContent = "";
+        a.rb.hidden = !(g && a.readback);
+        if (g && a.readback) {
+          a.rb.appendChild(el("span", { text: "You typed: " }));
+          a.rb.appendChild(addrWholeText(g));
+        }
+        // the history line (own addresses only; every address reads as new when the history cannot be read)
+        let isNew = false;
+        a.hist.textContent = "";
+        a.hist.hidden = true;
+        if (g && a.own(r) && histState) {
+          const info = histItems.find((it) => it && it.kind === a.kind && typeof it.addr === "string" && sameAddress(it.addr, v)) || null;
+          const mem = a.remembered();
+          const line = lf.historyLine(histState, info, mem && !sameAddress(mem, v) ? mem : null);
+          a.hist.textContent = line.text;
+          a.hist.hidden = false;
+          a.hist.className = "hist" + (line.isNew ? " new" : "");
+          isNew = line.isNew;
+        }
+        // all one case: a wrong character would not be caught by a checksum; on a test network a new own address gets a plain note
+        const noCheck = !!g && a.kind === "eth" && lf.caseNote(v) === "no_checksum";
+        const text = noCheck ? NO_CHECKSUM_NOTE : isNew && !mainnet ? COMPARE_NOTE : "";
+        a.note.textContent = text;
+        a.note.hidden = !text;
+        // the compare tick: Ethereum mainnet only, for a new or changed own address and for an address with no checksum; reset when the address changes
+        a.wanted = mainnet && !a.noTick && !!g && ((a.own(r) && isNew) || noCheck);
+        if (a.tick.checked && a.tickedFor !== v) a.tick.checked = false;
+        if (!a.wanted) a.tick.checked = false;
+        if (a.wanted && !a.tickLab.parentNode) a.f.box.appendChild(a.tickLab);
+        if (!a.wanted && a.tickLab.parentNode) a.tickLab.remove();
+      }
+      syncGo();
+    }
+
+    const factP = (id) => el("p", { class: "facts-line", id, hidden: true });
+    const rateP = el("p", { class: "facts-line", id: "ns-rate", hidden: true }, el("span", { class: "fig" }), el("span", { class: "fig" }));
+    const getP = factP("ns-get");
+    const feeP = factP("ns-fees");
+    const usualP = factP("ns-usual");
+    const backP = factP("ns-back");
+    const foldOf = (id, title) => {
+      const body = el("div", { class: "fold-body" });
+      return { node: el("details", { class: "newswap-opt", id, hidden: true }, el("summary", { text: title }), body), body };
+    };
+    const feesFold = foldOf("ns-fees-fold", "How the fees are counted");
+    const timesFold = foldOf("ns-times-fold", "How the times are counted");
+    const loudBox = safetyBox("warn", "Network fees", "");
+    loudBox.setAttribute("id", "ns-loud");
+    loudBox.hidden = true;
+    const capBox = safetyBox("warn", "Fee cap", "");
+    capBox.setAttribute("id", "ns-cap-below");
+    capBox.hidden = true;
+    const setLine = (p, text) => {
+      p.textContent = text || "";
+      p.hidden = !text;
+    };
+    const setBox = (box, text) => {
+      box.querySelector(".tx").textContent = text || "";
+      box.hidden = !text;
+    };
+    const setFold = (fold, lines) => {
+      fold.body.textContent = "";
+      for (const t of lines) fold.body.appendChild(el("p", { class: "facts-line", text: t }));
+      fold.node.hidden = !lines.length;
+    };
+    warnsBox.appendChild(loudBox);
+    warnsBox.appendChild(capBox);
+    const mainnetTag = el("span", { class: "tag real", id: "ns-mainnet-tag", hidden: true, text: "Ethereum mainnet: real ETH and real NOID" });
+    const limitsFold = window.NoidLimits ? el("details", { class: "newswap-opt", id: "ns-limits", hidden: true }, el("summary", { text: "Limits and risks" }), window.NoidLimits.card(el, limitsFacts(prog), { level: 3 })) : null;
+    function drawFacts() {
+      const lines = launchLines({ role: role.control.value, profile: profile.control.value, noid: val(noid.control), eth: val(eth.control), gas: val(gas.control), tip: val(tip.control), hcLead: val(hcLead.control), formProfile: profiles[profile.control.value], node: nodeSnap, nowMs: Date.now() });
+      const l = lines || { rate: null, get: null, fee: null, loud: null, cap_below: null, usual: null, back: null, fees_fold: [], times_fold: [] };
+      rateP.hidden = !l.rate;
+      for (let k = 0; k < 2; k++) rateP.children[k].textContent = l.rate ? l.rate[k] : "";
+      setLine(getP, l.get);
+      setLine(feeP, l.fee);
+      setLine(usualP, l.usual);
+      setLine(backP, l.back);
+      setFold(feesFold, l.fees_fold);
+      setFold(timesFold, l.times_fold);
+      setBox(loudBox, l.loud);
+      setBox(capBox, l.cap_below);
+      const mainnet = profile.control.value === "production";
+      mainnetTag.hidden = !mainnet;
+      if (limitsFold) limitsFold.hidden = !mainnet;
+    }
+    refreshAll = () => {
+      drawFacts();
+      drawAddresses();
+    };
+    for (const c of [role, noid, eth, gas, tip, hcLead, profile, bobNoid, bobEth, noidPay, ethPay, contract]) for (const ev of ["input", "change"]) c.control.addEventListener(ev, () => refreshAll());
+    // the node read is a snapshot of when the form opened: read it again while the form is on the page, so the base fee does not go stale under a person who is typing
+    const rereadNode = async () => {
+      if (root && root.isConnected === false) return;
+      try {
+        if (H.state.token) {
+          // while the network is Ethereum mainnet the read asks the program to read the mainnet endpoints (for ten minutes); otherwise no request goes to them
+          const r = await request("GET", profile.control.value === "production" ? "/api/program?want=mainnet-fee" : "/api/program");
+          if (r.ok && r.json && r.json.node && typeof r.json.node === "object") {
+            nodeSnap = r.json.node;
+            drawFacts();
+          }
+        }
+      } catch {
+        /* the old reading stays; it goes stale by itself */
+      }
+    };
+    const loop = async () => {
+      if (root && root.isConnected === false) return;
+      await rereadNode();
+      setTimeout(loop, 30000);
+    };
+    if (typeof setTimeout === "function") setTimeout(loop, 30000);
+    // Ethereum mainnet chosen (by hand or by an invitation): read at once (the answer has no fee yet) and again a few seconds later, when the program has read the endpoints
+    let askedMainnet = false;
+    const baseRefresh = refreshAll;
+    refreshAll = () => {
+      baseRefresh();
+      const prod = profile.control.value === "production";
+      if (prod && !askedMainnet) {
+        rereadNode();
+        if (typeof setTimeout === "function") setTimeout(rereadNode, 4000);
+      }
+      askedMainnet = prod;
+    };
+
     root = el(
       "section",
       { class: "pg-form ns", "aria-labelledby": "ns-h" },
-      el("div", { class: "card-head" }, el("h1", { id: "ns-h", text: "New swap" }), el("div", { class: "right" }, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Cancel"))),
+      el("div", { class: "card-head" }, el("h1", { id: "ns-h", text: "New swap" }), el("div", { class: "right" }, mainnetTag, el("button", { type: "button", class: "btn sm", onclick: () => h && h.cancel && h.cancel() }, "Cancel"))),
       inviteBox,
       role.box,
       el("div", { class: "convert" }, noid.box, el("div", { class: "mid", "aria-hidden": "true" }, el("i")), eth.box),
+      el("div", { class: "ns-facts" }, rateP, getP, feeP, feesFold.node, usualP, backP, timesFold.node),
       bobSec,
       ownSec,
       el("label", { class: "ack", for: `${F}-remember` }, remember, el("span", { text: " Use these addresses for my next swaps" })),
       el("label", { class: "ack", for: `${F}-single_node_ok` }, single, el("span", {}, " I accept a single node per chain for this swap. ", el("strong", { text: "Never tick this for a swap with someone you do not know:" }), " one node that lies can make the program act on a false chain. Leave it empty unless you control both sides.")),
       optional,
+      limitsFold,
       general,
+      warnsBox,
       el("div", { class: "form-end" }, go, el("p", { class: "plain", text: "Every value is checked by the program before anything is made. A new swap sends nothing to any chain; coins move only after you approve and deposit." }))
     );
     const node = root;
-    return { node, collect, setErrors, submit, controls: { role, profile, version, noid, eth, contract, bobNoid, bobEth, noidPay, ethPay, remember, single, optBlock, hcLead, gas, tip, optional, invButton } };
+    refreshAll();
+    return { node, collect, setErrors, submit, launch: () => launchLines({ role: role.control.value, profile: profile.control.value, noid: val(noid.control), eth: val(eth.control), gas: val(gas.control), tip: val(tip.control), hcLead: val(hcLead.control), formProfile: profiles[profile.control.value], node: nodeSnap, nowMs: Date.now() }), controls: { role, profile, version, noid, eth, contract, bobNoid, bobEth, noidPay, ethPay, remember, single, optBlock, hcLead, gas, tip, optional, invButton } };
   }
 
   // ------------------------------------------------------------------ the settings screen
@@ -562,6 +939,9 @@
     { group: "Ethereum node (Sepolia)", line: "Sepolia, the public test network." },
     T(["eth", "sepolia", "rpc"], "Sepolia node", "An https:// address."),
     T(["eth", "sepolia", "rpc2"], "Sepolia, second node (optional)", "", { nullable: true }),
+    { group: "Ethereum node (mainnet)", line: "Ethereum mainnet, real funds. Two public endpoints from two operators. Each one sees this computer's IP address together with the swap key's address, the contract, the lock id, the timing and, at the sweep, your payout address." },
+    T(["eth", "production", "rpc"], "Mainnet node", "An https:// address."),
+    T(["eth", "production", "rpc2"], "Mainnet, second node (needed for a swap)", "A different operator from the first.", { nullable: true }),
     { path: ["eth_rpc2_remote"], label: "The second Ethereum node is on another machine", kind: "check" },
     { path: ["rpc_timeout_s"], label: "Seconds to wait for a node", kind: "int" },
     { group: "Your addresses", line: "They fill the form of a new swap.", one: true },
@@ -718,6 +1098,8 @@
   }
   async function loadSettings() {
     const r = await request("GET", "/api/settings");
+    // R3: the payout history comes beside the settings; it is kept here for the new-swap form that is built next (it is never part of the settings, so it is never posted back)
+    if (r.ok && r.json && r.json.ok === true) historySnapshot = typeof r.json.payout_history_state === "string" ? { state: r.json.payout_history_state, items: Array.isArray(r.json.payout_history) ? r.json.payout_history : [] } : null;
     return r.ok && r.json && r.json.ok === true && r.json.settings && typeof r.json.settings === "object" ? { ok: true, settings: r.json.settings } : { ok: false, error: errorText(r) };
   }
 
@@ -736,6 +1118,9 @@
     swapList,
     loadingList,
     newSwapForm,
+    launchLines,
+    noticeBox,
+    limitsScreen,
     settingsForm,
     openProgram,
     makeSlot,

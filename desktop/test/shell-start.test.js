@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const { makeEnv, TOKEN, tick } = require("./shell-fixture");
+const releaseFixture = require("./release-fixture.js");
 
 const A = { swap_id: "a".repeat(32), role: "alice", phase: "funded", active: true, in_contract: true, coins: { noid_micronoid: "5000000", eth_wei: null }, until_unix: null, until_text: "about 14:20", needs_you: false };
 
@@ -367,7 +368,7 @@ test("the menu's Recovery code and Help reach the program's own open", async () 
     await tick();
     await tick();
     const help = e.electron.dialog.boxes.find((b) => b.title === "About No1d Swap");
-    assert.ok(help && /test networks only/.test(help.detail));
+    assert.ok(help && /Ethereum mainnet/.test(help.detail));
   } finally {
     e.cleanup();
   }
@@ -593,7 +594,7 @@ test("the secret window's page cannot be served: the program exits 1 with fixed 
 });
 
 const REPO = "owner-x/no1d-swap";
-const release = (tag) => [{ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}` }];
+const release = (tag) => [releaseFixture.withAssets({ tag_name: tag, draft: false, prerelease: false, html_url: `https://github.com/${REPO}/releases/tag/${tag}` })];
 const updateBox = (e) => e.electron.dialog.boxes.find((b) => b.title === "Check for a new version");
 const questionBox = (e) => e.electron.dialog.boxes.find((b) => b.title === "Check for new versions?");
 
@@ -604,7 +605,7 @@ test("update check: with no setting stored (off), the start asks nothing and fet
     assert.equal(await r.updateAtStart, "off");
     assert.equal(e.fetched.length, 0);
     assert.equal(questionBox(e), undefined);
-    assert.deepEqual(e.program().updateStatus(), { state: "never", latest: null, url: null });
+    assert.deepEqual(e.program().updateStatus(), { state: "never", latest: null, url: null, unsafeForNewSwaps: false, unsafeNote: null });
   } finally {
     e.cleanup();
   }
@@ -678,7 +679,9 @@ test("update check: the menu item checks whatever the setting is and shows the a
     const box = updateBox(e);
     assert.equal(box.message, "Version 9.0.0 is available.");
     assert.match(box.detail, new RegExp(`https://github\.com/${REPO}/releases/tag/v9\.0\.0`));
-    assert.match(box.detail, /sha256 and build provenance/);
+    assert.match(box.detail, /Compare the installer's SHA-256 with the signed value below/);
+    assert.match(box.detail, /  setup\.exe: a{64}\n/, "each installer name with its signed hash");
+    assert.match(box.detail, /A short note\./);
     assert.match(box.detail, /Nothing was downloaded/);
   } finally {
     e.cleanup();

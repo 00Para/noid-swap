@@ -141,7 +141,7 @@ fn locked_fixture_full_observation() {
             "eth_getBlockByNumber"
         ]
     );
-    assert_eq!(obs.chain_id, Some(31_337));
+    assert_eq!(obs.chain_id, Some(1));
     assert!(obs.contract_code_hash.is_some());
     assert_eq!(calls[4].1, json!([format!("0x{CONTRACT}"), "latest"]));
     assert_eq!(calls[1].1, json!(["latest", false]));
@@ -305,7 +305,7 @@ fn absent_lock_asks_get_lock_and_only_a_revert_means_no_lock() {
     assert_eq!(obs.latest_block, 2);
     assert!(!obs.lock_finalized());
     assert!(w.rpc.calls_made().iter().any(|(m, _)| m == "eth_call"), "getLock is asked on every poll");
-    assert!(obs.contract_code_hash.is_some() && obs.chain_id == Some(31_337));
+    assert!(obs.contract_code_hash.is_some() && obs.chain_id == Some(1));
     // Any other node error is an error, not "no lock".
     call_mut(&mut fx, "eth_call", 0)["error"] = json!({"code": -32005, "message": "rate limited"});
     assert!(matches!(watcher(&fx, id).observe(), Err(RpcError::Remote { code: -32005, .. })));
@@ -360,7 +360,7 @@ fn chain_id_and_contract_code_are_mandatory_on_every_poll() {
     let w = EthWatcher::new(rpc_from(&fx), a20(CONTRACT), [0u8; 32]).with_clock(|| BASE_TS);
     let obs = w.observe().unwrap();
     assert!(obs.lock.is_none());
-    assert_eq!(obs.chain_id, Some(31_337));
+    assert_eq!(obs.chain_id, Some(1));
     assert_eq!(obs.contract_code_hash, Some(swap_cli::watch::eth::keccak256(&hex::decode(result_of(&mut fx, "eth_getCode", 0).as_str().unwrap().trim_start_matches("0x")).unwrap())));
 }
 #[test]

@@ -1,6 +1,6 @@
 /* noid-swap operator console, program mode: the card of one swap, one stage at a time (window.NoidStage).
    The card shows a progress line, ONE headline, ONE status line and at most one action. Everything else of the swap page (today's page, whole) is drawn as before into the
-   closed "Details" fold below it. Folding is drawing only: this file sends nothing, decides nothing and adds no request; its boxes are the page's own builders
+   closed "Details" fold below it. Folding is drawing only: this file decides nothing and adds one request only, in the dialog of "Record a close made elsewhere" (POST /api/record-close: the swap and a transaction id; the server and swap-cli decide); its boxes are the page's own builders
    (autopilotBlock, handoverBlock and checkLineBlock, depositCompact, spendBlock), so the statements, the typed amount, the dry run and the gates are the ones the server checks.
    The card never calls a stage calm on data it cannot place (an unknown phase, a stale reading, two nodes that disagree, a held step it cannot explain): it says "Something
    needs a look", gives the plain reason and opens Details. No inline styles or handlers (CSP). plan() is data only (no DOM), draw() builds the elements. */
@@ -9,9 +9,11 @@
   let H = null; // helpers handed over by operator.js
   const A = () => window.NoidActions;
   const V = () => window.NoidView;
+  const LF = () => (window.NoidLaunch ? window.NoidLaunch : null);
+  const NT = () => (window.NoidNeedText ? window.NoidNeedText : null);
 
   const PROGRESS = ["Set up", "Check", "Approve", "Deposit", "Swap", "Done"];
-  const STAGE_AT = { setup: 0, check: 1, approve: 2, deposit: 3, swap: 4, done: 5, refund: 5, abort: 5 };
+  const STAGE_AT = { setup: 0, check: 1, approve: 2, deposit: 3, swap: 4, settled: 5, done: 5, refund: 5, abort: 5 };
 
   // the phases of each role by what the card says of them
   const PHASES = {
@@ -109,7 +111,7 @@
    *   claims     the boxes the card draws itself: { handover, autopilot, spend, step }; today's page does not draw them a second time (they carry element ids)
    */
   function plan(input) {
-    const m = { drawn: false, kind: null, tone: null, foot: null, picture: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null }, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role };
+    const m = { drawn: false, kind: null, tone: null, foot: null, picture: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null, late: null, noticeInfo: false }, timesNote: null, statusAddr: null, bobLock: null, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role, recordClose: false, sweepPending: false };
     const Ac = A();
     if (!Ac || !Ac.card) return m;
     const payload = input.payload || null;
@@ -136,6 +138,10 @@
     const pre = Ac.program.startKind(payload, role);
     const view = pre ? null : input.view || null;
     const x = (a.autopilot && a.autopilot[role]) || null;
+    const prg = payload.program && typeof payload.program === "object" ? payload.program : null;
+    // R2: a signed notice says this version should not start new swaps (a swap that exists goes on)
+    const noticeUnsafe = !!(prg && prg.notice && prg.notice.unsafe === true);
+    const mainnet = Ac.launch && Ac.launch.isMainnet ? Ac.launch.isMainnet(payload) : false;
     const lineHex = Ac.card.checkLineOf(a, role).hex;
     const confirmed = !!(a.line_match && lineHex && a.line_match.hex === lineHex);
     const on = !!(x && x.on === true);
@@ -162,12 +168,17 @@
       for (const n of loudList) m.safety.loud.push(n);
       const loud = new Set(loudList);
       // danger alarms are copied whether or not the tick has an action (an unreadable tick has none)
-      for (const al of view.alarms || []) if (al.level === "danger" && !loud.has(al.text)) m.safety.alarms.push(al.text);
+      for (const al of view.alarms || []) if (al.level === "danger" && !loud.has(al.text) && !m.safety.alarms.includes(al.text)) m.safety.alarms.push(al.text);
       if (view.action && view.action.held_not_offered) m.safety.held = { reason: view.action.reason || null };
       else if (view.action && view.action.intent && view.action.intent.status === "held") m.safety.heldIntent = { kind: view.action.intent.kind || null };
       if (lb && lbLevel === "warn") m.safety.lockBy = lb.text;
     }
     m.safety.job = lastSendJob(a);
+    // R5: Bob's NOID claim is late (the program's own watch says so; it reads only)
+    if (role === "bob" && x && x.late_claim && typeof x.late_claim === "object" && (x.late_claim.phase === "secret_seen" || x.late_claim.phase === "claim_submitted") && Number.isFinite(x.late_claim.blocks)) {
+      const ct = rowTime(view, "claim_target", now);
+      m.safety.late = { phase: x.late_claim.phase, blocks: x.late_claim.blocks, first_tip: Number.isFinite(x.late_claim.first_tip) ? x.late_claim.first_tip : null, target: ct && !ct.passed ? ct : null, engine: view && view.action && view.action.reason ? plainEngine(view.action.reason) : null };
+    }
     const needs = x && Array.isArray(x.needs_you) ? x.needs_you.length > 0 : false;
     const changed = !!(x && x.terms_changed === true);
 
@@ -208,6 +219,12 @@
       m.claims.step = m.action.kind === "button" || m.action.kind === "invitation";
     };
     const ph = PHASES[role];
+    // R2: a swap that exists and whose first own spend has not started: it can go on, and nothing of the person's is locked yet
+    if (noticeUnsafe && Ac.card.haveSwapFile(payload, role)) {
+      const firstId = role === "alice" ? "send-fund" : "send-lock";
+      const startedFirst = (a.jobs || []).some((j) => j && j.id === firstId) || funded || !!(view && view.phase && !ph.before.includes(view.phase.id));
+      m.safety.noticeInfo = !startedFirst;
+    }
     const needApprove = () => {
       // the approval box of this role, or the reason it cannot be drawn (the page never invents one)
       if (!x || x.available !== true || !Ac.autopilotFacts(boxView, payload)) {
@@ -246,21 +263,21 @@
       }
       if (role === "alice") {
         if (next.rec === "failed") {
-          set("setup", "Preparing the swap did not finish", "The last run did not end cleanly. Its result is in Details: read it before you run the step again.", { kind: "button", id: "prepare", label: "Prepare the swap file", primary: true });
+          set("setup", "Preparing the swap did not finish", "The last run did not end cleanly. Its result is in Details: read it before you run the step again.", { kind: "button", id: "prepare", label: "Prepare the swap file", primary: true, paused: noticeUnsafe });
           m.forceOpen = true;
         } else if (next.rec === "running") set("setup", "Preparing the swap", "Running now. The result shows here when it ends.");
-        else set("setup", "Prepare the swap when Bob is ready", "From then on you have about 25 minutes to deposit, or the swap does not start. Nothing is lost then.", { kind: "button", id: "prepare", label: "Prepare the swap file", primary: true });
+        else set("setup", "Prepare the swap when Bob is ready", "From then on you have about 25 minutes to deposit, or the swap does not start. Nothing is lost then.", { kind: "button", id: "prepare", label: "Prepare the swap file", primary: true, paused: noticeUnsafe });
         return null;
       }
       // Bob: his invitation, then Alice's file; both stay reachable (the invitation file is made again at any time)
       if (next.rec === "failed") {
-        set("check", "Checking Alice's file did not finish", "The last run did not end cleanly. Its result is in Details: read it before you run the step again.", { kind: "invitation", first: "join" });
+        set("check", "Checking Alice's file did not finish", "The last run did not end cleanly. Its result is in Details: read it before you run the step again.", { kind: "invitation", first: "join", paused: noticeUnsafe });
         m.forceOpen = true;
       } else if (next.rec === "running") set("check", "Checking Alice's file", "Running now. The result shows here when it ends.");
       else {
         const saved = Ac.card.noteOf("invitation");
-        if (saved && saved.ok === true) set("check", "Choose Alice's swap file", "The program checks it against your own terms. Nothing is sent.", { kind: "invitation", first: "join" });
-        else set("setup", "Send Alice your invitation", "Then wait for her swap file and choose it here. Do not send coins yet.", { kind: "invitation", first: "invitation" });
+        if (saved && saved.ok === true) set("check", "Choose Alice's swap file", "The program checks it against your own terms. Nothing is sent.", { kind: "invitation", first: "join", paused: noticeUnsafe });
+        else set("setup", "Send Alice your invitation", "Then wait for her swap file and choose it here. Do not send coins yet.", { kind: "invitation", first: "invitation", paused: noticeUnsafe });
       }
       return null;
     }
@@ -274,8 +291,25 @@
           return null;
         }
         if (id === "done") {
-          if (role === "alice") set("done", "Swap complete", swept.eth_alice ? `${amt.eth || "Your ETH"} was sent to ${ethPayout || "your own address"}.` : `${amt.eth || "Your ETH"} arrived in this swap's own key. It goes to ${ethPayout ? "your own address " + ethPayout : "your own address"} when the swap is swept.`);
-          else set("done", "Swap complete", `${amt.noid || "Your NOID"} was sent to ${own ? H.short(own) : "your Parano1d address"}.`);
+          // R7: "Swap complete" only when the coins are in the person's own address. Alice's ETH is paid to her swap key, then swept: until the sweep's marker exists it is "Swap settled".
+          // Bob's NOID is paid by the contract straight to his own address, so for him `done` (the claim is final) is complete.
+          const st = prg && prg.settlement && typeof prg.settlement === "object" ? prg.settlement : null;
+          if (role === "alice") {
+            const sweptOwn = !!(swept.eth_alice || (st && st.sweep_done));
+            if (!sweptOwn) {
+              m.sweepPending = true;
+              const sent = !!(st && st.sweep_sent);
+              set("settled", "Swap settled", sent ? `${amt.eth || "Your ETH"} is in this swap's own key. Sending to your own address now.` : `${amt.eth || "Your ETH"} is in this swap's own key. The program is sending it to your own address`);
+              if (!sent && w && w.eth_payout) m.statusAddr = { addr: w.eth_payout, label: "your Ethereum address" };
+              else if (!sent) m.status += ".";
+              return finishTerminal();
+            }
+            set("done", "Swap complete", `${amt.eth || "Your ETH"} was sent to ${w && w.eth_payout ? "" : "your own address."}`.trim());
+            if (w && w.eth_payout) m.statusAddr = { addr: w.eth_payout, label: "your Ethereum address" };
+          } else {
+            set("done", "Swap complete", `${amt.noid || "Your NOID"} was sent to ${own ? "" : "your Parano1d address."}`.trim());
+            if (own) m.statusAddr = { addr: own, label: "your Parano1d address" };
+          }
           return finishTerminal();
         }
         if (ph.refund.includes(id)) {
@@ -302,7 +336,9 @@
           if (!confirmed) {
             const hov = Ac.handoverBlock(boxView, payload);
             if (!hov) return look("The check line cannot be shown now. Open Details to read the step's result.");
-            set("check", role === "alice" ? "Send Bob your file, then compare check lines" : "Compare check lines with Alice", role === "alice" ? "Bob checks your file on his machine. Then read your check lines to each other." : "You checked Alice's file. Now read your check lines to each other.", { kind: "handover" });
+            set("check", role === "alice" ? "Send Bob your file, then compare check lines" : "Compare check lines with Alice", (role === "alice" ? "Bob checks your file on his machine. Then read your check lines to each other." : "You checked Alice's file. Now read your check lines to each other.") + (role === "alice" && mainnet ? " While you compare: ask Bob whether his program says it can lock today. If it says it cannot, stop here: nothing of yours is locked yet." : ""), { kind: "handover" });
+            // R5: Bob's own lock check (mainnet): the program says whether it would lock this swap now, so he can tell Alice before she deposits
+            if (role === "bob" && mainnet && prg && prg.bob_can_lock && typeof prg.bob_can_lock === "object") m.bobLock = prg.bob_can_lock;
             m.claims.handover = true;
             return null;
           }
@@ -359,8 +395,12 @@
         if (id === "funding_submitted") set("swap", "Your funding was sent", "Waiting for it to show in a block. Never fund a second time.");
         else if (id === "funded") set("swap", "Your NOID is in the swap contract", "Waiting until it is final.");
         else if (id === "funding_final") {
-          const d = rowTime(view, "d", now);
-          set("swap", "Waiting for Bob to lock his ETH", `If Bob does not lock, your NOID comes back after ${d && !d.passed ? about(d) : "the deadline"}.`);
+          // R4: the clock time is the deadline's row plus 20 blocks (19 for finality, 1 for the sweep), at the nominal 30 s a block
+          const back = NT() ? NT().aliceBack(view, now) : null;
+          if (back && !back.passed) {
+            set("swap", "Waiting for Bob to lock his ETH", `If Bob does not lock: your NOID is back by about ${A().card.hhmm(back.unix)}.`);
+            m.timesNote = "alice";
+          } else set("swap", "Waiting for Bob to lock his ETH", "If Bob does not lock: your NOID comes back after the deadline.");
         } else if (id === "lock_seen") set("swap", "Bob's lock is seen", "Waiting until Ethereum finalizes it, usually 15 to 20 minutes. Revealing earlier would be a risk.");
         else if (id === "lock_final") {
           const late = timePassed(id);
@@ -375,7 +415,17 @@
       else if (id === "locked") {
         const t = rowTime(view, "t_reveal", now);
         if (t && t.passed) set("swap", "Your ETH is locked", "Your ETH can be refunded now. The program does it when the engine says so.");
-        else set("swap", "Your ETH is locked", `Waiting for Alice to reveal the secret${t ? ", until " + about(t) : ""}. If she does not, your ETH comes back.`);
+        else {
+          // R4: Alice's last moment to take the ETH plus Ethereum's finality and one more minute (the profile's own figure), as a clock time
+          const lp = Ac.launch && Ac.launch.launchOf ? Ac.launch.launchOf(payload) : null;
+          const prof = lp && LF() && LF().PROFILES[lp.profile] ? LF().PROFILES[lp.profile] : null;
+          const bb = prof && NT() ? NT().bobBack(view, now, prof.eth_finality_s) : null;
+          const back = bb ? bb.unix : null;
+          if (back !== null) {
+            set("swap", "Your ETH is locked", `Waiting for Alice to reveal the secret, until ${about(t)}. If Alice does not take the ETH: it is back by about ${A().card.hhmm(back)}.`);
+            m.timesNote = "bob";
+          } else set("swap", "Your ETH is locked", `Waiting for Alice to reveal the secret${t ? ", until " + about(t) : ""}. If she does not, your ETH comes back.`);
+        }
       } else if (id === "secret_seen") {
         const late = timePassed(id);
         if (late) return look(late);
@@ -451,15 +501,24 @@
       m.lookSig = JSON.stringify(m.reasons);
       m.stage = -1;
       m.action = { kind: "none" };
+      m.statusAddr = null;
+      m.timesNote = null;
+      m.bobLock = null;
       m.claims.handover = false;
       m.claims.spend = false;
       m.claims.step = false;
       if (m.claims.autopilot && !m.safety.autopilot) m.claims.autopilot = false;
     }
+    // "Record a close made elsewhere" (Bob): a quiet action on a card that needs a look, or while the late-claim box is up, once his swap file exists and the engine's state is one the tool can record a
+    // close in (it records only from "secret_seen" and "claim_submitted"); with no reading of the state it is offered, and the tool refuses what does not fit
+    if (role === "bob" && Ac.card.haveSwapFile(payload, "bob") && (m.kind === "look" || m.safety.late)) {
+      const id = view && view.phase && view.phase.known ? view.phase.id : null;
+      m.recordClose = id === null || id === "secret_seen" || id === "claim_submitted";
+    }
     // the frame: amber while the swap waits on the person (an action of the card, the approval, the deposit, or a step that needs an answer), mint when it is settled, the alarm colour for a look
     m.tone = m.kind === "look" ? "look" : m.kind === "done" ? "done" : m.action.kind !== "none" || m.kind === "approve" || m.kind === "deposit" || needs || m.safety.autopilot ? "act" : null;
     m.foot = m.kind === "look" ? null : footOf(m, a, x, view, on, needs);
-    if (m.kind === "done") m.done = doneFacts(a, role, amt, swept, own);
+    if (m.kind === "done") m.done = doneFacts(a, role, amt, swept, own, payload);
     // "The two locks, from now" is on the main view only at the Swap stage, and only once a lock is seen on either chain (a track in a state other than "not locked yet") or while an
     // approval that lapsed in flight is asked for again (the stage stays Swap): before that it stays in Details. The view model's own picture; nothing is computed here.
     const pic = view && view.picture;
@@ -471,20 +530,67 @@
    * The finished swap's summary: what was given and what was got (the two amounts of the swap, each with where it went), and the rows the data supports. The only rows are from an
    * Ethereum sweep's own result file (the amount left over that it sent, and the fee of that transfer); a row with no data is not made. null when an amount is not known.
    */
-  function doneFacts(a, role, amt, swept, own) {
+  function doneFacts(a, role, amt, swept, own, payload) {
     const G = AMOUNT_RE.exec(String((role === "alice" ? amt.noid : amt.eth) || ""));
     const T = AMOUNT_RE.exec(String((role === "alice" ? amt.eth : amt.noid) || ""));
     if (!G || !T) return null;
     const on = role === "alice" ? ["for Bob, on Parano1d", swept.eth_alice ? "sent to your own Ethereum address" : "in this swap's own Ethereum key"] : ["paid to Alice on Ethereum", own ? "sent to your own Parano1d address" : "on Parano1d"];
     const rows = [];
+    const Ac = A();
+    const L = LF();
+    const prg = payload && payload.program && typeof payload.program === "object" ? payload.program : null;
+    const lp = Ac.launch && Ac.launch.launchOf ? Ac.launch.launchOf(payload) : null;
+    // R7: the rate, the total fees, the time (from lib/settlement.js, read-only facts; a row with no data is not made)
+    const rp = lp && L ? L.rateParts(lp.rate) : null;
+    if (rp) rows.push({ label: "Rate", value: rp.join("; ") });
+    const st = prg && prg.settlement && typeof prg.settlement === "object" ? prg.settlement : null;
+    if (st && st.fees && Ac.launch) {
+      const e = Ac.launch.ethTxt(st.fees.eth_wei);
+      const n = Ac.launch.noidTxt(st.fees.noid_micro);
+      const sh = typeof st.fees.share_bp === "number" && L ? L.pct(st.fees.share_bp) : null;
+      if (e !== null && n !== null) rows.push({ label: "Network fees, total", value: `${e} ETH and ${n} NOID${sh ? ` (${sh} % of what you swapped)` : ""}` });
+    } else if (st && !st.receipts_failed && st.receipts_pending > 0) rows.push({ label: "Network fees, total", value: "still reading one receipt" });
+    if (st && Number.isFinite(st.time_min) && st.time_min > 0) rows.push({ label: "Time", value: `${st.time_min} min from your first deposit step to settled` });
     const sw = ethSweepOf(a, role);
     if (sw) {
       const left = ethOf(sw.valueWei);
       const fee = ethOf(sw.feeWei);
-      if (left) rows.push({ label: "Left over, sent to you", value: sw.payout ? `${left} to ${H.short(sw.payout)}` : left });
+      // Alice's sweep carries the swap's own ETH with the rest of her key (so it is what reached her address); Bob's is only what was left over
+      if (left) rows.push({ label: role === "alice" ? "Reached your address" : "Left over, sent to you", value: sw.payout ? `${left} to ${H.short(sw.payout)}` : left });
       if (fee) rows.push({ label: "Network fee of that transfer", value: fee });
     }
-    return { gave: { text: G[0], num: G[1], tic: G[2], on: on[0] }, got: { text: T[0], num: T[1], tic: T[2], on: on[1] }, rows };
+    // Alice's NOID wallet sweep, from the report lines the step printed (the amount that went to her address and the fee of that transfer)
+    const ns = role === "alice" ? noidSweepOf(a) : null;
+    if (ns) {
+      const left = noidOf(ns.amount);
+      const fee = noidOf(ns.fee);
+      if (left) rows.push({ label: sw ? "Left over NOID, sent to you (confirming)" : "Left over, sent to you (confirming)", value: ns.payout ? `${left} to ${H.short(ns.payout)}` : left });
+      if (fee) rows.push({ label: sw ? "Network fee of the NOID transfer" : "Network fee of that transfer", value: fee });
+    }
+    // Bob's leftover ETH is swept by the program after the swap: until its marker exists the row says so (the amount is not known)
+    if (role === "bob" && !swept.eth_bob && !sw) rows.push({ label: "Left over ETH, sending to you (confirming)", value: "to your own Ethereum address" });
+    // what the sweep could not send (too small to pay its own fee), from a wallet status read after the sweep
+    if (st && st.left_wei && Ac.launch) {
+      const left = ethExactOf(st.left_wei);
+      if (left) rows.push({ label: "Left in this swap's key", value: `${left} ETH, too small to send back` });
+    }
+    // the two blocks are the swap itself, the approval's "after fees" figure is not counted again: this line says where the fees were taken from, with no figure of its own
+    const note = role === "alice" ? (sw ? "The amounts above are the swap itself. What reached your address, after the fee of the last transfer, is below." : "The amounts above are the swap itself. Network fees were paid from the fee deposit.") : "The amounts above are the swap itself, before the Parano1d fee of your claim.";
+    return { gave: { text: G[0], num: G[1], tic: G[2], on: on[0] }, got: { text: T[0], num: T[1], tic: T[2], on: on[1] }, rows, note };
+  }
+
+  /** The newest clean NOID wallet sweep that SENT (its own report lines in the job's output: the amount and the fee, and the address of its `target` line; the node has accepted it, which is not yet mined, so the row says confirming): { amount, fee, payout } in micro-NOID, or null. A sweep that found nothing, or was already done, has no such line. */
+  function noidSweepOf(a) {
+    const jobs = ((a && a.jobs) || []).filter((j) => j && j.id === "send-sweep-noid" && j.state === "done" && j.ok === true && j.exit_code === 0);
+    for (let i = jobs.length - 1; i >= 0; i--) {
+      const out = String(jobs[i].stdout || "");
+      if (!/^wallet-sweep: outcome sent$/m.test(out)) continue;
+      const am = /^wallet-sweep: amount_micronoid ([0-9]+)$/m.exec(out);
+      const fe = /^wallet-sweep: fee_micronoid ([0-9]+)$/m.exec(out);
+      const po = /^wallet-sweep: target (o1[0-9a-z]+)$/m.exec(out);
+      if (am && fe) return { amount: am[1], fee: fe[1], payout: po ? po[1] : null };
+    }
+    return null;
   }
 
   /** The newest clean Ethereum sweep of this role that has a result file with its own figures: { valueWei, feeWei, payout }, or null. */
@@ -498,6 +604,18 @@
     return null;
   }
 
+  /** Wei as ETH in plain units, exact (no rounding): "0.0000021". null for anything that is not a whole number. */
+  function ethExactOf(wei) {
+    try {
+      const v = BigInt(wei);
+      if (v < 0n) return null;
+      const f = String(v % 10n ** 18n).padStart(18, "0").replace(/0+$/, "");
+      return f ? `${v / 10n ** 18n}.${f}` : String(v / 10n ** 18n);
+    } catch {
+      return null;
+    }
+  }
+
   const sentence = (t) => {
     const v = String(t || "").trim();
     return v ? v.charAt(0).toUpperCase() + v.slice(1) + (/[.!?]$/.test(v) ? "" : ".") : "";
@@ -509,7 +627,7 @@
    */
   function footOf(m, a, x, view, on, needs) {
     const Ac = A();
-    const out = { doing: "", stopped: null, read_age_s: null };
+    const out = { doing: "", stopped: null, alert: false, read_age_s: null };
     const busy = a && a.busy && typeof a.busy === "object" ? a.busy : null;
     if (needs) out.stopped = "Stopped on this step until you answer";
     else if (busy) {
@@ -521,7 +639,9 @@
     else {
       out.doing = on ? sentence(x && x.doing) || "The program is driving this swap." : "The program is not driving this swap.";
       const s = m.safety;
-      const quiet = m.action.kind === "none" && !needs && !out.stopped && !s.loud.length && !s.alarms.length && !s.held && !s.heldIntent && !s.job && !s.lockBy && !s.autopilot && !!(H && H.state && H.state.token) && !Ac.card.pendingLock(a);
+      const quiet = m.action.kind === "none" && !needs && !out.stopped && !s.loud.length && !s.alarms.length && !s.late && !s.held && !s.heldIntent && !s.job && !s.lockBy && !s.autopilot && !!(H && H.state && H.state.token) && !Ac.card.pendingLock(a);
+      // a danger box on the card (the late claim, an alarm, the last step's failure) is never beside "Nothing for you to do", and the dot is the alarm colour, not the calm one
+      out.alert = !!(s.late || s.alarms.length || s.loud.length || s.job);
       // (only while the program is driving: when it is not, "nothing for you to do" would be false, the person has to approve)
       if (quiet && on) out.doing += " Nothing for you to do.";
     }
@@ -575,7 +695,7 @@
   function footLine(m) {
     const f = m.foot;
     if (!f) return null;
-    const p = H.el("p", { class: "sc-foot" }, H.el("span", { class: "live" + (f.stopped ? " stop" : ""), text: f.stopped || f.doing }));
+    const p = H.el("p", { class: "sc-foot" }, H.el("span", { class: "live" + (f.stopped ? " stop" : "") + (f.alert ? " alert" : ""), text: f.stopped || f.doing }));
     if (f.read_age_s !== null) p.appendChild(H.el("span", { class: "right", text: readText(f.read_age_s) }));
     return p;
   }
@@ -602,16 +722,199 @@
     return ol;
   }
 
+  const NOTICE_INFO = "This version has a security notice. This swap was made before it and can go on. Nothing of yours is locked yet, so you can still stop here.";
+  const NOTICE_PAUSED = "Paused in this version by a signed security notice (see Your swaps). Nothing was sent; you can leave this swap as it is or remove it.";
+  let lateAnnounced = null; // the late box says role="alert" on its first draw only: a redraw does not announce it again
+
+  /** R5: Bob's NOID claim is late: a danger box in three parts (no "I have dealt with it": it goes away when the claim is in a block). */
+  function lateBox(late) {
+    const swap = H && H.state ? H.state.swap || "" : "";
+    const key = `${swap}|${late.first_tip}|${late.phase}`;
+    const first = lateAnnounced !== key;
+    lateAnnounced = key;
+    const ended = (t) => (/[.!?]$/.test(t) ? t : t + ".");
+    const what = (late.phase === "secret_seen" ? `Alice took the ETH ${late.blocks} blocks ago. Your program has not got your NOID claim into a block yet.` : `Alice took the ETH ${late.blocks} blocks ago. Your claim was sent but is not in a block yet.`) + (late.engine ? ` The program says: ${ended(late.engine)}` : "");
+    const coins = late.target ? `Not safe yet. The claim must be in a block before about ${A().card.hhmm(late.target.unix)}. After that, Alice can take the NOID back and you lose the ETH.` : "Not safe yet.";
+    const steps = ["Keep this computer on and the program open.", "Check the top bar: Parano1d must say connected. If the Parano1d wallet app is closed, start it.", "If the claim is still not in a block in 10 minutes, have it closed from a second computer: Menu, Help, Close a swap from a second computer. That close can only pay your own address."];
+    return H.el(
+      "div",
+      { class: "alarm danger big late-claim", role: first ? "alert" : null, "aria-label": "Your NOID claim is late" },
+      ic("alert"),
+      H.el("span", { class: "lv", text: "Late" }),
+      H.el("span", { class: "tx" }, H.el("strong", { text: "Your NOID claim is late" }), H.el("dl", { class: "need3" }, H.el("dt", { text: "What happened" }), H.el("dd", { text: what }), H.el("dt", { text: "Your coins" }), H.el("dd", { text: coins }), H.el("dt", { text: "What to do" }), H.el("dd", {}, H.el("ol", {}, ...steps.map((t) => H.el("li", { text: t }))))))
+    );
+  }
+
+  // ------------------------------------------------------------------ Record a close made elsewhere
+  const RC_HELP = "The program asks the Parano1d node about this transaction and records it only if it is the close of this swap, paid to your address, and final (about 18 blocks, 9 minutes, after it is mined). Nothing is sent.";
+  const RC_SHAPE = "A transaction id is 64 characters, 0 to 9 and a to f. Copy it whole from the second computer.";
+  let rcDialog = null;
+
+  /** What the person pasted, in the form the request takes: no spaces around or inside, lower case. The server checks the shape again. */
+  const rcNormalise = (v) => String(v || "").replace(/\s+/g, "").toLowerCase();
+  const rcShapeOk = (t) => /^(?:0x)?[0-9a-f]{64}$/.test(t);
+
+  function closeRecordClose() {
+    if (!rcDialog) return;
+    try {
+      rcDialog.close();
+    } catch {
+      /* already closed */
+    }
+    rcDialog.remove();
+    rcDialog = null;
+  }
+
+  /** The one request of this file. Resolves { ok, status, json }; a network failure is status 0 with no body. */
+  async function rcPost(swapId, txid) {
+    try {
+      const r = await fetch("/api/record-close", { method: "POST", cache: "no-store", headers: { "content-type": "application/json", "x-swap-token": (H.state && H.state.token) || "" }, body: JSON.stringify({ swap: swapId, txid }) });
+      const json = await r.json().catch(() => ({}));
+      return { ok: r.ok, status: r.status, json: json && typeof json === "object" ? json : {} };
+    } catch {
+      return { ok: false, status: 0, json: {} };
+    }
+  }
+
+  /** The dialog: one field, the plain line, and the tool's own reason in words when it refuses. Nothing is asked of the node before the button is pressed. */
+  function openRecordClose(opener) {
+    closeRecordClose();
+    const swapId = (H.state && H.state.swap) || "";
+    const dlg = document.createElement("dialog");
+    dlg.className = "confirm neutral";
+    dlg.setAttribute("aria-labelledby", "rc-title");
+    const out = H.el("div", { id: "rc-out", class: "rc-out", role: "status", "aria-live": "polite" });
+    const clear = () => {
+      while (out.firstChild) out.removeChild(out.firstChild);
+    };
+    const label = H.el("label", { class: "typed-label", for: "rc-txid", text: "Close transaction id" });
+    const input = H.el("input", { type: "text", id: "rc-txid", autocomplete: "off", spellcheck: "false", "aria-describedby": "rc-help rc-out" });
+    // the field shows 64 digits only in part, so what was read is repeated below it in groups of eight (the same text the request will carry; a screen reader has the field)
+    const echo = H.el("p", { class: "plain mono rc-echo", "aria-hidden": "true" });
+    input.addEventListener("input", () => {
+      const t = rcNormalise(input.value);
+      echo.textContent = t ? "As read: " + t.replace(/(.{8})(?=.)/g, "$1 ") : "";
+    });
+    const btn = (label, onclick, primary) => H.el("button", { type: "button", class: "btn sm" + (primary ? " primary" : ""), onclick }, label);
+    const done = (focusTo) => {
+      closeRecordClose();
+      try {
+        if (focusTo && focusTo.focus) focusTo.focus();
+      } catch {
+        /* the card was drawn again */
+      }
+    };
+    const cancelBtn = btn("Cancel", () => done(opener), false);
+    const go = btn(
+      "Record the close",
+      async () => {
+        const t = rcNormalise(input.value);
+        clear();
+        if (!rcShapeOk(t)) {
+          out.appendChild(H.el("p", { class: "attn", role: "alert", text: t ? RC_SHAPE : "Paste the transaction id of the close. " + RC_SHAPE }));
+          input.focus();
+          return;
+        }
+        go.disabled = true;
+        input.disabled = true;
+        out.appendChild(H.el("p", { class: "plain", text: "Asking the Parano1d node…" }));
+        const r = await rcPost(swapId, t);
+        clear();
+        if (r.ok && r.json.recorded === true) {
+          // recorded: the page's next reading shows the swap's new state
+          input.hidden = true;
+          label.hidden = true;
+          echo.hidden = true;
+          go.hidden = true;
+          cancelBtn.textContent = "Close";
+          out.appendChild(H.el("p", { class: "plain give-get", text: "Recorded. The swap file now holds this close; this page shows the swap's new state now." }));
+          cancelBtn.focus();
+          // the page loads the swap again at once (it does not wait for the next poll)
+          try {
+            if (typeof H.reload === "function") await H.reload(true);
+          } catch {
+            /* the next poll shows it */
+          }
+          return;
+        }
+        const box = H.el("div", { class: "attn", role: "alert" }, H.el("p", { text: r.status === 0 ? "The program could not be reached. Nothing was recorded." : r.json.error || "The program did not record this close. The swap was not changed." }));
+        const lines = Array.isArray(r.json.lines) ? r.json.lines.filter((l) => typeof l === "string" && l) : [];
+        if (lines.length) box.appendChild(H.el("ul", { class: "fold-list rc-why", "aria-label": "The tool's reason" }, ...lines.map((l) => H.el("li", { text: plainEngine(l) }))));
+        // a close that is not final yet is the one refusal that has a next step
+        if (lines.some((l) => /not final yet/i.test(l))) box.appendChild(H.el("p", { class: "rc-next", text: "Try again once it is final." }));
+        out.appendChild(box);
+        input.disabled = false;
+        go.disabled = false;
+        input.focus();
+      },
+      true
+    );
+    dlg.appendChild(
+      H.el(
+        "div",
+        { class: "confirm-body" },
+        H.el("h2", { id: "rc-title", text: "Record a close made elsewhere" }),
+        H.el("p", { class: "plain", id: "rc-help", text: RC_HELP }),
+        label,
+        input,
+        echo,
+        out,
+        H.el("div", { class: "row end" }, cancelBtn, go)
+      )
+    );
+    dlg.addEventListener("cancel", () => {
+      rcDialog = null;
+      try {
+        if (opener && opener.focus) opener.focus();
+      } catch {
+        /* the card was drawn again */
+      }
+    });
+    document.body.appendChild(dlg);
+    rcDialog = dlg;
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+    input.focus();
+  }
+
+  /** The quiet action under the card (Bob, a card that needs a look or a late claim): a ghost button that opens the dialog. Drawn disabled with its reason while another step runs or the key is lost. */
+  function recordCloseArea(m, payload) {
+    if (!m.recordClose || !payload || !payload.actions) return null;
+    const busy = !!payload.actions.busy;
+    const noKey = !(H.state && H.state.token);
+    const why = noKey ? "The page has lost its key: reload it." : busy ? "Another step of this swap is running. Try again when it ends." : null;
+    const b = H.el("button", { type: "button", class: "btn sm ghost", disabled: why ? true : null, "aria-describedby": "rc-why", title: why }, "Record a close made elsewhere");
+    b.addEventListener("click", () => openRecordClose(b));
+    return H.el("div", { class: "sc-record" }, b, H.el("p", { class: "why dim", id: "rc-why", text: why || "Use it when the NOID contract was closed from another computer." }));
+  }
+
+  /** R5: Bob's lock check on the Check stage (mainnet): whether his program would lock this swap now, in four states. */
+  function lockCheckLine(c) {
+    if (!c) return null;
+    if (c.state === "ok") {
+      const calm = H.el("p", { class: "plain lock-check", "data-state": "ok", text: `Your program can lock on this swap now.${c.share_text ? ` One address mined ${c.share_text} % of Parano1d's recent blocks; you will be asked to acknowledge that.` : ""} Tell Alice.` });
+      // above half the blocks the calm line is not enough (nothing is refused by it: the screen's own limit is the program's)
+      if (Number(c.share_text) > 50) return H.el("div", { class: "lock-check-wrap" }, calm, H.el("p", { class: "attn lock-half", role: "note", text: "That is more than half: someone who controls most of the mining can take both sides of a swap. Swap only with someone you have a reason to trust." }));
+      return calm;
+    }
+    if (c.state === "no") return A().launch.levelBox("warn", "Lock", `Your program would not lock now:${c.why ? " " + c.why : ""} Tell Alice before she deposits.`);
+    if (c.state === "stale") return H.el("p", { class: "plain dim lock-check", "data-state": "stale", text: "The last reading is old; the program reads again." });
+    return H.el("p", { class: "plain dim lock-check", "data-state": "loading", text: "Reading who mined Parano1d's recent blocks…" });
+  }
+
   /** The always-open boxes above the headline: the page's banners (key, lock, a step still running), the engine's loud notes and danger alarms, a held step, the last send's result, the approval's own alert. */
   function safetyBoxes(m, payload) {
     const out = [];
     const Ac = A();
+    // R5: the late claim comes first (it is the loudest thing on the page), R2: the notice's info box follows the banners
+    if (m.safety.late) out.push(lateBox(m.safety.late));
     for (const b of Ac.banners(payload)) {
       // the same banner is in Details: this copy carries no id, so the page has each id once
       if (b.removeAttribute) b.removeAttribute("id");
       out.push(b);
     }
     const s = m.safety;
+    if (s.noticeInfo) out.push(H.el("div", { class: "alarm info notice-info" }, ic("info"), H.el("span", { class: "lv", text: "Notice" }), H.el("span", { class: "tx", text: NOTICE_INFO })));
     if (s.loud.length) {
       const box = H.el("div", { class: "loud-notes", role: "alert", "aria-label": "The engine's loud notes, in plain words" }, ic("alert"));
       for (const n of s.loud) box.appendChild(H.el("p", { class: "loud", text: plainEngine(n) }));
@@ -656,8 +959,13 @@
     const box = H.el("div", { class: "sc-act" });
     if (act.kind === "button") {
       const b = C.actionButton(a, act.id, act.label, act.primary);
+      if (act.paused) {
+        b.el.disabled = true;
+        b.el.setAttribute("aria-describedby", "paused-why");
+      }
       box.appendChild(b.el);
-      if (b.why) box.appendChild(H.el("p", { class: "why dim", text: b.why }));
+      if (act.paused) box.appendChild(H.el("p", { class: "why dim", id: "paused-why", text: NOTICE_PAUSED }));
+      else if (b.why) box.appendChild(H.el("p", { class: "why dim", text: b.why }));
     } else if (act.kind === "invitation") {
       const join = C.actionButton(a, "join", "Choose Alice's file…", act.first === "join");
       const inv = C.fileButton("invitation", act.first === "invitation" ? "Save an invitation for Alice…" : "Save the invitation again…", act.first === "invitation");
@@ -667,9 +975,15 @@
       const joinPart = H.el("div", { class: "sc-part" }, A().partTitle(2, "Choose the file Alice sends back"), A().fileRow("open", "Alice's swap file", "The program checks it against your own terms. Nothing is sent.", join.el));
       if (act.first === "join") box.append(joinPart, invPart);
       else box.append(invPart, joinPart);
-      if (join.why) box.appendChild(H.el("p", { class: "why dim", text: join.why }));
+      if (act.paused) {
+        join.el.disabled = true;
+        join.el.setAttribute("aria-describedby", "paused-why");
+        box.appendChild(H.el("p", { class: "why dim", id: "paused-why", text: NOTICE_PAUSED }));
+      } else if (join.why) box.appendChild(H.el("p", { class: "why dim", text: join.why }));
       if (note) box.appendChild(note);
     } else if (act.kind === "handover") {
+      const lc = lockCheckLine(m.bobLock);
+      if (lc) box.appendChild(lc);
       const n = Ac.handoverBlock(m.view, payload);
       if (n) box.appendChild(n);
     } else if (act.kind === "approval") {
@@ -692,6 +1006,7 @@
     const side = (x, caption, c) => H.el("div", { class: `side ${c}` }, H.el("span", { class: "k", text: caption }), H.el("span", { class: "v" }, H.coinGlyph ? H.coinGlyph(c) : null, H.el("span", { class: "num", text: x.num }), H.el("span", { class: "tic", text: x.tic })), H.el("span", { class: "on", text: x.on }));
     const coinOf = (x) => (x.tic === "NOID" ? "noid" : "eth");
     const box = H.el("div", { class: "sc-act sc-done" }, H.el("p", { class: "sr-only", text: `You gave ${d.gave.text}. You got ${d.got.text}.` }), H.el("div", { class: "convert done", "aria-hidden": "true" }, side(d.gave, "You gave", coinOf(d.gave)), H.el("div", { class: "mid" }, H.el("i", {})), side(d.got, "You got", coinOf(d.got))));
+    if (d.note) box.appendChild(H.el("p", { class: "plain dim done-note", text: d.note }));
     if (d.rows.length) box.appendChild(H.el("dl", { class: "facts left" }, ...d.rows.map((r) => H.el("div", {}, H.el("dt", { text: r.label }), H.el("dd", { text: r.value })))));
     return box;
   }
@@ -708,7 +1023,11 @@
     }
     root.appendChild(progress(m));
     root.appendChild(H.el("h2", { class: "sc-head", id: "pg-headline" }, m.tone === "done" ? ic("check") : null, coinText(m.headline)));
-    root.appendChild(H.el("p", { class: "sc-status" + (m.kind === "look" ? " look" : ""), role: "status" }, coinText(m.status)));
+    root.appendChild(H.el("p", { class: "sc-status" + (m.kind === "look" ? " look" : ""), role: "status" }, coinText(m.status), m.statusAddr ? [" ", H.addrWhole ? H.addrWhole(m.statusAddr.addr, m.statusAddr.label) : H.short(m.statusAddr.addr)] : null));
+    if (m.timesNote) {
+      const lines = ["Parano1d blocks come about every 30 seconds; faster blocks bring it sooner.", m.timesNote === "alice" ? "Your NOID's time is the deadline plus 20 blocks: 19 for finality and 1 for the sweep." : "Your ETH's time is Alice's last moment to take it, plus Ethereum's finality (about 19 minutes) and one more minute."];
+      root.appendChild(H.el("details", { class: "deposit-details fact-fold times-fold" }, H.el("summary", { text: "How the times are counted" }), H.el("ul", { class: "fold-list" }, ...lines.map((t) => H.el("li", { text: t })))));
+    }
     if (m.kind === "look" && m.reasons.length) {
       const ul = H.el("ul", { class: "sc-reasons", "aria-label": "Why" });
       for (const r of m.reasons) ul.appendChild(H.el("li", { text: r }));
@@ -717,6 +1036,8 @@
     if (m.kind === "done" && m.done) root.appendChild(doneBlock(m.done));
     const act = payload && payload.actions ? actionArea(m, payload) : null;
     if (act) root.appendChild(act);
+    const rc = recordCloseArea(m, payload);
+    if (rc) root.appendChild(rc);
     const foot = footLine(m);
     if (foot) root.appendChild(foot);
     return root;
@@ -740,12 +1061,15 @@
     const now = typeof H.nowS === "function" ? H.nowS() : 0;
     const view = m.view || null;
     if (m.kind === "done" && view && Array.isArray(view.receipts)) return receiptsTicket(view, role, a);
+    // "alice_back" and "bob_back" are the card's own "back by about" times (the same function), the rest are deadline rows
+    const lpT = Ac.launch && Ac.launch.launchOf ? Ac.launch.launchOf(payload) : null;
+    const profT = lpT && LF() && LF().PROFILES[lpT.profile] ? LF().PROFILES[lpT.profile] : null;
     const aboutRow = (id) => {
-      const t = rowTime(view, id, now);
+      const t = id === "alice_back" ? (NT() ? NT().aliceBack(view, now) : null) : id === "bob_back" ? (NT() && profT ? NT().bobBack(view, now, profT.eth_finality_s) : null) : rowTime(view, id, now);
       return t && !t.passed ? about(t) : null;
     };
     // a card that needs a look draws the legs as unknown, except when the view says the secret may be public (a held reveal): then the ticket must not stay silent about the NOID
-    const legs = (m.kind === "look" && !(view && view.secret_may_be_public === true)) || !V().legsFor ? null : V().legsFor(view, role, { about: aboutRow });
+    const legs = (m.kind === "look" && !(view && view.secret_may_be_public === true)) || !V().legsFor ? null : V().legsFor(view, role, { about: aboutRow, sweep_pending: m.sweepPending === true });
     const L = legs || (V().legsFor ? V().legsFor(null, role) : null);
     if (!L) return null;
     const amts = amounts(payload, view && view.header ? view : null);
@@ -772,7 +1096,7 @@
     const x = (a.autopilot && a.autopilot[role]) || null;
     const p = x && x.payouts;
     const mine = role === "alice" ? { label: "Your ETH goes to", addr: p && p.eth, what: "your Ethereum address" } : { label: "Your NOID goes to", addr: p && p.noid, what: "your Parano1d address" };
-    if (typeof mine.addr === "string" && mine.addr) rows.push(H.el("div", {}, H.el("dt", { text: mine.label }), H.el("dd", {}, H.copyButton(mine.addr, mine.what))));
+    if (typeof mine.addr === "string" && mine.addr) rows.push(H.el("div", {}, H.el("dt", { text: mine.label }), H.el("dd", {}, H.addrWhole ? H.addrWhole(mine.addr, mine.what) : H.copyButton(mine.addr, mine.what))));
     const cl = Ac.card.checkLineOf(a, role);
     if (cl.hex && a.line_match && a.line_match.hex === cl.hex) rows.push(H.el("div", {}, H.el("dt", { text: "Check line" }), H.el("dd", {}, H.el("span", { class: "mono", text: groupHex(cl.hex) }), H.el("span", { class: "sub", text: `compared with ${role === "alice" ? "Bob" : "Alice"}` }))));
     if (rows.length) out.push(H.el("dl", { class: "facts" }, ...rows));

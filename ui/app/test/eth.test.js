@@ -28,7 +28,7 @@ test("locked.json: open lock, Locked event, no preimage; only allowed methods as
   const rpc = new FixtureRpc(load("locked.json"), "eth");
   const o = await observeEth(rpc, { contract: CONTRACT, lock_id: LOCK1 }, () => 5);
   assert.equal(o.observed_at, 5);
-  assert.equal(o.chain_id, 31337);
+  assert.equal(o.chain_id, 1); // swap-cli's eth fixtures carry chain 1, the chain the production profile pins
   assert.equal(o.latest_number, 2);
   assert.equal(o.latest.number, 2);
   assert.equal(o.finalized.number, 2);

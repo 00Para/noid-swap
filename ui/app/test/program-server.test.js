@@ -154,9 +154,9 @@ test("GET /api/program: version, test network, node status, vault, new-swap perm
     assert.deepEqual(p.vault, { ready: true, recovery_confirmed: true, why: null });
     assert.deepEqual(p.new_swap_allowed, { ok: true, why: null });
     assert.deepEqual(p.swaps.map((s) => s.swap).sort(), [a.id, b.id].sort());
-    for (const s of p.swaps) assert.deepEqual(Object.keys(s).sort(), ["active", "created_at", "get", "give", "in_contract", "label", "needs_you", "phase", "refused", "role", "swap", "until_text"]);
+    for (const s of p.swaps) assert.deepEqual(Object.keys(s).sort(), ["active", "created_at", "get", "give", "in_contract", "label", "needs_you", "network", "phase", "refused", "role", "swap", "until_text"]);
     assert.deepEqual(p.board, { enabled: false, slot: null });
-    assert.deepEqual(p.update, { state: "none", latest: null, url: null });
+    assert.deepEqual(p.update, { state: "none", latest: null, url: null, unsafe: false, note: null, note_unreadable: false });
     assert.ok(!/PASSPHRASE|passphrase|0123456789abcdef/.test(JSON.stringify(p)), "no passphrase, no key check");
     // the vault says why a new swap is not allowed
     env.vaultState.confirmed = false;
@@ -358,10 +358,13 @@ test("POST /api/newswap: a good form makes a swap and answers its id; errors ans
   try {
     const { srv, api } = await env.start();
     const form = { role: "alice", profile: "sepolia", contract_version: 1, noid_amount: "5", eth_amount: "0.001", contract: CONTRACT, bob_noid: BOB_NOID, bob_eth: "0x" + "b2".repeat(20), noid_payout: NOID_PAYOUT, eth_payout: ETH_PAYOUT, single_node_ok: false };
-    let r = await api("POST", "/api/newswap", { fields: { ...form, profile: "production" } });
+    let r = await api("POST", "/api/newswap", { fields: { ...form, profile: "bogus" } });
     assert.equal(r.status, 422);
     assert.equal(r.body.ok, false);
     assert.ok(r.body.errors.profile);
+    r = await api("POST", "/api/newswap", { fields: { ...form, profile: "production", noid_amount: "2501" } });
+    assert.equal(r.status, 422, "over the mainnet cap");
+    assert.ok(r.body.errors.noid_amount);
     r = await api("POST", "/api/newswap", { fields: form });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.equal(r.body.ok, true);

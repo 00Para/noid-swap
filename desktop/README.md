@@ -2,7 +2,7 @@
 
 The shell of the desktop program (piece 4, step 4.7). It runs the console server in its main process, shows it in one hardened
 window, keeps the machine awake while coins are in a contract, comes back after a crash, and starts at login while a swap is
-active. This version works on test networks only.
+active. This version works on the test networks and, within fixed limits per swap (0.5 ETH and 2,500 NOID), on Ethereum mainnet, where the coins are real.
 
 All logic lives in plain modules under `lib/` that take the Electron module (or the parts they need) as an argument and are tested
 with `node --test` against a fake `electron` (`test/fake-electron.js`). **Only `main.js` and `preload-secret.js` may
@@ -156,8 +156,9 @@ check its sha256 and build provenance, and install by hand.
 - `lib/updates.js` asks GitHub's public list of releases of the repository named in `package.json` (`no1d.updateRepo`) once: one
   https request, no redirect, no cookie, status 200 only, a size cap, a timeout, and a generic User-Agent. It answers "newer" only for a
   release that is neither a draft nor a pre-release, whose tag is `vX.Y.Z`, whose page is exactly
-  `https://github.com/<repo>/releases/tag/<tag>`, and whose version is above the program's. Every test build has `updateRepo: null`:
-  it never asks the first-start question, never checks, and its menu item says "This version cannot check for updates".
+  `https://github.com/<repo>/releases/tag/<tag>`, and whose version is above the program's. `desktop/package.json` names the public repository; a build whose
+  `updateRepo` is `null` (the tests run as one) never asks the first-start question, never checks, and its menu item says "This version cannot
+  check for updates".
 - `lib/updatecheck.js` decides when. The setting `update_check` (Settings) is `ask` at first, then `daily` or `off`. With `ask`, the
   program asks once after its page has loaded ("Once a day", "Never", "Ask me later"; Esc is "Ask me later"); a start at login
   (`--hidden`) asks nothing and a later start asks. With `daily` it checks at a start when the last check is a day old. Nothing is
@@ -330,11 +331,51 @@ Two dialogs of the program object (`lib/program.js`), used by the console's rout
 - The shell gives both dialogs the main window as their parent when it has one (`saveFile`, `chooseInvitation`). Tests: `test/simple-dialogs.test.js`,
   `test/program.test.js`, `test/shell-start.test.js`.
 
+## Launch screens, desktop side (2026-11-20)
+
+Four small additions to the `program` object that the console reads (`program.payoutHistory`, `program.clipboardMatches`, `program.nodeStatus().eth.fee`
+and the signed notice in `program.updateStatus()`). None sends anything and none changes what an approval hashes.
+
+- **The signed notice.** `updateStatus()` already passes the update checker's answer through unchanged, `unsafeForNewSwaps` (a boolean) and
+  `unsafeNote` (a string or null) included; a missing field reads as false or null. The program checks nothing more: the console re-checks the note.
+- **The history of payout addresses** (`program.payoutHistory`, `lib/program.js`). One sealed file, `payout-history.sealed`, in the data folder
+  (next to `vault/`, not inside it): AES-256-GCM under the key `K(S, "payout-history", "install")` = HMAC-SHA256 of the install secret with the message
+  `no1d-swap/v1/payout-history/install` (`derive.historyKey`, test vector in `test/derive.test.js`; the sealed envelope's label is `payout-history`,
+  its run id the word `install`, and the file name is bound into the tag, as for the board's files). The vault gives the sealer
+  (`vault.historySealer()`, the shape of `boardSealer`). Plain text: `{ v: 1, entries: [{ kind: "noid"|"eth", addr, first_at, uses: [{ run, at }] }] }`
+  with the newest 100 uses per address and 200 addresses at most (the least recently used address goes first; also when the plain text would pass
+  900,000 bytes, the sealed envelope's limit is 1 MiB). Times are ISO-8601 in UTC.
+  - `record(runId, entries)`: `entries` is `[{ kind, addr }]`; an address that is not of its kind's shape is skipped; a run counts once for an address;
+    one write at a time; always resolves (a storage problem is logged in fixed words, never with an address).
+  - `list()` gives `{ state, items: [{ kind, addr, first_at, count }] }`, newest use first; `forRun(runId, addrs)` gives `{ state, map }`, where `count`
+    leaves out `runId` and an address seen only by that run is absent (so it reads as new). `0x` addresses are compared without regard to case, `o1`
+    addresses exactly; the stored form is the first one recorded; `map` is keyed by the form the caller asked with.
+  - `state` is `"ok"`, `"unreadable"` (the file is there and does not open: one flipped byte, a cut or edited file, a file of another installation or
+    under another name, a folder in its place) or `"locked"` (the vault is not open, or the key store no longer opens the install secret, or the vault
+    has no history sealer as in the self-test). In both other states the map and the items are empty, so every address reads as new, never as known.
+  - A file that does not open (damaged, as opposed to a read error) is moved aside once, as `payout-history.sealed.unreadable`, by the next `record`,
+    and a new history starts. A locked key store or a read error is never written over.
+  - It is a check against slips and casual tampering, not against a program that runs as the same user and can read the key store: that one can seal a
+    forged history. No step reads it.
+- **The clipboard check** (`program.clipboardMatches(value)`). The shell passes `readClipboard`, electron's `clipboard.readText()` in the main
+  process; the pages have no clipboard-read permission (`lib/hardening.js` denies all). The answer is `true` (the clipboard holds exactly `value`,
+  white space around it ignored), `false` (anything else, an empty clipboard included) or `null` (no reader, a reader that throws or gives no text,
+  a value that is empty or over 128 characters). It never returns the clipboard's text.
+- **Ethereum's base fee** (`lib/nodecheck.js`). The latest-block read the node check already makes for its age test also gives `baseFeePerGas` and
+  `number`; no new call. `eth.fees[profile] = { base_fee_wei, block, at, profile }` (a decimal string of wei, the block number, the time of the read in
+  ms) for each profile read, and `eth.fee` is the one the page shows: Ethereum mainnet (`production`) when it has been read, else the first read
+  profile. A node that is behind, on another chain or silent adds none; the last good one stays with its old `at`, so the console can call it stale
+  after 120 s. The rehearsal chain reads no block and has no fee. Display only: no step reads it.
+- Tests: `test/payout-history-vault.test.js`, `test/clipboard.test.js`, and additions to `test/nodecheck.test.js`, `test/derive.test.js`,
+  `test/sealed.test.js`, `test/vault.test.js`, `test/program.test.js`. The fake electron has a `clipboard` stub (`opts.clipboardText`, `opts.clipboardThrows`).
+
 ## Low points (one line each)
+
+- `eth.fee` is a pick (mainnet first when both networks were read): a swap on the other network should read `eth.fees[its profile]`, which carries the same fields, and compare `eth.fee.profile` before using `eth.fee`.
 
 - The menu's "Settings" brings the window forward and then asks the page to open its settings screen (`openSettings` in `lib/window.js`): the main process runs one fixed line in the page that clicks the page's own menu item "Settings". It asks only while the window shows the program's own page (the private scheme), takes no argument and gives the page nothing; if the page has no such item (a page that is not in program mode, or one not drawn yet) the window is only shown. It depends on the item's text. Fixed 2026-11-19 (D-extra-1); the build info file (`DESKTOP-BUILD-INFO.txt`) now says "signature: none on Windows, ad hoc on macOS (no certificate, no notarization)" instead of "unsigned: yes".
 - A notification click shows the window; it does not select the swap (the main window has no preload to be told which).
-- The Ethereum node check looks at the `sepolia` endpoints only (the program has no list of profiles in use yet).
+- The Ethereum node check looks at the `sepolia` endpoints always and at the `production` (Ethereum mainnet, chain 1) endpoints only while a run in the runs folder has profile `production` or within ten minutes after the page asked for the production fee (`GET /api/program?want=mainnet-fee`, sent by the new-swap form while its profile is mainnet; `program.wantMainnetFee()` -> `nodeCheck.wantMainnet()`); otherwise no request goes to the two mainnet operators and `status().eth.production` is `{ state: "idle" }` (with the endpoints asked: `{ state, endpoints, chain_id }`), and the overall `eth.state` is the worst of the profiles that were read. The rehearsal chain is not checked (the program has no list of profiles in use yet).
 - The Parano1d checkpoint (height 279,370) was read from one node only; the second node's read is still to be done at the first two-machine run.
 - `tray.png` and the template images are drawn by a small script as plain diamonds; the logo work replaces them.
 - The crash handler stores only times; no error text is kept anywhere, so a crash leaves no diagnostics.

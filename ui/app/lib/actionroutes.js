@@ -4,8 +4,8 @@
  * content type, body size). Each takes a parsed JSON object and answers { status, body }, or throws an error that
  * carries `status` (and `reasons` / `errors`).
  *
- *   POST /api/action  {"id": "..."}                    a setup, tick, dry-run or watch action of lib/actions.js (never a spend)
- *   POST /api/spend   {"id": "...", "typed": "...", "no_pending_funding": true, "bob_check_matches": true}   a spending action; lib/gate.js decides (the last two fields only for send-fund)
+ *   POST /api/action  {"id": "...", "new_cap_gwei"?: "..."}  a setup, tick, dry-run or watch action of lib/actions.js (never a spend)
+ *   POST /api/spend   {"id": "...", "typed": "...", "new_cap_gwei"?: "..." (the four re-send ids, program mode: required there, refused for every other id), "no_pending_funding": true, "bob_check_matches": true}   a spending action; lib/gate.js decides (the last two fields only for send-fund)
  *   POST /api/autopilot {"on": true, "role", "typed", "statements": {...}} | {"on": false, "role"} | {"clear_needs_you": "<spend id>", "role"}   lib/autopilot.js decides; the body never reaches a spend as `auto`
  *   POST /api/funded  {"checked": true}                the operator says Alice's wallet funding was done (only logged)
  *   POST /api/newswap {"fields": {...}, "replace": b}  the new-swap form -> $L/env.local.sh
@@ -23,7 +23,9 @@ function handleActionPost(p, body, { actions, runDir, board, startMeta }) {
     case "/api/action": {
       if (typeof body.id !== "string") throw bad(400, 'body must be {"id": "..."}');
       // startMeta is made by the server only (program mode: the file the shell's dialog chose for join); nothing of it comes from a request
-      const job = actions.startAction(body.id, startMeta && typeof startMeta === "object" ? { ...startMeta } : {});
+      // M1: `new_cap_gwei` (a string) is the new fee cap of a re-send; its presence and bounds are the runner's to decide (lib/actions.js newCapFor)
+      if (body.new_cap_gwei !== undefined && typeof body.new_cap_gwei !== "string") throw bad(400, "new_cap_gwei must be a decimal in gwei, as text");
+      const job = actions.startAction(body.id, { ...(startMeta && typeof startMeta === "object" ? startMeta : {}), ...(typeof body.new_cap_gwei === "string" ? { newCapGwei: body.new_cap_gwei } : {}) });
       return { status: 202, body: { accepted: true, job } };
     }
     case "/api/spend": {
@@ -35,7 +37,8 @@ function handleActionPost(p, body, { actions, runDir, board, startMeta }) {
       if (body.bob_check_matches !== undefined && typeof body.bob_check_matches !== "boolean") throw bad(400, "bob_check_matches must be true or false");
       // program mode: Bob's lock also needs "Alice's check line matches mine", required in the request and recorded the same way
       if (body.alice_check_matches !== undefined && typeof body.alice_check_matches !== "boolean") throw bad(400, "alice_check_matches must be true or false");
-      const job = actions.startSpend(body.id, body.typed, { noPendingFunding: body.no_pending_funding === true, bobCheckMatches: body.bob_check_matches === true, aliceCheckMatches: body.alice_check_matches === true });
+      if (body.new_cap_gwei !== undefined && typeof body.new_cap_gwei !== "string") throw bad(400, "new_cap_gwei must be a decimal in gwei, as text");
+      const job = actions.startSpend(body.id, body.typed, { ...(typeof body.new_cap_gwei === "string" ? { newCapGwei: body.new_cap_gwei } : {}), noPendingFunding: body.no_pending_funding === true, bobCheckMatches: body.bob_check_matches === true, aliceCheckMatches: body.alice_check_matches === true });
       return { status: 202, body: { accepted: true, job } };
     }
     case "/api/checkline/confirm": {

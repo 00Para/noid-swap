@@ -390,6 +390,7 @@ with --transport curl, or --allow-plain-http"). `http://127.0.0.1@elsewhere/` co
 | `--noid-rpc URL` twice / `--eth-rpc URL` twice | the second, independent node (above) |
 | `--single-node-ok` | accept one node for the two steps above under `production` or `sepolia` (no value) |
 | `--accept-producer-concentration` | `tick`: waive the `production` refusals of the producer-concentration screen (no value; see "The producer-concentration gate") |
+| `--acknowledge-producer-share PERMILLE` | `tick` and every command that reads the nodes: the narrow acknowledgement (1 to 650; see "The producer-concentration gate", "The narrow acknowledgement") |
 | `--allow-plain-http` | accept non-loopback `http://` (no value) |
 | `--noid-rpc2-is-remote` / `--eth-rpc2-is-remote` | information only: the second node runs on another machine behind a local port (no value; changes the G3 note, relaxes nothing) |
 
@@ -734,6 +735,20 @@ a swap against a producer that is visibly large, and nothing else.
   change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is
   never implied by a profile, and under `sepolia` and `rehearsal` it changes nothing. The helpers pass it only when `ACCEPT_PRODUCER_CONCENTRATION=1`
   is set in `env.local.sh`.
+- **The narrow acknowledgement (2026-11-20).** `--acknowledge-producer-share PERMILLE` (a whole number from 1 to 650; a compiled maximum, anything else is refused at
+  parse time, before a node is asked) is for program-mode production swaps between people who have a reason to trust each other. Under `production` it waives
+  **only** (a) the refusal "one address above the limit" while the measured share is at most PERMILLE in BOTH windows (integer comparison on the counts, so a share
+  exactly at PERMILLE passes), and (b) the refusal "no second Parano1d node" for Bob's `lock_eth` when exactly one `--noid-rpc` was given and its host is loopback
+  (`127.0.0.1`, `localhost`, `[::1]`: the person's own node). It **never** waives unreadable, incomplete or stale headers, a second node that disagrees or cannot be read,
+  a remembered disagreement (the `.producer-differs` file or `producer_differs_seen` in the history), the alert latch of a pending lock, or a share above PERMILLE.
+  When it is the reason a lock is offered the tick prints `ACKNOWLEDGED: producer share N permille <= ceiling C ...` (not `OVERRIDDEN`) and the swap file's history
+  gets one entry `producer_share_acknowledged: largest L permille of 2880 and S permille of 720, ceiling C permille, at T`, written once per swap like the override
+  entry; `eth/scripts/live.js lock` does not count it as an override of its own refusals. With `--accept-producer-concentration` also given, the old flag keeps its own
+  entry and the acknowledgement writes none. Under `sepolia` and `rehearsal` it changes nothing. The tick JSON carries a `producer_screen` object (Bob, before his lock; `null`
+  otherwise): `state` (`pass`, `concentrated`, `cannot_check`, `stale`, `disagrees`, `one_node`, `remembered`), `enforced`, `share_permille_long`, `share_permille_short`,
+  `limit_permille`, `second_node` (`ok`, `missing`, `disagrees`, `remembered`, `unreadable`), `single_node_loopback`, `waivable_by_acknowledgement` (the screen passes or fails
+  only for a reason the flag can waive), `hard_max_permille` (650), `acknowledged_ceiling_permille` and `waived_by_acknowledgement`; it is computed without the flag, so it shows
+  why the screen refuses on its own. Tests: `tests/producer_gate.rs` (the D2 block at the end).
 - **What is in the observation.** `NoidObservation.producers` (counts, 8-hex ids, `complete`, `second`, `error`; absent when nothing was read) and
   `accept_producer_concentration`. Both are skipped when empty, so recordings and swap files made before the change load unchanged.
 - **The removed-claim alert.** When a reorg removes Bob's mined NOID claim and the node does not show it pending, the tick adds a note that starts with
@@ -1620,7 +1635,7 @@ D_offset = B_fund + B_final + B_bob + RHS(I1) + margin
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` | |
 | Full "Alice never reveals" cycle (creation to her final refund) | 756 blocks | 140 blocks | 320 blocks (≈ 2 h 40) | `D_offset + 18` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s | local Hardhat finalizes at once; Sepolia does not |
-| caps | none | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
+| caps | 2,500 NOID (2,500,000,000 micro-NOID), 0.5 ETH (500,000,000,000,000,000 wei), Ethereum chain **1 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
 
 A happy path under `sepolia` still settles in about 45 minutes (Alice's funding final ≈ 9 min, Bob's Sepolia lock finalized ≈ 13–19 min, the reveal,
 Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody does not show up.
@@ -1635,8 +1650,8 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   tests; the engine does not read them. The fee rule (`F_max`) and the chain facts (finality 18, epoch 144, minimum fee 5,800) are the same in
   every profile and stay global.
 - `Gates::validate()` is the one checker of the §4.2/§4.3 relations (non-zero times and `W_A_min ≤ W_A`; `B_final` = `NF + 1` = 19 with Parano1d's finality depth `NF` = 18; `M_A` >
-  Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (the per-profile Ethereum inclusion delay `DE` and Alice's rebroadcast time `RA`: one Ethereum reorg of her claim can still be answered); `D_offset` = the formula above; the T6 guard fits in `B_safety`; every non-production
-  profile (`rehearsal`, `sepolia`) has all three caps and production none). All three profiles pass it; `params::tests::a_broken_profile_is_rejected`
+  Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (the per-profile Ethereum inclusion delay `DE` and Alice's rebroadcast time `RA`: one Ethereum reorg of her claim can still be answered); `D_offset` = the formula above; the T6 guard fits in `B_safety`; every profile
+  (`production`, `rehearsal`, `sepolia`) has all three caps: rule 7, so a production profile without caps is refused since 2026-11-20). All three profiles pass it; `params::tests::a_broken_profile_is_rejected`
   lists twenty-five hand-made broken ones (the last three are the `DE`/`RA` relations, each failing alone; five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
   rehearsal window).
 - Tests: `tests/scenarios.rs` runs, under `rehearsal` and under `sepolia` (`Scenario::with_profile`), the happy path (raw and stock), "Alice never

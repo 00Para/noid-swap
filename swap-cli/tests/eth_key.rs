@@ -299,7 +299,7 @@ fn ethkey_address_and_emit_work_on_a_key_file_and_a_swap_file_and_emit_is_for_a_
 fn alice_args(out: &str, cast: &h::Cast) -> Vec<String> {
     [
         "new-alice", "--out", out, "--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000", "--fee-estimate", "5800", "--h-create",
-        "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "31337", "--eth-amount-wei", "10000000000000000", "--eth-receiver",
+        "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "1", "--eth-amount-wei", "10000000000000000", "--eth-receiver",
         ALICE_HEX, "--eth-sender", BOB_HEX, "--eth-code-hash", CODE_HASH, "--fast-kdf",
     ]
     .iter()
@@ -387,7 +387,7 @@ fn new_bob_seals_his_key_and_refuses_a_foreign_address() {
     let bob_args = |out: &std::path::Path| {
         let mut args = vec![
             "new-bob".to_string(), "--bundle".into(), bundle_path.to_str().unwrap().into(), "--out".into(), out.to_str().unwrap().into(), "--bob".into(),
-            cast.bob.to_bech32(), "--amount".into(), "10000000".into(), "--eth-chain-id".into(), "31337".into(), "--eth-contract".into(),
+            cast.bob.to_bech32(), "--amount".into(), "10000000".into(), "--eth-chain-id".into(), "1".into(), "--eth-contract".into(),
             "0x5fbdb2315678afecb367f032d93f642f64180aa3".into(), "--eth-amount-wei".into(), "10000000000000000".into(), "--eth-sender".into(), BOB_HEX.into(),
             "--eth-code-hash".into(), CODE_HASH.into(), "--fast-kdf".into(),
         ];

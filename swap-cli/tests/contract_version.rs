@@ -38,7 +38,7 @@ fn alice_args(out: &Path, version: Option<&str>) -> Vec<String> {
     let cast = htlc_harness::Cast::new();
     let mut a = s(&["new-alice", "--out", out.to_str().unwrap()]);
     a.extend(s(&["--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000", "--fee-estimate", "5800"]));
-    a.extend(s(&["--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "11155111"]));
+    a.extend(s(&["--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "1"]));
     a.extend(s(&["--eth-amount-wei", "10000000000000000", "--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"]));
     a.extend(s(&["--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--eth-code-hash", CODE_HASH, "--fast-kdf"]));
     if let Some(v) = version {

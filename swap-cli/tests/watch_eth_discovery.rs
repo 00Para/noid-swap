@@ -31,7 +31,7 @@ fn alice_discovers_bobs_lock_by_parties_and_hashlock() {
     let obs = by_id.observe().unwrap();
     assert!(obs.lock.is_none());
     // REVIEW-2 F1: even then the chain id and the contract code hash are read.
-    assert_eq!(obs.chain_id, Some(31_337));
+    assert_eq!(obs.chain_id, Some(1));
     assert!(obs.contract_code_hash.is_some());
     // With the rule the recorded lock is found and fully decoded.
     let rpc = fixture("locked.json");
@@ -60,7 +60,7 @@ fn alice_discovers_bobs_lock_by_parties_and_hashlock() {
     let h = obs.contract_code_hash.expect("code hash is read on every poll");
     assert_ne!(h, keccak256(b""));
     // The chain id and the code hash are read even when no lock is found (REVIEW-2 F1).
-    assert_eq!(obs.chain_id, Some(31_337));
+    assert_eq!(obs.chain_id, Some(1));
     // The rule must match: another receiver finds nothing.
     let rpc = fixture("locked.json");
     let w = EthWatcher::new(&rpc, a20(CONTRACT), [0u8; 32]).with_discovery(LockDiscovery {

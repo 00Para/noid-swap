@@ -220,3 +220,21 @@ test("the two file dialogs of the simple flow exist on the program object and ar
   assert.equal(await wired.chooseInvitationFile(), "C:\\x\\invitation.json");
   assert.equal(await base({ chooseInvitation: async () => "invitation.json" }).program.chooseInvitationFile(), null);
 });
+
+test("the signed notice passes through updateStatus unchanged: the flag and the note; a missing field is left missing (the server reads it as false / null)", () => {
+  const u = { state: "none", latest: null, url: null, unsafeForNewSwaps: true, unsafeNote: "Do not start swaps." };
+  assert.deepEqual(base({ updateStatus: () => u }).program.updateStatus(), u);
+  assert.deepEqual(base({ updateStatus: () => ({ state: "none", latest: null, url: null }) }).program.updateStatus(), { state: "none", latest: null, url: null });
+});
+
+test("the program offers the address history and the clipboard check (the server uses them in program mode)", () => {
+  const { program } = base();
+  assert.deepEqual(Object.keys(program.payoutHistory).sort(), ["forRun", "list", "record"]);
+  assert.equal(typeof program.clipboardMatches, "function");
+});
+
+test("nodeStatus passes the node check's answer through, the base fee included", () => {
+  const fee = { base_fee_wei: "300000000", block: 7, at: 1, profile: "production" };
+  const { program } = base({ nodeCheck: { status: () => ({ eth: { state: "ok", fee } }) } });
+  assert.deepEqual(program.nodeStatus().eth.fee, fee);
+});

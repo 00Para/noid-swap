@@ -73,7 +73,7 @@ fn a_bundle_cannot_be_moved_between_profiles() {
     let mut as_prod = reh.clone();
     as_prod.params.profile = ProfileName::Production;
     let e = as_prod.check().unwrap_err().to_string();
-    assert!(e.contains("738"), "{e}");
+    assert!(e.contains("738") || e.contains("chain id"), "{e}");
     // Strip the profile field from the JSON (what an old tool would produce): the same result.
     let mut v: serde_json::Value = serde_json::to_value(&reh).unwrap();
     v["params"].as_object_mut().unwrap().remove("profile").unwrap();
@@ -106,11 +106,26 @@ fn the_caps_are_enforced_when_the_file_is_built_and_when_it_is_checked() {
     let mut big = base.clone();
     big.params.eth.amount_wei = 10u128.pow(17);
     assert!(big.check().unwrap_err().to_string().contains("wei"));
-    // Production has no caps.
-    let mut eth = base.params.eth.clone();
-    eth.chain_id = 1;
-    eth.amount_wei = 10u128.pow(20);
-    assert!(SwapPublic::build(&secret, Variant::Raw, &cast.alice, &cast.bob, 5_000_000_000, 5_800, 300_000, eth).is_ok());
+    // Production carries caps too (2026-11-20): 2,500 NOID, 0.5 ETH, chain 1. At the cap passes, one unit above fails, and the test chains are refused.
+    let prod_build = |amount: u64, wei: u128, chain: u64| {
+        let mut eth = base.params.eth.clone();
+        eth.chain_id = chain;
+        eth.amount_wei = wei;
+        SwapPublic::build(&secret, Variant::Raw, &cast.alice, &cast.bob, amount, 5_800, 300_000, eth)
+    };
+    assert!(prod_build(2_500_000_000, 500_000_000_000_000_000, 1).is_ok());
+    assert!(prod_build(2_500_000_001, 500_000_000_000_000_000, 1).unwrap_err().to_string().contains("micro-NOID"));
+    assert!(prod_build(2_500_000_000, 500_000_000_000_000_001, 1).unwrap_err().to_string().contains("wei"));
+    assert!(prod_build(5_000_000, 10u128.pow(15), 11_155_111).unwrap_err().to_string().contains("chain id"));
+    assert!(prod_build(5_000_000, 10u128.pow(15), 31_337).unwrap_err().to_string().contains("chain id"));
+    // A production file edited by hand above the cap is refused when it is checked (Bob'"'"'s side: a bundle over the cap).
+    let mut ok = prod_build(5_000_000, 10u128.pow(15), 1).unwrap();
+    assert!(ok.check().is_ok());
+    ok.params.eth.amount_wei = 500_000_000_000_000_001;
+    assert!(ok.check().unwrap_err().to_string().contains("wei"));
+    ok.params.eth.amount_wei = 10u128.pow(15);
+    ok.params.amount_micronoid = 2_500_000_001;
+    assert!(ok.check().is_err());
 }
 
 #[test]
@@ -129,7 +144,7 @@ fn new_alice_profile_rehearsal_through_the_binary() {
     assert!(ok && out.contains("\"profile\": \"rehearsal\""), "{out}");
     // The default is production, and says so.
     let d = dir.path().join("d.swap.json");
-    let (ok, bundle, err) = run(&alice_args(&d, None, "10000000", "10000000000000000", "31337"));
+    let (ok, bundle, err) = run(&alice_args(&d, None, "10000000", "10000000000000000", "1"));
     assert!(ok, "{err}");
     assert!(!bundle.contains("profile"));
     let (_, out, _) = run(&s(&["status", d.to_str().unwrap()]));

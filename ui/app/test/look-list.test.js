@@ -20,7 +20,7 @@ test("a row with give and get draws the pair: glyph, figure, arrow, glyph, figur
   const pair = row.querySelector(".pg-pair");
   assert.ok(pair, "the pair is drawn");
   assert.equal(pair.getAttribute("aria-hidden"), "true", "the pair is for the eye; the label below is for a screen reader");
-  assert.deepEqual(pair.children.map((c) => (c.tag === "svg" ? c.className : c.className)), ["coin noid sm", "amt noid", "ic", "coin eth sm", "amt eth"]);
+  assert.deepEqual(pair.children.map((c) => (c.tag === "svg" ? c.className : c.className)), ["coin solid noid sm", "amt noid", "ic", "coin solid eth sm", "amt eth"]);
   const amts = pair.all((n) => n.tag === "span" && has(n, "amt"));
   assert.deepEqual(amts.map((a) => [a.querySelector(".num").textContent, a.querySelector(".tic").textContent]), [["5", "NOID"], ["0.001", "ETH"]]);
   const label = row.all((n) => has(n, "sr-only"))[0];

@@ -159,11 +159,14 @@ async function runSelfTest({ whenLoaded, webContents, request, secretProbe, node
         const secretWhy = secretProbeProblem(await secretProbe());
         if (secretWhy) throw new Error(secretWhy);
         step("secret page probe answered");
+        // the release check's signature primitive: a known answer (RFC 8032), so a runtime without Ed25519 fails here
+        if (!require("./releasefile").ed25519KnownAnswer()) throw new Error("the Ed25519 known-answer check failed: this runtime cannot check release signatures");
+        step("ed25519 known answer ok");
         const status = await nodeCheck.checkOnce();
         step("node check answered");
         if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
         if (holdMs > 0) step("hold over");
-        return { selftest: "ok", node: status.noid.state, page: "loaded", prefs: pickPrefs(prefs), no_token: noToken, page_script: true, page_post: probe.post.status, secret_page: true };
+        return { selftest: "ok", node: status.noid.state, page: "loaded", prefs: pickPrefs(prefs), no_token: noToken, page_script: true, page_post: probe.post.status, secret_page: true, ed25519: true };
       })(),
       deadline,
     ]);

@@ -45,7 +45,7 @@ const raised = (h, role) => notes(h, role).filter((r) => /^needs you: deposit-/.
 const cleared = (h, role) => notes(h, role).filter((r) => /^cleared: deposit-/.test(r.result));
 const view = (h, role) => h.ap.view(h.run())[role].needs_you;
 const tickNow = (h, role) => JSON.parse(fs.readFileSync(path.join(h.f.run, `last-tick-${role}.json`), "utf8")).now;
-const short = (a) => `${a.slice(0, 6)}…${a.slice(-5)}`;
+const whole = (a) => a; // the entry names the deposit address whole (rehearsal 4.12, R412-2)
 
 /** Bob, approved, Alice's funding final (his file at funding_final), a fresh tick and loop; the status is set by the caller. */
 function bobApproved(o = {}) {
@@ -80,9 +80,9 @@ test("the live case: Bob approved, the key holds 0.0011 ETH of 0.0019 ETH: one e
     assert.equal(v[0].spend, "deposit-eth");
     assert.equal(v[0].kind, "deposit");
     assert.equal(v[0].label, "Your deposit");
-    assert.equal(v[0].reason, `Your ETH deposit is short: this swap's key holds 0.0011 ETH of 0.0019 ETH. Send 0.0008 ETH more to ${short(E.bob_sender)}. The engine says: ${SHORT_NOTE}.`);
+    assert.equal(v[0].reason, `Your ETH deposit is short: this swap's key holds 0.0011 ETH of 0.0019 ETH. Send 0.0008 ETH more to ${whole(E.bob_sender)}. The engine says: ${SHORT_NOTE}.`);
     assert.equal(v[0].until, tickNow(B, "bob") + 240, "12 blocks at 20 s: the time is a field of its own, not in the sentence");
-    assert.match(v[0].reason, /^Your ETH deposit is short: this swap's key holds 0\.0011 ETH of 0\.0019 ETH\. Send 0\.0008 ETH more to 0x[0-9a-fA-F]{4}…[0-9a-fA-F]{5}\./);
+    assert.match(v[0].reason, /^Your ETH deposit is short: this swap's key holds 0\.0011 ETH of 0\.0019 ETH\. Send 0\.0008 ETH more to 0x[0-9a-fA-F]{40}\./);
     // the same entry through the swap list's own path (it drives the tray)
     assert.equal(B.ap.needViews("bob").length, 1);
     // one audit line when it is raised, none again on later steps
@@ -139,7 +139,7 @@ test("a coin with nothing deposited raises an entry only when the engine's note 
     status(B, "bob", { held: "0" });
     steps(B, 1);
     assert.equal(view(B, "bob").length, 1);
-    assert.equal(view(B, "bob")[0].reason, `Deposit now: this swap's key holds no ETH and needs 0.0019 ETH. Send 0.0019 ETH to ${short(E.bob_sender)}. The engine says: ${SHORT_NOTE}.`);
+    assert.equal(view(B, "bob")[0].reason, `Deposit now: this swap's key holds no ETH and needs 0.0019 ETH. Send 0.0019 ETH to ${whole(E.bob_sender)}. The engine says: ${SHORT_NOTE}.`);
     assert.equal(view(B, "bob")[0].until, tickNow(B, "bob") + 240);
     assert.equal(raised(B, "bob").length, 1);
   } finally {
@@ -357,7 +357,7 @@ test("Alice, a short NOID deposit: the entry names NOID, what the wallet holds a
     const v = view(A, "alice");
     assert.equal(v.length, 1);
     assert.equal(v[0].spend, "deposit-noid");
-    assert.equal(v[0].reason, `Your NOID deposit is short: this swap's wallet holds 5.006 NOID of 10.006 NOID. Send 5 NOID more to ${short(WNA)}. The engine says: ${FUND_SHORT_NOTE}.`);
+    assert.equal(v[0].reason, `Your NOID deposit is short: this swap's wallet holds 5.006 NOID of 10.006 NOID. Send 5 NOID more to ${whole(WNA)}. The engine says: ${FUND_SHORT_NOTE}.`);
     assert.equal(v[0].until, tickNow(A, "alice") + 180);
     assert.equal(raised(A, "alice").length, 1);
     assert.equal(raised(A, "alice")[0].result, "needs you: deposit-noid");

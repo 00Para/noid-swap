@@ -1,7 +1,7 @@
 "use strict";
 /*
- * The console does not act on a production swap (Ethereum mainnet): test networks only until the external review (PROJECT.md). A run folder is a
- * production run when ANY of these says so: the bundle's profile or chain id (the terms), a tick's Ethereum observation or the swap file's own terms
+ * The TERMINAL console does not act on a production swap (Ethereum mainnet); program mode does, through run.json's own production rules, and uses `programNetworkReason`
+ * below (every file names run.json's network). A run folder is a production run, for the terminal console, when ANY of these says so: the bundle's profile or chain id (the terms), a tick's Ethereum observation or the swap file's own terms
  * (`swap_terms.eth.chain_id`, copied by the engine), or the PROFILE / CHAIN line of the folder's env.local.sh (the settings the helpers will use; the
  * helpers default to sepolia when it sets neither). Only those two lines of env.local.sh are read, by a strict pattern, and nothing else of the file
  * leaves this module.
@@ -56,4 +56,36 @@ function productionReason(run, dir) {
   return null;
 }
 
-module.exports = { envLocalNetwork, productionReason, PRODUCTION_TEXT };
+const num = (x) => (typeof x === "number" && Number.isFinite(x) ? x : typeof x === "string" && /^[0-9]{1,16}$/.test(x) ? Number(x) : null);
+const MIXED_TEXT = "This swap's files do not all name the same network as its settings (run.json): every action is refused.";
+
+/**
+ * PROGRAM MODE: why this swap's files must not be acted on although run.json passed its schema, or null. In program mode production is a profile like the others, so the
+ * old rule "any production refuses" becomes "nothing may name another network than run.json": the bundle's profile (when it states one) and its chain id, every tick's
+ * Ethereum chain and the swap file's own chain (`swap_terms.eth.chain_id`, copied into the tick by the engine) must equal run.json's profile and chain. A Sepolia run.json with a
+ * chain-1 bundle or tick, and the reverse, is refused here. Ids that are absent are not held against the swap (a swap with no bundle yet has none to compare).
+ * @param {object} settings the loaded run.json
+ * @param {object|null} run the readRun result (terms and ticks)
+ * @returns {string|null}
+ */
+function programNetworkReason(settings, run) {
+  if (!settings || typeof settings.profile !== "string" || !Number.isInteger(settings.chain_id)) return MIXED_TEXT;
+  const wantMain = settings.profile === "production" || settings.chain_id === 1;
+  // a mix between Ethereum mainnet and anything else is refused; the test networks among themselves (Sepolia against the rehearsal chain) cannot cost real ETH and are not held against a swap
+  const clash = (chain) => chain !== undefined && chain !== null && (wantMain ? num(chain) !== 1 : num(chain) === 1 || num(chain) === null);
+  const terms = run && run.terms;
+  if (terms) {
+    const p = terms.profile_explicit !== false && typeof terms.profile === "string" ? terms.profile : null;
+    if (p !== null && (wantMain ? p !== "production" : p === "production")) return MIXED_TEXT;
+    if (clash(terms.chain_id)) return MIXED_TEXT;
+  }
+  const ticks = run && run.roles ? ["alice", "bob"].map((r) => run.roles[r] && run.roles[r].tick).filter(Boolean) : [];
+  for (const t of ticks) {
+    const eth = (t && t.eth) || {};
+    const st = (t && t.swap_terms && t.swap_terms.eth) || {};
+    for (const v of [eth.chain_id, st.chain_id]) if (clash(v)) return MIXED_TEXT;
+  }
+  return null;
+}
+
+module.exports = { envLocalNetwork, productionReason, programNetworkReason, PRODUCTION_TEXT, MIXED_TEXT };

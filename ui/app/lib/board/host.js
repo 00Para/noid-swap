@@ -300,14 +300,29 @@ class BoardHost {
     return p;
   }
 
+  /**
+   * The board never runs on Ethereum mainnet, whatever program mode now allows for a swap of its own: an explicit refusal when run.json names the production profile or chain 1, or the
+   * board's own settings do. It stands beside productionBlock (which, in program mode, no longer refuses a valid production run.json). Fails closed when the settings cannot be asked.
+   */
+  onMainnet() {
+    if (this.settings && this.settings.profile === "production") return true;
+    const ss = this.actions && this.actions.settingsSource;
+    if (!ss) return false;
+    try {
+      const l = ss.load();
+      return !!(l && l.ok && (l.settings.profile === "production" || l.settings.chain_id === 1));
+    } catch {
+      return true;
+    }
+  }
+
   // ------------------------------------------------------------------------------------------------ start and stop
   /** Opens the relay clients for browsing and, when the run folder already holds a handover (a restart), picks it up where it was. */
   start() {
     if (this.started) return this;
     const br = this.actions.boardRun();
     if (br.ambiguous) throw new Error("env.local.sh mentions HANDOVER in a way this console cannot read");
-    const prod = this.actions.productionBlock();
-    if (prod) throw new Error("the board does not run on a production run");
+    if (this.onMainnet() || this.actions.productionBlock()) throw new Error("the board does not run on a production run");
     this.started = true;
     this.pool = this.makePool(this.settings.relays);
     this.pool.start();
@@ -364,7 +379,7 @@ class BoardHost {
     if (this.actions.swapFilesExist()) throw Object.assign(new Error("this run folder already has swap files: start the board on a fresh run folder"), { status: 409 });
     if (this.programMode) {
       // program mode: a fresh board slot holds no run.json (the host writes it when the handover reaches that point) and no swap file
-      if (this.actions.productionBlock()) throw Object.assign(new Error("the board does not run on a production run"), { status: 403 });
+      if (this.onMainnet() || this.actions.productionBlock()) throw Object.assign(new Error("the board does not run on a production run"), { status: 403 });
       if (this.exists("run.json")) throw Object.assign(new Error("this run folder already has a run.json: the board writes it on a fresh board slot"), { status: 409 });
       return;
     }
@@ -372,7 +387,7 @@ class BoardHost {
     const br = this.actions.boardRun();
     if (br.ambiguous || wr.ambiguous) throw Object.assign(new Error("env.local.sh cannot be read as a board run"), { status: 409 });
     if (wr.found !== false && (wr.use_swap_wallet || wr.noid_payout || wr.eth_payout || br.declared)) throw Object.assign(new Error("this run folder already has settings: the board writes them itself, on a fresh run folder"), { status: 409 });
-    if (this.actions.productionBlock()) throw Object.assign(new Error("the board does not run on a production run"), { status: 403 });
+    if (this.onMainnet() || this.actions.productionBlock()) throw Object.assign(new Error("the board does not run on a production run"), { status: 403 });
     const hasEnv = (() => {
       for (const c of pathCandidates(this.dir)) if (fs.existsSync(path.join(c, "env.local.sh"))) return true;
       return false;

@@ -10,7 +10,7 @@ const C = require("../scripts/startup-check.js");
 
 const REPO = path.join(__dirname, "..", "..");
 const LIVE_JS = path.join(REPO, "eth", "scripts", "live.js");
-const GOOD = { selftest: "ok", node: "not_running", page: "loaded", prefs: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, devTools: false }, no_token: 401, page_script: true, page_post: 403, secret_page: true };
+const GOOD = { selftest: "ok", node: "not_running", page: "loaded", prefs: { contextIsolation: true, sandbox: true, nodeIntegration: false, webSecurity: true, devTools: false }, no_token: 401, page_script: true, page_post: 403, secret_page: true, ed25519: true };
 const line = (o) => JSON.stringify(o);
 
 test("a good self-test line passes, among other output and with a CRLF ending", () => {
@@ -40,6 +40,8 @@ test("each failing field of the line is named", () => {
     [{ page_post: undefined }, /page_post is undefined/],
     [{ secret_page: false }, /secret_page is false, not true: the secret window's page/],
     [{ secret_page: undefined }, /secret_page is undefined/],
+    [{ ed25519: undefined }, /ed25519 is undefined/],
+    [{ ed25519: false }, /ed25519 is false, not true/],
   ];
   for (const [patch, re] of cases) {
     const r = C.parseSelfTest(line({ ...GOOD, ...patch }), 0);

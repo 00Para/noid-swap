@@ -29,7 +29,7 @@ const { createGuard } = require("./hardening");
 const { createMainWindow } = require("./window");
 const { createSecretUi } = require("./secretwin");
 const { createElectronKeyStore } = require("./keystore-electron");
-const { createNodeCheck, httpPost } = require("./nodecheck");
+const { createNodeCheck, httpPost, hasProductionRun } = require("./nodecheck");
 const { createNotifier } = require("./notify");
 const { createCrashHandler } = require("./crash");
 const { createKeepAwake } = require("./keepawake");
@@ -116,10 +116,14 @@ function updateRepoOf(fs, desktopDir) {
 /** The words of the menu item's answer. Fixed texts; the version and the page come from the checked answer only. */
 function updateAnswerWords(r) {
   const s = (r && r.shown) || {};
-  if (s.state === "newer") return { message: `Version ${s.latest} is available.`, detail: `Its release page: ${s.url}
-
-${updates.NOTICE_TEXT} Nothing was downloaded.` };
+  if (s.state === "newer") {
+    const sums = (Array.isArray(s.sha256) ? s.sha256 : []).map((e) => `  ${e.name}: ${e.sha256}`).join("\n");
+    const note = typeof s.note === "string" && s.note ? `\n\n${s.note}` : "";
+    return { message: `Version ${s.latest} is available.`, detail: `Its release page: ${s.url}${note}\n\n${updates.NOTICE_TEXT}\n${sums}\n\nNothing was downloaded.` };
+  }
   if (s.state === "none") return { message: "You have the newest version.", detail: "" };
+  if (s.state === "unverified") return { message: "A newer release is listed but its signature does not check.", detail: updates.UNVERIFIED_TEXT + " Nothing was downloaded." };
+  if (s.state === "release_check_not_configured") return { message: "This version cannot check for updates.", detail: updates.KEY_MISSING_TEXT };
   if (r && r.state === "skipped_active") return { message: "Not checked: a swap is active.", detail: "The check never runs while a swap is active. Try again when your swaps are over." };
   if (s.state === "not_configured") return { message: "This version cannot check for updates.", detail: "It was built without an update address." };
   return { message: "The check did not work.", detail: "GitHub could not be asked, or its answer was not the expected one. Nothing was downloaded." };
@@ -409,6 +413,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       now,
       settings: cmd.selfTest ? () => ({ noid_rpc: "http://127.0.0.1:9601", eth: {} }) : () => programsettings.load(dataDir),
       autoStart: !cmd.selfTest,
+      // L4: the mainnet endpoints are asked only while a run of the runs folder is a production run (or the page asked for the production fee: wantMainnet)
+      mainnetWanted: () => hasProductionRun(path.join(dataDir, "runs"), fs),
     });
 
     // The notify-only update check (updatecheck.js): never in the self-test, which asks no network for anything.
@@ -416,6 +422,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       ? null
       : createUpdateChecker({
           fetchJson: deps.updateFetchJson || updates.createHttpsFetchJson(),
+          // the release key is compiled into releasekey.js; only a test passes another one
+          ...(deps.updatePublicKey === undefined ? {} : { publicKey: deps.updatePublicKey }),
           currentVersion: version,
           repo: updateRepoOf(fs, desktopDir),
           anyActive: () => stakeList.some((s) => s && s.active === true),
@@ -515,6 +523,8 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         "update-check": checkForUpdateNow,
       },
       updateStatus: updateChecker ? () => updateChecker.status() : undefined,
+      // the clipboard check reads the clipboard here, in the main process; the page has no clipboard-read permission, and the program answers a boolean only
+      readClipboard: electron.clipboard && typeof electron.clipboard.readText === "function" ? () => electron.clipboard.readText() : undefined,
     });
 
     t("server");

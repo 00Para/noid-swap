@@ -808,6 +808,11 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
         if !already {
             log.extend(producer_gate::override_history_entry(file.public.params.profile.gates(), noid, now));
         }
+        // D2: the narrow acknowledgement, once per swap and again after each barrier like the entry above. `live.js lock` does not count it as an override.
+        let ack_already = file.history.iter().enumerate().any(|(i, h)| h.event.starts_with(producer_gate::ACK_HISTORY) && last_barrier.is_none_or(|d| i > d));
+        if !ack_already {
+            log.extend(producer_gate::ack_history_entry(file.public.params.profile.gates(), noid, now));
+        }
     }
     Decision { events, action, notes, log, reveal_cutoff_passed }
 }
@@ -1380,7 +1385,14 @@ fn f5_gate(file: &SwapFile, action: &Action, noid: &NoidObservation, eth: &EthOb
         }
     }
     match action {
-        Action::LockEth { .. } => match second_node_policy(file, noid.second.as_deref(), noid.second_error.as_deref(), noid.single_node_ok, notes) {
+        Action::LockEth { .. } => match second_node_policy(
+            file,
+            noid.second.as_deref(),
+            noid.second_error.as_deref(),
+            // D2: `--acknowledge-producer-share` also waives the missing second node of THIS step when the one configured node is loopback (production).
+            noid.single_node_ok || producer_gate::ack_waives_single_node(file.public.params.profile.gates(), noid),
+            notes,
+        ) {
             Err(why) => Some(why),
             Ok(None) => None,
             Ok(Some(second)) => {
@@ -3924,7 +3936,7 @@ fn tick_core(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObservation, 
     for entry in &decision.log {
         // Observe-only: an entry that records that an action was OFFERED (a lock past the concentration screen by the operator's flag, a recovery
         // close for another instance) is written by the full `--apply` tick that offers it, not by one that only watches.
-        if mode == TickMode::Observe && (entry.starts_with(producer_gate::OVERRIDE_HISTORY) || entry.starts_with(RECOVERY_ADOPTED)) {
+        if mode == TickMode::Observe && (entry.starts_with(producer_gate::OVERRIDE_HISTORY) || entry.starts_with(producer_gate::ACK_HISTORY) || entry.starts_with(RECOVERY_ADOPTED)) {
             continue;
         }
         file.log(entry.clone(), now);
@@ -5036,7 +5048,7 @@ mod tests {
         eth.contract_code_hash = file.public.params.eth.code_hash;
         assert_eq!(decide(&file, &funded(300_040, 10_000_000), &eth, t_b).events.len(), 1);
         let mut wrong_chain = eth.clone();
-        wrong_chain.chain_id = Some(1);
+        wrong_chain.chain_id = Some(11_155_111);
         let d = decide(&file, &funded(300_040, 10_000_000), &wrong_chain, t_b);
         assert!(d.events.is_empty() && d.notes.iter().any(|n| n.contains("chain")), "{:?}", d.notes);
         let mut wrong_code = eth.clone();
@@ -5169,7 +5181,7 @@ mod tests {
         unknown_chain.chain_id = None;
         assert_eq!(why(&n, &unknown_chain, &file), "eth.chain_id unknown");
         let mut wrong_chain = e.clone();
-        wrong_chain.chain_id = Some(1);
+        wrong_chain.chain_id = Some(11_155_111);
         assert!(why(&n, &wrong_chain, &file).contains("not the pinned chain"));
         // An old swap file without any pinned hash can never spend ETH.
         let mut unpinned = file.clone();

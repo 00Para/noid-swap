@@ -7,8 +7,11 @@
  *  - Every key is required. Unknown keys, duplicate keys (at any depth), a BOM, a root that is not an object, comments, trailing commas and
  *    any number that is not a whole number are refused. `null` only where the table allows it.
  *  - A message names the key and the rule, never the value (a node URL may carry an API key, the alert URL is a secret).
- *  - Test networks only: the profile is `sepolia` or `rehearsal`; a production value anywhere in the file refuses (productionReason).
- *  - Not in the schema on purpose: the mainnet fee cap, the producer waiver, the classic-run switch, platform and tool paths, key files.
+ *  - Networks: the profile is `sepolia`, `rehearsal` or `production` (Ethereum mainnet, chain 1, program mode only), and the chain id is the profile's own. Production adds rules
+ *    (`productionRules` below): the caps of the owner's decision D1, a mainnet fee cap, contract version 1, two Ethereum nodes, no board handover. A file that says production or
+ *    chain 1 and does not pass them stays refused (productionReason).
+ *  - Not in the schema on purpose: the producer waiver (the program passes it only while Bob's approval holds it), the classic-run switch, platform and tool paths, key files.
+ *    On production `gas_price_gwei` is the mainnet fee cap (`--mainnet --max-fee-gwei`), never a gas price.
  *
  * This module reads and writes files only. It never sources or runs anything, and it is not wired into the console yet (it still reads
  * env.local.sh); migrateFromEnvLocal reads that file as text.
@@ -17,7 +20,7 @@
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const { PROFILES, decimalToInt } = require("./swapform");
+const { PROGRAM_PROFILES: PROFILES, decimalToInt } = require("./swapform");
 const { noidAddressProblem, ethAddressProblem } = require("./walletrun");
 const { PRODUCTION_TEXT } = require("./viewmodel");
 
@@ -84,9 +87,9 @@ const printable = (s) => String(s).replace(/[^\x20-\x7e]/g, "?").slice(0, 40);
 /**
  * A node URL: http:// only to a loopback host, else https://; no user-info part, no whitespace or control character, at most 2048 characters,
  * a plain host (the host is compared as written, so a host that only the URL parser would rewrite is refused), a port from 1 to 65535, no fragment.
- * Returns a problem text (without the value) or null.
+ * `anyHttp` (a run.json that is only being loaded, never one being made): http:// is accepted for any host, as before the loopback rule (L8, fix round 2). Returns a problem text (without the value) or null.
  */
-function urlProblem(s, { httpsOnly = false } = {}) {
+function urlProblem(s, { httpsOnly = false, anyHttp = false } = {}) {
   if (typeof s !== "string") return "text expected";
   if (s.length === 0 || s.length > MAX_URL) return `1 to ${MAX_URL} characters`;
   if (/[\x00-\x20\x7f-￿]/.test(s)) return "no whitespace, control or non-ASCII characters";
@@ -107,13 +110,38 @@ function urlProblem(s, { httpsOnly = false } = {}) {
   if (parsed.hostname.toLowerCase() !== a[1].toLowerCase()) return "not a plain host name or address";
   if (scheme === "http") {
     if (httpsOnly) return "an https:// address";
-    if (!LOOPBACK.has(a[1].toLowerCase())) return "http:// only to this machine (127.0.0.1, ::1, localhost); any other host needs https://";
+    if (!anyHttp && !LOOPBACK.has(a[1].toLowerCase())) return "http:// only to this machine (127.0.0.1, ::1, localhost); any other host needs https://";
   }
   return null;
 }
 
+/** True when a node address is on this machine (the host is 127.0.0.1, [::1] or localhost) and is written with http:// (swap-cli counts only that form as its own node). */
+function isLoopbackUrl(s) {
+  const m = typeof s === "string" ? /^http:\/\/(\[[^\]]*\]|[^:/?#]*)/.exec(s) : null;
+  return !!m && LOOPBACK.has(m[1].toLowerCase());
+}
+
+/**
+ * What a production (Ethereum mainnet) swap needs on top of the schema, each one a fail-closed refusal in the program's own words (`p(key, why)`): a fee cap, contract version 1
+ * (version 2 never ran live), two Ethereum nodes and no single-node switch (a swap with a stranger needs the second-node checks), no board handover (the board stays test-only),
+ * and, for Bob, a second Parano1d node unless his own node is on this machine (the producer check needs one; D2). The caps are the profile's own (checked with the amounts above).
+ */
+const MAINNET_TIP_MAX_GWEI = 2n; // the tip is paid on every Ethereum step, so it has a mainnet-sized limit of its own; the cap stays the person's
+const MAINNET_CAP_MAX_GWEI = 100n; // a new mainnet swap's fee cap; a re-send may go higher (lib/actions.js), the schema's own limit for a loaded file stays 1000
+function productionRules(o, p, create) {
+  if (o.gas_price_gwei === null) p("gas_price_gwei", "required on Ethereum mainnet: it is the fee cap (--max-fee-gwei)");
+  // L8 (fix round 2): the two tightenings of fix round 1 and the cap limit are checked when a swap is made, never when its run.json is loaded (a tighter load would block its refund and sweep)
+  if (create && typeof o.gas_price_gwei === "string" && GWEI_DEC.test(o.gas_price_gwei) && decimalToInt(o.gas_price_gwei, 9) > MAINNET_CAP_MAX_GWEI * 10n ** 9n) p("gas_price_gwei", `at most ${MAINNET_CAP_MAX_GWEI} gwei for a new swap on Ethereum mainnet (it is only the most you allow per gas; a stuck step can be re-sent at a higher cap later)`);
+  if (create && typeof o.priority_fee_gwei === "string" && GWEI_DEC.test(o.priority_fee_gwei) && decimalToInt(o.priority_fee_gwei, 9) > MAINNET_TIP_MAX_GWEI * 10n ** 9n) p("priority_fee_gwei", `at most ${MAINNET_TIP_MAX_GWEI} gwei on Ethereum mainnet: the tip is paid on every Ethereum step (0.05 is the usual figure; check the decimal point)`);
+  if (o.contract_version !== 1) p("contract_version", "must be 1 on Ethereum mainnet (version 2 has not run live)");
+  if (o.eth_rpc2 === null) p("eth_rpc2", "required on Ethereum mainnet: two Ethereum nodes from two operators");
+  if (o.single_node_ok !== false) p("single_node_ok", "must be false on Ethereum mainnet");
+  if (o.handover !== null) p("handover", "must be null on Ethereum mainnet: the board does not run there");
+  if (o.role === "bob" && o.noid_rpc2 === null && !isLoopbackUrl(o.noid_rpc)) p("noid_rpc2", "required for Bob on Ethereum mainnet unless his Parano1d node is on this machine: the producer check needs a second node");
+}
+
 /** Problems (an empty list = valid) of a settings object. Messages name the key and the rule, never a value. */
-function validate(obj) {
+function validate(obj, { create = false } = {}) {
   const probs = [];
   const p = (k, why) => probs.push(`${k}: ${why}`);
   if (!plain(obj)) return ["the settings are not an object"];
@@ -156,7 +184,7 @@ function validate(obj) {
       if (!nullable) p(k, "required");
       return;
     }
-    const why = urlProblem(o[k], { httpsOnly });
+    const why = urlProblem(o[k], { httpsOnly, anyHttp: !create });
     if (why) p(k, why);
   };
 
@@ -164,9 +192,11 @@ function validate(obj) {
   if (typeof o.run_id !== "string" || !RUN_ID.test(o.run_id)) p("run_id", "32 lower-case hexadecimal characters");
   if (o.role !== "alice" && o.role !== "bob") p("role", "alice or bob");
   const prof = typeof o.profile === "string" && Object.prototype.hasOwnProperty.call(PROFILES, o.profile) ? PROFILES[o.profile] : null;
-  if (!prof) p("profile", o.profile === "production" ? "production is not accepted: test networks only" : `one of ${Object.keys(PROFILES).join(", ")}`);
-  if (!isInt(o.chain_id) || o.chain_id === 1) p("chain_id", "must be the chain of the profile (11155111 for sepolia, 31337 for rehearsal)");
+  if (!prof) p("profile", `one of ${Object.keys(PROFILES).join(", ")}`);
+  if (!isInt(o.chain_id)) p("chain_id", "must be the chain of the profile (1 for production, 11155111 for sepolia, 31337 for rehearsal)");
   else if (prof && o.chain_id !== prof.chain) p("chain_id", "does not match the profile");
+  else if (!prof && o.chain_id === 1) p("chain_id", "chain 1 only with the production profile");
+  const production = o.profile === "production";
   eth("contract", { nullable: false });
   if (o.lock_kind !== "poseidon") p("lock_kind", "must be poseidon");
   if (o.variant !== "raw") p("variant", "must be raw");
@@ -233,6 +263,7 @@ function validate(obj) {
   whole("lock_precheck_timeout_s", 1, 90, { nullable: true });
   if (o.handover !== null && o.handover !== "board") p("handover", "board or null");
   url("alert_url", { nullable: true, httpsOnly: true });
+  if (production) productionRules(o, p, create);
   return probs;
 }
 
@@ -382,8 +413,8 @@ const ordered = (o) => {
   return r;
 };
 
-function refuseIfInvalid(obj) {
-  const probs = validate(obj);
+function refuseIfInvalid(obj, create = false) {
+  const probs = validate(obj, { create });
   if (probs.length) throw new RunSettingsError(`run.json is refused: ${probs.slice(0, 6).join("; ")}${probs.length > 6 ? `; and ${probs.length - 6} more` : ""}`, probs);
 }
 
@@ -428,8 +459,8 @@ function load(runDir) {
 }
 
 /** The bytes the autopilot approval binds: the keys in the table's order, two-space indent, one final newline. Refuses an invalid object. */
-function canonicalBytes(obj) {
-  refuseIfInvalid(obj);
+function canonicalBytes(obj, create = false) {
+  refuseIfInvalid(obj, create);
   return Buffer.from(JSON.stringify(obj, ORDER, 2) + "\n", "utf8");
 }
 
@@ -441,8 +472,8 @@ const FIXED_AFTER_CREATE = ["run_id", "role", "profile", "noid_payout", "eth_pay
  * is never replaced; without it the file must already be there and its run_id, role, profile and two payout addresses must stay as they are. Mode 0o600. Returns { path, bytes }.
  */
 function write(runDir, obj, { create = false } = {}) {
-  refuseIfInvalid(obj);
-  const bytes = canonicalBytes(obj);
+  refuseIfInvalid(obj, create);
+  const bytes = canonicalBytes(obj, create);
   let st;
   try {
     st = fs.statSync(runDir);
@@ -517,7 +548,7 @@ function newSettings(fields, { runId } = {}) {
   // `runId` (the program's own option, never a field): the id the run folder was already named by (the offer board makes the folder first). Same shape as a made one.
   if (runId !== undefined && (typeof runId !== "string" || !RUN_ID.test(runId))) throw new RunSettingsError("runId: 32 lower-case hexadecimal characters");
   const o = { v: 1, run_id: runId !== undefined ? runId : crypto.randomBytes(16).toString("hex"), ...fields };
-  refuseIfInvalid(o);
+  refuseIfInvalid(o, true);
   return Object.freeze(ordered(o));
 }
 
@@ -585,9 +616,9 @@ function textSaysProduction(text) {
 }
 
 /**
- * Why <runDir>/run.json must not be acted on, or null. A string: PRODUCTION_TEXT when the raw text says production anywhere (a `production` value, or chain 1, in
- * any place, duplicates and odd spacing included), another text when the file cannot be read safely or does not pass the schema. No run.json: null (load
- * refuses it separately).
+ * Why <runDir>/run.json must not be acted on, or null (a file that passes the schema, mainnet included, gives null). A string: PRODUCTION_TEXT when a file that does NOT pass
+ * the schema says production anywhere (a `production` value, or chain 1, in any place, duplicates and odd spacing included), another text when the file cannot be read safely or
+ * does not pass the schema. No run.json: null (load refuses it separately).
  */
 function productionReason(runDir) {
   const file = path.join(runDir || "", FILE);
@@ -606,16 +637,20 @@ function productionReason(runDir) {
     return "run.json cannot be read safely: every action is refused.";
   }
   if (buf.length > MAX_BYTES) return "run.json cannot be read safely (too large): every action is refused.";
-  // read as UTF-8 and again as UTF-16 little-endian (a file that is not UTF-8 must not hide a production value)
+  // A file that passes the schema is acted on, production included: the schema itself holds the production rules (the caps, the fee cap, chain 1). Any other file that says
+  // production (or chain 1) anywhere stays refused with PRODUCTION_TEXT: read as UTF-8 and again as UTF-16 little-endian, so a file that is not UTF-8 cannot hide a production value
+  // and be taken for a test run.
+  let schemaProblem = null;
+  try {
+    parseValid(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buf));
+    return null;
+  } catch (e) {
+    schemaProblem = e instanceof RunSettingsError ? e.message : "";
+  }
   const texts = [buf.toString("utf8")];
   if (buf.length >= 2 && (buf[0] === 0xff || buf[1] === 0xff || buf.includes(0))) texts.push(buf.toString("utf16le"), Buffer.from(buf.subarray(1)).toString("utf16le"));
   if (texts.some(textSaysProduction)) return PRODUCTION_TEXT;
-  try {
-    parseValid(new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buf));
-  } catch (e) {
-    return `run.json does not pass its schema: every action is refused. ${e instanceof RunSettingsError ? e.message : ""}`.trim();
-  }
-  return null;
+  return `run.json does not pass its schema: every action is refused. ${schemaProblem}`.trim();
 }
 
 // ---- migration from env.local.sh
@@ -788,5 +823,8 @@ module.exports = {
   productionReason,
   migrateFromEnvLocal,
   urlProblem,
+  isLoopbackUrl,
+  MAINNET_TIP_MAX_GWEI,
+  MAINNET_CAP_MAX_GWEI,
   PRODUCTION_TEXT,
 };

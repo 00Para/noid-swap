@@ -488,7 +488,7 @@ impl Fx {
             5_800,
             300_000,
             EthParams {
-                chain_id: 11_155_111,
+                chain_id: 1,
                 contract: [0x11; 20],
                 code_hash: Some(params::code_hash_for(LockKind::Sha256)),
                 lock_kind: LockKind::Sha256,

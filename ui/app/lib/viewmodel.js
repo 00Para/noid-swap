@@ -1078,9 +1078,10 @@
     const given = id === "aborted" ? null : own(REFUND_STATE[r], id) ? track : r === "alice" ? [track[0], track[1]] : [track[1], track[0]];
     const note = (n) => {
       if (n === null) return null;
-      if (n === "@back_d") return `Comes back to you after ${about("d") || "the deadline"} if the swap stops.`;
+      // the time is the card's own "back by about" (the deadline plus the blocks of the recovery); without it the note says "the deadline" and no time is invented
+      if (n === "@back_d") return about("alice_back") ? `If the swap stops, it is back by ${about("alice_back")}.` : "Comes back to you after the deadline if the swap stops.";
       if (n === "@alice_back") return `Alice can take it back after ${about("d") || "the deadline"}.`;
-      if (n === "@bob_back") return `Comes back to you after ${about("t_reveal") || "the deadline"} if she does not reveal.`;
+      if (n === "@bob_back") return about("bob_back") ? `If she does not reveal, it is back by ${about("bob_back")}.` : "Comes back to you after the deadline if she does not reveal.";
       if (n === "@reveal_by") {
         const t = about("reveal_start_by") || about("reveal_cutoff");
         return t ? `The reveal is due before ${t}.` : null;
@@ -1095,6 +1096,14 @@
     }
     const leg = (i) => ({ coin: coins[i], state: given[i], words: words[i][0], note: note(words[i][1]) });
     const out = { give: leg(0), get: leg(1), public: false };
+    // Alice's NOID after the swap is over: with the contract read and empty (the same facts that make the swap finished) Bob has taken it
+    if (r === "alice" && id === "done" && view.finished === true && !view.leftover && view.coins_at_contract && view.coins_at_contract.known === true && view.coins_at_contract.count === 0) {
+      out.give = { coin: coins[0], state: "closed", words: "Taken by Bob", note: null };
+    }
+    // Alice's ETH is paid to the swap's own key and swept to her address after: until the sweep is done it is not "Paid to you" (opts.sweep_pending), and it carries no mark of done
+    if (r === "alice" && id === "done" && opts && opts.sweep_pending === true) {
+      out.get = { coin: coins[1], state: "final", words: "In this swap's key, sending to you", note: null };
+    }
     out.public = [out.give.state, out.get.state].some((x) => x === "secret_public" || x === "closing" || x === "closed");
     return out;
   }
@@ -1189,7 +1198,8 @@
       eth_known: !!(tick && tick.eth && typeof tick.eth === "object"),
       bin: cmdCtx.bin,
     });
-    const production = isProduction(terms, tick);
+    // program mode (input.program) takes the network from run.json: the server refuses a swap whose files name another network (actions.production), and a production run.json is acted on
+    const production = input.program === true ? false : isProduction(terms, tick);
 
     let alarms = alarmsFor(role, tick, loop, tickAge, input.err_text, input.tick_error, terms, dl.rows, now, finished, !!input.tick_writing);
     // Which machine drives which role (machineStatus): the role that runs elsewhere has no file here, and that is not a problem.
@@ -1286,7 +1296,8 @@
             // set when the intent is held and the engine's fresh decision of this tick is NOT that step: nothing of it is offered, the engine's reason leads
             held_not_offered: heldNotOffered,
             // the engine's loud notes, whole: ALARM / ANOMALY / ALERT: (shown with emphasis, never cut)
-            loud_notes: (tick.notes || []).map(String).filter((n) => E.isAlertNote(n) || E.isAlarmText(n)),
+            // (the same note twice in one tick is shown once)
+            loud_notes: [...new Set((tick.notes || []).map(String).filter((n) => E.isAlertNote(n) || E.isAlarmText(n)))],
           }
         : null,
       deadlines: dl.rows,

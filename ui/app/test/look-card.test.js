@@ -122,7 +122,7 @@ test("tone: a calm stage has no tone word; the stages that wait on the person ar
   assert.equal(cls(deposit), "sc-in act");
   const prepare = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [F.job("setup"), F.job("wallet-setup-alice")], wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } } }));
   assert.equal(cls(prepare), "sc-in act", "Prepare has a button");
-  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
+  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } }, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
   assert.equal(cls(done), "sc-in done");
   const look = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: LM, autopilot: A_ON, status: status("alice"), phase: "funding_final", tick: { noid: { second: { tip: 281000, instance_count: 0 } } } }));
   assert.equal(cls(look), "sc-in look");
@@ -139,7 +139,7 @@ test("tone and foot are decided in plan(), as data: the same words without a bro
 });
 
 test("the done headline has a tick icon with no text, the headline is still the card's one h2 and its words are unchanged", async () => {
-  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
+  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } }, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
   const h = done.byId("pg-headline");
   assert.equal(h.children[0].tag, "svg");
   assert.equal(h.textContent, "Swap complete");
@@ -169,7 +169,7 @@ test("the foot line: what the program is doing, the sentence about nothing to do
   assert.equal(look.byId("pg-card").querySelector(".sc-foot"), null);
   const alarm = await openSwap(F.SWAP_B, (r) => cardPayload(r, { phase: "locked", line_match: LM, autopilot: { alice: null, bob: ON("bob") }, status: status("bob"), tick: { lock: mkLock(), notes: ["ALERT: a reorg removed your claim; send it again before D"] } }));
   assert.equal(alarm.byId("pg-card").querySelector(".sc-foot"), null, "an alert makes it a look");
-  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
+  const done = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: A_ON, status: status("alice"), wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } }, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
   assert.equal(done.byId("pg-card").querySelector(".sc-foot").querySelector(".live").textContent, "The transaction ids are under Details, Receipts.");
 });
 

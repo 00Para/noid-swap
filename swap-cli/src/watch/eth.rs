@@ -123,10 +123,10 @@ pub fn lock_word_of(kind: LockKind, preimage: &[u8; 32]) -> [u8; 32] {
     }
 }
 
-/// Blocks per `eth_getLogs` request when a node refuses the whole range of the `poseidon` sender query (public Sepolia RPCs cap a request at this
-/// size; REVIEW-7 R7-1). The old rule that read a result of exactly 1,000 / 5,000 / 10,000 / 20,000 logs as truncated is gone: the query is for
+/// Blocks per `eth_getLogs` request when a node refuses the whole range of the `poseidon` sender query (public Sepolia and Ethereum mainnet RPCs cap a request at 10,000 blocks or more; this
+/// is the largest chunk; REVIEW-7 R7-1). The old rule that read a result of exactly 1,000 / 5,000 / 10,000 / 20,000 logs as truncated is gone: the query is for
 /// Bob's own sender, so its size does not depend on the other users of the contract.
-pub const DEFAULT_LOG_RANGE_MAX: u64 = 50_000;
+pub const DEFAULT_LOG_RANGE_MAX: u64 = 10_000;
 
 /// The error when `getLock` shows a lock that `eth_getLogs` does not. It stays an error (the poll fails and the engine decides nothing on
 /// it); the text only says what is the usual cause right after a lock was mined, so that one failed poll there does not alarm.

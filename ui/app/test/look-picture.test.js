@@ -174,7 +174,7 @@ test("something that needs a look draws no picture on the main view", async () =
 
 test("a finished swap draws no picture (its place is the ticket's Receipts)", async () => {
   const done = await alice("done", { tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } });
-  assert.equal(squash(done.text("pg-headline")), "Swap complete");
+  assert.equal(squash(done.text("pg-headline")), "Swap settled");
   assert.equal(mainPic(done).hidden, true);
 });
 

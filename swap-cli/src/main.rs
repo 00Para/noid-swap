@@ -92,7 +92,7 @@ const USAGE: &str = "usage:
   swap-cli secret FILE [--passphrase-env VAR]   (Alice only: the 32-byte secret as 0x-hex, for equiv-prove and the Ethereum reveal)
   swap-cli tick FILE (--noid-fixture FILE | --noid-rpc URL) (--eth-fixture FILE | --eth-rpc URL)
                 [--record-noid FILE] [--record-eth FILE] [--now UNIX (fixtures only)] [--pending-tx 0x..]... [--reveal-tx 0x..] [--apply]
-                [--closed-by TXID] [--accept-producer-concentration] [--single-node-ok] [--observe-only]
+                [--closed-by TXID] [--accept-producer-concentration] [--acknowledge-producer-share PERMILLE] [--single-node-ok] [--observe-only]
                 (--observe-only, with --apply only: write the facts the observation shows (phase moves, instance gone, lock seen, reorgs, the stored --eth-from-block,
                  the producer-screen detections and other alerts) and NOTHING a decision records: no intent, no recorded abort, no spend parameters in the output (the action
                  prints as a read-only tick prints it). Refused when the file holds an intent or a pending action or its history shows an intent was ever decided (run a full --apply then), together with --closed-by,
@@ -153,7 +153,9 @@ const USAGE: &str = "usage:
   fixture), keeps them in FILE.producers, and counts who produced the last 2,880 and the last 720 blocks. Under the production profile `lock_eth` is not offered while one
   address produced more than 35 % of either window, or when the headers cannot be read in full, are stale, or the second Parano1d node disagrees or is missing (under production
   --single-node-ok does not relax the second-node part of this check); under sepolia and rehearsal the same check only warns. The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives the production refusals: it
-  prints a warning on every tick and writes one history entry; it is never implied by a profile. A detection that cannot come from two honest nodes (another producer for a
+  prints a warning on every tick and writes one history entry; it is never implied by a profile. --acknowledge-producer-share PERMILLE (1 to 650; tick and the other commands that read the nodes) is the narrow form, production only: it waives
+  only 'one address above the limit' while the share in BOTH windows is at most PERMILLE, and 'no second Parano1d node' when the one --noid-rpc is a loopback node (127.0.0.1, localhost, [::1]); it never waives unreadable or stale headers, a second node
+  that disagrees, a remembered disagreement or the alert latch; the tick prints an ACKNOWLEDGED line and the history records producer_share_acknowledged. The tick JSON carries the structured `producer_screen` object. A detection that cannot come from two honest nodes (another producer for a
   block with equal hashes, confirmed by a second ask; or another block below an anchor they agree on) is kept in FILE.producer-differs and, with `tick --apply`, in the history
   of FILE, and refuses the lock for the rest of that swap file under production: once a `tick --apply` has run, removing the marker does not clear it (the swap file's history keeps it); the ways on are the flag above or a new swap file.
   It is a screen, not a defence.";
@@ -483,6 +485,14 @@ fn observe_tracking(producer_cache: Option<&Path>, file: &SwapFile, flags: &Hash
     noid.second_label = flags.get("noid-rpc").and_then(|v| v.get(1)).map(|u| redact(u));
     // T21: the operator accepts the producer-concentration risk (never implied by a profile).
     noid.accept_producer_concentration = flags.contains_key("accept-producer-concentration");
+    // D2: the narrow acknowledgement (production only; refused at parse time above 650 or below 1). A loopback node is a single `--noid-rpc` whose host is local.
+    if let Some(v) = flags.get("acknowledge-producer-share") {
+        noid.acknowledge_producer_share = Some(swap_cli::producer_gate::parse_ack_value(v.last().map(String::as_str).unwrap_or(""))?);
+    }
+    noid.single_node_loopback = match flags.get("noid-rpc") {
+        Some(urls) if urls.len() == 1 => swap_cli::watch::http::is_loopback_http(&urls[0]),
+        _ => false,
+    };
     // T21: who produced the recent blocks, from Bob's own node's headers. Bob only, before his lock, and only against a live node.
     if let (Some(path), true) = (producer_cache, swap_cli::engine::producer_scan_wanted(file)) {
         let mut detected: Option<(u64, swap_cli::producer_marker::MarkerKind)> = None;
@@ -798,6 +808,12 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
         "closed_by": closed_json,
         "action": action_json,
         "notes": decision.notes,
+        // The screen as data (Bob, before his lock): never an address. `null` when the screen is not asked in this phase.
+        "producer_screen": if swap_cli::engine::producer_scan_wanted(&file) {
+            serde_json::to_value(swap_cli::producer_gate::report(file.public.params.profile.gates(), noid, now)).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        },
         "intent": intent_json(&outcome.intent),
         // The terms of the swap that the lock is bound to, as THIS tick read them from the file (copies, nothing computed or decided): scripts/live/lock.sh
         // hashes them with the intent's parameters into the approval it hands to `live.js lock`, which recomputes the hash from what it is about to send

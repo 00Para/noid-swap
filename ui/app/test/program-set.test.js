@@ -299,7 +299,12 @@ test("new swap: every error is by form field; production, unknown fields, an uns
       }
       assert.fail("expected a refusal");
     };
-    assert.match(errors(FORM({ profile: "production" })).profile, /one of/);
+    assert.match(errors(FORM({ profile: "bogus" })).profile, /one of/);
+    // Ethereum mainnet: the caps (one above each), version 1 only and no single-node switch are refused by field
+    assert.match(errors(FORM({ profile: "production", noid_amount: "2500.000001" })).noid_amount, /cap|over/);
+    assert.match(errors(FORM({ profile: "production", eth_amount: "0.500000000000000001" })).eth_amount, /cap|over/);
+    assert.match(errors(FORM({ profile: "production", contract_version: 2 })).contract_version, /1 only/);
+    assert.match(errors(FORM({ profile: "production", single_node_ok: true })).single_node_ok, /not on Ethereum mainnet/);
     assert.match(errors(FORM({ extra: "x" })).extra, /unknown field/);
     const f = FORM();
     delete f.single_node_ok;
@@ -371,7 +376,7 @@ test("atStake: active needs a swap file and a phase that is not ended; in_contra
     const x = find(a.id);
     assert.deepEqual([x.active, x.in_contract, x.phase, x.coins, x.role], [true, true, "funding_submitted", { noid_micronoid: String(F.TERMS.amount_micronoid), eth_wei: null }, "alice"]);
     assert.equal(typeof x.until_unix, "number");
-    assert.match(x.until_text, /^about \d\d:\d\d/);
+    assert.match(x.until_text, /^back by about \d\d:\d\d/);
     setPhase(a, "alice", "refunded");
     assert.deepEqual([find(a.id).active, find(a.id).in_contract], [false, false]);
     for (const p of ["done", "lost", "aborted"]) {

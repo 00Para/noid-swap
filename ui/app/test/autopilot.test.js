@@ -497,7 +497,7 @@ test("stop: a held step the engine does not offer is a wait (amendment F); one i
     steps(h, 5);
     assert.equal(h.log.length, 0);
     assert.deepEqual(needs(h, "bob"), [], "not a stop");
-    assert.equal(viewOf(h, "bob").doing, "waiting for the engine to offer your next step");
+    assert.equal(viewOf(h, "bob").doing, "waiting for the next step");
     // the engine says outright not to send it: a stop, reported once, and nothing runs
     h.tick("bob", "lock_eth", { held: true, mutate: (t) => (t.action.reason += " (do NOT send it)") });
     steps(h, 3);

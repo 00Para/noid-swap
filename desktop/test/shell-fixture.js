@@ -7,6 +7,7 @@ const path = require("node:path");
 const { EventEmitter } = require("node:events");
 const { createFakeElectron } = require("./fake-electron");
 const { createShell } = require("../lib/shell");
+const releaseFixture = require("./release-fixture.js");
 
 const TOKEN = "TOKEN-canary-7f3a";
 
@@ -134,12 +135,17 @@ function makeEnv(opts = {}) {
   };
 
   // curl.exe is checked to exist at start: say it does, on whatever machine the tests run
-  // opts.updateRepo: the no1d.updateRepo the shell reads from desktop/package.json (the real file has null)
+  // opts.updateRepo: the no1d.updateRepo the shell reads from desktop/package.json; a test that gives none runs as a test build (null), whatever the real file names
   const pkgPath = (p) => /[\\/]desktop[\\/]package\.json$/.test(String(p));
   const fsx = {
     ...fs,
     existsSync: (p) => (/curl(.exe)?$/.test(String(p)) ? true : fs.existsSync(p)),
-    readFileSync: (p, ...rest) => (opts.updateRepo !== undefined && pkgPath(p) ? JSON.stringify({ name: "no1d-swap", no1d: { updateRepo: opts.updateRepo } }) : fs.readFileSync(p, ...rest)),
+    readFileSync: (p, ...rest) => {
+      if (!pkgPath(p)) return fs.readFileSync(p, ...rest);
+      const pkg = JSON.parse(fs.readFileSync(p, "utf8"));
+      pkg.no1d = { ...(pkg.no1d || {}), updateRepo: opts.updateRepo === undefined ? null : opts.updateRepo };
+      return JSON.stringify(pkg);
+    },
   };
   const fetched = [];
   const deps = {
@@ -153,9 +159,15 @@ function makeEnv(opts = {}) {
     manifest: opts.manifest,
     now: opts.now,
     // the update check's network: every call is recorded; with no answer given, the check fails as a network error would
+    // the two signed-notice assets of a newest release are served by the release fixture and not recorded in `fetched`
+    updatePublicKey: releaseFixture.PUB,
     updateFetchJson: async (url, o) => {
+      if (opts.updateAnswer === undefined) {
+        fetched.push({ url, headers: o && o.headers });
+        throw Object.assign(new Error("offline"), { reason: "network" });
+      }
+      if (url.includes("/releases/assets/")) return releaseFixture.releaseFetch(typeof opts.updateAnswer === "function" ? () => opts.updateAnswer(url) : opts.updateAnswer)(url, o);
       fetched.push({ url, headers: o && o.headers });
-      if (opts.updateAnswer === undefined) throw Object.assign(new Error("offline"), { reason: "network" });
       return typeof opts.updateAnswer === "function" ? opts.updateAnswer(url) : opts.updateAnswer;
     },
   };

@@ -27,7 +27,7 @@ fn run(cmd: &mut Command) -> (bool, String, String) {
 fn alice_args(out: &std::path::Path, cast: &swap_cli::htlc_harness::Cast) -> Vec<String> {
     let mut v: Vec<String> = [
         "new-alice", "--out", out.to_str().unwrap(), "--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000",
-        "--fee-estimate", "5800", "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "31337",
+        "--fee-estimate", "5800", "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "1",
         "--eth-amount-wei", "10000000000000000", "--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", "--eth-sender",
         "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--fast-kdf",
     ]
@@ -41,7 +41,7 @@ fn alice_args(out: &std::path::Path, cast: &swap_cli::htlc_harness::Cast) -> Vec
 fn bob_args(bundle: &std::path::Path, out: &std::path::Path, cast: &swap_cli::htlc_harness::Cast) -> Vec<String> {
     [
         "new-bob", "--bundle", bundle.to_str().unwrap(), "--out", out.to_str().unwrap(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000",
-        "--eth-chain-id", "31337", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-amount-wei", "10000000000000000",
+        "--eth-chain-id", "1", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-amount-wei", "10000000000000000",
         "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8",
     ]
     .iter()

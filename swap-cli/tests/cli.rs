@@ -48,7 +48,7 @@ fn alice_and_bob_files_through_the_binary() {
     let cast = swap_cli::htlc_harness::Cast::new();
     let common = [
         "--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000", "--fee-estimate", "5800",
-        "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "31337",
+        "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "1",
         "--eth-amount-wei", "10000000000000000", "--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
         "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--eth-code-hash", CODE_HASH, "--fast-kdf",
     ];
@@ -77,7 +77,7 @@ fn alice_and_bob_files_through_the_binary() {
     let bob_args = |out: &std::path::Path| {
         let mut args = vec![
             "new-bob".to_string(), "--bundle".into(), bundle_path.to_str().unwrap().into(), "--out".into(), out.to_str().unwrap().into(),
-            "--bob".into(), cast.bob.to_bech32(), "--amount".into(), "10000000".into(), "--eth-chain-id".into(), "31337".into(),
+            "--bob".into(), cast.bob.to_bech32(), "--amount".into(), "10000000".into(), "--eth-chain-id".into(), "1".into(),
             "--eth-contract".into(), "0x5fbdb2315678afecb367f032d93f642f64180aa3".into(), "--eth-amount-wei".into(), "10000000000000000".into(),
             "--eth-sender".into(), "0x70997970c51812dc3a010c7d01b50e0d17dc79c8".into(), "--eth-code-hash".into(), CODE_HASH.into(),
         ];
@@ -193,7 +193,7 @@ fn secret_prints_alice_secret_only_with_the_passphrase() {
     let cast = swap_cli::htlc_harness::Cast::new();
     let common = [
         "--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32(), "--amount", "10000000", "--fee-estimate", "5800",
-        "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "31337",
+        "--h-create", "300000", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-chain-id", "1",
         "--eth-amount-wei", "10000000000000000", "--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc",
         "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8", "--eth-code-hash", CODE_HASH, "--fast-kdf",
     ];
@@ -224,7 +224,7 @@ fn chain_id_is_mandatory_and_the_code_hash_is_the_compiled_in_constant_for_both_
     let cast = swap_cli::htlc_harness::Cast::new();
     let all: Vec<(&str, String)> = vec![
         ("--alice", cast.alice.to_bech32()), ("--bob", cast.bob.to_bech32()), ("--amount", "10000000".into()), ("--fee-estimate", "5800".into()),
-        ("--h-create", "300000".into()), ("--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3".into()), ("--eth-chain-id", "31337".into()),
+        ("--h-create", "300000".into()), ("--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3".into()), ("--eth-chain-id", "1".into()),
         ("--eth-amount-wei", "10000000000000000".into()), ("--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc".into()),
         ("--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8".into()), ("--eth-code-hash", CODE_HASH.into()), ("--fast-kdf", "".into()),
     ];
@@ -271,7 +271,7 @@ fn chain_id_is_mandatory_and_the_code_hash_is_the_compiled_in_constant_for_both_
             "--eth-sender".into(), "0x70997970c51812dc3a010c7d01b50e0d17dc79c8".into(),
         ];
         if chain_id {
-            args.extend(["--eth-chain-id".to_string(), "31337".into()]);
+            args.extend(["--eth-chain-id".to_string(), "1".into()]);
         }
         if let Some(h) = code_hash {
             args.extend(["--eth-code-hash".to_string(), h.to_string()]);
@@ -382,11 +382,11 @@ fn read_only_tick_withholds_the_parameters_of_a_spend_and_apply_records_and_prin
     let eth = dir.path().join("eth.json");
     std::fs::write(
         &eth,
-        serde_json::json!({"description": "minimal Ethereum answers: chain 11155111, the HTLC runtime code, no lock", "calls": [
+        serde_json::json!({"description": "minimal Ethereum answers: chain 1, the HTLC runtime code, no lock", "calls": [
             {"method": "eth_blockNumber", "result": "0xa"},
             {"method": "eth_getBlockByNumber", "result": {"number": "0xa", "timestamp": "0x3e8"}},
             {"method": "eth_getBlockByNumber", "result": {"number": "0x8", "timestamp": "0x3d0"}},
-            {"method": "eth_chainId", "result": "0xaa36a7"},
+            {"method": "eth_chainId", "result": "0x1"},
             {"method": "eth_getCode", "result": real_code},
             {"method": "eth_getLogs", "result": []},
             {"method": "eth_call", "error": {"code": 3, "message": "execution reverted: LockNotFound"}}
@@ -472,11 +472,11 @@ fn tick_apply_before_h_create_records_the_funding_intent_and_the_next_tick_holds
     let eth = dir.path().join("eth.json");
     std::fs::write(
         &eth,
-        serde_json::json!({"description": "minimal Ethereum answers: chain 11155111, the HTLC runtime code, no lock", "calls": [
+        serde_json::json!({"description": "minimal Ethereum answers: chain 1, the HTLC runtime code, no lock", "calls": [
             {"method": "eth_blockNumber", "result": "0xa"},
             {"method": "eth_getBlockByNumber", "result": {"number": "0xa", "timestamp": "0x3e8"}},
             {"method": "eth_getBlockByNumber", "result": {"number": "0x8", "timestamp": "0x3d0"}},
-            {"method": "eth_chainId", "result": "0xaa36a7"},
+            {"method": "eth_chainId", "result": "0x1"},
             {"method": "eth_getCode", "result": real_code},
             {"method": "eth_getLogs", "result": []},
             {"method": "eth_call", "error": {"code": 3, "message": "execution reverted: LockNotFound"}}

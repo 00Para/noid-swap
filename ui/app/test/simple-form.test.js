@@ -20,7 +20,7 @@ const formView = () => ({
   },
   roles: ["alice", "bob"],
 });
-const SETTINGS = { v: 1, noid_rpc: "http://127.0.0.1:9601", noid_rpc2: null, noid_rpc2_remote: false, eth: { sepolia: { rpc: "https://s.example", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null } }, eth_rpc2_remote: false, rpc_timeout_s: 60, alert_url: null, noid_payout: MY_NOID, eth_payout: MY_ETH, bob_noid: null, board: { relays: ["wss://r1.example"], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0 }, update_check: "ask" };
+const SETTINGS = { v: 1, noid_rpc: "http://127.0.0.1:9601", noid_rpc2: null, noid_rpc2_remote: false, eth: { sepolia: { rpc: "https://s.example", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null }, production: { rpc: "https://ethereum-rpc.publicnode.com", rpc2: "https://rpc.mevblocker.io" } }, eth_rpc2_remote: false, rpc_timeout_s: 60, alert_url: null, noid_payout: MY_NOID, eth_payout: MY_ETH, bob_noid: null, board: { relays: ["wss://r1.example"], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0 }, update_check: "ask" };
 
 async function formPage({ settings = SETTINGS, form = formView(), routes = {} } = {}) {
   const page = await loadPage({
@@ -59,7 +59,7 @@ test("form: the main fields in order, the remember tick on, the single-node tick
   assert.equal(g("ns-single_node_ok").checked, false);
   assert.match(textOf(root), /Every value is checked by the program before anything is made\. A new swap sends nothing to any chain; coins move only after you approve and deposit\./);
   assert.match(textOf(root), /Use these addresses for my next swaps/);
-  assert.doesNotMatch(textOf(root), /production|mainnet/i);
+  assert.match(textOf(root), /Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap/);
 });
 
 test("form: Alice's labels and hints", async () => {
@@ -393,7 +393,7 @@ test("settings: the groups in their order and the closed Advanced fold holding t
   const { root, g } = await settingsPage();
   // the groups are sections with a title and one line (no fieldset any more), each tied to its title
   const titles = root.all((n) => n.tag === "h2" && n.attrs.id && n.attrs.id.startsWith("st-sec-")).map((n) => textOf(n).trim());
-  assert.deepEqual(titles, ["Parano1d node", "Ethereum node (Sepolia)", "Your addresses", "Updates", "Alerts", "Rehearsal chain", "Offer board"]);
+  assert.deepEqual(titles, ["Parano1d node", "Ethereum node (Sepolia)", "Ethereum node (mainnet)", "Your addresses", "Updates", "Alerts", "Rehearsal chain", "Offer board"]);
   assert.equal(root.all((n) => n.tag === "fieldset" || n.tag === "legend").length, 0);
   for (const sec of root.all((n) => n.className.split(/\s+/).includes("set-sec"))) assert.ok(root.all((n) => n.attrs.id === sec.attrs["aria-labelledby"]).length === 1);
   assert.match(textOf(root), /They fill the form of a new swap./);

@@ -7,7 +7,7 @@
 (() => {
   "use strict";
   let H = null; // helpers handed over by operator.js
-  const ui = { form: null, dialog: null, lastSig: "", msg: null, formMsg: null, sending: false, ack: false, folded: false, termsOpened: false, trade: null, tradeTerms: null, roleTouched: false, ap: { typed: "", ticks: {} } };
+  const ui = { form: null, dialog: null, lastSig: "", msg: null, formMsg: null, sending: false, ack: false, folded: false, termsOpened: false, trade: null, tradeTerms: null, roleTouched: false, ap: { typed: "", ticks: {}, cmp: {} }, cap: {} };
   const $ = (id) => document.getElementById(id);
 
   // ------------------------------------------------------------------ icons
@@ -32,8 +32,10 @@
     key: Object.freeze([["rect", { x: 4.5, y: 4.5, width: 7, height: 7, rx: 1, transform: "rotate(45 8 8)" }]]),
     hand: Object.freeze([["circle", { cx: 8, cy: 8, r: 5.5 }], ["path", { d: "M4.2 4.2l7.6 7.6" }]]),
   });
-  /** The two coin glyphs are the two arcs of the mark: NOID is its outer arc, ETH the same arc turned half way round. They always sit beside their ticker. */
-  const COIN_DATA = Object.freeze({ noid: "M10.5 3.02A7 7 0 1 1 3.1 8.8", eth: "M9.5 16.98A7 7 0 1 1 16.9 11.2" });
+  /** R7: the two coin marks are solid shapes that differ in shape, not only in colour (safe for colour blindness): NOID is a disc with one diagonal cut (a slashed zero), ETH a disc with three short
+   *  horizontal cuts (the sign of Ethereum in negative). They always sit beside their ticker and are hidden from a screen reader. The cuts are paths of the class "cut". */
+  const COIN_DISC = "M2.5 10a7.5 7.5 0 1 0 15 0a7.5 7.5 0 1 0 -15 0z";
+  const COIN_DATA = Object.freeze({ noid: Object.freeze(["M6.2 13.8L13.8 6.2"]), eth: Object.freeze(["M6.5 7h7", "M7.5 10h5", "M6.5 13h7"]) });
   const SVG_NS = "http://www.w3.org/2000/svg";
   // an icon is decoration: a document that cannot make svg elements (a minimal test document) simply gets none
   const canDraw = () => typeof document !== "undefined" && typeof document.createElementNS === "function";
@@ -52,8 +54,9 @@
   /** The glyph of a coin ("noid" or "eth"), or null. */
   function coinGlyph(coin, extra) {
     if ((coin !== "noid" && coin !== "eth") || !canDraw()) return null;
-    const svg = svgNode("svg", { class: `coin ${coin}${extra ? " " + extra : ""}`, viewBox: "0 0 20 20", "aria-hidden": "true", focusable: "false" });
-    svg.appendChild(svgNode("path", { d: COIN_DATA[coin] }));
+    const svg = svgNode("svg", { class: `coin solid ${coin}${extra ? " " + extra : ""}`, viewBox: "0 0 20 20", "aria-hidden": "true", focusable: "false" });
+    svg.appendChild(svgNode("path", { class: "disc", d: COIN_DISC }));
+    for (const d of COIN_DATA[coin]) svg.appendChild(svgNode("path", { class: "cut", d }));
     return svg;
   }
 
@@ -112,10 +115,11 @@
     H.rerender();
   }
 
-  async function startAction(id) {
+  async function startAction(id, extra) {
     if (!H.state.token) return;
     ui.msg = null;
-    const r = await post("/api/action", { id });
+    // `extra`: the one field a step may carry besides its id (the re-send box's new fee cap); the server checks it
+    const r = await post("/api/action", extra ? { id, ...extra } : { id });
     if (!r.ok) ui.msg = { kind: "danger", text: `${id}: ${r.json.error || "HTTP " + r.status}` };
     forceRender();
     await H.reload(true);
@@ -218,10 +222,10 @@
     return !H.state.token ? KEY_LOST : entry && entry.blocked ? entry.blocked : entry && entry.mode_blocked ? entry.mode_blocked : lockWhy ? lockWhy : a.busy ? `Busy: ${a.busy.id} is running` : null;
   }
 
-  function actionButton(a, id, label, note) {
+  function actionButton(a, id, label, note, getExtra) {
     const entry = (a.table || []).find((e) => e.id === id);
     const why = actionWhy(a, id);
-    return btn(label, () => startAction(id), { disabled: !!why, title: why || (entry ? `${note || entry.note}\n\n${entry.command || ""}` : note) });
+    return btn(label, () => startAction(id, getExtra ? getExtra() : undefined), { disabled: !!why, title: why || (entry ? `${note || entry.note}\n\n${entry.command || ""}` : note) });
   }
 
   function rowsList(rows) {
@@ -260,6 +264,93 @@
     return box;
   }
 
+  /**
+   * The re-send box's field "New fee cap (gwei)" (the four replace steps): prefilled with the larger of the approved cap times 1.25 and (2 x the swap's fresh base fee + the re-send's tip) plus 10 %,
+   * rounded up to two decimals and clamped into the server's bounds (live.js refuses a cap under twice the base fee, so a stuck step usually needs the second; 1.25 x alone when the base fee is not
+   * known or is old), and a line that says what the swap key must hold for that cap (the step's gas ceiling times the new cap), what it holds now when the program knows, and where to send the
+   * difference. Two plain lines: the transaction pays Ethereum's fee level plus the tip, never the cap (the cap is only the most the person allows), and a re-send raises the tip (live.js: at least the
+   * old tip plus 12.5 %, and at least min(cap, 1 gwei)). The page only fills in and posts the text as `new_cap_gwei`; the server enforces the bounds.
+   * Returns { node, extra } (extra() is the request's extra field, or undefined when the field is empty).
+   */
+  function resendCap(sp, a, payload) {
+    const L = LF();
+    const key = `${H.state.swap || ""}|${sp.id}`;
+    // the bounds and the approved cap come from the step's own view (new_cap); the launch numbers are the fallback for the approved cap
+    const nc = sp.new_cap && typeof sp.new_cap === "object" ? sp.new_cap : null;
+    const lp = launchOf(payload);
+    const bigOf = (x) => (typeof x === "string" && /^[0-9]{1,40}$/.test(x) ? BigInt(x) : null);
+    const tipRun = lp && lp.fees ? bigOf(lp.fees.tip_wei) : null;
+    const baseWei = lp && lp.fees ? bigOf(lp.fees.base_fee_wei) : null; // null when the reading is old: launchfacts keeps only a fresh one
+    const GWEI = 10n ** 9n;
+    // the tip a re-send uses (live.js replacePlan): the larger of min(cap, 1 gwei) and the old tip plus 12.5 %
+    const tipFor = (capWei) => {
+      let t = capWei < GWEI ? capWei : GWEI;
+      if (tipRun !== null && (tipRun * 1125n) / 1000n > t) t = (tipRun * 1125n) / 1000n;
+      return t;
+    };
+    if (ui.cap[key] === undefined) {
+      let pre = "";
+      try {
+        const approved = nc && L && L.gweiToWei(String(nc.approved_gwei)) !== null ? L.gweiToWei(String(nc.approved_gwei)) : lp && lp.fees && lp.fees.cap_wei ? BigInt(lp.fees.cap_wei) : null;
+        if (approved !== null && L) {
+          const step = 10n ** 7n;
+          const up = (x) => ((x + step - 1n) / step) * step;
+          let v = up((approved * 125n + 99n) / 100n);
+          if (baseWei !== null) {
+            const need = up(((2n * baseWei + tipFor(v > 2n * baseWei ? v : 2n * baseWei)) * 110n + 99n) / 100n);
+            if (need > v) v = need;
+          }
+          // clamped into the bounds: above min_exclusive, at most max
+          const mx = nc ? L.gweiToWei(String(nc.max_gwei)) : null;
+          const mn = nc ? L.gweiToWei(String(nc.min_exclusive_gwei)) : null;
+          if (mx !== null && v > mx) v = mx;
+          if (mn !== null && v <= mn) v = ((mn / step) + 1n) * step;
+          pre = L.weiToGwei(v) || "";
+        }
+      } catch {
+        pre = "";
+      }
+      ui.cap[key] = pre;
+    }
+    const ceiling = L ? (/reveal/.test(sp.id) ? L.GAS.reveal.ceiling : L.GAS.refund.ceiling) : null;
+    const w = walletOf(a);
+    const r = w && w.roles && w.roles[sp.role];
+    const keyAddr = (r && r.status && r.status.eth && r.status.eth.address) || (r && r.key_address) || null;
+    const id = `resend-cap-${sp.id}`;
+    const input = H.el("input", { type: "text", id, autocomplete: "off", spellcheck: "false", inputmode: "decimal", value: ui.cap[key], "aria-describedby": `${id}-need` });
+    const amount = H.el("span", { class: "fig", text: "…" });
+    // what the swap key holds now, when the program knows (the wallet status it already reads); said before the first dry run only, the dry run's own words follow after it
+    const heldWei = r && r.status && r.status.eth ? bigOf(String(r.status.eth.balance_wei)) : null;
+    const tail = H.el("span", { class: "resend-tail" }); // " for this fee cap; it holds X. Send the difference to " (one text, so that it reads whole)
+    const tipLine = H.el("span", { class: "resend-tip" });
+    const show = () => {
+      const wei = L ? L.gweiToWei(String(ui.cap[key]).trim()) : null;
+      amount.textContent = wei !== null && ceiling !== null ? `${L.fmtEth(ceiling * wei).text} ETH` : "…";
+      tail.textContent = ` for this fee cap${!sp.dry && heldWei !== null && L ? `; it holds ${L.fmtEth(heldWei).text} ETH` : ""}. Send the difference to `;
+      const tip = wei !== null && L ? L.weiToGwei(((tipFor(wei) + 10n ** 7n - 1n) / 10n ** 7n) * 10n ** 7n) : null;
+      tipLine.textContent = tip ? ` A re-send also raises the tip to about ${tip} gwei.` : "";
+    };
+    input.addEventListener("input", () => {
+      ui.cap[key] = input.value;
+      show();
+    });
+    // a send at another cap than the held dry run's needs a new dry run
+    const redo = H.el("p", { class: "attn resend-redo", role: "status" });
+    const showRedo = () => {
+      const held = sp.dry && typeof sp.dry_new_cap_gwei === "string" ? sp.dry_new_cap_gwei : null;
+      const now = String(ui.cap[key]).trim();
+      redo.textContent = held !== null && now !== held ? "The dry run was made at " + held + " gwei: run the dry run again for this fee cap before you send." : "";
+    };
+    input.addEventListener("input", showRedo);
+    showRedo();
+    show();
+    const bounds = nc ? H.el("p", { class: "dim", text: "Above " + nc.min_exclusive_gwei + " gwei and at most " + nc.max_gwei + " gwei (the approved cap is " + nc.approved_gwei + " gwei)." }) : null;
+    const need = H.el("p", { class: "dim resend-need", id: `${id}-need` }, "The swap key must hold at least ", amount, tail, keyAddr ? H.addrWhole(keyAddr, "the swap key address") : "the swap key", " first if it holds less.");
+    const feeLevel = H.el("p", { class: "dim resend-fee" }, "You pay Ethereum's fee level plus the tip, not the cap; the cap is only the most you allow.", tipLine);
+    const node = H.el("div", { class: "resend-cap" }, H.el("label", { for: id, class: "typed-label", text: "New fee cap (gwei)" }), input, bounds, feeLevel, need, redo);
+    return { node, extra: () => (String(ui.cap[key]).trim() ? { new_cap_gwei: String(ui.cap[key]).trim() } : undefined) };
+  }
+
   function spendBlock(view, payload) {
     const a = payload && payload.actions;
     if (!a || !a.enabled || !view || !view.action) return null;
@@ -272,7 +363,9 @@
       if (sp.kind === "fund_noid") box.appendChild(H.el("p", { class: "plain", text: walletOf(a) ? "This funds from this swap's own wallet, once: the wallet writes its transaction before it sends, and running it again sends the same bytes, never a second funding." : "Use this button only if you have NOT already funded (fund.sh in a terminal, or the wallet)." }));
       if (sp.kind === "refund_noid" || sp.kind === "sweep_noid" || sp.kind === "sweep_eth") box.appendChild(H.el("p", { class: "plain", text: sp.kind === "refund_noid" ? "The deadline has passed and the NOID is still at the contract: this takes it back to this swap's own wallet. The console records the close in the swap file once it is confirmed." : "The swap is over: this sends what is left to the payout address you gave when the swap was made, and to no other address." }));
       box.appendChild(H.el("p", { class: "dim", text: `Two steps: a dry run of ${sp.dry_id.replace(/^dry-/, "")} (valid 90 s), then the confirmation. The server checks both again.` }));
-      const dryRow = H.el("div", { class: "row" }, actionButton(a, sp.dry_id, dry ? "Run the dry run again" : "1. Run the dry run", "Sends nothing"));
+      const cap = sp.replace ? resendCap(sp, a, payload) : null;
+      if (cap) box.appendChild(cap.node);
+      const dryRow = H.el("div", { class: "row" }, actionButton(a, sp.dry_id, dry ? "Run the dry run again" : "1. Run the dry run", "Sends nothing", cap ? cap.extra : undefined));
       if (dry) {
         dryRow.appendChild(H.chip(dry.ok && dry.all_ok ? "ok" : "danger", dry.ok && dry.all_ok ? "all fields match" : dry.ok ? "a field does not match" : `dry run failed (${dry.result})`));
         dryRow.appendChild(H.el("span", { class: "dim mono", dataset: { dryAt: String(dry.at) }, text: "" }));
@@ -289,7 +382,7 @@
       // An engine ALARM does not stop a step that only returns coins to their owner (the ETH refund); its whole text is shown beside the send box.
       for (const n of sp.notices || []) box.appendChild(H.el("div", { class: "alarm danger", role: "alert" }, H.el("span", { class: "lv", text: "engine alarm" }), H.el("span", { class: "tx", text: n.text })));
       if ((sp.notices || []).length) box.appendChild(H.el("p", { class: "dim", text: "The engine's alarm does not stop this step: it only returns your own coins and the engine offers it. Read the alarm before you send." }));
-      const sendRow = H.el("div", { class: "row" }, btn("2. Send…", () => openConfirm(sp, a), { primary: true, disabled: !sp.eligible || !H.state.token || !!a.busy, title: sp.eligible ? sp.command : "Not yet: " + (reasons.map((r) => r.text).join(" ") || "see below") }), H.el("code", { class: "mono dim", text: sp.command || "" }));
+      const sendRow = H.el("div", { class: "row" }, btn("2. Send…", () => openConfirm(sp, a, cap ? cap.extra : undefined), { primary: true, disabled: !sp.eligible || !H.state.token || !!a.busy, title: sp.eligible ? sp.command : "Not yet: " + (reasons.map((r) => r.text).join(" ") || "see below") }), H.el("code", { class: "mono dim", text: sp.command || "" }));
       box.appendChild(sendRow);
       if (!sp.eligible && reasons.length) {
         const ul = H.el("ul", { class: "blocked", "aria-label": "Why sending is not possible yet" });
@@ -316,7 +409,7 @@
     }
   }
 
-  function openConfirm(sp, a) {
+  function openConfirm(sp, a, getExtra) {
     closeDialog();
     const dlg = document.createElement("dialog");
     dlg.className = "confirm";
@@ -339,7 +432,9 @@
     const send = btn("Send for real", async () => {
       send.disabled = true;
       clear(err);
-      const body = needsStatement ? { id: sp.id, typed: input.value, no_pending_funding: !!(stmt && stmt.checked), bob_check_matches: !!(stmtBob && stmtBob.checked) } : needsAlice ? { id: sp.id, typed: input.value, alice_check_matches: !!(stmtAlice && stmtAlice.checked) } : { id: sp.id, typed: input.value };
+      const base = needsStatement ? { id: sp.id, typed: input.value, no_pending_funding: !!(stmt && stmt.checked), bob_check_matches: !!(stmtBob && stmtBob.checked) } : needsAlice ? { id: sp.id, typed: input.value, alice_check_matches: !!(stmtAlice && stmtAlice.checked) } : { id: sp.id, typed: input.value };
+      // the re-send box's new fee cap travels with the send as well as with the dry run (the server checks the bounds)
+      const body = getExtra && getExtra() ? { ...base, ...getExtra() } : base;
       const r = await post("/api/spend", body);
       if (r.ok) {
         closeDialog();
@@ -551,7 +646,9 @@
     const row = H.el("div", { class: "deposit-row" });
     row.appendChild(H.el("p", { class: "who" }, coinGlyph(cls, "sm"), `${coin} to deposit`, H.el("span", { class: "dst" }, seen ? H.chip("ok", "seen") : H.chip("attn", "not yet"))));
     row.appendChild(H.el("p", { class: "line" }, H.el("span", { class: "k", text: "Send at least" }), H.el("span", { class: `leg ${cls}` }, H.el("span", { class: "amt", text: figure }), H.el("span", { class: "unit", text: coin })), H.copyButton(figure, `the ${coin} amount`, "Copy amount", { icon: true })));
-    row.appendChild(H.el("p", { class: "line" }, H.el("span", { class: "k", text: "to this address" }), H.copyButton(address, `the ${coin} deposit address`, address, { icon: true, mono: true })));
+    // R3: the deposit address is shown whole, in groups of four (an address that does not parse keeps the plain string)
+    const parsed = LF() ? LF().groups(String(address)) : null;
+    row.appendChild(H.el("p", { class: "line" }, H.el("span", { class: "k", text: "to this address" }), H.copyButton(address, `the ${coin} deposit address`, parsed ? undefined : address, { icon: true, mono: true, whole: true })));
     if (exact) row.appendChild(H.el("p", { class: "dim", text: exact }));
     return row;
   }
@@ -840,38 +937,243 @@
   };
   // program mode: what the program does once it is approved, in three short lines (every promise of the longer text above is kept)
   const AP_INTRO_PROGRAM = {
-    alice: ["Once you approve, the program funds the NOID from this swap's own wallet and reveals the secret by itself, each step with the same dry run and the same checks as a step sent by hand. It waits for your deposit and for the fee reserve.", "If the swap does not go through, it takes the NOID back after the deadline and records that in the swap file. When the swap is over, it sends what is left to your own addresses.", "It stops and asks you when anything is unclear, and it never re-sends a stuck transaction. Test networks only."],
-    bob: ["Once you approve, the program locks the ETH from this swap's own key and claims the NOID by itself, each step with the same dry run and the same checks as a step sent by hand. It waits for your deposit and for the fee reserve.", "If the swap does not go through, it refunds the ETH. When the swap is over, it sends what is left of the key to your own address.", "It stops and asks you when anything is unclear, and it never re-sends a stuck transaction. Test networks only."],
+    alice: ["Once you approve, the program funds the NOID from this swap's own wallet and reveals the secret by itself, each step with the same dry run and the same checks as a step sent by hand. It waits for your deposit and for the fee reserve.", "If the swap does not go through, it takes the NOID back after the deadline and records that in the swap file. When the swap is over, it sends what is left to your own addresses.", "It stops and asks you when anything is unclear, and it never re-sends a stuck transaction. Test networks and Ethereum mainnet (within the program's limits per swap)."],
+    bob: ["Once you approve, the program locks the ETH from this swap's own key and claims the NOID by itself, each step with the same dry run and the same checks as a step sent by hand. It waits for your deposit and for the fee reserve.", "If the swap does not go through, it refunds the ETH. When the swap is over, it sends what is left of the key to your own address.", "It stops and asks you when anything is unclear, and it never re-sends a stuck transaction. Test networks and Ethereum mainnet (within the program's limits per swap)."],
   };
   const AP_INTRO = {
     alice: "Once you approve, this console funds the NOID and reveals the secret by itself, each step with the same dry run and the same checks as the buttons below. It stops and asks you when anything is unclear. It never re-sends a stuck transaction and never takes NOID back. Test networks only.",
     bob: "Once you approve, this console locks the ETH, claims the NOID and refunds the ETH if the swap does not go through, each step with the same dry run and the same checks as the buttons below. It stops and asks you when anything is unclear. It never re-sends a stuck transaction. Test networks only.",
   };
 
+  // ------------------------------------------------------------------ the launch screens' reads (program mode, display only)
+  // Everything below draws numbers the server already computed (payload.program.launch, from lib/launchfacts.js) and texts of lib/needtext.js and lib/limitstext.js. Nothing here decides
+  // anything, adds a request body field (except the re-send box's new fee cap) or changes what an approval hashes.
+  const LF = () => (typeof window !== "undefined" && window.NoidLaunch ? window.NoidLaunch : null);
+  const NT = () => (typeof window !== "undefined" && window.NoidNeedText ? window.NoidNeedText : null);
+  const LT = () => (typeof window !== "undefined" && window.NoidLimits ? window.NoidLimits : null);
+
+  /** `payload.program.launch` (the server's numbers of this swap), or null. */
+  function launchOf(payload) {
+    const l = payload && payload.program && payload.program.launch;
+    return l && typeof l === "object" ? l : null;
+  }
+  /** True for an Ethereum mainnet swap: the launch numbers say so, else the swap's summary in the list does. */
+  function isMainnet(payload) {
+    const l = launchOf(payload);
+    if (l && typeof l.mainnet === "boolean") return l.mainnet;
+    const sw = payload && payload.program && payload.program.summary;
+    return !!(sw && sw.network === "mainnet");
+  }
+  const ethTxt = (wei) => {
+    const L = LF();
+    const t = L && wei !== null && wei !== undefined ? L.fmtEth(wei) : null;
+    return t ? t.text : null;
+  };
+  const noidTxt = (micro, o) => {
+    const L = LF();
+    const t = L && micro !== null && micro !== undefined ? L.fmtNoid(micro, o) : null;
+    return t ? t.text : null;
+  };
+  const gweiTxt = (wei) => {
+    const L = LF();
+    return L && wei !== null && wei !== undefined ? L.weiToGwei(wei) : null;
+  };
+  /** An address as groups of four inside a sentence (no copy button): a span.addr-whole of span.g. An address that does not parse is the plain string. */
+  /** The groups of an address as one span.addr-whole. `stop` (a full stop or a comma) goes inside the last group, so that it never wraps onto a line of its own; it is not selectable (a copy by hand gets the address only). */
+  function groupsSpan(addr, stop) {
+    const L = LF();
+    const g = L ? L.groups(String(addr)) : null;
+    const texts = g || [String(addr)];
+    return H.el("span", { class: "addr-whole" }, texts.map((x, i) => H.el("span", { class: "g" }, x, stop && i === texts.length - 1 ? H.el("span", { class: "stop", text: stop }) : null)));
+  }
+  /** "2000 NOID" -> "2,000 NOID": the display copy of an amount text (what the person types is never taken from it). Anything else is returned as it is. */
+  const groupAmt = (t) => {
+    const m = /^([0-9]+(?:.[0-9]+)?)( [A-Z]{3,4})$/.exec(String(t === null || t === undefined ? "" : t));
+    const L = LF();
+    return m && L ? L.groupDec(m[1]) + m[2] : t;
+  };
+  const groupsText = (addr) => {
+    const L = LF();
+    const g = L ? L.groups(String(addr)) : null;
+    return g ? g.join(" ") : String(addr);
+  };
+  /** A safety box of the approval, in the existing levels (warn, needs, info, danger). */
+  const levelBox = (level, label, text, role) => H.el("div", { class: `alarm ${level}`, role: role || null }, icon(level === "info" ? "info" : "alert"), H.el("span", { class: "lv", text: label }), H.el("span", { class: "tx", text }));
+
+  /** The fee cap text of the "below the rule" box. `where`: "form" says where to raise it; the approval cannot (the cap is part of what was approved). */
+  function capBelowText(role, cap, base, where) {
+    const tail = where === "form" ? "Raise the cap under Optional settings, or wait for lower fees." : "Make a new swap with a higher cap, or wait for lower fees.";
+    if (role === "alice") return `Your fee cap (${cap} gwei) is below twice Ethereum's base fee now (${base} gwei). While fees stay this high, the program will not send the reveal, and the swap would end with both sides refunded. ${tail}`;
+    return `Your fee cap (${cap} gwei) is below Ethereum's base fee now (${base} gwei). While fees stay this high, the program will not send your lock. ${tail.replace("or wait for lower fees.", "or wait.")}`;
+  }
+
+  /** The minutes line for Bob's stake (R5): "at least about N minutes". `n` comes from the swap's launch numbers. */
+  const bobStakeText = (n) => `After Alice takes the ETH, your program has at least about ${n} minutes to claim your NOID. If this computer is off or offline for all that time, Alice can take the NOID back and you lose the ETH.`;
+
+  /**
+   * The approval's four plain lines (program mode): what the person gives and gets, how long it takes, when the coins are back if the swap stops, and where they go. Each line is `{ text, nodes }`
+   * (`text` for the confirmation dialog, `nodes` for the page: the addresses of the last line are groups of four). A line whose figures are missing is shortened or left out, never guessed.
+   */
+  function plainLines(f, payload, view) {
+    const L = LF();
+    const lp = launchOf(payload);
+    const out = [];
+    const add = (...parts) => out.push({ text: parts.map((x) => (typeof x === "string" ? x : x.t)).join(""), nodes: parts.map((x) => (typeof x === "string" ? x : x.n)) });
+    const rp = lp && L ? L.rateParts(lp.rate) : null;
+    const keep = "Keep this computer on and online until the swap shows Done.";
+    const fees = lp && lp.fees ? lp.fees : null;
+    const times = lp && lp.times ? lp.times : null;
+    const rel = times && L && typeof times.back_after_s === "number" ? L.fmtBack(times.back_after_s) : null;
+    const g = (a, stop) => ({ t: groupsText(a) + (stop || ""), n: groupsSpan(a, stop) });
+    if (f.role === "alice") {
+      if (f.expected_typed && f.gets_text) add(`You give ${groupAmt(f.expected_typed)} and get ${groupAmt(f.gets_text)}${rp ? ` (${rp[0]})` : ""}. After this approval the program does every step by itself.`);
+      add(times && times.usual_min ? `It takes about ${times.usual_min} minutes once both deposits are in. ${keep}` : keep);
+      const stopFee = fees && fees.stopped ? noidTxt(fees.stopped.noid_micro) : null;
+      const less = stopFee ? `, less about ${stopFee} NOID in fees` : "";
+      const back = NT() ? NT().aliceBack(view, H.nowS()) : null;
+      if (back && !back.passed) add(`If Bob does not lock, or anything stops the swap, your NOID is back by about ${hhmm(back.unix)}${less}.`);
+      else if (rel) add(`If Bob does not lock, or anything stops the swap, your NOID is back ${rel} after you pressed Prepare${less}.`);
+      else add("If Bob does not lock, or anything stops the swap, your NOID comes back after the deadline.");
+      const p = f.payouts;
+      if (p && p.eth && p.noid) add("The ETH goes to ", g(p.eth, "."), " What is left of the NOID goes to ", g(p.noid, "."));
+    } else {
+      const net = lp && lp.get_after_fees ? lp.get_after_fees : null;
+      if (f.expected_typed && f.gets_text) add(net ? `You give ${groupAmt(f.expected_typed)} and get ${net} NOID after the Parano1d fee${rp ? ` (${rp[1]})` : ""}. After this approval the program does every step by itself.` : `You give ${groupAmt(f.expected_typed)} and get ${groupAmt(f.gets_text)}. After this approval the program does every step by itself.`);
+      add(times && Number.isInteger(times.bob_online_min) && times.bob_online_min > 0 ? `${bobStakeText(times.bob_online_min)} ${keep}` : keep);
+      const stopEth = fees && fees.stopped ? ethTxt(fees.stopped.eth_now_wei) : null;
+      const maxEth = fees && fees.stopped ? ethTxt(fees.stopped.eth_max_wei) : null;
+      const less = stopEth ? `, less about ${stopEth} ETH in fees` : maxEth ? `, less fees of up to ${maxEth} ETH` : "";
+      // after the lock the row of Alice's last moment gives a clock time (plus Ethereum's finality and a minute); before it only the relative figure
+      const prof = lp && L ? L.PROFILES[lp.profile] : null;
+      const tr = NT() && prof ? NT().bobBack(view, H.nowS(), prof.eth_finality_s) : null;
+      if (tr && !tr.passed) add(`If Alice does not take the ETH: it is back by about ${hhmm(tr.unix)}${less}.`);
+      else if (rel) add(`If Alice does not take the ETH, it is back ${rel} after your lock${less}.`);
+      const p = f.payouts;
+      if (p && p.noid && p.eth) add("The NOID goes to ", g(p.noid, "."), " What is left of the ETH goes to ", g(p.eth, "."));
+    }
+    return out;
+  }
+
+  /** The "How the fees are counted" and "How the times are counted" folds of the approval. */
+  function foldsOf(f, payload) {
+    const L = LF();
+    const lp = launchOf(payload);
+    const out = [];
+    if (!L || !lp || !lp.fees) return out;
+    const fees = lp.fees;
+    const say = (which) => ((which && which.eth_steps) || []).map((s) => `${s.id} ${groupsInt(s.gas)} gas${s.id === "sweep" ? ", counted at your fee cap" : ""}`).join(", ");
+    const lis = [];
+    if (fees.happy) lis.push(`If the swap goes through: ${say(fees.happy)}.`);
+    if (fees.stopped) lis.push(`If it stops: ${say(fees.stopped)}.`);
+    const base = gweiTxt(fees.base_fee_wei);
+    lis.push(base ? `Ethereum's base fee: ${base} gwei${Number.isInteger(fees.base_fee_block) ? ` (block ${groupsInt(fees.base_fee_block)}` + (Number.isFinite(fees.base_fee_age_s) ? `, read ${fees.base_fee_age_s} s ago` : "") + ")" : ""}.` : "Ethereum's fee level is not read yet (or the reading is old), so only the most you can lose is shown.");
+    const tip = gweiTxt(fees.tip_wei);
+    const cap = gweiTxt(fees.cap_wei);
+    if (tip || cap) lis.push(`${tip ? `Your tip: ${tip} gwei. ` : ""}${cap ? `Your fee cap: ${cap} gwei.` : ""}`.trim());
+    lis.push("A step costs its gas times the lower of your cap and the base fee plus the tip. The sweep sends the key's balance minus 21,000 gas at your cap, so what is under the cap stays in the key: it counts at the cap. The most you can lose to fees is the gas ceiling of each step at your cap.");
+    lis.push("Parano1d fees are the figures measured on real swaps (about 0.009 NOID to fund, about 0.0058 NOID to close or sweep).");
+    out.push(H.el("details", { class: "deposit-details fact-fold" }, H.el("summary", { text: "How the fees are counted" }), H.el("ul", { class: "fold-list" }, ...lis.map((t) => H.el("li", { text: t })))));
+    out.push(H.el("details", { class: "deposit-details fact-fold" }, H.el("summary", { text: "How the times are counted" }), H.el("ul", { class: "fold-list" }, H.el("li", { text: "Parano1d blocks come about every 30 seconds; faster blocks bring it sooner." }), H.el("li", { text: f.role === "alice" ? "Your NOID's time is the deadline plus 20 blocks: 19 for finality and 1 for the sweep." : "Your ETH's time is Alice's last moment to take it, plus Ethereum's finality (about 19 minutes) and one more minute." }))));
+    return out;
+  }
+  const groupsInt = (x) => {
+    const L = LF();
+    return L ? L.groupInt(String(x)) : String(x);
+  };
+
+  /** The rate, "You get" and fee lines of the approval, with the loud-fee and the cap-below boxes above them. `where`: "approval". */
+  function feeLines(f, payload) {
+    const L = LF();
+    const lp = launchOf(payload);
+    const out = [];
+    if (!L || !lp || !lp.fees) return out;
+    const fees = lp.fees;
+    const happy = fees.happy || {};
+    if (fees.loud && typeof fees.share_bp === "number") out.push(levelBox("warn", "Fees", `Network fees are about ${L.pct(fees.share_bp)} % of what you swap. A larger amount, or a time when Ethereum fees are lower, costs a smaller share.`));
+    const cap = gweiTxt(fees.cap_wei);
+    const baseG = gweiTxt(fees.base_fee_wei);
+    if (fees.refused_now && cap && baseG) out.push(levelBox("warn", "Fee cap", capBelowText(f.role, cap, baseG, "approval")));
+    const rp = L.rateParts(lp.rate);
+    if (rp) out.push(H.el("p", { class: "facts-line" }, H.el("span", { class: "fig", text: rp[0] }), H.el("span", { class: "fig", text: rp[1] })));
+    // what the person gets after the fees
+    if (f.role === "alice") {
+      if (happy.eth_now_wei === null || happy.eth_now_wei === undefined) {
+        const m = AMOUNT_RE.exec(String(f.gets_text || ""));
+        out.push(H.el("p", { class: "facts-line", text: `You get ${m ? m[1] + " ETH" : f.gets_text || "the ETH"}, less the Ethereum fees below.` }));
+      } else if (lp.get_after_fees) out.push(H.el("p", { class: "facts-line" }, "You get about ", H.el("span", { class: "fig", text: `${lp.get_after_fees} ETH` }), " after network fees."));
+    } else if (lp.get_after_fees) out.push(H.el("p", { class: "facts-line" }, "You get ", H.el("span", { class: "fig", text: `${lp.get_after_fees} NOID` }), " after the Parano1d fee."));
+    // the fee line
+    const noid = noidTxt(happy.noid_micro);
+    const maxEth = ethTxt(happy.eth_max_wei);
+    const share = typeof fees.share_bp === "number" ? L.pct(fees.share_bp) : null;
+    const nowEth = ethTxt(happy.eth_now_wei);
+    const upto = f.role === "bob" ? noidTxt(happy.noid_upto_micro) : null;
+    if (maxEth && cap && noid) {
+      const kids = ["Network fees, about: "];
+      if (nowEth) {
+        kids.push(H.el("span", { class: "fig", text: `${nowEth} ETH` }), " on Ethereum, ", H.el("span", { class: "fig", text: `${noid} NOID` }), f.role === "bob" ? " on Parano1d, taken from the NOID you get" : " on Parano1d", share ? ` (${share} % of what you swap)` : "", ". ", `At most ${maxEth} ETH at your fee cap of ${cap} gwei${f.role === "bob" && upto ? ` and ${upto} NOID` : ""}.`);
+      } else kids.push(`Ethereum's fee level is not read yet; at most ${maxEth} ETH at your fee cap of ${cap} gwei. `, H.el("span", { class: "fig", text: `${noid} NOID` }), f.role === "bob" ? " on Parano1d, taken from the NOID you get." : " on Parano1d.");
+      out.push(H.el("p", { class: "facts-line" }, ...kids));
+    }
+    for (const n of foldsOf(f, payload)) out.push(n);
+    return out;
+  }
+
+  // ------------------------------------------------------------------ "needs you" in three parts
+  const RESEND_OF = /^send-(reveal|refund-eth)(?:-replace)?$/;
+  /** Opens the Details fold and brings the re-send box of `spendId` into view with the cursor in its fee field (the fold may draw its content when it opens, so the field is looked up after two frames). */
+  function showResendBox(spendId) {
+    const fold = document.getElementById("pg-details");
+    if (fold && "open" in fold) fold.open = true;
+    const go = () => {
+      const field = document.getElementById(`resend-cap-${spendId}`);
+      const target = field ? (typeof field.closest === "function" && field.closest(".resend-cap")) || field : fold;
+      if (target && typeof target.scrollIntoView === "function") target.scrollIntoView({ block: "center" });
+      if (field && typeof field.focus === "function") field.focus({ preventScroll: true });
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => requestAnimationFrame(go));
+    else go();
+  }
+
+  /** One entry in three parts (what happened, your coins and until when, what to do), from lib/needtext.js; null for an entry it has no words for. */
+  function need3(t) {
+    const coins = H.el("dd", {}, H.el("p", { class: t.coins_level === "danger" ? "need-coins danger" : "need-coins", text: t.coins }));
+    if (t.until) coins.appendChild(H.el("p", { class: "need-until", text: t.until }));
+    return H.el("dl", { class: "need3" }, H.el("dt", { text: "What happened" }), H.el("dd", { text: t.what }), H.el("dt", { text: "Your coins" }), coins, H.el("dt", { text: "What to do" }), H.el("dd", {}, H.el("ol", {}, ...t.steps.map((s) => H.el("li", { text: s })))));
+  }
+
   /**
    * The approval's entries that need an answer, as boxes: one alert with a row per entry (its words, its reason, and "I have dealt with it" unless the entry is a short deposit, which goes away
-   * by itself), then, outside the alert, the time left of each short deposit (a changing count must not be announced again each time). `f` is autopilotFacts(...).
+   * by itself), then, outside the alert, the time left of each short deposit (a changing count must not be announced again each time). `f` is autopilotFacts(...). In program mode an entry
+   * with words in lib/needtext.js is drawn in three parts, and the program's own reason follows as a quiet last line.
    */
-  function needsYouElements(f) {
+  function needsYouElements(f, view) {
     const out = [];
     if (!f.needs_you.length) return out;
-    const al = H.el("div", { class: (isProgram() ? "alarm needs big" : "alarm danger big"), role: "alert", "aria-label": "The autopilot needs you" }, icon("alert"), H.el("span", { class: "lv", text: isProgram() ? "Needs you" : "needs you" }));
+    const prog = isProgram();
+    const parts = f.needs_you.map((n) => (prog && NT() && n.kind !== "deposit" ? NT().parts(n, view || null, H.nowS(), hhmm) : null));
+    const danger = parts.some((t) => t && t.tone === "danger");
+    const al = H.el("div", { class: prog ? (danger ? "alarm danger big" : "alarm needs big") : "alarm danger big", role: "alert", "aria-label": prog ? "The program needs you" : "The autopilot needs you" }, icon("alert"), H.el("span", { class: "lv", text: prog ? "Needs you" : "needs you" }));
     const tx = H.el("span", { class: "tx" });
-    for (const n of f.needs_you) {
-      const row = H.el("div", { class: "row" }, H.el("strong", { text: (n.label || n.spend) + ":" }), H.el("span", { text: " " + n.reason }));
-      if (n.retrying) row.appendChild(H.el("span", { class: "dim", text: " The autopilot is still trying this step on later ticks." }));
+    f.needs_you.forEach((n, i) => {
+      const t = parts[i];
+      const row = t ? H.el("div", { class: "row need-entry" }, H.el("strong", { text: n.label || n.spend }), need3(t), t.said ? H.el("p", { class: "dim need-said", text: `What the program said: ${t.said}` }) : null) : H.el("div", { class: "row" }, H.el("strong", { text: (n.label || n.spend) + ":" }), H.el("span", { text: " " + n.reason }));
+      if (n.retrying) row.appendChild(H.el("span", { class: "dim", text: prog ? " The program is still trying this step on later ticks." : " The autopilot is still trying this step on later ticks." }));
       // a short deposit goes away by itself when the coin is covered: there is nothing to confirm
       if (n.kind === "deposit") {
         tx.appendChild(row);
-        continue;
+        return;
       }
+      // a stuck reveal or ETH refund: its steps send the person to the re-send box, which lives in the Details fold; this button opens the fold and puts the cursor in the box's fee field
+      const resend = t && t.kind === "stuck" ? RESEND_OF.exec(String(n.spend || "")) : null;
+      if (resend) row.appendChild(btn("Show the re-send box", () => showResendBox(`send-${resend[1]}-replace`)));
       row.appendChild(
         btn(
           "I have dealt with it",
           () => {
             openSimpleConfirm({
-              title: "Let the autopilot go on",
-              lines: [`Confirm only when you have looked at "${n.label || n.spend}" yourself (the audit log, the contract, the wallet) and know what state it is in.`, "The autopilot then goes on from what the engine and the gate say now, and it can stop this step again."],
+              title: prog ? "Let the program go on" : "Let the autopilot go on",
+              lines: [`Confirm only when you have looked at "${n.label || n.spend}" yourself (the audit log, the contract, the wallet) and know what state it is in.`, `${prog ? "The program" : "The autopilot"} then goes on from what the engine and the gate say now, and it can stop this step again.`],
               confirmLabel: "Yes, I have dealt with it",
               onConfirm: async () => {
                 const r = await post("/api/autopilot", { clear_needs_you: n.spend, role: f.role });
@@ -886,7 +1188,7 @@
         )
       );
       tx.appendChild(row);
-    }
+    });
     al.appendChild(tx);
     out.push(al);
     for (const n of f.needs_you) if (n.kind === "deposit") out.push(H.el("p", { class: "dim deposit-time", dataset: { depositTime: n.spend, until: Number.isFinite(Number(n.until)) && n.until ? String(n.until) : "" }, text: depositTimeText(n.until) }));
@@ -896,7 +1198,7 @@
   /** The boxes of a step that needs the person, for the card to draw above its progress line (none when the approval box cannot be drawn or nothing needs an answer). */
   function needsYouBoxes(view, payload) {
     const f = autopilotFacts(view, payload);
-    return f ? needsYouElements(f) : [];
+    return f ? needsYouElements(f, view) : [];
   }
 
   const AMOUNT_RE = /^([0-9][0-9.,]*) (NOID|ETH)$/;
@@ -907,18 +1209,38 @@
     if (!g || !t) return null;
     const side = (m, caption) => {
       const c = m[2] === "NOID" ? "noid" : "eth";
-      return H.el("div", { class: `side ${c}` }, H.el("span", { class: "k", text: caption }), H.el("span", { class: "v" }, coinGlyph(c), H.el("span", { class: "num", text: m[1] }), H.el("span", { class: "tic", text: m[2] })), H.el("span", { class: "on", text: c === "noid" ? "on Parano1d" : "on Ethereum" }));
+      return H.el("div", { class: `side ${c}` }, H.el("span", { class: "k", text: caption }), H.el("span", { class: "v" }, coinGlyph(c), H.el("span", { class: "num", text: LF() ? LF().groupDec(m[1]) : m[1] }), H.el("span", { class: "tic", text: m[2] })), H.el("span", { class: "on", text: c === "noid" ? "on Parano1d" : "on Ethereum" }));
     };
     return H.el("div", { class: "convert", "aria-hidden": "true" }, side(g, "You give"), H.el("div", { class: "mid" }, H.el("i", {})), side(t, "You get"));
   }
 
-  /** What the approval costs and where the coins go, as a list: the network fees (from the newest clean deposit status of this role), where the coins you get are sent, and where yours come back if the swap stops (the settings' payout addresses). A line with no data is not drawn; null when there is none. */
-  function approvalFacts(f, payload) {
+  /** The history line of an own address (R3) from the swap's `program.payout_history`: null while the history is loading or the program has none (no line is shown). */
+  function historyOf(addr, payload) {
+    const L = LF();
+    const pr = payload && payload.program;
+    if (!L || !pr) return null;
+    const st = pr.payout_history_state;
+    if (st === "unreadable" || st === "locked") return L.historyLine(st);
+    if (st !== "ok" || !pr.payout_history || typeof pr.payout_history !== "object") return null;
+    return L.historyLine("ok", Object.prototype.hasOwnProperty.call(pr.payout_history, addr) ? pr.payout_history[addr] : null, undefined);
+  }
+
+  const CMP_TEXT = "I compared every group of this address with my wallet's own screen.";
+  const CMP_NOTE = "Compare it with your wallet's own screen.";
+  const NO_CHECKSUM = "This address has no checksum (all one case), so a wrong character would not be caught. Compare it with your wallet's own screen.";
+
+  /**
+   * What the approval costs and where the coins go, as a list: the network fees (from the newest clean deposit status of this role), where the coins you get are sent, and where yours come back if the swap stops (the settings' payout addresses). A line with no data is not drawn; null when there is none.
+   * Program mode: each address is shown whole, in groups of four, with its history line under it; on mainnet a new, changed or unchecked address also asks for a tick (page-level: the request body does not change).
+   * `ctx.ticks` collects the compare ticks, `ctx.onTick` is called when one changes.
+   */
+  function approvalFacts(f, payload, ctx) {
     const a = payload && payload.actions;
     const w = walletOf(a);
     const s = w && w.roles && w.roles[f.role] && w.roles[f.role].status;
     const clean = !!(s && s.ok && s.show);
     const rows = [];
+    const prog = isProgram();
     const row = (label, ...kids) => rows.push(H.el("div", {}, H.el("dt", { text: label }), H.el("dd", {}, ...kids)));
     if (clean) {
       const parts = [];
@@ -926,13 +1248,37 @@
       const ef = s.eth ? ethFigure(s.eth.reserve_wei) : null;
       if (nf !== null) parts.push(`${nf} NOID`);
       if (ef !== null) parts.push(`${ef} ETH`);
-      if (parts.length) row("Network fees", parts.join(" and "), H.el("span", { class: "sub", text: "Part of your deposit; what is left is sent to your own addresses." }));
+      if (parts.length) row("Kept back for fees", parts.join(" and "), H.el("span", { class: "sub", text: "Part of your deposit, kept to pay fees. What is not used comes back to you with the sweep." }));
     }
+    const mainnet = isMainnet(payload);
+    // an own address, whole; its history line; the compare tick (mainnet, new, changed or no checksum) or the quiet note (test network)
+    const own = (addr, what, labelPrefix) => {
+      if (!prog) return [labelPrefix ? `${labelPrefix} ` : null, H.copyButton(addr, what)];
+      const kids = [labelPrefix ? `${labelPrefix} ` : null, H.addrWhole(addr, what)];
+      const L = LF();
+      const h = historyOf(addr, payload);
+      if (h) kids.push(H.el("p", { class: h.isNew ? "hist new" : "hist", text: h.text }));
+      const noCk = L && L.caseNote(addr) === "no_checksum";
+      if (noCk) kids.push(H.el("p", { class: "hist new", text: NO_CHECKSUM }));
+      const needsTick = mainnet && ((h && h.isNew) || noCk);
+      if (needsTick && ctx) {
+        const key = addr;
+        const cb = H.el("input", { type: "checkbox", id: `ap-cmp-${ctx.ticks.length}`, checked: ui.ap.cmp && ui.ap.cmp[key] ? true : null });
+        cb.addEventListener("change", () => {
+          ui.ap.cmp = ui.ap.cmp || {};
+          ui.ap.cmp[key] = cb.checked;
+          if (ctx.onTick) ctx.onTick();
+        });
+        ctx.ticks.push({ cb });
+        kids.push(H.el("label", { class: "ack cmp-tick", for: cb.getAttribute("id") }, cb, " " + CMP_TEXT));
+      } else if (!mainnet && h && h.isNew && !noCk) kids.push(H.el("p", { class: "hist", text: CMP_NOTE })); // (the no-checksum note already ends with the same sentence)
+      return kids;
+    };
     const p = f.payouts;
     if (p) {
       const mine = f.role === "alice" ? { get: p.eth, getLabel: "Your ETH goes to", getWhat: "your Ethereum address", back: p.noid, backLabel: "Your NOID comes back to", backWhat: "your Parano1d address" } : { get: p.noid, getLabel: "Your NOID goes to", getWhat: "your Parano1d address", back: p.eth, backLabel: "Your ETH comes back to", backWhat: "your Ethereum address" };
-      if (typeof mine.get === "string" && mine.get) row(mine.getLabel, H.copyButton(mine.get, mine.getWhat));
-      if (typeof mine.back === "string" && mine.back) row("If the swap stops", `${mine.backLabel} `, H.copyButton(mine.back, mine.backWhat));
+      if (typeof mine.get === "string" && mine.get) row(mine.getLabel, ...own(mine.get, mine.getWhat, null));
+      if (typeof mine.back === "string" && mine.back) row("If the swap stops", ...own(mine.back, mine.backWhat, mine.backLabel));
     }
     return rows.length ? H.el("dl", { class: "facts" }, ...rows) : null;
   }
@@ -943,12 +1289,12 @@
     const prog = isProgram();
     const box = H.el("section", { class: "spend-box autopilot-box", "aria-label": "Run this swap for me" }, H.el("div", { class: "row" }, H.el("strong", { text: "Run this swap for me" }), f.on ? H.chip("ok", "on") : H.chip("quiet", "off"), prog ? H.el("span", { class: "tag", text: "moves funds" }) : H.chip("warn", "moves funds")));
     // the card draws these as boxes of its own above the box (needs: false); everywhere else they are the first thing in it
-    if (!opts || opts.needs !== false) for (const n of needsYouElements(f)) box.appendChild(n);
+    if (!opts || opts.needs !== false) for (const n of needsYouElements(f, view)) box.appendChild(n);
     if (f.on) {
       box.appendChild(H.el("p", { class: "plain", text: f.doing || "Starting." }));
       if (f.waiting_reason) box.appendChild(H.el("p", { class: "dim", text: `Waiting for: ${f.waiting_reason}` }));
       for (const t of f.finished_notes) box.appendChild(H.el("p", { class: "dim", text: t }));
-      if (f.approved_at) box.appendChild(H.el("p", { class: "dim", text: `Approved ${H.clock(f.approved_at)}. ${isProgram() ? "A change of the terms, of this swap's settings, of the program or of its tools turns it off by itself." : "A change of the terms, of env.local.sh or of the helpers turns it off by itself."}` }));
+      if (f.approved_at) box.appendChild(H.el("p", { class: "dim", text: `Approved ${isProgram() ? hhmm(f.approved_at) : H.clock(f.approved_at)}. ${isProgram() ? "A change of the terms, of this swap's settings, of the program or of its tools turns it off by itself." : "A change of the terms, of env.local.sh or of the helpers turns it off by itself."}` }));
       if (f.valid_until) box.appendChild(H.el("p", { class: "dim", text: `The two funding statements are good for one automatic funding, until ${H.clock(f.valid_until)}.` }));
       box.appendChild(
         H.el(
@@ -962,38 +1308,60 @@
               forceRender();
               await H.reload(true);
             },
-            { disabled: !H.state.token, title: H.state.token ? "Stops the autopilot. A step that is already running goes on." : KEY_LOST }
+            { disabled: !H.state.token, title: H.state.token ? `Stops ${prog ? "the automatic steps" : "the autopilot"}. A step that is already running goes on.` : KEY_LOST }
           )
         )
       );
       if (!H.state.token) box.appendChild(keyNote());
       return box;
     }
-    if (f.terms_changed) box.appendChild(H.el("p", { class: "attn", role: "alert", text: isProgram() && f.terms_changed_why === "program_version" ? "The program was updated since you approved, so the autopilot is off. Approve again after an update, once the terms look right." : isProgram() ? "The terms, the settings of this swap, the program or one of its tools changed since you approved, so the autopilot is off. Check the terms, then approve again if they are right." : "The terms changed since you approved (or a file they are bound to did), so the autopilot is off. Check the terms, then approve again if they are right." }));
+    if (f.terms_changed) box.appendChild(H.el("p", { class: "attn", role: "alert", text: isProgram() && f.terms_changed_why === "program_version" ? "The program was updated since you approved, so automatic steps are off. Approve again after an update, once the terms look right." : isProgram() ? "The terms, the settings of this swap, the program or one of its tools changed since you approved, so automatic steps are off. Check the terms, then approve again if they are right." : "The terms changed since you approved (or a file they are bound to did), so the autopilot is off. Check the terms, then approve again if they are right." }));
+    // the ticks and the typed amount belong to one swap and one role: another swap (or the other role) opens with an empty form
+    const apKey = `${H.state.swap || ""}|${f.role}`;
+    if (ui.ap.key !== apKey) ui.ap = { key: apKey, typed: "", ticks: {}, cmp: {} };
+    const cmpCtx = { ticks: [], onTick: null };
+    const lines = prog ? plainLines(f, payload, view) : [];
     if (f.expected_typed && f.gets_text) {
-      // program mode: what the person gives and gets as two blocks (for the eye), the sentence for a screen reader, then the fees and where the coins go
+      // program mode: what the person gives and gets as two blocks (for the eye), the sentence for a screen reader, then the four plain lines
       if (prog) {
         const cv = convertBlocks(f);
         if (cv) box.appendChild(cv);
       }
-      box.appendChild(H.el("p", { class: prog ? "plain sr-only" : "plain" }, "You give ", coinSpan(f.expected_typed), ". You get ", coinSpan(f.gets_text), "."));
+      box.appendChild(H.el("p", { class: prog ? "plain sr-only" : "plain" }, "You give ", coinSpan(prog ? groupAmt(f.expected_typed) : f.expected_typed), ". You get ", coinSpan(prog ? groupAmt(f.gets_text) : f.gets_text), "."));
     }
+    const mainnet = prog && isMainnet(payload);
     if (prog) {
-      const fx = approvalFacts(f, payload);
+      if (lines.length) box.appendChild(H.el("ol", { class: "plain4", "aria-label": "What this approval means" }, ...lines.map((l) => H.el("li", {}, ...l.nodes))));
+      // today's three lines, in a fold (every promise of the longer text is kept)
+      box.appendChild(H.el("details", { class: "deposit-details fact-fold how-it-works" }, H.el("summary", { text: "How it works" }), H.el("div", { class: "fold-body" }, ...(AP_INTRO_PROGRAM[f.role] || []).map((l) => H.el("p", { class: "plain", text: l })))));
+      for (const n of feeLines(f, payload)) box.appendChild(n);
+      const fx = approvalFacts(f, payload, cmpCtx);
       if (fx) box.appendChild(fx);
-      const lines = AP_INTRO_PROGRAM[f.role] || [];
-      const intro = H.el("p", { class: "plain" });
-      lines.forEach((l, i) => {
-        if (i) intro.appendChild(document.createTextNode(" "));
-        intro.appendChild(H.el("span", { class: "line", text: l }));
-      });
-      box.appendChild(intro);
+      // Alice asks Bob, before she approves: his program can say it cannot lock today (mainnet only)
+      if (mainnet && f.role === "alice") box.appendChild(H.el("p", { class: "plain ask-bob", text: "Bob's program said it can lock today: ask him before you approve." }));
     } else box.appendChild(H.el("p", { class: "plain", text: (f.wallet ? AP_INTRO_WALLET : AP_INTRO)[f.role] }));
     if (f.wallet && !prog) box.appendChild(H.el("p", { class: "plain dim", text: f.role === "alice" ? "A wallet run does not ask the classic funding statement (the wallet holds one funding and the tool refuses a funding another path submitted). It still asks whether Bob's check line matches yours." : f.statements.some((st) => st.id === "alice_check_matches") ? "A wallet run asks three statements: that this computer stays on, that you send no step by hand, and that Alice's check line matches yours." : "A wallet run asks the same two statements as before." }));
-    if (!f.can_turn_on) box.appendChild(H.el("p", { class: "attn", text: "The engine does not offer your funding yet. You can turn the autopilot on when it does (after Bob's check)." }));
-    // the ticks and the typed amount belong to one swap and one role: another swap (or the other role) opens with an empty form
-    const apKey = `${H.state.swap || ""}|${f.role}`;
-    if (ui.ap.key !== apKey) ui.ap = { key: apKey, typed: "", ticks: {} };
+    if (!f.can_turn_on) box.appendChild(H.el("p", { class: "attn", text: `The engine does not offer your funding yet. You can turn ${prog ? "automatic steps" : "the autopilot"} on when it does (after Bob's check).` }));
+    // R6: before the first mainnet approval of this program version the card of limits and risks stands in place of the statements; "I have read this" is page sequencing only (the server never checks it)
+    const limits = mainnet && LT() ? (isLimitsUnread(payload) ? "unread" : (payload.program && payload.program.limits_read === true) || ui.limitsOk === true ? "read" : null) : null;
+    const lf = limits ? limitsFactsOf() : null;
+    if (limits === "unread") {
+      box.appendChild(LT().card(H.el, lf, { level: 3, headingId: "ap-limits-h" }));
+      const readBtn = btn(LT().READ_BUTTON, async () => {
+        readBtn.disabled = true;
+        const r = await post("/api/limits/read", {});
+        if (r.ok) {
+          ui.limitsOk = true;
+          ui.focusStatement = true;
+        } else ui.msg = { kind: "danger", text: r.json.error || `HTTP ${r.status}` };
+        forceRender();
+        await H.reload(true);
+      }, { primary: true, big: true, disabled: !H.state.token, title: H.state.token ? null : KEY_LOST });
+      box.appendChild(H.el("div", { class: "row" }, readBtn));
+      if (!H.state.token) box.appendChild(keyNote());
+      return box;
+    }
+    if (limits === "read") box.appendChild(H.el("details", { class: "deposit-details fact-fold limits-link" }, H.el("summary", { text: LT().LINK_TEXT }), LT().card(H.el, lf, { level: 3 })));
     const input = H.el("input", { type: "text", id: "ap-typed", autocomplete: "off", spellcheck: "false", "aria-describedby": "ap-typed-hint", placeholder: f.expected_typed || "", value: ui.ap.typed });
     const ticks = f.statements.map((st) => {
       // the line match of the run folder pre-ticks the line statement (still asked, still required); a person's own un-tick is kept
@@ -1013,23 +1381,25 @@
         const typed = input.value;
         openSimpleConfirm({
           title: prog ? "Approve this swap" : "Run this swap for me",
-          lines: [
-            ...(f.expected_typed && f.gets_text ? [`You give ${f.expected_typed}. You get ${f.gets_text}.`] : []),
-            f.wallet
-              ? `From now on ${prog ? "the program" : "this console"} does every step of this swap by itself, from this swap's own wallet${f.payouts ? `, and when it is over it sends what is left to ${f.role === "alice" && f.payouts.noid ? "NOID address " + f.payouts.noid + " and " : ""}ETH address ${f.payouts.eth}` : ""}. The approval is bound to those addresses.`
-              : f.role === "alice"
-              ? `From now on ${prog ? "the program" : "this console"} funds the NOID and reveals the secret by itself. The funding goes soon: the two funding statements you ticked are good for ONE automatic funding within 5 minutes.`
-              : `From now on ${prog ? "the program" : "this console"} locks the ETH, claims the NOID and refunds the ETH by itself.`,
-            `Every step is sent through the same dry run and the same checks as ${prog ? "a step sent by hand" : "the buttons below"}, and written to the audit log. It stops and asks you when anything is unclear. You can turn it off at any time.`,
-            isProgram() ? "The approval is bound to these terms, to this swap's settings, to the program's version and to its tools: a change of any of them turns it off." : "The approval is bound to these terms, to env.local.sh and to the helpers in bin/: a change of any of them turns it off.",
-          ],
+          lines: prog
+            ? [...(f.expected_typed && f.gets_text ? [`You give ${groupAmt(f.expected_typed)}. You get ${groupAmt(f.gets_text)}.`] : []), ...lines.map((l) => l.text)]
+            : [
+                ...(f.expected_typed && f.gets_text ? [`You give ${f.expected_typed}. You get ${f.gets_text}.`] : []),
+                f.wallet
+                  ? `From now on this console does every step of this swap by itself, from this swap's own wallet${f.payouts ? `, and when it is over it sends what is left to ${f.role === "alice" && f.payouts.noid ? "NOID address " + f.payouts.noid + " and " : ""}ETH address ${f.payouts.eth}` : ""}. The approval is bound to those addresses.`
+                  : f.role === "alice"
+                  ? "From now on this console funds the NOID and reveals the secret by itself. The funding goes soon: the two funding statements you ticked are good for ONE automatic funding within 5 minutes."
+                  : "From now on this console locks the ETH, claims the NOID and refunds the ETH by itself.",
+                "Every step is sent through the same dry run and the same checks as the buttons below, and written to the audit log. It stops and asks you when anything is unclear. You can turn it off at any time.",
+                "The approval is bound to these terms, to env.local.sh and to the helpers in bin/: a change of any of them turns it off.",
+              ],
           confirmLabel: prog ? "Yes, approve" : "Yes, turn it on",
           due: prog,
           lead: prog,
           onConfirm: async () => {
             const r = await post("/api/autopilot", { on: true, role: f.role, typed, statements });
             if (!r.ok) return [r.json.error || `HTTP ${r.status}`, ...(r.json.reasons || []).map((x) => x.text)].join(" ");
-            ui.ap = { key: apKey, typed: "", ticks: {} };
+            ui.ap = { key: apKey, typed: "", ticks: {}, cmp: {} };
             ui.msg = null;
             forceRender();
             await H.reload(true);
@@ -1040,8 +1410,9 @@
       { primary: true, disabled: true }
     );
     const refresh = () => {
-      go.disabled = !H.state.token || !f.can_turn_on || !typedOk(input.value, f.expected_typed) || !ticks.every((t) => t.cb.checked);
+      go.disabled = !H.state.token || !f.can_turn_on || !typedOk(input.value, f.expected_typed) || !ticks.every((t) => t.cb.checked) || !cmpCtx.ticks.every((t) => t.cb.checked);
     };
+    cmpCtx.onTick = refresh;
     input.addEventListener("input", () => {
       ui.ap.typed = input.value;
       refresh();
@@ -1058,9 +1429,28 @@
       box.appendChild(H.el("div", { class: "row" }, go));
     }
     refresh();
+    if (ui.focusStatement) {
+      // after "I have read this" the first statement takes focus
+      ui.focusStatement = false;
+      const first = ticks[0] ? ticks[0].cb : null;
+      if (first && typeof setTimeout === "function") setTimeout(() => (first.focus ? first.focus() : null), 0);
+    }
     if (!H.state.token) box.appendChild(keyNote());
     return box;
   }
+
+  /** R6: has the person not yet read the card of limits and risks for this program version? The server says (`program.limits_read`); an answer of this session counts at once. */
+  function isLimitsUnread(payload) {
+    const pr = payload && payload.program;
+    return !!(pr && pr.limits_read === false && ui.limitsOk !== true);
+  }
+  /** The caps of the card: from the program's own production profile (the form's), else none (the row is left out). */
+  function limitsFactsOf() {
+    const pr = H.state && H.state.program;
+    const p = pr && pr.form && pr.form.profiles && pr.form.profiles.production;
+    return p ? { max_noid: p.max_noid, max_eth: p.max_eth } : {};
+  }
+
 
   // ------------------------------------------------------------------ Bob's check line, kept until his lock
   // Bob's phases before his lock is sent. From "lock_submitted" on the comparison can no longer change anything.
@@ -1419,7 +1809,7 @@
   /** Empties the start screen's own section (the swap page is showing). */
   function clearStart() {
     // leaving a swap forgets its autopilot form (ticks and typed amount)
-    ui.ap = { typed: "", ticks: {} };
+    ui.ap = { typed: "", ticks: {}, cmp: {} };
     const s = $("start");
     if (s) {
       empty(s);
@@ -2479,6 +2869,7 @@ ${entry.command || ""}` : "") }), why };
     checkLineBlock,
     invitationBlock,
     depositFigures: { noid: noidFigure, eth: ethFigure },
+    launch: { launchOf, isMainnet, groupsSpan, groupsText, ethTxt, noidTxt, gweiTxt, levelBox, capBelowText, bobStakeText, plainLines, resendCap, isLimitsUnread, limitsFactsOf },
     depositTimes: { text: depositTimeText, refresh: refreshDepositTimes },
   };
 })();

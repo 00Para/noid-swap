@@ -106,7 +106,7 @@ test("settings.json: a save over a broken file keeps a copy of it first (mode 06
 });
 
 test("settings view and merge: a node address with a path and the alert URL never reach the page; the shown text keeps the stored value", () => {
-  const stored = { ...PS.defaults(), alert_url: "https://hooks.example/SECRETTOKEN", eth: { sepolia: { rpc: "https://node.example/v2/APIKEY123", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null } } };
+  const stored = { ...PS.defaults(), alert_url: "https://hooks.example/SECRETTOKEN", eth: { sepolia: { rpc: "https://node.example/v2/APIKEY123", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null }, production: { rpc: "https://ethereum-rpc.publicnode.com", rpc2: "https://rpc.mevblocker.io" } } };
   const view = PS.view(stored);
   const text = JSON.stringify(view);
   assert.ok(!/SECRETTOKEN|APIKEY123/.test(text));

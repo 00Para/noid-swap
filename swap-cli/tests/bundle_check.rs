@@ -39,7 +39,7 @@ fn fixture() -> Fixture {
     let alice_file = dir.path().join("a.swap.json");
     let (ok, bundle_text, alice_err) = run(bin()
         .args(["new-alice", "--out", alice_file.to_str().unwrap(), "--alice", &cast.alice.to_bech32(), "--bob", &cast.bob.to_bech32()])
-        .args(["--amount", "10000000", "--fee-estimate", "5800", "--h-create", "300000", "--eth-chain-id", "31337"])
+        .args(["--amount", "10000000", "--fee-estimate", "5800", "--h-create", "300000", "--eth-chain-id", "1"])
         .args(["--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3", "--eth-amount-wei", "10000000000000000"])
         .args(["--eth-receiver", "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc", "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"])
         .args(["--eth-code-hash", CODE_HASH, "--fast-kdf"])
@@ -57,7 +57,7 @@ impl Fixture {
         let out = self.dir.path().join(format!("{name}.swap.json"));
         let mut cmd = bin();
         cmd.args(["new-bob", "--bundle", bundle.to_str().unwrap(), "--out", out.to_str().unwrap(), "--bob", &self.cast.bob.to_bech32()])
-            .args(["--amount", "10000000", "--eth-chain-id", "31337", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3"])
+            .args(["--amount", "10000000", "--eth-chain-id", "1", "--eth-contract", "0x5fbdb2315678afecb367f032d93f642f64180aa3"])
             .args(["--eth-amount-wei", "10000000000000000", "--eth-sender", "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"])
             .args(["--eth-code-hash", CODE_HASH])
             .args(["--registry", self.dir.path().join(format!("{name}.registry")).to_str().unwrap()])

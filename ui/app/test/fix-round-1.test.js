@@ -209,20 +209,21 @@ test("S6: the card's foot names a running step in plain words, the deposit statu
 // ---------------------------------------------------------------- S7: the done card
 test("S7: the done card has the two blocks, You gave and You got, and the rows only when a sweep's own result has the figures; the receipts have plain names and keep the ids", async () => {
   const sweepJob = { ...F.job("send-sweep-eth-alice"), id: "send-sweep-eth-alice", state: "done", ok: true, exit_code: 0, files: [{ name: "eth-sweep-alice-1.json", size: 9, summary: { txHash: "0x" + "9f".repeat(32), sweep: { role: "alice", valueWei: "916000000000000", feeWei: "84000000000000", payout: PAYOUT_ETH } } }] };
-  const mk = (jobs) => (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), jobs, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1", tx_hash: "0x" + "d3".repeat(32), block_number: 90 } } } });
+  const mk = (jobs) => (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), jobs, wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } }, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1", tx_hash: "0x" + "d3".repeat(32), block_number: 90 } } } });
   const page = await openSwap(F.SWAP_A, mk([F.job("setup"), F.job("wallet-setup-alice"), sweepJob]));
   const done = page.byId("pg-card").all((n) => has(n, "sc-done"))[0];
   assert.ok(done, "the blocks are drawn");
   const sides = done.all((n) => has(n, "side"));
   assert.deepEqual(sides.map((s) => [s.querySelector(".k").textContent, s.querySelector(".num").textContent, s.querySelector(".tic").textContent]), [["You gave", "5", "NOID"], ["You got", "0.001", "ETH"]]);
-  assert.deepEqual(sides.map((s) => squash(textOf(s.querySelector(".on")))), ["for Bob, on Parano1d", "in this swap's own Ethereum key"], "Alice's done phase does not prove that Bob claimed: no word of payment");
+  assert.deepEqual(sides.map((s) => squash(textOf(s.querySelector(".on")))), ["for Bob, on Parano1d", "sent to your own Ethereum address"], "Alice's done phase does not prove that Bob claimed: no word of payment");
   assert.doesNotMatch(squash(textOf(done)), /paid to Bob/);
   assert.equal(done.all((n) => has(n, "convert"))[0].attrs["aria-hidden"], "true");
   assert.equal(done.all((n) => n.tag === "p" && has(n, "sr-only"))[0].textContent, "You gave 5 NOID. You got 0.001 ETH.");
   const rows = done.all((n) => n.tag === "dt").map((n) => n.textContent);
-  assert.deepEqual(rows, ["Left over, sent to you", "Network fee of that transfer"]);
+  assert.deepEqual(rows, ["Reached your address", "Network fee of that transfer"]);
   assert.match(squash(textOf(done)), /0\.000916 ETH to 0x3c3c3c3c/);
-  assert.equal(page.byId("pg-card").all((n) => n.tag === "button").length, 0, "no button on a finished card");
+  // (the address of the status line has its copy button; no other button)
+  assert.equal(page.byId("pg-card").all((n) => n.tag === "button" && !/^Copy /.test(n.attrs["aria-label"] || "")).length, 0, "no button on a finished card");
   // no data, no row
   const bare = await openSwap(F.SWAP_A, mk([F.job("setup"), F.job("wallet-setup-alice")]));
   assert.equal(bare.byId("pg-card").all((n) => has(n, "sc-done"))[0].all((n) => n.tag === "dt").length, 0);
@@ -280,7 +281,7 @@ test("low: the foot never says there is nothing to do while the program is not d
   // the ticket of an aborted swap, from the view's own coins at the contract
   const V = require("../lib/viewmodel");
   const withCoins = V.legsFor({ phase: { id: "aborted" }, coins_at_contract: { instances: [{}] } }, "alice", { about: () => "about 10:31" });
-  assert.deepEqual([withCoins.give.words, withCoins.give.state, withCoins.give.note], ["Coming back to you", "pending", "Comes back to you after about 10:31 if the swap stops."]);
+  assert.deepEqual([withCoins.give.words, withCoins.give.state, withCoins.give.note], ["Coming back to you", "pending", "If the swap stops, it is back by about 10:31."]);
   const none = V.legsFor({ phase: { id: "aborted" }, coins_at_contract: { instances: [] } }, "bob");
   assert.deepEqual([none.give.words, none.give.note, none.get.words], ["In your own wallet", "Nothing was locked.", "Never locked"]);
   assert.equal(V.legsFor({ phase: { id: "aborted" } }, "alice").give.words, "Not known", "with no coins read it says nothing");

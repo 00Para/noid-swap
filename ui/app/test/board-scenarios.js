@@ -95,7 +95,7 @@ function autopilotFor(name, now) {
   const on = ["board-progress", "board-needs-you", "board-done", "board-refunded"].includes(name);
   const needs = name === "board-needs-you" ? [{ spend: "send-reveal", label: "Reveal the secret on Ethereum", reason: "Reveal the secret on Ethereum: it did not end as a clean success (exit 1), so it may have been sent. The autopilot does not touch this step again: look at the contract and the audit log first.", at: now - 120 }] : [];
   return {
-    alice: { available: true, on, approved_at: on ? now - 26 * 60 : null, terms_changed: false, doing: on ? "waiting for the engine to offer your next step" : null, waiting_reason: null, needs_you: needs, funding_statements_valid_until: null, expected_typed: "5 NOID", statements: STATEMENTS, board: true, funding_offered: null, wallet: true, payouts: { noid: A.noidPayout, eth: A.ethPayout } },
+    alice: { available: true, on, approved_at: on ? now - 26 * 60 : null, terms_changed: false, doing: on ? "waiting for the next step" : null, waiting_reason: null, needs_you: needs, funding_statements_valid_until: null, expected_typed: "5 NOID", statements: STATEMENTS, board: true, funding_offered: null, wallet: true, payouts: { noid: A.noidPayout, eth: A.ethPayout } },
     bob: { available: false, on: false, reason: "this console was started with --role alice: the bob side runs on another machine" },
   };
 }

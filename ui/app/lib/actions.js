@@ -30,17 +30,24 @@ const { checkDryRun } = require("./dryrun");
 const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, expectedAmount, isNothingToSweep } = require("./gate");
 const { envLocalWallet, parseWalletStatus } = require("./walletrun");
 const { classifySpendExit, classifyStepExit, NOT_SENT } = require("./exitcodes");
-const { productionReason } = require("./production");
+const { productionReason, programNetworkReason } = require("./production");
 const { boardRun: boardRunOf } = require("./board/runmode");
 const { STEP_OF, TERMINAL_ONLY } = require("./stepexec");
 const firststeps = require("./firststeps");
 const { readBobKeyAddress } = require("./invitation");
+const { decimalToInt } = require("./swapform");
 
 /** Own-property lookup: an id such as "__proto__" or "constructor" is not a spend. */
 const SPENDS = new Proxy(SPEND_TABLE, { get: (t, k) => (typeof k === "string" && Object.prototype.hasOwnProperty.call(t, k) ? t[k] : undefined) });
 
 const MIN = 60 * 1000;
 const TX_RE = /^0x[0-9a-f]{64}$/;
+// M1: the four re-send ids (the two dry runs and the two sends) take a new fee cap, typed by the person: `new_cap_gwei`, a decimal string in gwei. The server decides its bounds.
+const REPLACE_ID_RE = /^(?:dry|send)-(?:reveal|refund-eth)-replace$/;
+const GWEI_RE = /^(?:0|[1-9]\d{0,3})(?:\.\d{1,9})?$/;
+// L4 (fix round 2): no multiple of the approved cap. A cap is only the most the person allows (the transaction pays the fee level plus the tip, never the cap), so a high cap costs nothing beyond
+// the balance the swap key must hold; the re-send needs a cap strictly above the approved one and at most the ceiling.
+const NEW_CAP_CEILING_GWEI = { production: 300n, test: 1000n }; // the highest cap the program will send, whatever the approved one was
 const RUN_RE = /^[1-9]\d{0,3}$/;
 const MIN_GAP_MS = 2000;
 const WATCH_CACHE_MS = 10000;
@@ -421,9 +428,64 @@ class ActionRunner {
       if (!e) throw Object.assign(new Error(`unknown action id: ${JSON.stringify(String(id).slice(0, 40))}`), { status: 400 });
       if (txHash !== undefined && txHash !== null && !TX_RE.test(txHash)) throw new Error("the transaction hash to replace must be 0x + 64 lower-case hex");
       const scriptName = e.script ? (Object.prototype.hasOwnProperty.call(WALLET_SCRIPT, e.script.name) ? WALLET_SCRIPT[e.script.name] : e.script.name) : null;
-      return { file: null, args: [], env: {}, display: `step ${id}${txHash ? ` replacing ${txHash}` : ""}`, entry: e, script: scriptName };
+      // M1: a re-send at a new fee cap is bound by its words: a dry run made at one cap never authorizes a send at another
+      if (extra.newCap !== undefined && extra.newCap !== null && !(typeof extra.newCap === "string" && GWEI_RE.test(extra.newCap))) throw new Error("the new fee cap must be a decimal in gwei");
+      return { file: null, args: [], env: {}, display: `step ${id}${txHash ? ` replacing ${txHash}` : ""}${extra.newCap ? ` at fee cap ${extra.newCap} gwei` : ""}`, entry: e, script: scriptName };
     }
     return buildActionCommand(id, this.cfg, { ...extra, txHash, env: this.env, wallet: this.walletRun().use_swap_wallet === true });
+  }
+
+  /**
+   * M1: the new fee cap of a re-send. `raw` is what the request carried (`new_cap_gwei`, undefined when absent). Returns null when there is none to use, else `{ cap, approved }` (decimal
+   * strings in gwei; `approved` is run.json's own cap, null when the run has none). Rules: the four re-send ids in program mode REQUIRE it; every other id, and the terminal console (which
+   * has no such flag), REFUSE it (400). Bounds, decided here and never by the page: strictly above the approved cap; at most 300 gwei on mainnet and 1000 on a test
+   * network (a run with no cap on a test network: only the ceiling). run.json is never written (live.js itself raises the tip of a replacement to at least the old tip plus 12.5 %, up to 1 gwei,
+   * and prints a warning). A refusal is 422 with a plain reason.
+   */
+  newCapFor(id, raw) {
+    const isReplace = REPLACE_ID_RE.test(String(id));
+    const given = raw !== undefined && raw !== null;
+    if (!this.programMode || !isReplace) {
+      if (given) throw Object.assign(new Error(this.programMode ? "new_cap_gwei belongs only to a re-send of a stuck reveal or refund" : "new_cap_gwei is a setting of the program: the terminal console re-sends with the helper's own fee"), { status: 400 });
+      return null;
+    }
+    if (!given) throw Object.assign(new Error("a re-send needs a new fee cap (new_cap_gwei, in gwei, typed by you)"), { status: 400 });
+    if (typeof raw !== "string" || !GWEI_RE.test(raw.trim()) || decimalToInt(raw.trim(), 9) <= 0n) throw Object.assign(new Error("the new fee cap is a decimal in gwei like 2 or 0.5 (at most 9 decimals, more than zero)"), { status: 400 });
+    const cap = raw.trim();
+    const loaded = this.settingsSource ? this.settingsSource.load() : { ok: false };
+    if (!loaded.ok) throw Object.assign(new Error("run.json cannot be used: the approved fee cap is not known"), { status: 409 });
+    const s = loaded.settings;
+    const mainnet = s.profile === "production";
+    const approved = typeof s.gas_price_gwei === "string" ? s.gas_price_gwei : null;
+    const n = decimalToInt(cap, 9);
+    const ceiling = (mainnet ? NEW_CAP_CEILING_GWEI.production : NEW_CAP_CEILING_GWEI.test) * 10n ** 9n;
+    const fail = (why) => Object.assign(new Error(why), { status: 422 });
+    if (approved !== null) {
+      const a = decimalToInt(approved, 9);
+      if (n <= a) throw fail(`the new fee cap must be above the approved cap of ${approved} gwei: a replacement must pay more than the transaction it replaces`);
+    }
+    if (n > ceiling) throw fail(`the new fee cap is at most ${ceiling / 10n ** 9n} gwei ${mainnet ? "on Ethereum mainnet" : "on a test network"}`);
+    return { cap, approved };
+  }
+
+  /** M1: what the page needs to draw the new-cap field: `{ approved_gwei, min_exclusive_gwei, max_gwei }` (strings; null when run.json cannot be read). The server still decides every request. */
+  newCapLimits() {
+    try {
+      const loaded = this.settingsSource ? this.settingsSource.load() : { ok: false };
+      if (!loaded.ok) return null;
+      const s = loaded.settings;
+      const approved = typeof s.gas_price_gwei === "string" ? s.gas_price_gwei : null;
+      const ceiling = (s.profile === "production" ? NEW_CAP_CEILING_GWEI.production : NEW_CAP_CEILING_GWEI.test) * 10n ** 9n;
+      const max = ceiling;
+      const dec = (n) => {
+        const whole = n / 10n ** 9n;
+        const frac = String(n % 10n ** 9n).padStart(9, "0").replace(/0+$/, "");
+        return frac ? `${whole}.${frac}` : String(whole);
+      };
+      return { approved_gwei: approved, min_exclusive_gwei: approved, max_gwei: dec(max) };
+    } catch {
+      return null;
+    }
   }
 
   /** What env.local.sh says about the run's mode and the payout addresses (lib/walletrun.js); read again on every call (a few lines of a small file). In program mode: run.json. */
@@ -594,11 +656,17 @@ class ActionRunner {
   /** The reason text when this run folder is a production run (the console only shows it), else null. `run` is a readRun result, read when not given. */
   productionBlock(run) {
     if (this.settingsSource) {
-      // program mode fails closed: run.json says production, cannot be read safely or fails its schema (every action refused), or the run's terms or a tick say production
+      // program mode fails closed: run.json cannot be read safely or fails its schema (every action refused; a file that says production and fails the schema is refused with the
+      // production text), or the run's terms or a tick name another network than run.json (a Sepolia run.json with a chain-1 bundle or tick, and the reverse). A valid production
+      // run.json is acted on: its own rules (caps, fee cap, chain 1) are in the schema.
       try {
         const why = this.settingsSource.productionReason();
         if (why) return why;
-        return productionReason(run || this.readRunFn(this.cfg.runDirs, this.nowS()), null);
+        const l = this.settingsSource.load();
+        const snapshot = run || this.readRunFn(this.cfg.runDirs, this.nowS());
+        // no run.json at all (a board slot before its swap exists): production anywhere still refuses, as before; the production profile exists only with a run.json
+        if (!l.ok) return productionReason(snapshot, null);
+        return programNetworkReason(l.settings, snapshot);
       } catch {
         return "the production check could not be made: every action is refused.";
       }
@@ -804,7 +872,7 @@ class ActionRunner {
     const relevant = this.spendModeOk(spend) && relevantFor(spend, tick, spend.replace ? replaceTx : sentHash);
     let expectedDry = null;
     try {
-      expectedDry = this.command(spend.dry, replaceTx).display;
+      expectedDry = this.command(spend.dry, replaceTx, { newCap: spend.replace && this.programMode && this.dry.get(spend.id) ? this.dry.get(spend.id).newCap || null : null }).display;
     } catch {
       expectedDry = null;
     }
@@ -844,7 +912,8 @@ class ActionRunner {
       const dryRec = this.dryFor(s, run, replaceTx, nowMs);
       let expectedDry = null;
       try {
-        expectedDry = this.command(s.dry, replaceTx).display;
+        // a re-send's dry run is bound to the fee cap it was made at: the page's reading of it asks the same words
+        expectedDry = this.command(s.dry, replaceTx, { newCap: s.replace && this.programMode && this.dry.get(s.id) ? this.dry.get(s.id).newCap || null : null }).display;
       } catch {
         expectedDry = null;
       }
@@ -875,6 +944,8 @@ class ActionRunner {
         dry_id: s.dry,
         dry_command: expectedDry,
         replace_tx: replaceTx,
+        // M1 (program mode): the limits the server applies to the new fee cap typed for a re-send, and the cap the held dry run was made at
+        ...(s.replace && this.programMode ? { new_cap: this.newCapLimits(), dry_new_cap_gwei: this.dry.get(s.id) ? this.dry.get(s.id).newCap || null : null } : {}),
         dry: dryRec
           ? { age_s: Math.floor((nowMs - dryRec.finished_ms) / 1000), at: Math.floor(dryRec.finished_ms / 1000), hash: dryRec.check ? dryRec.check.hash : null, ok: dryRec.ok, result: dryRec.result, rows: dryRec.check ? dryRec.check.rows : [], all_ok: dryRec.check ? dryRec.check.all_ok : false, shown: dryRec.check ? dryRec.check.shown : null, stderr: dryRec.stderr }
           : null,
@@ -1184,6 +1255,7 @@ class ActionRunner {
     if (this.walletRun().ambiguous && (e.group === "dry" || e.id === "prepare" || e.id === "join")) this.assertMode({ id, role: e.role, mode: "wallet" });
     this.assertProgram(e, { sender: false, quiet: !!meta.poll });
     this.preflight(id);
+    const capInfo = this.newCapFor(id, meta.newCapGwei);
     let run = null;
     let txHash = null;
     let spend = null;
@@ -1214,8 +1286,8 @@ class ActionRunner {
       const jf = this.joinView();
       bundleFromPublic = !jf.run_bundle && !!(jf.public_bundle && jf.public_bundle.ok && jf.public_arg);
     }
-    const cmd = this.command(id, txHash, { bundleFromPublic });
-    return this.launch(e, cmd, { ...meta, role: e.role || null, spend, run, replaceTx: txHash, bundleFromPublic });
+    const cmd = this.command(id, txHash, { bundleFromPublic, newCap: capInfo ? capInfo.cap : null });
+    return this.launch(e, cmd, { ...meta, role: e.role || null, spend, run, replaceTx: txHash, bundleFromPublic, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
   }
 
   /** The confirmed spend. `typed` is what the operator typed; the gate re-checks everything. */
@@ -1240,6 +1312,7 @@ class ActionRunner {
     else if (this.walletRun().ambiguous) this.assertMode({ id, role: spend.role, mode: "wallet" });
     this.assertProgram(e, { sender: true });
     this.preflight(id);
+    const capInfo = this.newCapFor(id, meta.newCapGwei);
     const replaceTx = this.replaceTxFor(spend, run);
     if (spend.replace && !replaceTx) {
       this.audit.append({ action: id, role: spend.role, phase: "refused", result: "refused: no_pending_tx" });
@@ -1248,7 +1321,7 @@ class ActionRunner {
     const dry = this.dryFor(spend, run, replaceTx, nowMs);
     let expectedDry;
     try {
-      expectedDry = this.command(spend.dry, replaceTx).display;
+      expectedDry = this.command(spend.dry, replaceTx, { newCap: capInfo ? capInfo.cap : null }).display;
     } catch (err) {
       throw Object.assign(err, { status: err.status || 409 });
     }
@@ -1279,11 +1352,11 @@ class ActionRunner {
       throw Object.assign(new Error("the gate refused this spend"), { status: 422, reasons: g.reasons });
     }
     if (auto && spend.kind === "fund_noid") this.autopilot.consumeFunding(); // the statements are good for ONE automatic start
-    const cmd = this.command(id, replaceTx);
+    const cmd = this.command(id, replaceTx, { newCap: capInfo ? capInfo.cap : null });
     const tick = run.roles[spend.role].tick;
     const latch = { tickNow: typeof tick.now === "number" ? tick.now : null, intentAt: tick.intent && tick.intent.intent && typeof tick.intent.intent.decided_at === "number" ? tick.intent.intent.decided_at : null };
     this.dry.delete(id); // a dry run authorizes one start
-    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, aliceCheckRequired: programGate.aliceCheckRequired === true, role: spend.role, spend, run, replaceTx, dryHash: dry.check.hash, latch });
+    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, aliceCheckRequired: programGate.aliceCheckRequired === true, role: spend.role, spend, run, replaceTx, dryHash: dry.check.hash, latch, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
   }
 
   /**
@@ -1329,7 +1402,7 @@ class ActionRunner {
     const job = ++this.jobSeq;
     // the line before: if it cannot be written, nothing runs
     try {
-      this.audit.append({ action: e.id, role: meta.role || null, phase: "start", result: "started", dry_hash: meta.dryHash || null, detail: [meta.replaceTx ? `replaces ${meta.replaceTx}` : null, e.group === "spend" && meta.spend && meta.spend.kind === "fund_noid" ? (this.boardCtx(meta.spend) ? "board run: the handover check by the board, no human statement" : this.walletCtx(meta.spend) ? "statement=bob_check_line_matches; wallet run: no funding statement asked" : "statement=no_pending_funding; statement=bob_check_line_matches") : null, meta.bundleFromPublic ? "bundle from the public copy folder" : null, meta.firstSteps === true ? "started by the program" : null, e.group === "spend" && meta.aliceCheckRequired === true ? "statement=alice_check_line_matches" : null, meta.autoApproval ? `auto=1; approval=${meta.autoApproval}` : null, meta.latch ? `tick=${meta.latch.tickNow === null ? "-" : meta.latch.tickNow};intent=${meta.latch.intentAt === null ? "-" : meta.latch.intentAt}` : null].filter(Boolean).join("; ") || null });
+      this.audit.append({ action: e.id, role: meta.role || null, phase: "start", result: "started", dry_hash: meta.dryHash || null, detail: [meta.replaceTx ? `replaces ${meta.replaceTx}` : null, meta.newCap ? `fee cap: approved ${meta.approvedCap || "none"} gwei, new ${meta.newCap} gwei` : null, e.group === "spend" && meta.spend && meta.spend.kind === "fund_noid" ? (this.boardCtx(meta.spend) ? "board run: the handover check by the board, no human statement" : this.walletCtx(meta.spend) ? "statement=bob_check_line_matches; wallet run: no funding statement asked" : "statement=no_pending_funding; statement=bob_check_line_matches") : null, meta.bundleFromPublic ? "bundle from the public copy folder" : null, meta.firstSteps === true ? "started by the program" : null, e.group === "spend" && meta.aliceCheckRequired === true ? "statement=alice_check_line_matches" : null, meta.autoApproval ? `auto=1; approval=${meta.autoApproval}` : null, meta.latch ? `tick=${meta.latch.tickNow === null ? "-" : meta.latch.tickNow};intent=${meta.latch.intentAt === null ? "-" : meta.latch.intentAt}` : null].filter(Boolean).join("; ") || null });
     } catch (err) {
       throw Object.assign(new Error(`the audit log cannot be written (${err.code || err.message}); nothing was run`), { status: 500 });
     }
@@ -1425,6 +1498,7 @@ class ActionRunner {
   runStep(e, rec, meta, finish) {
     const x = {};
     if (meta.replaceTx) x.tx = meta.replaceTx;
+    if (typeof meta.newCap === "string") x.newCap = meta.newCap;
     if (typeof meta.bundlePath === "string") x.bundlePath = meta.bundlePath;
     let p;
     try {
@@ -1596,6 +1670,7 @@ class ActionRunner {
         // fund.sh prints its refusals on stdout ("REFUSED: ...", "dry run: a real run would be REFUSED ...")
         stderr: (e.text ? rec.stdout || rec.stderr : rec.stderr) ? (e.text ? rec.stdout || rec.stderr : rec.stderr).slice(0, e.text ? 1800 : 600) : null,
         replaceTx: meta.replaceTx || null,
+        newCap: meta.newCap || null,
       });
       // A failed helper leaves an empty result file: the sha256 of nothing is not a dry run's hash and must not go into the audit log as one.
       if (main && main.bytes.length > 0) rec.dry_hash = crypto.createHash("sha256").update(main.bytes).digest("hex");

@@ -48,7 +48,12 @@ test("/api/program: the form's profiles carry the contract the program pins, or 
     let r = await api("GET", "/api/program");
     assert.equal(r.body.form.profiles.sepolia.contract, PIN);
     assert.equal(r.body.form.profiles.rehearsal.contract, null);
-    assert.deepEqual(Object.keys(r.body.form.profiles), ["sepolia", "rehearsal"], "no production profile");
+    assert.deepEqual(Object.keys(r.body.form.profiles), ["sepolia", "rehearsal", "production"]);
+    assert.equal(r.body.form.profiles.production.contract, "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70", "the mainnet deployment of the committed artifact");
+    assert.equal(r.body.form.profiles.production.chain, 1);
+    assert.equal(r.body.form.profiles.production.max_noid, 2500);
+    assert.equal(r.body.form.profiles.production.max_eth, 0.5);
+    assert.equal(r.body.form.profiles.production.fee_cap_gwei, "1");
     assert.equal(r.body.form.profiles.sepolia.chain, 11155111);
     assert.equal(r.body.form.profiles.sepolia.max_noid, 20);
     const s = programsettings.defaults();

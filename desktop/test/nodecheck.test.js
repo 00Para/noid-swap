@@ -198,3 +198,87 @@ test("overlapping checks share one run", async () => {
   await Promise.all([c.checkOnce(), c.checkOnce(), c.checkOnce()]);
   assert.equal(n, 1);
 });
+
+test("mainnet opening (2026-11-20): production is chain 1 in the node check, and the version is 0.1.5", () => {
+  const nc = require("../lib/nodecheck");
+  assert.equal(nc.CHAIN_IDS.production, 1);
+  assert.equal(nc.CHAIN_IDS.sepolia, 11155111);
+  assert.equal(require("../package.json").version, "0.1.5");
+});
+
+// ---------------------------------------------------------------- the base fee (launch spec 5.1)
+
+const withFee = (hexFee, number = "0x10", age = 5, id = 11155111) => ({ eth_chainId: "0x" + id.toString(16), eth_getBlockByNumber: { number, baseFeePerGas: hexFee, timestamp: "0x" + (NOW_S - age).toString(16) } });
+const GWEI = 1_000_000_000n;
+
+test("the base fee: a decimal string of wei, the block number and the read time, read from the same latest-block call", async () => {
+  const log = [];
+  const c = createNodeCheck({ post: fakePost({ [NOID]: goodNoid(), [ETH1]: withFee("0x" + (3n * GWEI / 10n).toString(16), "0x2a"), [ETH2]: goodEth() }, log), now: () => NOW, settings: baseSettings, checkpoint: null, autoStart: false });
+  const s = await c.checkOnce();
+  assert.deepEqual(s.eth.fee, { base_fee_wei: "300000000", block: 42, at: NOW, profile: "sepolia" });
+  assert.deepEqual(s.eth.fees, { sepolia: { base_fee_wei: "300000000", block: 42, at: NOW, profile: "sepolia" } });
+  assert.deepEqual(c.status().eth.fee, s.eth.fee);
+  // no extra call: the latest-block read of the age check is the one
+  assert.equal(log.filter((l) => l.method === "eth_getBlockByNumber").length, 2);
+});
+
+test("the base fee: of two endpoints the newer block wins; one without a base fee does not hide the other", async () => {
+  const c = make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee("0x64", "0x10"), [ETH2]: withFee("0xc8", "0x11") } });
+  assert.deepEqual((await c.checkOnce()).eth.fee, { base_fee_wei: "200", block: 17, at: NOW, profile: "sepolia" });
+  const d = make({ handlers: { [NOID]: goodNoid(), [ETH1]: goodEth(), [ETH2]: withFee("0xc8", "0x11") } });
+  assert.equal((await d.checkOnce()).eth.fee.base_fee_wei, "200");
+});
+
+test("the base fee is null when no endpoint gave a good one: a block without the field, an odd value, a node that is behind, on another chain or unreachable", async () => {
+  assert.equal((await make({ handlers: { [NOID]: goodNoid(), [ETH1]: goodEth(), [ETH2]: goodEth() } }).checkOnce()).eth.fee, null);
+  for (const odd of ["300", "0x", "0xzz", 300, null, "0x" + "f".repeat(33)]) {
+    const s = await make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee(odd), [ETH2]: withFee(odd) } }).checkOnce();
+    assert.equal(s.eth.fee, null, String(odd));
+  }
+  assert.equal((await make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee("0x64", "0x10", 500), [ETH2]: withFee("0x64", "0x10", 500) } }).checkOnce()).eth.fee, null, "behind");
+  assert.equal((await make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee("0x64", "0x10", 5, 1), [ETH2]: { eth_chainId: refused() } } }).checkOnce()).eth.fee, null, "wrong chain, unreachable");
+  assert.equal((await make({ handlers: { [NOID]: goodNoid() }, settings: () => ({ noid_rpc: NOID, eth: {} }) }).checkOnce()).eth.fee, null, "no endpoint");
+});
+
+test("the rehearsal profile reads no block, so it has no fee", async () => {
+  const c = make({ handlers: { [NOID]: goodNoid(), "http://127.0.0.1:8545": { eth_chainId: "0x7a69" } }, profiles: () => ["rehearsal"] });
+  assert.equal((await c.checkOnce()).eth.fee, null);
+});
+
+test("the fee of each profile is kept apart, and Ethereum mainnet is the one the page shows when both were read", async () => {
+  const MAIN = "https://main.example.invalid/k";
+  const settings = () => ({ noid_rpc: NOID, eth: { sepolia: { rpc: ETH1, rpc2: null }, production: { rpc: MAIN, rpc2: null } } });
+  const c = make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee("0x64", "0x10"), [MAIN]: withFee("0x12c", "0x20", 5, 1) }, settings });
+  const s = await c.checkOnce();
+  assert.equal(s.eth.fees.sepolia.base_fee_wei, "100");
+  assert.equal(s.eth.fees.production.base_fee_wei, "300");
+  assert.deepEqual(s.eth.fee, s.eth.fees.production);
+  assert.equal(s.eth.fee.profile, "production");
+});
+
+test("a later failed read keeps the last good fee with its old time, so a reader can see it is stale", async () => {
+  let t = NOW;
+  let tick = 0;
+  const post = async (url, body) => {
+    const h = tick === 0 ? { [NOID]: goodNoid(), [ETH1]: withFee("0x64", "0x10"), [ETH2]: goodEth() } : { [NOID]: goodNoid(), [ETH1]: { eth_chainId: refused() }, [ETH2]: { eth_chainId: refused() } };
+    const m = h[url] && h[url][body.method];
+    if (m === undefined) return { jsonrpc: "2.0", id: 1, error: { code: -32601, message: "no" } };
+    const v = typeof m === "function" ? m(body.params) : m;
+    if (v instanceof Error) throw v;
+    return { jsonrpc: "2.0", id: 1, result: v };
+  };
+  const c = createNodeCheck({ post, now: () => t, settings: baseSettings, checkpoint: null, autoStart: false });
+  await c.checkOnce();
+  tick = 1;
+  t = NOW + 600_000;
+  const s = await c.checkOnce();
+  assert.equal(s.eth.state, "unreachable");
+  assert.deepEqual(s.eth.fee, { base_fee_wei: "100", block: 16, at: NOW, profile: "sepolia" });
+  assert.equal(s.eth.checked_at, NOW + 600_000);
+});
+
+test("the status never carries an endpoint address or a key", async () => {
+  const c = make({ handlers: { [NOID]: goodNoid(), [ETH1]: withFee("0x64"), [ETH2]: withFee("0x64") } });
+  const text = JSON.stringify(await c.checkOnce());
+  assert.ok(!text.includes("example.invalid") && !text.includes("secret-api-key"));
+});

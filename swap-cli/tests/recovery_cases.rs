@@ -769,9 +769,9 @@ fn x4_a_node_on_another_chain_or_with_other_code_or_a_second_node_that_is_wrong_
     let l = drop_the_lock(&s);
     s.world.borrow_mut().warp_eth_to(t_reveal_of(&l) + s.gates().eth_finality_s + 60);
     // The first node answers from another chain / another contract: "no such lock" proves nothing.
-    let r = s.tick_bob_with(|_, eth| eth.chain_id = Some(1));
+    let r = s.tick_bob_with(|_, eth| eth.chain_id = Some(5));
     assert_eq!(s.bob_phase(), "locked", "{r:?}");
-    assert!(r.notes.iter().any(|n| n.contains("the first Ethereum node is on chain 1")), "{:?}", r.notes);
+    assert!(r.notes.iter().any(|n| n.contains("the first Ethereum node is on chain 5")), "{:?}", r.notes);
     let r = s.tick_bob_with(|_, eth| eth.chain_id = None);
     assert_eq!(s.bob_phase(), "locked", "{r:?}");
     assert!(r.notes.iter().any(|n| n.contains("the first Ethereum node's chain id is unknown")), "{:?}", r.notes);

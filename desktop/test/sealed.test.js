@@ -91,6 +91,8 @@ test("arguments are checked: key size, label, run id for the label, file name as
   assert.throws(() => sealed.seal(args({ runId: "install" })), sealed.SealedError);
   assert.throws(() => sealed.seal(args({ label: "board-invite", runId: R })), sealed.SealedError);
   assert.doesNotThrow(() => sealed.seal(args({ label: "board-invite", runId: "install", fileName: "board-invite.sealed" })));
+  assert.doesNotThrow(() => sealed.seal(args({ label: "payout-history", runId: "install", fileName: "payout-history.sealed" })));
+  assert.throws(() => sealed.seal(args({ label: "payout-history", runId: R, fileName: "payout-history.sealed" })), sealed.SealedError, "the history's run id is the word install");
   assert.throws(() => sealed.seal(args({ fileName: "../x" })), sealed.SealedError);
   assert.throws(() => sealed.seal(args({ fileName: "a/b" })), sealed.SealedError);
   assert.throws(() => sealed.seal(args({ fileName: "" })), sealed.SealedError);

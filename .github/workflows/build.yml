@@ -359,7 +359,7 @@ jobs:
             installer_glob: "No1d-Swap-*-win-x64.exe"
             resources: "dist/win-unpacked/resources"
             binary: "dist/win-unpacked/No1d Swap.exe"
-          - os: macos-14
+          - os: macos-latest
             platform: macos-aarch64
             stage_platform: mac
             dir_args: "--mac --arm64 --dir"
@@ -438,21 +438,17 @@ jobs:
       - name: Check the contract code hashes against swap-cli's constants
         run: node desktop/scripts/codehash-check.js --artifacts eth/artifacts --params swap-cli/src/params.rs --build-info swap-cli-dist/BUILD-INFO.txt --expect-commit "$GITHUB_SHA"
 
-      # The build tools, at the exact versions of desktop/package.json. Scripts are not run (the Electron program is downloaded by
-      # electron-builder itself). With a committed desktop/package-lock.json this is `npm ci`; without one the first run makes it and uploads
-      # it below, to be committed (nothing can make it offline).
+      # The build tools, at the exact versions of desktop/package.json and the committed desktop/package-lock.json. Scripts are not run
+      # (the Electron program is downloaded by electron-builder itself). A missing lock file fails the job: there is no unlocked fallback.
       - name: Install the build tools (electron-builder)
         id: tools
         working-directory: desktop
         run: |
-          if [ -f package-lock.json ]; then
-            npm ci --ignore-scripts --no-audit --no-fund
-            echo "lock_generated=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning title=desktop lock::desktop/package-lock.json is not committed: the build tools were installed at their exact pinned versions, but their own dependencies were not locked. Commit the lock from the uploaded artifact."
-            npm install --ignore-scripts --no-audit --no-fund
-            echo "lock_generated=true" >> "$GITHUB_OUTPUT"
+          if [ ! -f package-lock.json ]; then
+            echo "::error title=desktop lock::desktop/package-lock.json is not committed: the build tools must be installed from a committed lock file."
+            exit 1
           fi
+          npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Stage the program (desktop/stage, desktop/stage-bin)
         run: node desktop/scripts/stage.js stage --repo . --out desktop/stage --bin-out desktop/stage-bin --swap-cli-dir swap-cli-dist --platform "${{ matrix.stage_platform }}"
@@ -554,17 +550,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # Only when desktop/package-lock.json was not committed: the lock this run made, to be committed (then this step and the install
-      # fallback above are no longer used).
-      - name: Upload the build tools' lock file (only when it was not committed)
-        if: steps.tools.outputs.lock_generated == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: desktop-lock-${{ matrix.platform }}
-          path: desktop/package-lock.json
-          if-no-files-found: error
-          retention-days: 30
-
   # ---------------------------------------------------------------------------------------------------------------------------------
   # Step 4.8: the start-up test. A fresh machine of each kind installs the program the desktop job made and starts it with --self-test
   # (a switch that opens a hidden window on a temporary data folder, opens no vault and can act on nothing). Besides the start it checks the
@@ -585,7 +570,7 @@ jobs:
         include:
           - os: windows-latest
             platform: windows-x86_64
-          - os: macos-14
+          - os: macos-latest
             platform: macos-aarch64
 
     steps:

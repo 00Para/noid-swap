@@ -33,7 +33,7 @@ test("with the fake: one JSON line, exit 0, the temporary folder gone, the real 
     const line = e.stdout[0];
     assert.ok(line.endsWith("\n") && line.trim().split("\n").length === 1);
     const j = JSON.parse(line);
-    assert.deepEqual(Object.keys(j), ["selftest", "node", "page", "prefs", "no_token", "page_script", "page_post", "secret_page"]);
+    assert.deepEqual(Object.keys(j), ["selftest", "node", "page", "prefs", "no_token", "page_script", "page_post", "secret_page", "ed25519"]);
     // the page's POST went through the session's own scheme handler to the real server and was refused for the token
     assert.equal(j.page_script, true);
     assert.equal(j.page_post, 403);
@@ -366,7 +366,7 @@ test("the progress lines name each step in order; a progress function that throw
     holdMs: 5,
     progress: (s) => steps.push(s),
   });
-  assert.deepEqual(steps, ["checks begin", "page loaded", "request without the token answered", "page probe answered", "secret page probe answered", "node check answered", "hold over", "result printed", "stopped"]);
+  assert.deepEqual(steps, ["checks begin", "page loaded", "request without the token answered", "page probe answered", "secret page probe answered", "ed25519 known answer ok", "node check answered", "hold over", "result printed", "stopped"]);
   let code = null;
   const lines = [];
   await runSelfTest({

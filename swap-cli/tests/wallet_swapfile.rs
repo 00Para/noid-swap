@@ -103,7 +103,7 @@ fn a_swap_with_a_wallet_is_refused_unless_the_pieces_agree() {
             5_800,
             300_000,
             swap_cli::swapfile::EthParams {
-                chain_id: 11_155_111,
+                chain_id: 1,
                 contract: [0x11; 20],
                 code_hash: Some(swap_cli::params::code_hash_for(swap_cli::secret::LockKind::Sha256)),
                 lock_kind: swap_cli::secret::LockKind::Sha256,

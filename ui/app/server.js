@@ -21,6 +21,7 @@
  *   GET  /api/run              the run folder, parsed and stripped of anything secret-bearing
  *   GET  /api/demo?scenario=&role=&step=&flags=
  *   POST /api/helper           {"id": ...} -> lib/runner.js (only with --allow-run-readonly)
+ * Program mode also has POST /api/record-close {swap, txid} (record a close made elsewhere: tick --apply --closed-by, nothing is sent).
  * The previous chain-polling console stays at /console (and /api/swaps).
  *
  * What it never does (without --allow-actions): send a transaction, call a wallet_* / submit* / create*
@@ -47,15 +48,22 @@ const { demoPayload, scenarioList, FLAGS: DEMO_FLAGS } = require("./lib/demo");
 const { ReadOnlyRunner, validateConfig, TABLE: RUNNER_TABLE } = require("./lib/runner");
 const { ActionRunner, validateActionsConfig, runNumberOf, defaultRepoLiveDir, TABLE: ACTION_TABLE } = require("./lib/actions");
 const { AuditLog } = require("./lib/audit");
-const { validateForm, writeEnvLocal, envLocalState, PROFILES: FORM_PROFILES, ROLES: FORM_ROLES, LOCK_KINDS, pinFor } = require("./lib/swapform");
+const { validateForm, writeEnvLocal, envLocalState, PROFILES: FORM_PROFILES, ROLES: FORM_ROLES, LOCK_KINDS, pinFor, programPinFor, PROGRAM_PROFILES, PRODUCTION_FEE_DEFAULTS } = require("./lib/swapform");
 const invitation = require("./lib/invitation");
 const { pathCandidates } = require("./lib/runfolder");
 const { handleActionPost, ACTION_POSTS } = require("./lib/actionroutes");
 const { RunLock, LazyRunLock } = require("./lib/runlock");
+const { TICK_FRESH_S } = require("./lib/gate");
 const { Autopilot, STEP_MS } = require("./lib/autopilot");
+const { programWords } = require("./lib/programwords");
 const { BoardHost } = require("./lib/board/host");
 const { SwapSet, ID_RE: SWAP_ID_RE } = require("./lib/swapset");
+const { recordCloseTxid, RECORD_CLOSE_ID } = require("./lib/stepexec");
 const programsettings = require("./lib/programsettings");
+const newSwapNotice = require("./lib/newswapnotice");
+const payoutHistory = require("./lib/payouthistory");
+const Launch = require("./lib/launchfacts");
+const { ETH_RE: WALLET_ETH_RE, NOID_RE: WALLET_NOID_RE } = require("./lib/walletrun");
 
 const APP_DIR = __dirname;
 const UI_DIR = path.join(APP_DIR, "..");
@@ -67,6 +75,12 @@ const STATIC = {
   "/phases.js": ["lib/phases.js", "text/javascript; charset=utf-8"],
   "/viewmodel.js": ["lib/viewmodel.js", "text/javascript; charset=utf-8"],
   "/enginetext.js": ["lib/enginetext.js", "text/javascript; charset=utf-8"],
+  "/programwords.js": ["lib/programwords.js", "text/javascript; charset=utf-8"],
+  // the launch screens' shared pieces (figures, the limits card, the needs-you texts) and their stylesheet, linked after operator.css
+  "/launchfacts.js": ["lib/launchfacts.js", "text/javascript; charset=utf-8"],
+  "/limitstext.js": ["lib/limitstext.js", "text/javascript; charset=utf-8"],
+  "/needtext.js": ["lib/needtext.js", "text/javascript; charset=utf-8"],
+  "/launch.css": ["launch.css", "text/css; charset=utf-8"],
   "/actions.js": ["actions.js", "text/javascript; charset=utf-8"],
   "/program.js": ["program.js", "text/javascript; charset=utf-8"],
   "/stagecard.js": ["stagecard.js", "text/javascript; charset=utf-8"],
@@ -710,6 +724,31 @@ function main() {
 }
 
 // ====================================================================================================================================================
+/**
+ * POST /api/record-close {"swap", "txid"}: "Record a close made elsewhere" (batch D). The request carries the swap and one transaction id and nothing else (any other key is a 400): the executor
+ * runs one tick of the swap's own role with `--apply --closed-by TXID` and no other flag (lib/stepexec.js recordClose). It sends nothing, so it has no gate, typed amount or latch, but it
+ * takes the runner's busy flag for its time (one action at a time: a second press, or a step that is running, is a 409). A refusal of the tool is a 409 with the tool's own words in `lines`
+ * and the swap file unchanged. A request that is not a transaction id is a 400 before anything is asked or logged.
+ */
+async function recordCloseRoute(swap, body) {
+  for (const k of Object.keys(body)) if (k !== "swap" && k !== "txid") return { status: 400, body: { error: "the request carries the swap and the transaction id only" } };
+  if (typeof body.txid !== "string" || !recordCloseTxid(body.txid)) return { status: 400, body: { error: "A transaction id is 64 characters, 0 to 9 and a to f, in lower case (it may start with 0x)." } };
+  if (!swap.runner || !swap.executor || typeof swap.executor.recordClose !== "function") return { status: 409, body: { error: swap.refused || "this folder is not open" } };
+  const runner = swap.runner;
+  if (runner.busy) return { status: 409, body: { error: "Another step of this swap is running. Try again when it has ended.", recorded: false } };
+  const mine = { id: RECORD_CLOSE_ID, job: -1, started_ms: Date.now() };
+  runner.busy = mine;
+  try {
+    const r = await swap.executor.recordClose(body.txid);
+    if (r.recorded) return { status: 200, body: { ok: true, recorded: true, txid: r.txid, phase_after: r.phase_after || null } };
+    return { status: r.status || 409, body: { error: r.why || "The program did not record this close.", recorded: false, tag: r.tag || null, lines: Array.isArray(r.lines) ? r.lines : [] } };
+  } catch {
+    return { status: 500, body: { error: "The program could not run the check. Nothing was recorded.", recorded: false, lines: [] } };
+  } finally {
+    if (runner.busy === mine) runner.busy = null;
+  }
+}
+
 // PROGRAM MODE (piece 4, step 4.5): the desktop shell calls startProgramServer(program). Steps run in-process (lib/stepexec.js), settings come from each swap's run.json,
 // several swaps run side by side (lib/swapset.js), and every request that acts names a swap id. Terminal mode above is unchanged.
 // ====================================================================================================================================================
@@ -718,14 +757,31 @@ function main() {
 const PROGRAM_STATIC = Object.fromEntries(Object.entries(STATIC).filter(([p]) => !["/console", "/app.js", "/styles.css"].includes(p)));
 const OPEN_WHAT = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
 const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384 };
-/** The form's view of the test profiles: chain, caps, and the program's own contract for the network (`pinFor`: the settings' override, else the one pin; null when there is none). */
-const formProfileView = (settings) => Object.fromEntries(Object.entries(FORM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18, contract: pinFor(k, settings) || null }]));
+/** The form's view of the networks (the test profiles and Ethereum mainnet): chain, caps, and the program's own contract for the network (`programPinFor`: the settings' override, else the one pin; null when there is none, as on mainnet until a deployment exists). */
+const formProfileView = (settings) => Object.fromEntries(Object.entries(PROGRAM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18, contract: programPinFor(k, settings) || null, ...(k === "production" ? { mainnet: true, fee_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei, tip_gwei: PRODUCTION_FEE_DEFAULTS.priority_fee_gwei } : { estimate_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei }) }]));
+
+/**
+ * R4: the base fee the desktop read, for the page: each fee (`eth.fee`, `eth.fees[profile]`) gets `age_s` and `stale` (older than 120 s) from the server's own clock. The fee is display only and
+ * feeds no step: the steps keep their own reads. A fee of a shape that is not agreed is dropped (null).
+ */
+function withFeeAges(s, now = Date.now()) {
+  if (!s || typeof s !== "object" || !s.eth || typeof s.eth !== "object") return s;
+  const one = (f) => {
+    if (!f || typeof f !== "object" || typeof f.base_fee_wei !== "string" || !/^[0-9]{1,40}$/.test(f.base_fee_wei) || !Number.isFinite(Number(f.at))) return null;
+    const age = Math.max(0, Math.floor((now - Number(f.at)) / 1000));
+    return { ...f, age_s: age, stale: age > Launch.BASE_FEE_STALE_S };
+  };
+  const eth = { ...s.eth };
+  if ("fee" in eth) eth.fee = one(eth.fee);
+  if (eth.fees && typeof eth.fees === "object") eth.fees = Object.fromEntries(Object.entries(eth.fees).map(([k, v]) => [k, one(v)]).filter(([, v]) => v !== null));
+  return { ...s, eth };
+}
 
 function programNodeStatus(program) {
   const fallback = { noid: { state: "error", tip: null, chain_checked: false, ok_since_start: false, checked_at: null }, eth: { state: "error", chain_id: null, endpoints: 0, checked_at: null } };
   try {
     const s = typeof program.nodeStatus === "function" ? program.nodeStatus() : null;
-    return s && typeof s === "object" ? s : fallback;
+    return s && typeof s === "object" ? withFeeAges(s) : fallback;
   } catch {
     return fallback;
   }
@@ -747,20 +803,29 @@ function programPayload(program, swapSet) {
   }
   const ps = swapSet.programSettings();
   const slot = swapSet.slotSwap();
-  let update = { state: "none", latest: null, url: null };
+  // the bar's chip: mainnet as soon as one open swap is a mainnet swap (real funds), else the test network
+  const swaps = swapSet.list();
+  const network = swaps.some((x) => x && x.network === "mainnet") ? "mainnet" : "test";
+  let update = { state: "none", latest: null, url: null, unsafe: false, note: null, note_unreadable: false };
   try {
     const u = typeof program.updateStatus === "function" ? program.updateStatus() : null;
-    if (u && typeof u === "object") update = { state: String(u.state || "none"), latest: u.latest || null, url: u.url || null };
+    if (u && typeof u === "object") update = { state: String(u.state || "none"), latest: u.latest || null, url: u.url || null, unsafe: false, note: null, note_unreadable: false };
   } catch {
     /* none */
   }
+  // R2: the signed notice. Its flags are re-checked here (the note: 280 characters, no control character); the vault's own reasons keep their priority below.
+  const notice = newSwapNotice.read(program);
+  update.unsafe = notice.unsafe;
+  update.note = notice.note;
+  update.note_unreadable = notice.note_unreadable;
+  if (notice.unsafe && allowed && allowed.ok === true) allowed = { ok: false, why: notice.why };
   return {
     version: program.version,
-    network: "test",
+    network,
     node: programNodeStatus(program),
     vault: { ready: !!(ready && ready.ok), recovery_confirmed: confirmed, why: ready && ready.ok ? null : (ready && ready.why) || null },
     new_swap_allowed: { ok: !!(allowed && allowed.ok), why: allowed && allowed.ok ? null : (allowed && allowed.why) || null },
-    swaps: swapSet.list(),
+    swaps,
     board: { enabled: !!(ps && ps.board.relays.length >= 2), slot: slot ? slot.id : null },
     update,
     form: { profiles: formProfileView(ps), roles: ["alice", "bob"] },
@@ -777,11 +842,32 @@ function ownNoid(swap) {
   }
 }
 
+/** Bob's lock check (R5, mainnet): from the producer screen of his autopilot view and the age of his last tick. `state` is ok, no, loading (no tick yet) or stale (the tick is older than the gate's limit). */
+function bobCanLock(screen, tick, now) {
+  if (!screen || typeof screen !== "object") return null;
+  if (!tick) return { ok: false, state: "loading", why: null, share_text: null };
+  const age = typeof tick.now === "number" ? now - tick.now : null;
+  if (age === null || age > TICK_FRESH_S || age < -TICK_FRESH_S) return { ok: false, state: "stale", why: null, share_text: null };
+  return { ok: screen.ok === true, state: screen.ok === true ? "ok" : "no", why: screen.ok === true ? null : screen.why || null, share_text: screen.ok === true ? screen.share_text || null : null };
+}
+
+/** The numbers of the launch screens for one swap (R4): the shared figures of lib/launchfacts.js from the swap's own run.json, the base fee of its own network, the deposit status and the terms. Display only. */
+function launchOf(program, swap, run, settings) {
+  const s = settings;
+  const node = programNodeStatus(program);
+  const ws = swap.runner && swap.runner.walletStatus ? swap.runner.walletStatus[s.role] : null;
+  const fee = ws && ws.ok === true && ws.noid && typeof ws.noid.fee_reserve_micronoid === "string" ? ws.noid.fee_reserve_micronoid : null;
+  const maxFee = run && run.terms && Number.isSafeInteger(run.terms.max_fee_micronoid) ? run.terms.max_fee_micronoid : null;
+  return Launch.launch({ profile: s.profile, role: s.role, amountMicro: s.amount_micronoid, amountWei: s.amount_wei, capGwei: s.gas_price_gwei, tipGwei: s.priority_fee_gwei, baseFee: Launch.baseFeeFor(node.eth, s.profile), nowMs: Date.now(), fundingFeeMicro: fee, maxFeeMicro: maxFee, hcLead: Number.isInteger(s.hc_lead) ? s.hc_lead : null });
+}
+
 /** GET /api/run?swap=ID: today's run payload for one swap (no path of the data folder in it). */
-function programRunPayload(swapSet, swap) {
+async function programRunPayload(program, swapSet, swap) {
   const now = nowS();
-  const program = { swap: swap.id, refused: swap.refused || null, read_only: !!swap.readOnly, board_error: swap.boardError || null, summary: swapSet.summary(swap), own_noid: ownNoid(swap) };
-  if (!swap.runner) return { mode: "run", server_now: now, role: null, program, runner: { enabled: false, items: [] }, actions: { enabled: false }, board: null };
+  const notice = newSwapNotice.read(program);
+  const ps = programsettings.loadSafe(program.dataDir);
+  const prog = { swap: swap.id, refused: swap.refused || null, read_only: !!swap.readOnly, board_error: swap.boardError || null, summary: swapSet.summary(swap), own_noid: ownNoid(swap), notice: { unsafe: notice.unsafe, note: notice.note, note_unreadable: notice.note_unreadable }, limits_read: ps.ok && ps.settings.limits_read_version === program.version };
+  if (!swap.runner) return { mode: "run", server_now: now, role: null, program: prog, runner: { enabled: false, items: [] }, actions: { enabled: false }, board: null };
   const run = readRun([swap.dir, swap.pub], now);
   const role = swap.settingsSource.role();
   if (run.roles && role) run.roles = { ...run.roles, [role === "alice" ? "bob" : "alice"]: null };
@@ -790,6 +876,35 @@ function programRunPayload(swapSet, swap) {
   const { dirs, wsl: _wsl, ...rest } = run;
   void _wsl;
   const dirNames = ["this swap's folder", "this swap's pub folder"];
+  const actionsView = swap.runner.view(run);
+  let settings = null;
+  try {
+    const l = swap.settingsSource.load();
+    settings = l.ok ? l.settings : null;
+  } catch {
+    settings = null;
+  }
+  // R3: the history of the person's own addresses, the count without this run; null when the program has no history (nothing is shown)
+  const hist = settings ? await payoutHistory.runView(program, swap.id, settings) : { state: "none", map: {} };
+  prog.payout_history = hist.state === "none" ? null : hist.map;
+  prog.payout_history_state = hist.state;
+  if (settings) {
+    try {
+      prog.launch = launchOf(program, swap, run, settings);
+    } catch {
+      prog.launch = null;
+    }
+    try {
+      prog.settlement = swapSet.settlement.view({ dir: swap.dir, role: settings.role, settings, audit: swap.audit, run, marker: (n) => swap.runner.walletMarker(n), walletStatus: swap.runner.walletStatus ? swap.runner.walletStatus[settings.role] : null });
+    } catch {
+      prog.settlement = null;
+    }
+    if (settings.role === "bob" && settings.profile === "production") {
+      const ap = actionsView && actionsView.autopilot && actionsView.autopilot.bob ? actionsView.autopilot.bob : null;
+      const tick = run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+      prog.bob_can_lock = bobCanLock(ap && ap.producer_screen, tick, now);
+    }
+  }
   return {
     mode: "run",
     server_now: now,
@@ -800,9 +915,9 @@ function programRunPayload(swapSet, swap) {
     bundle_file: strip(run.bundle_file),
     commands: { bin: null, linux_run: null },
     runner: { enabled: true, items: swap.runner.describe() },
-    actions: swap.runner.view(run),
+    actions: actionsView,
     board: swap.board ? swap.board.view() : null,
-    program,
+    program: prog,
   };
 }
 
@@ -898,7 +1013,7 @@ const FILE_WORDS = Object.freeze({
   place: "That place cannot be used: choose a folder outside the program's own data folder. Nothing was saved.",
   invitation_role: "Only the swap of the side that sells ETH makes an invitation.",
   invitation_board: "A board run hands the terms over by itself.",
-  invitation_network: "Invitations are made for Sepolia swaps only.",
+  invitation_network: "Invitations are made for Sepolia and Ethereum mainnet swaps only.",
   invitation_key: "There is no invitation yet: the program is still making this swap's key.",
   invitation_bad: "The invitation cannot be made from this swap's settings. Nothing was saved.",
 });
@@ -991,11 +1106,14 @@ async function bundleSaveRoute(program, swap) {
 
 /** POST /api/invitation/save {"swap"}: Bob saves his invitation for Alice. */
 async function invitationSaveRoute(program, swap) {
+  // R2: a new swap is paused by a signed notice, and an invitation asks Alice to start one
+  const notice = newSwapNotice.read(program);
+  if (notice.unsafe) return fileRefusal(409, notice.why);
   const no = savePrecheck(swap, "bob", { role: FILE_WORDS.invitation_role, board: FILE_WORDS.invitation_board });
   if (no) return no;
   const l = swap.settingsSource.load();
   if (!l.ok) return fileRefusal(409, FILE_WORDS.invitation_bad);
-  if (l.settings.profile !== "sepolia") return fileRefusal(409, FILE_WORDS.invitation_network);
+  if (l.settings.profile !== "sepolia" && l.settings.profile !== "production") return fileRefusal(409, FILE_WORDS.invitation_network);
   const key = invitation.readBobKeyAddress(swap.dir);
   if (!key) return fileRefusal(409, FILE_WORDS.invitation_key);
   let text;
@@ -1071,9 +1189,20 @@ function rememberAddresses(program, swapSet, id) {
   }
 }
 
+// ---- R3: the clipboard read-back. The page asks whether the clipboard still holds what it copied; the main process answers with a boolean and never the content.
+const CLIPBOARD_MAX_PER_MIN = 10;
+const AMOUNT_SHAPE = /^[0-9]{1,40}(?:\.[0-9]{1,39})?$/;
+/** A value the read-back accepts: an Ethereum address (0x and 40 hexadecimal characters), a Parano1d address (o1...) or an amount (digits and one dot, at most 40 characters). */
+function clipboardShape(v) {
+  if (typeof v !== "string" || v.length === 0 || v.length > 120) return false;
+  return WALLET_ETH_RE.test(v) || WALLET_NOID_RE.test(v) || (v.length <= 40 && AMOUNT_SHAPE.test(v));
+}
+
 /** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
 function programRequestHandler(program, swapSet, getServer) {
-  const forPage = pagePathRewriter(program);
+  const clipHits = []; // the times (ms) of the read-backs of the last minute: ten a minute for the one page
+  const forPaths = pagePathRewriter(program);
+  const forPage = (body) => programWords(forPaths(body)); // no path of the data or home folder, and the program's words instead of the console's
   const send = (res, status, body, type) => sendWith(CSP_SCHEME, res, status, body !== null && typeof body === "object" && !Buffer.isBuffer(body) ? forPage(body) : body, type); // every answer of program mode carries the scheme's policy, and no path of the data or home folder (the page's own files, a string or a Buffer, are sent as they are)
   const swapOf = (id, res) => {
     if (typeof id !== "string" || !SWAP_ID_RE.test(id)) {
@@ -1131,6 +1260,32 @@ function programRequestHandler(program, swapSet, getServer) {
             programsettings.save(program.dataDir, merged);
             return send(res, 200, { ok: true, settings: programsettings.view(merged) });
           }
+          if (p === "/api/clipboard/verify") {
+            if (!clipboardShape(body.value)) return send(res, 400, { error: "value must be an address or an amount" });
+            const t = Date.now();
+            while (clipHits.length && t - clipHits[0] >= 60000) clipHits.shift();
+            if (clipHits.length >= CLIPBOARD_MAX_PER_MIN) return send(res, 429, { error: "too many clipboard checks: try again in a minute" });
+            clipHits.push(t);
+            let match = null;
+            try {
+              const r = typeof program.clipboardMatches === "function" ? await program.clipboardMatches(body.value) : null;
+              match = r === true || r === false ? r : null;
+            } catch {
+              match = null;
+            }
+            return send(res, 200, { match });
+          }
+          if (p === "/api/limits/read") {
+            // R6: page sequencing only (the card is shown once per program version); nothing checks it, and turnOn does not
+            const cur = programsettings.loadSafe(program.dataDir);
+            if (!cur.ok) return send(res, 409, { error: "the program settings cannot be read: fix them first" });
+            try {
+              programsettings.save(program.dataDir, { ...cur.settings, limits_read_version: String(program.version) });
+            } catch {
+              return send(res, 409, { error: "the program settings cannot be saved" });
+            }
+            return send(res, 200, { ok: true, limits_read: true });
+          }
           if (p === "/api/program/open") {
             if (typeof body.what !== "string" || !OPEN_WHAT.has(body.what)) return send(res, 400, { error: `what must be one of ${[...OPEN_WHAT].join(", ")}` });
             if (typeof program.open !== "function") return send(res, 409, { error: "the program has no window for that here" });
@@ -1149,6 +1304,12 @@ function programRequestHandler(program, swapSet, getServer) {
             const swap = swapOf(body.swap, res);
             if (!swap) return;
             const out = p === "/api/bundle/save" ? await bundleSaveRoute(program, swap) : await invitationSaveRoute(program, swap);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/record-close") {
+            const swap = swapOf(body.swap, res);
+            if (!swap) return;
+            const out = await recordCloseRoute(swap, body);
             return send(res, out.status, out.body);
           }
           if (p === "/api/board/slot") {
@@ -1193,15 +1354,26 @@ function programRequestHandler(program, swapSet, getServer) {
         if (!fs.existsSync(f)) return send(res, 404, "/* ui/tokens.css not present */", "text/css; charset=utf-8");
         return send(res, 200, fs.readFileSync(f), "text/css; charset=utf-8");
       }
-      if (p === "/api/program") return send(res, 200, programPayload(program, swapSet));
+      if (p === "/api/program") {
+        // L4: the new-swap form sends `?want=mainnet-fee` while its profile is mainnet: the node check then asks the Ethereum mainnet endpoints (for ten minutes). Nothing else of the query is read.
+        if (url.searchParams.get("want") === "mainnet-fee" && typeof program.wantMainnetFee === "function") {
+          try {
+            program.wantMainnetFee();
+          } catch {
+            /* the ask is a convenience */
+          }
+        }
+        return send(res, 200, programPayload(program, swapSet));
+      }
       if (p === "/api/run") {
         const swap = swapOf(url.searchParams.get("swap"), res);
         if (!swap) return;
-        return send(res, 200, programRunPayload(swapSet, swap));
+        return send(res, 200, await programRunPayload(program, swapSet, swap));
       }
       if (p === "/api/settings") {
         const cur = programsettings.loadSafe(program.dataDir);
-        return send(res, 200, { ok: true, settings: programsettings.view(cur.settings), problem: cur.ok ? null : cur.why });
+        const hist = await payoutHistory.listView(program);
+        return send(res, 200, { ok: true, settings: programsettings.view(cur.settings), problem: cur.ok ? null : cur.why, payout_history: hist.items, payout_history_state: hist.state });
       }
       // the demo fixtures are for the terminal console only: the program has no route for them (404)
       return send(res, 404, { error: "not found" });
@@ -1250,6 +1422,6 @@ async function startProgramServer(program, deps = {}) {
   return { scheme: SCHEME_NAME, token, swapSet, handler, mark, maxBody: Math.max(...Object.values(PROGRAM_BODY_MAX)), stop };
 }
 
-module.exports = { createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig, startProgramServer, pagePathRewriter, schemeHostOk, schemeOriginOk, SCHEME_ORIGIN, CSP_SCHEME };
+module.exports = { bobCanLock, withFeeAges, createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig, startProgramServer, pagePathRewriter, schemeHostOk, schemeOriginOk, SCHEME_ORIGIN, CSP_SCHEME };
 
 if (require.main === module) main();

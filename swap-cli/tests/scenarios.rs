@@ -621,7 +621,7 @@ fn lock_eth_needs_every_field_its_gate_reads() {
         assert_eq!(s.bob_phase(), "funding_final", "{field}");
     }
     // A known chain id that is not the pinned one holds too.
-    let r = s.tick_bob_with(|_, e| e.chain_id = Some(1));
+    let r = s.tick_bob_with(|_, e| e.chain_id = Some(5));
     assert!(matches!(&r.action, Action::Wait { reason } if reason.contains("not the pinned chain")), "{r:?}");
     assert_eq!(s.bob.executor.count("lock_eth"), 0);
     // Complete again: the lock goes out.
@@ -2565,8 +2565,8 @@ fn f5_a_second_eth_node_on_another_chain_or_code_blocks_the_reveal() {
     // The simulator's second node shares the world; this one is checked on a hand-edited observation.
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();
-    let r = s.tick_alice_with(|_, e| e.second.as_mut().unwrap().chain_id = Some(1));
-    assert!(wait_reason(&r).contains("the second eth node is on chain 1"), "{r:?}");
+    let r = s.tick_alice_with(|_, e| e.second.as_mut().unwrap().chain_id = Some(5));
+    assert!(wait_reason(&r).contains("the second eth node is on chain 5"), "{r:?}");
     let r = s.tick_alice_with(|_, e| e.second.as_mut().unwrap().contract_code_hash = Some([0xbb; 32]));
     assert!(wait_reason(&r).contains("other code"), "{r:?}");
     let r = s.tick_alice_with(|_, e| e.second.as_mut().unwrap().observed_at = Some(1));

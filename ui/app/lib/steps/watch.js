@@ -15,6 +15,10 @@
  * then reads with the plain read-only tick (never a full --apply) and `opts.onNote(text)` is told once per refusal streak. Alice's ticks in read mode stay plain read-only ticks (no --apply):
  * from `created` the engine adopts any fitting instance at her contract root, so an observe tick could move her file to `funded` on a deposit someone else made there, and rule W reads any
  * phase past `created` as her own act and would switch to apply before her approval and deposit.
+ * `opts.lockEverSent` (a function, default none): Bob on production while his approval is off or lapsed, before any lock send of this swap ever started and while the last tick shows a held or
+ * recorded lock_eth intent (the one state in which an applied tick without the acknowledgement writes the producer latch): an apply-mode round ticks read-only instead (no --apply), and its loop
+ * line says so (common.js readingOnlyForAck). In every other case the loop is unchanged: a height abort is recorded as on a test network. The acknowledgement is decided once per round and the
+ * same flags are handed to the tick (no second read).
  */
 
 const fs = require("fs");
@@ -34,6 +38,7 @@ const PARTS = [
   [/^(applied|phase_after)/, 400],
 ];
 
+const READING_ONLY_RE = /^Reading only:/;
 const LEFTOVER = ["refund_", "still at the contract", "ETH lock is still open", "already submitted", "open past T_reveal", "taking it back"];
 
 /** The lines of `lines` that match, the first eight, each cut to `max` characters, joined with a space (watch.sh `part`). */
@@ -49,7 +54,11 @@ function part(lines, re, max) {
 function loopLine(time, outText) {
   const lines = String(outText).split("\n");
   if (lines[lines.length - 1] === "") lines.pop();
-  return `${time} ${PARTS.map(([re, max]) => part(lines, re, max)).join(" ")}`;
+  const parts = PARTS.map(([re, max]) => part(lines, re, max));
+  // S1: a round that read only because Bob's approval is off says so, right after the "[role] tick exit" part (only then: the line otherwise keeps the helper's eight parts)
+  const note = part(lines, READING_ONLY_RE, 300);
+  if (note) parts.splice(1, 0, note);
+  return `${time} ${parts.join(" ")}`;
 }
 
 /** 1 when the line says its file is terminal (watch.sh lines 28-31), else 0. */
@@ -69,6 +78,8 @@ class Watch {
     this.onLine = opts.onLine || null;
     this.apply = opts.apply !== false;
     this.onNote = opts.onNote || null;
+    this.lockEverSent = typeof opts.lockEverSent === "function" ? opts.lockEverSent : null;
+    this.lastIntent = new Map(); // role -> did the last tick this loop read show a pending lock_eth intent (kept when the file cannot be read)
     this.refused = new Map(); // role -> the observe-only refusal streak is on (the note was given)
     this.ticks = 0;
     this.lastError = null;
@@ -103,8 +114,43 @@ class Watch {
     });
   }
 
+  /**
+   * S1 and L2: what this round's tick of `role` is told: `{ readOnly, ack }`. readOnly: Bob on production, no acknowledgement in force, before his lock, the last tick showing a held or
+   * recorded lock_eth intent and no lock send ever started. ack: the producer-share flags, asked of the program ONCE here and handed to the tick. Never throws; an unreadable answer is
+   * "not read-only" (the intent state is then the one the loop last saw).
+   */
+  decideRound(ctx, role) {
+    let ack;
+    try {
+      ack = role === "bob" ? C.producerAckFlags(ctx) : [];
+    } catch {
+      ack = [];
+    }
+    try {
+      if (role !== "bob" || !ctx.settings || ctx.settings.profile !== "production" || !this.lockEverSent) return { readOnly: false, ack };
+      let phase = null;
+      let pending = this.lastIntent.get(role) === true;
+      const text = C.readTextCapped(path.join(ctx.runDir, `last-tick-${role}.json`), 64 * 1024 * 1024);
+      if (text) {
+        try {
+          const v = JSON.parse(text);
+          if (v && typeof v.phase_after === "string") phase = v.phase_after;
+          if (v && typeof v === "object") {
+            pending = C.lockIntentPendingIn(v);
+            this.lastIntent.set(role, pending);
+          }
+        } catch {
+          phase = null;
+        }
+      }
+      return { readOnly: C.readingOnlyForAck(ctx, role, phase, this.lockEverSent() === true, pending, ack), ack };
+    } catch {
+      return { readOnly: false, ack };
+    }
+  }
+
   /** An observe-only tick that swap-cli refused (the file holds an intent): this round reads without recording, one note per streak. Never a full --apply. */
-  async afterObserve(ctx, role, res) {
+  async afterObserve(ctx, role, res, ack) {
     const text = `${(res && res.stderr) || ""}${(res && res.stdout) || ""}`;
     const refused = !!res && res.code === 1 && /observe-only is refused/.test(text);
     if (!refused) {
@@ -121,22 +167,27 @@ class Watch {
         }
       }
     }
-    return this.tickStep(ctx, role, { args: [] });
+    return this.tickStep(ctx, role, { args: [], ackFlags: ack });
   }
 
   async tickOnce(role) {
     const ctx = this.ctx;
     let res;
+    let readingOnly = false;
     try {
       const observe = !this.apply && role === "bob"; // Alice reads with the plain read-only tick (see the head of this file)
-      res = await this.tickStep(ctx, role, this.apply ? { args: ["--apply"] } : observe ? { args: [], observeOnly: true } : { args: [] });
-      if (observe) res = await this.afterObserve(ctx, role, res);
+      const round = this.decideRound(ctx, role);
+      readingOnly = this.apply && round.readOnly;
+      // Bob's ticks carry the round's acknowledgement decision (L2); Alice's tick has no such flag and is asked for exactly as before
+      const extra = role === "bob" ? { ackFlags: round.ack } : {};
+      res = await this.tickStep(ctx, role, this.apply && !readingOnly ? { args: ["--apply"], ...extra } : observe ? { args: [], observeOnly: true, ...extra } : { args: [], ...extra });
+      if (observe) res = await this.afterObserve(ctx, role, res, round.ack);
     } catch (e) {
       this.lastError = String((e && e.message) || e);
       res = { code: null, stdout: "", stderr: "", files: [] };
     }
     this.ticks++;
-    const outText = `${res.stderr || ""}${res.stdout || ""}`;
+    const outText = `${readingOnly ? `${C.READING_ONLY_NOTE}\n` : ""}${res.stderr || ""}${res.stdout || ""}`;
     const line = loopLine(C.clock(C.nowMs(ctx), true), outText);
     try {
       fs.appendFileSync(path.join(ctx.runDir, `loop-${role}.txt`), `${line}\n`, { mode: 0o600 });

@@ -223,7 +223,7 @@ function lock(ctx, opts = {}) {
     const N = C.clock(C.nowMs(ctx), false);
     const approve = [];
     if (!dry) {
-      const base = C.tickBase(pctx);
+      const base = C.tickBase(pctx, { ack: true });
       if (base.error) throw new Refusal(2, base.error);
       for (const w of base.warnings) out.warn(w);
       const preJson = `lock-precheck-${N}.json`;

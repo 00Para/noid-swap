@@ -39,19 +39,29 @@ test("an unknown name gives null, a name of the object's own prototype too, and 
   assert.equal(A.icon("check", "go").className, "ic go");
 });
 
-test("the two coin glyphs are 20-unit svgs with one arc each; any other name gives null", async () => {
+test("the two coin glyphs are solid 20-unit svgs (a disc and its cuts) that differ in shape; any other name gives null", async () => {
   const pg = await boot();
   const A = pg.window.NoidActions;
+  const cuts = {};
   for (const c of ["noid", "eth"]) {
     const g = A.coinGlyph(c);
     assert.equal(g.tag, "svg");
-    assert.equal(g.className, `coin ${c}`);
+    assert.equal(g.className, `coin solid ${c}`);
     assert.equal(g.getAttribute("viewBox"), "0 0 20 20");
     assert.equal(g.getAttribute("aria-hidden"), "true");
-    assert.equal(g.children.length, 1);
     assert.equal(textOf(g).trim(), "");
+    const paths = g.children;
+    assert.ok(paths.every((n) => n.tag === "path"));
+    // the disc first, then the cuts
+    assert.equal(paths[0].className, "disc");
+    cuts[c] = paths.slice(1).map((n) => n.getAttribute("d"));
+    assert.ok(paths.slice(1).every((n) => n.className === "cut"));
   }
-  assert.notEqual(A.coinGlyph("noid").children[0].getAttribute("d"), A.coinGlyph("eth").children[0].getAttribute("d"));
+  // NOID: one diagonal cut (a slashed zero); ETH: three short horizontal cuts at y 7, 10 and 13 of widths 7, 5 and 7
+  assert.deepEqual(cuts.noid, ["M6.2 13.8L13.8 6.2"]);
+  assert.deepEqual(cuts.eth, ["M6.5 7h7", "M7.5 10h5", "M6.5 13h7"]);
+  assert.notDeepEqual(cuts.noid, cuts.eth);
+  assert.equal(A.coinGlyph("noid", "sm").className, "coin solid noid sm");
   for (const bad of ["", "btc", "NOID", null, undefined]) assert.equal(A.coinGlyph(bad), null, String(bad));
 });
 

@@ -128,6 +128,8 @@ fn tick_over_loopback_http_matches_the_fixture_and_records_a_replayable_copy() {
         v["noid"]["observed_at"] = Value::Null;
         v["eth"]["observed_at"] = Value::Null;
         v["noid"].as_object_mut().unwrap().remove("producers");
+        // D2: a live loopback node is reported as such (the page reads it); a fixture replay has no URL.
+        v["noid"].as_object_mut().unwrap().remove("single_node_loopback");
         let kept: Vec<Value> = v["notes"].as_array().unwrap().iter().filter(|n| !n.as_str().unwrap().contains("producer concentration")).cloned().collect();
         v["notes"] = Value::Array(kept);
         v
@@ -367,7 +369,7 @@ fn claim_world() -> ClaimWorld {
             {"method": "eth_blockNumber", "result": "0xa"},
             {"method": "eth_getBlockByNumber", "result": {"number": "0xa", "timestamp": "0x3e8"}},
             {"method": "eth_getBlockByNumber", "result": {"number": "0x8", "timestamp": "0x3d0"}},
-            {"method": "eth_chainId", "result": "0xaa36a7"},
+            {"method": "eth_chainId", "result": "0x1"},
             {"method": "eth_getCode", "result": "0x6001"},
             {"method": "eth_getLogs", "result": []},
             {"method": "eth_call", "error": {"code": 3, "message": "execution reverted: LockNotFound"}}
@@ -751,9 +753,9 @@ fn bob_file_on(profile: swap_cli::params::ProfileName, path: &Path) {
 fn f7_eth_from_block_is_stored_by_apply_reused_without_the_flag_and_required_on_a_public_chain() {
     let dir = tempfile::tempdir().unwrap();
     let b = dir.path().join("b.swap.json");
-    bob_file_on(swap_cli::params::ProfileName::Production, &b); // chain id 11155111
+    bob_file_on(swap_cli::params::ProfileName::Production, &b); // chain id 1
     let noid = fixtures().join("parano1d/idle.json");
-    let node = empty_eth_node(11_155_111);
+    let node = empty_eth_node(1);
     let tick = |extra: &[&str]| run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url]).args(extra));
     let stored = || SwapFile::load(&b).unwrap();
 
@@ -798,12 +800,10 @@ fn f7_eth_from_block_is_stored_by_apply_reused_without_the_flag_and_required_on_
 fn r6_3_reveal_tx_flag_is_one_hash_and_without_a_visible_lock_it_is_only_a_note() {
     let dir = tempfile::tempdir().unwrap();
     let b = dir.path().join("b.swap.json");
-    let mut public = example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw);
-    public.params.eth.chain_id = 31_337;
-    example_bob_file(public, 1).unwrap().save(&b).unwrap();
+    example_bob_file(example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw), 1).unwrap().save(&b).unwrap();
     let noid = fixtures().join("parano1d/idle.json");
-    let node = empty_eth_node(31_337);
-    let tick = |extra: &[&str]| run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url]).args(extra));
+    let node = empty_eth_node(1);
+    let tick = |extra: &[&str]| run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url, "--eth-from-block", "0"]).args(extra));
     let h = format!("0x{}", "ab".repeat(32));
     let (ok, _, err) = tick(&["--reveal-tx", "0x1234"]);
     assert!(!ok && err.contains("--reveal-tx"), "{err}");
@@ -820,18 +820,14 @@ fn r6_3_reveal_tx_flag_is_one_hash_and_without_a_visible_lock_it_is_only_a_note(
 }
 
 #[test]
-fn f7_eth_from_block_defaults_to_zero_only_on_a_local_chain() {
+fn f7_eth_from_block_has_no_default_on_ethereum_mainnet_which_the_production_profile_pins() {
     let dir = tempfile::tempdir().unwrap();
     let b = dir.path().join("b.swap.json");
-    // The production example (the opening the idle fixture knows) re-pointed at a local chain; production allows any chain id.
-    let mut public = example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw);
-    public.params.eth.chain_id = 31_337;
-    example_bob_file(public, 1).unwrap().save(&b).unwrap();
+    // The production example (the opening the idle fixture knows) is pinned to chain 1 since 2026-11-20: a public chain, so there is no default of 0.
+    example_bob_file(example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw), 1).unwrap().save(&b).unwrap();
     let noid = fixtures().join("parano1d/idle.json");
-    let node = empty_eth_node(31_337);
-    let (ok, out, err) = run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url]));
-    assert!(ok, "{err}");
-    assert_eq!(serde_json::from_str::<Value>(&out).unwrap()["sources"]["eth_from_block"], 0);
-    assert_eq!(from_blocks(&node), vec!["0x0"]);
-    assert!(SwapFile::load(&b).unwrap().eth_from_block.is_none(), "a default is never stored");
+    let node = empty_eth_node(1);
+    let (ok, _, err) = run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url]));
+    assert!(!ok && err.contains("--eth-from-block"), "{err}");
+    assert!(SwapFile::load(&b).unwrap().eth_from_block.is_none(), "nothing is stored");
 }

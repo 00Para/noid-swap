@@ -86,6 +86,9 @@ h1[tabindex="-1"]:focus, h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focu
 .btn.lg { min-height: 48px; padding: 0 var(--s5); font-size: 15px; }
 .btn.ghost { background: transparent; border-color: transparent; color: var(--quiet); }
 .btn.ghost:hover { background: var(--raise); border-color: transparent; color: var(--text); }
+.sc-record .btn.ghost { border-color: var(--rule-2); }
+.sc-record .btn.ghost:hover { border-color: var(--quiet); }
+.sc-record .btn.ghost[disabled] { border-color: var(--off); }
 /* the go button of a form: bright, no colour */
 .btn.primary { background: var(--text); border-color: var(--text); color: #07100e; font-weight: 600; }
 .btn.primary:hover { background: #fff; border-color: #fff; color: #07100e; }
@@ -662,7 +665,7 @@ body.program main { padding-top: var(--s5); padding-bottom: var(--s8); }
 .pg-swap.needs .pg-row::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--due); }
 .pg-swap.ended .pg-pair span.amt { color: var(--quiet); }
 .pg-swap.ended .coin { opacity: .55; }
-.pg-refused { grid-column: 1 / -1; color: var(--alarm); font-size: 13px; }
+.pg-refused { grid-column: 1 / -1; color: var(--quiet); font-size: 13px; }
 .pg-group { padding: var(--s3) var(--s5); font: 500 12.5px/1 var(--sans); color: var(--faint); background: var(--bg); border-top: 1px solid var(--rule); }
 .pg-why { margin: calc(-1 * var(--s3)) 0 var(--s4); color: var(--faint); font-size: 13px; text-align: right; max-width: none; }
 .pg-list > .alarm { margin: 0 0 var(--s3); }
@@ -695,7 +698,7 @@ body.program main { padding-top: var(--s5); padding-bottom: var(--s8); }
 .pg-board { margin-top: var(--s7); }
 .pg-form { max-width: 960px; }
 .pg-form .form-grid { gap: var(--s4) var(--s5); }
-.pg-form select { width: 100%; }
+.pg-form select { width: 100%; text-overflow: ellipsis; }
 .pg-form .field.check { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
 .pg-form .field.check input { order: -1; }
 .pg-form .field.check .hint, .pg-form .field.check .ferr { flex-basis: 100%; }
@@ -779,6 +782,7 @@ body.program.on-swap .foot { display: none; }
 .sc-foot .live { display: inline-flex; align-items: center; gap: var(--s2); color: var(--quiet); }
 .sc-foot .live::before { content: ""; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--safe); animation: pulse 2.4s ease-in-out infinite; }
 .sc-foot .live.stop::before { background: var(--due); animation: none; }
+.sc-foot .live.alert::before { background: var(--alarm); animation: none; }
 .sc-foot .right { margin-left: auto; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 .sc-act > .row .btn.primary, .sc-act > .btn.primary { min-height: 48px; font-size: 15px; padding: 0 var(--s5); }

@@ -339,7 +339,7 @@ test("Alice, Swap by phase: the headline and the status line of each phase, with
   assert.equal(nowStage(inContract), "Swap");
   const waiting = await at("funding_final");
   assert.equal(head(waiting), "Waiting for Bob to lock his ETH");
-  assert.match(card(waiting), /If Bob does not lock, your NOID comes back after about \d\d:\d\d\./);
+  assert.match(card(waiting), /If Bob does not lock: your NOID is back by about \d\d:\d\d\./);
   assert.equal(waiting.byId("pg-card").all((n) => n.tag === "button").length, 0, "no action while waiting");
   const seen = await at("lock_seen", { tick: { lock: mkLock() } });
   assert.equal(head(seen), "Bob's lock is seen");
@@ -353,12 +353,16 @@ test("Alice, Swap by phase: the headline and the status line of each phase, with
 test("Alice, Done, refund and abort: the end of the swap in plain words, with the engine's reason when it ended the file", async () => {
   const end = (phase, o = {}) => openSwap(F.SWAP_A, (r) => cardPayload(r, { phase, line_match: { hex: HEX, at: NOW }, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), ...o }));
   const done = await end("done", { tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } });
-  assert.equal(head(done), "Swap complete");
-  assert.match(card(done), /0\.001 ETH arrived in this swap's own key\. It goes to your own address 0x3c3c3c3c…3c3c3c when the swap is swept\./);
-  assert.equal(nowStage(done), null, "every stage is done");
-  assert.equal(doneStages(done).length, 6);
+  // R7: "Swap complete" only when the coins are in the person's own address: until the sweep's marker exists the swap is settled, and the Done stage is the current one
+  assert.equal(head(done), "Swap settled");
+  assert.match(card(done), /0\.001 ETH is in this swap's own key\. The program is sending it to your own address 0x3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c/);
+  assert.equal(nowStage(done), "Done");
+  assert.equal(doneStages(done).length, 5);
   const swept = await end("done", { tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } }, wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } } });
-  assert.match(card(swept), /0\.001 ETH was sent to 0x3c3c3c3c…3c3c3c\./);
+  assert.equal(head(swept), "Swap complete");
+  assert.match(card(swept), /0\.001 ETH was sent to 0x3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c 3c3c/);
+  assert.equal(nowStage(swept), null, "every stage is done");
+  assert.equal(doneStages(swept).length, 6);
   const refunded = await end("refunded");
   assert.equal(head(refunded), "The swap did not go through");
   assert.match(card(refunded), /Your NOID is back in this swap's wallet\. The program sends it to your own address\./);
@@ -429,7 +433,7 @@ test("Bob, Swap by phase, Done and refund", async () => {
   assert.match(card(secret), /The program claims the NOID by itself before about \d\d:\d\d\./);
   const done = await at("done", { tick: { lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } });
   assert.equal(head(done), "Swap complete");
-  assert.match(card(done), /5 NOID was sent to o1bobparan…xxxxxx\./);
+  assert.match(card(done), /5 NOID was sent to o1bobparano1daddressxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx/);
   const refund = await at("refund_submitted", { tick: { lock: mkLock({ refunded: true }) } });
   assert.equal(head(refund), "The swap did not go through");
   assert.match(card(refund), /Your ETH is being refunded to this swap's key, then to your own address\./);
@@ -455,7 +459,8 @@ const above = (page) => {
 test("a step that needs the person: the approval's own alert, with its whole reason and its button, is on the card above the headline, whatever the stage", async () => {
   const needs = [{ spend: "send-lock", label: "Lock the ETH", reason: "the dry run does not match the terms", retrying: false }];
   const page = await openSwap(F.SWAP_B, (r) => cardPayload(r, { phase: "funding_final", line_match: { hex: HEX, at: NOW }, autopilot: { alice: null, bob: ON("bob", { needs_you: needs }) }, status: status("bob") }));
-  assert.match(above(page), /needs you Lock the ETH: the dry run does not match the terms/i);
+  assert.match(above(page), /needs you Lock the ETH What happened Your lock was not sent\./i);
+  assert.match(above(page), /What the program said: the dry run does not match the terms/);
   assert.ok(btnWith(page.byId("pg-card").all((n) => n.className.includes("sc-safety"))[0], "I have dealt with it"));
   assert.equal(ids(page, "ap-typed"), 0);
   // drawn once: the page below does not draw the approval box a second time
@@ -466,7 +471,7 @@ test("a step that needs the person: the approval's own alert, with its whole rea
 test("terms that changed since the approval: 'approve again' is on the card", async () => {
   const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "funding_final", line_match: { hex: HEX, at: NOW }, autopilot: { alice: AP("alice", { terms_changed: true, version_changed: true }), bob: null }, status: status("alice") }));
   assert.equal(head(page), "Approve this swap again");
-  assert.match(card(page), /The program was updated since you approved, so the autopilot is off\. Approve again after an update/);
+  assert.match(card(page), /The program was updated since you approved, so automatic steps are off. Approve again after an update/);
   assert.equal(ids(page, "ap-typed"), 1);
 });
 
@@ -637,9 +642,12 @@ test("static: the boxes and the dialog's body are one minmax(0, 1fr) column, so 
 test("stagecard.js: no inline handler, style or HTML sink, no secret, key or path; it is served like program.js; every id it needs is in index.html", async () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "stagecard.js"), "utf8");
   const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-  assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|\.style\b|setAttribute\(\s*["']style|\bon\w+\s*=\s*["']|fetch\(|XMLHttpRequest/);
+  assert.doesNotMatch(code, /innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|\.style\b|setAttribute\(\s*["']style|\bon\w+\s*=\s*["']|XMLHttpRequest/);
   assert.doesNotMatch(code, /master_secret|private_key|passphrase|\bmnemonic\b|--mainnet|"mainnet"/i);
-  assert.ok(!/post\(|startAction|\/api\//.test(code), "it sends nothing and adds no request: its buttons are the page's own");
+  assert.ok(!/post\(|startAction/.test(code), "its buttons are the page's own: it starts no action of the runner");
+  // batch D: the one request of this file is "Record a close made elsewhere" (POST /api/record-close: the swap and a transaction id; it sends nothing to any chain)
+  assert.equal((code.match(/fetch\(/g) || []).length, 1, "one fetch only");
+  assert.deepEqual([...new Set(code.match(/\/api\/[a-z-]+/g) || [])], ["/api/record-close"], "and it is the record-close route");
   const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
   for (const id of ["pg-card", "pg-details", "pg-details-sum", "pg-details-body"]) assert.match(html, new RegExp(`id="${id}"`), id);
 });
@@ -683,7 +691,7 @@ test("with no approval in force a step left at the end (a sweep, a recovery) is 
   };
   const tick = { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } };
   const manual = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", tick, autopilot: { alice: null, bob: null }, actions: { spends: sweep } }));
-  assert.equal(head(manual), "Swap complete");
+  assert.equal(head(manual), "Swap settled");
   assert.equal(manual.byId("pg-card").all((n) => n.className.includes("spend-box") && /Do it from here/.test(squash(textOf(n)))).length, 1, "on the card");
   assert.equal(manual.byId("next-action").all((n) => /Do it from here/.test(squash(textOf(n)))).length, 0, "not a second time in Details");
   const auto = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", tick, autopilot: { alice: ON("alice"), bob: null }, actions: { spends: sweep } }));
@@ -772,7 +780,8 @@ test("S1: if the card cannot be drawn, the boxes it would have claimed are drawn
   };
   await ap.byId("refresh").click();
   await ap.flush();
-  assert.match(squash(ap.text("next-action")), /needs you Lock the ETH: the dry run does not match the terms/i);
+  assert.match(squash(ap.text("next-action")), /needs you Lock the ETH What happened Your lock was not sent\./i);
+  assert.match(squash(ap.text("next-action")), /What the program said: the dry run does not match the terms/);
   // no view: the plan does not claim a box that cannot be drawn
   const p = cardPayload("bob", { phase: "funding_final", line_match: { hex: HEX, at: NOW }, autopilot: { alice: null, bob: ON("bob", { needs_you: needs }) } });
   const plan = ap.window.NoidStage.plan({ payload: p, role: "bob", view: null, now: NOW });

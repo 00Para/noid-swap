@@ -118,7 +118,7 @@ test("the ticket for Alice at each stage: her NOID first, then Bob's ETH, each w
   const at = (phase, extra = {}) => openSwap(F.SWAP_A, (r) => cardPayload(r, { phase, line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), ...extra }));
   const wait = await at("funding_final");
   assert.deepEqual(legs(wait).map((l) => [l.coin, l.caption, l.line, l.words]), [["noid", "You give", "final", "Locked in the swap contract"], ["eth", "You get", "none", "Bob has not locked yet"]]);
-  assert.match(legs(wait)[0].note, /^Comes back to you after about \d\d:\d\d if the swap stops\.$/);
+  assert.match(legs(wait)[0].note, /^If the swap stops, it is back by about \d\d:\d\d\.$/);
   const both = await at("lock_final", { tick: { lock: mkLock({ timelock: NOW + 9000 }) } });
   assert.deepEqual(legs(both).map((l) => [l.line, l.words]), [["final", "Locked in the swap contract"], ["final", "Locked by Bob, final"]]);
   assert.equal(tkOf(both).all((n) => has(n, "tk-key"))[0].className, "tk-key", "the secret is not public yet");
@@ -143,7 +143,7 @@ test("the ticket for Alice at each stage: her NOID first, then Bob's ETH, each w
 test("the ticket never says the NOID comes back when the secret may be public (a reveal in the mempool, a held reveal, a claim seen); it says Bob can take it", async () => {
   const at = (phase, tick) => openSwap(F.SWAP_A, (r) => cardPayload(r, { phase, line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), tick }));
   const calm = await at("lock_final", { lock: mkLock({ timelock: NOW + 9000 }) });
-  assert.match(legs(calm)[0].note, /^Comes back to you after /, "with nothing public the note stands");
+  assert.match(legs(calm)[0].note, /^If the swap stops, it is back by /, "with nothing public the note stands");
   for (const [name, tick] of [
     ["a reveal in the mempool", { lock: mkLock({ timelock: NOW + 9000 }), eth: { pending_preimage: true } }],
     ["a claim seen on the lock", { lock: mkLock({ timelock: NOW + 9000, claimed: true }) }],
@@ -224,7 +224,7 @@ test("before the first reading the ticket says nothing is locked; a card that ne
 });
 
 test("a finished swap: the ticket is Receipts, with the transaction ids shortened and copyable; the legs are gone", async () => {
-  const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
+  const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { phase: "done", line_match: LM, autopilot: { alice: ON("alice"), bob: null }, status: status("alice"), wallet: { swept: { eth_alice: "2026-11-19T10:00:00Z" } }, tick: { instance: null, lock: mkLock({ claimed: true }), eth: { claimed: { lock_id: "0x1" } } } }));
   const tk = tkOf(page);
   assert.equal(tk.querySelector("h2").textContent, "Receipts");
   assert.equal(tk.all((n) => has(n, "tk-leg")).length, 0);
@@ -285,11 +285,11 @@ test("legsFor: every phase of both roles has words and a state for each leg; a p
 
 test("legsFor: a note that needs a time uses the caller's words for it, and says 'the deadline' when there are none", () => {
   const V = require("../lib/viewmodel");
-  const about = (id) => ({ d: "about 16:22", t_reveal: "about 15:12", reveal_start_by: "about 14:42" }[id] || null);
-  assert.equal(V.legsFor({ phase: { id: "funding_final" } }, "alice", { about }).give.note, "Comes back to you after about 16:22 if the swap stops.");
+  const about = (id) => ({ d: "about 16:22", alice_back: "about 16:32", bob_back: "about 15:23", t_reveal: "about 15:12", reveal_start_by: "about 14:42" }[id] || null);
+  assert.equal(V.legsFor({ phase: { id: "funding_final" } }, "alice", { about }).give.note, "If the swap stops, it is back by about 16:32.");
   assert.equal(V.legsFor({ phase: { id: "funding_final" } }, "alice").give.note, "Comes back to you after the deadline if the swap stops.");
   assert.equal(V.legsFor({ phase: { id: "lock_final" } }, "alice", { about }).get.note, "The reveal is due before about 14:42.");
   assert.equal(V.legsFor({ phase: { id: "lock_final" } }, "alice").get.note, null);
-  assert.equal(V.legsFor({ phase: { id: "locked" } }, "bob", { about }).give.note, "Comes back to you after about 15:12 if she does not reveal.");
+  assert.equal(V.legsFor({ phase: { id: "locked" } }, "bob", { about }).give.note, "If she does not reveal, it is back by about 15:23.");
   assert.equal(V.legsFor({ phase: { id: "funding_final" } }, "bob", { about }).get.note, "Alice can take it back after about 16:22.");
 });
