@@ -83,6 +83,12 @@ function sweepReady(role, tick) {
   if (tick.phase_after === "done" && tick.action && typeof tick.action.reason === "string" && LEFTOVER_RE.test(tick.action.reason)) return false;
   return true;
 }
+// The words swap-cli prints when a NOID sweep finds nothing to send (its dry run is refused: the funding spent the wallet's one coin with no change, so the wallet is empty after every
+// swap that went through). Matched on the tool's text, never on the exit status alone: exit 3 also means other refusals (a lock still open, an instance not closed), which stay a wait.
+const NOTHING_TO_SWEEP_RE = /\bno plain coin worth more than the fee of spending it\b/;
+function isNothingToSweep(text) {
+  return NOTHING_TO_SWEEP_RE.test(String(text || ""));
+}
 // The newest wallet status (the deposit and the Ethereum reserve) must be younger than this to let a funding or a lock go (amendment C of the swap wallet design).
 const RESERVE_FRESH_S = 120;
 
@@ -471,4 +477,4 @@ function factsReady(spend, ctx) {
   return { ok: reasons.length === 0, reasons, ignored, notices: g.notices || [], expected_typed: g.expected_typed };
 }
 
-module.exports = { BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, SPENDS, evaluateSpend, factsReady, relevantFor, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };
+module.exports = { isNothingToSweep, NOTHING_TO_SWEEP_RE, BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, SPENDS, evaluateSpend, factsReady, relevantFor, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };

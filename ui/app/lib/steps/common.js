@@ -876,11 +876,12 @@ async function walletStep(ctx, sub, base, dry, opts = {}) {
     }
     return { rc: wrc, parsed: p, files, exit: rc };
   }
-  let size = 0;
+  // a report file whose size cannot be read is counted as not empty: "empty" is the only size that lets rc 1 read as a refusal (3, nothing sent)
+  let size = 1;
   try {
     size = fs.statSync(jsonFile).size;
   } catch {
-    size = 0;
+    size = 1;
   }
   const wrc = dry || (rc === 1 && size === 0) ? 3 : 1;
   return { rc: wrc, parsed: null, files, exit: rc };

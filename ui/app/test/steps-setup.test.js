@@ -820,14 +820,7 @@ test("(s17) join: a bundle of exactly 1 MB is read; one byte more is refused", a
   const big = joinHarness({ src: `${pad(1048576)} ` });
   assert.equal((await runJoin(big)).code, 6);
 });
-test("(s17) join: a destination with other content, or one that is not a plain file: exit 4, new-bob not called, the destination untouched, no temporary file", async () => {
-  const h = joinHarness();
-  h.write("alice.bundle.json", `${BUNDLE_J}\ndifferent\n`);
-  const r = await runJoin(h);
-  assert.equal(r.code, 4);
-  assert.match(r.stdout, /already exists with other content than the file given/);
-  assert.equal(h.read("alice.bundle.json"), `${BUNDLE_J}\ndifferent\n`);
-  assert.ok(nb(h).length === 0 && temps(h) === 0 && !h.exists("bob"));
+test("(s17) join: a destination that is not a plain file: exit 4, new-bob not called, the destination untouched, no temporary file (a copy with other content: final-pass-steps-join.test.js)", async () => {
   const g = joinHarness();
   fs.mkdirSync(path.join(g.runDir, "alice.bundle.json"));
   assert.equal((await runJoin(g)).code, 4);

@@ -14,7 +14,8 @@
  * Files: wallet-sweep-noid-[dry-]N.addr.json / .addr.err / .json / .err and wallet-swept-noid.marker; eth-sweep-ROLE-[dry-]N.json / .err and
  * wallet-swept-eth-ROLE.marker (markers are made exclusively, and hold the time and `txid X`).
  *
- * Codes (spendcommon.js CODE_TABLE): 0, 1, 2, 3, 4 (noid), 6, null. The eth sweep's 3 after live.js has run is given for a DRY run only, and needs the
+ * Codes (spendcommon.js CODE_TABLE): 0, 1, 2, 3, 4 (noid), 6 (noid), null. A real eth sweep that live.js broadcast (a `sent:` line) and did not finish is null, never 6
+ * (6 means "run it again, the same recorded bytes", true only for the NOID wallet). The eth sweep's 3 after live.js has run is given for a DRY run only, and needs the
  * tool's own evidence: exit 1, its `error:` line, no `sent:` line and no result file. A real sweep that ended in an error without a `sent:` line is 1
  * (unknown): live.js prints `sent:` only after the send call returned, and the node may have taken the transaction before that call failed.
  */
@@ -157,7 +158,9 @@ function walletSweep(ctx, kind, role, opts = {}) {
     }
     if (sent) {
       out.say(`live.js broadcast the sweep and did not finish (exit ${l.code}): it MAY have been sent; look at the key's balance before doing anything`);
-      return out.done(dry ? 1 : 6);
+      // 6 would read as "run it again: the same bytes", which is true only for the NOID wallet: an Ethereum sweep that live.js broadcast and did not
+      // finish has no recorded bytes, so it is null (may have been sent), and the autopilot shows "needs you"
+      return out.done(dry ? 1 : null);
     }
     return out.done(1);
   });

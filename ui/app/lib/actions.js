@@ -27,7 +27,7 @@ const { scrubText, readRun, pathCandidates, wslParts } = require("./runfolder");
 const { samePath } = require("./paths");
 const { redactDeep } = require("./secrets");
 const { checkDryRun } = require("./dryrun");
-const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, expectedAmount } = require("./gate");
+const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, expectedAmount, isNothingToSweep } = require("./gate");
 const { envLocalWallet, parseWalletStatus } = require("./walletrun");
 const { classifySpendExit, classifyStepExit, NOT_SENT } = require("./exitcodes");
 const { productionReason } = require("./production");
@@ -357,7 +357,7 @@ class ActionRunner {
       // that no instance, no marker here and no tick shows yet).
       if (r.action === "funded-ack" && r.phase === "note") this.funded = { at_ms: Date.parse(r.t) || 0, from_log: true };
       // A spend that the helper refused cleanly (the exit status it documents as "nothing was sent", lib/exitcodes.js) sent nothing: its start line does not latch.
-      if (r.phase === "end" && SPENDS[r.action] && /^refused, nothing sent\b/.test(String(r.result || "")) && undo.has(r.action)) {
+      if (r.phase === "end" && SPENDS[r.action] && /^(?:refused, nothing sent|nothing to sweep)\b/.test(String(r.result || "")) && undo.has(r.action)) {
         const before = undo.get(r.action);
         if (before) this.latch.set(r.action, before);
         else this.latch.delete(r.action);
@@ -1294,7 +1294,9 @@ class ActionRunner {
         if (e.group === "spend" && rec.rerun_safe) this.latch.set(e.id, { tickNow: meta.latch ? meta.latch.tickNow : null, intentAt: latchBefore ? latchBefore.intentAt : null });
         const secretWord = rec.warning ? (rec.secret_certain ? "SECRET PUBLIC: " : "SECRET MAY BE PUBLIC: ") : "";
         const mayHave = e.group === "spend" ? ", the transaction may have been sent" : "";
-        const result = rec.nothing_sent
+        const result = rec.nothing_left
+          ? `nothing to sweep (exit ${rec.exit_code})`
+          : rec.nothing_sent
           ? `refused, nothing sent (${rec.script || (e.script && e.script.name)} exit ${rec.exit_code})`
           : rec.rerun_safe
           ? `may have been sent, the same bytes may be sent again (${rec.script} exit ${rec.exit_code})`
@@ -1500,6 +1502,9 @@ class ActionRunner {
         rec.warning = "The reveal did not end as a clean success, and this console cannot tell that nothing was sent: treat the SECRET as PUBLIC (the helper's text above may say more, but only its refusal before it started counts as nothing sent). Run a tick with --apply now (the watch loop does) and let the engine judge; it decides whether a re-send is still allowed. This console never re-sends a reveal by itself.";
       }
     }
+    // an empty swap wallet: the tool's own refusal of the NOID sweep (exit 3 with its words). Nothing is left to send; the autopilot ends that sweep and the audit line says so.
+    // a real sweep also needs the step's own "nothing was sent" reading, so a may-have-been-sent ending can never be called "nothing to sweep"
+    if ((e.id === "dry-sweep-noid" || (e.id === "send-sweep-noid" && rec.nothing_sent === true)) && rec.ok === false && rec.exit_code === 3 && isNothingToSweep(`${stdout || ""}\n${stderr || ""}`)) rec.nothing_left = true;
     if (/^wallet-status-(alice|bob)$/.test(e.id)) {
       // the deposit status: kept only as a fact of this process (a restart forgets it, and the gate then refuses until a new one is read)
       const role = e.id.slice("wallet-status-".length);

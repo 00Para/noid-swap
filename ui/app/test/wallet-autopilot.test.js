@@ -381,43 +381,134 @@ test("rule 8: a sweep the tool refuses ('lock still open', 'instance not closed'
   }
 });
 
-test("rule 8, an empty NOID wallet (rehearsal 4.10): the NOID sweep's refused dry run waits on the sweep timer and the Ethereum sweep goes on, with no stop", () => {
+// An empty swap wallet (rehearsal 4.10, R410-7 and R410-4): the funding spent the wallet's one coin with no change, so every swap that went through leaves the NOID sweep with nothing to send.
+const NOTHING_LEFT = "Nothing is left in the swap wallet to send back.";
+const auditEnds = (h, action) => h.audit.all().filter((r) => r.action === action && r.phase === "end").map((r) => r.result);
+const emptyWalletStart = (A) => {
+  A.loop("alice");
+  A.runner.walletPoll();
+  A.tick("alice", "fund_noid");
+  assert.equal(A.approve("alice", { statements: OK_STATEMENTS }).status, 200);
+  A.adv(10000);
+  // the swap ended: the watch loop has stopped, so no newer tick comes by itself
+  put(A, "alice", endedTick("done"));
+  A.loop("alice");
+};
+
+test("rule 8, an empty NOID wallet (rehearsal 4.10, R410-7): the tool's 'no plain coin' refusal ends the NOID sweep: the Ethereum sweep goes on once, nothing is tried again, no waiting text, the swap reads as finished", () => {
   const A = makeWallet({ role: "alice", behaviour: { wallet: { sweepNoidDryExit: 3 } } });
   try {
-    A.loop("alice");
-    A.runner.walletPoll();
-    A.tick("alice", "fund_noid");
-    assert.equal(A.approve("alice", { statements: OK_STATEMENTS }).status, 200);
-    A.adv(10000);
-    // the funding spent the wallet's one coin with no change, the swap ended: the watch loop has stopped, so no newer tick comes by itself
-    put(A, "alice", endedTick("done"));
-    A.loop("alice");
+    emptyWalletStart(A);
     steps(A, 8);
-    assert.ok(dry(A, "wallet-sweep.sh", "noid --dry-run") >= 1, "the NOID sweep's dry run was tried");
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1, "the NOID sweep's dry run was tried once");
     assert.equal(real(A, "wallet-sweep.sh", "noid"), 0, "a NOID sweep whose dry run was refused is never sent");
     assert.equal(dry(A, "wallet-sweep.sh", "eth alice --dry-run"), 1, "the Ethereum sweep's dry run ran");
     assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "the Ethereum sweep went on");
     assert.deepEqual(needs(A, "alice"), [], "no stop");
     assert.equal(A.ap.refusals.get("send-sweep-noid"), undefined, "not counted as a refusal");
-    // within 5 minutes the NOID sweep's dry run is not tried again, even on new ticks; nothing else is sent
-    const tried = dry(A, "wallet-sweep.sh", "noid --dry-run");
-    for (let i = 0; i < 3; i++) {
-      A.adv(60000);
+    assert.equal(A.ap.timedWait.has("send-sweep-noid"), false, "not on the 5-minute timer");
+    // the page: a plain finished line, no waiting text
+    const v = A.ap.view(A.run()).alice;
+    assert.deepEqual(v.finished_notes, [NOTHING_LEFT]);
+    assert.match(v.doing, /finished/);
+    assert.equal(v.waiting_reason, null);
+    assert.doesNotMatch(JSON.stringify(v), /tried again in|did not accept/);
+    // the audit line says what it was
+    assert.deepEqual(auditEnds(A, "dry-sweep-noid"), ["nothing to sweep (exit 3)"]);
+    // neither after 5 minutes nor after 30 minutes is anything tried again or a watch loop started (no loop file is written from here on)
+    const started = A.spawned.length;
+    for (const ms of [300000, 1800000]) {
+      A.adv(ms);
       put(A, "alice", endedTick("done"));
-      A.loop("alice");
-      steps(A, 3);
+      steps(A, 4);
     }
-    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), tried);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1, "the NOID sweep is not tried again");
+    assert.equal(real(A, "wallet-sweep.sh", "noid"), 0);
     assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "the Ethereum sweep is not sent twice");
-    assert.match(A.ap.state.alice.waiting_reason || "", /may be nothing left to sweep/);
-    // after 5 minutes it is tried again, on a newer tick, and still never sent
-    A.adv(300000);
+    assert.equal(A.spawned.length, started, "no watch loop is started for a swap that is finished");
+    assert.deepEqual(needs(A, "alice"), []);
+    assert.match(A.ap.state.alice.doing, /finished/);
+    assert.equal(A.ap.state.alice.waiting_reason, null);
+  } finally {
+    A.cleanup();
+  }
+});
+
+test("rule 8, a NOID sweep refused with any other exit-3 text keeps the 5-minute wait, the waiting text and the audit wording 'failed'", () => {
+  const A = makeWallet({ role: "alice", behaviour: { wallet: { sweepNoidDryExit: 3, sweepNoidDryText: "error: refused: the instance is not closed yet\n" } } });
+  try {
+    emptyWalletStart(A);
+    steps(A, 8);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "the Ethereum sweep still goes on");
+    assert.equal(A.ap.timedWait.has("send-sweep-noid"), true, "on the 5-minute timer");
+    assert.deepEqual(A.ap.view(A.run()).alice.finished_notes, []);
+    assert.match(A.ap.state.alice.waiting_reason || "", /tried again in \d+ min/);
+    assert.deepEqual(auditEnds(A, "dry-sweep-noid"), ["failed (exit 3)"]);
+    A.adv(240000);
+    put(A, "alice", endedTick("done"));
+    steps(A, 3);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1, "not tried again within 5 minutes");
+    A.adv(120000);
+    put(A, "alice", endedTick("done"));
+    steps(A, 3);
+    assert.ok(dry(A, "wallet-sweep.sh", "noid --dry-run") >= 2, "tried again after the timer");
+    assert.deepEqual(needs(A, "alice"), []);
+  } finally {
+    A.cleanup();
+  }
+});
+
+test("rule 8, an empty NOID wallet: only a wallet status read AFTER the refusal that shows a plain coin brings the NOID sweep back", () => {
+  const A = makeWallet({ role: "alice", behaviour: { wallet: { sweepNoidDryExit: 3 } } });
+  try {
+    emptyWalletStart(A);
+    steps(A, 8);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1);
+    const status = (at_ms, plain) => ({ at_ms, ok: true, noid: { address: F.TERMS.alice_noid || "o1x", plain_micronoid: plain, amount_micronoid: "5000000", fee_reserve_micronoid: "6000", need_micronoid: "5006000", covers: false, tip: "1" }, eth: {}, problems: [] });
+    const mark = A.ap.nothingLeft.get("send-sweep-noid").at_ms;
+    // a status read before the refusal, or one that shows no coin, changes nothing
+    A.runner.walletStatus.alice = status(mark - 1000, "5000000");
+    A.adv(10000);
+    put(A, "alice", endedTick("done"));
+    steps(A, 3);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1, "an older status does not bring it back");
+    A.runner.walletStatus.alice = status(A.clock.ms, "0");
+    A.adv(10000);
+    put(A, "alice", endedTick("done"));
+    steps(A, 3);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 1, "a newer status with no coin does not bring it back");
+    // a newer status with a coin: the dry run is tried again (and this time the tool has something to send)
+    A.wallet.sweepNoidDryExit = 0;
+    A.runner.walletStatus.alice = status(A.clock.ms + 1000, "400000");
+    A.adv(10000);
     put(A, "alice", endedTick("done"));
     A.loop("alice");
     steps(A, 4);
-    assert.ok(dry(A, "wallet-sweep.sh", "noid --dry-run") > tried, "tried again after the timer");
-    assert.equal(real(A, "wallet-sweep.sh", "noid"), 0);
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 2, "tried again");
+    assert.equal(real(A, "wallet-sweep.sh", "noid"), 1, "and sent once");
+    assert.deepEqual(A.ap.view(A.run()).alice.finished_notes, []);
     assert.deepEqual(needs(A, "alice"), []);
+  } finally {
+    A.cleanup();
+  }
+});
+
+test("rule 8, an empty NOID wallet: 'nothing left' belongs to its run folder, and the manual dry run of the sweep still works", () => {
+  const A = makeWallet({ role: "alice", behaviour: { wallet: { sweepNoidDryExit: 3 } } });
+  try {
+    emptyWalletStart(A);
+    steps(A, 8);
+    assert.equal(A.ap.nothingLeftNow("send-sweep-noid"), true);
+    // the manual button is not affected: its own dry run starts as before
+    A.adv(10000);
+    A.runner.startAction("dry-sweep-noid");
+    assert.equal(dry(A, "wallet-sweep.sh", "noid --dry-run"), 2);
+    // another run folder is another wallet
+    const dir = A.ap.runDir;
+    A.ap.runDir = () => dir.call(A.ap) + "-other";
+    assert.equal(A.ap.nothingLeftNow("send-sweep-noid"), false);
+    assert.equal(A.ap.nothingLeft.has("send-sweep-noid"), false);
   } finally {
     A.cleanup();
   }

@@ -31,7 +31,7 @@ decides if it needs the package).
 | `assets/` | tray icons (`tray.png`, `trayTemplate.png`, `trayTemplate@2x.png`); the stage step must copy this folder |
 | `lib/shell.js` | the start-up order (below), switch refusals, wiring |
 | `lib/program.js` | builds the `program` object (build spec I1) from the pieces |
-| `lib/window.js`, `lib/hardening.js` | the main window and the policy guard of every webContents |
+| `lib/window.js`, `lib/hardening.js` | the main window (and its `openSettings`) and the policy guard of every webContents |
 | `lib/secretwin.js` | the secret window (I6) |
 | `lib/keystore-electron.js` | the real key store (I5) over `safeStorage` |
 | `lib/nodecheck.js` | the node check (I4) |
@@ -314,7 +314,7 @@ runs, and it gives a wrong passphrase for an imported folder (one with `passphra
 
 ## Low points (one line each)
 
-- The menu's "Settings" only shows the window; the page's own menu opens its settings screen.
+- The menu's "Settings" brings the window forward and then asks the page to open its settings screen (`openSettings` in `lib/window.js`): the main process runs one fixed line in the page that clicks the page's own menu item "Settings". It asks only while the window shows the program's own page (the private scheme), takes no argument and gives the page nothing; if the page has no such item (a page that is not in program mode, or one not drawn yet) the window is only shown. It depends on the item's text. Fixed 2026-11-19 (D-extra-1); the build info file (`DESKTOP-BUILD-INFO.txt`) now says "signature: none on Windows, ad hoc on macOS (no certificate, no notarization)" instead of "unsigned: yes".
 - A notification click shows the window; it does not select the swap (the main window has no preload to be told which).
 - The Ethereum node check looks at the `sepolia` endpoints only (the program has no list of profiles in use yet).
 - The Parano1d checkpoint (height 279,370) was read from one node only; the second node's read is still to be done at the first two-machine run.

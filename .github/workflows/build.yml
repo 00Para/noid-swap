@@ -520,7 +520,7 @@ jobs:
             echo "electron: $(node -p "require('../node_modules/electron/package.json').version")"
             echo "electron-builder: $(node -p "require('../node_modules/electron-builder/package.json').version")"
             echo "installer: $name"
-            echo "unsigned: yes (no certificate, no notarization)"
+            echo "signature: none on Windows, ad hoc on macOS (no certificate, no notarization)"
           } > DESKTOP-BUILD-INFO.txt
           cat DESKTOP-BUILD-INFO.txt
           echo "sha256:"

@@ -80,8 +80,9 @@ The five hard rules (`PROJECT.md`):
    `paranoid_getBlockHeader`: without a header time the tool holds every NOID-side spend. A pending close the first node shows but the
    second does not no longer stalls Bob's claim. Plain `http://` is accepted only to loopback
    (`--allow-plain-http` otherwise). Do not use Alice's node, and do not rely on one remote node: `swap-cli/REVIEW-2.md` F5
-   (single-source trust) says a lagging or lying node is not detected. The two-node path has run live once, in run 12
-   (`docs/live-run-12.md`): each machine's own node plus the other's through one SSH tunnel (`docs/mac-setup.md` section 6, step 2a: a
+   (single-source trust) says a lagging or lying node is not detected. The two-node path has run live twice: in run 12
+   (`docs/live-run-12.md`) and in run 20 (`docs/live-run-20.md`: with the link to the second node closed, Bob's tool refused to offer the lock and
+   offered it once the link was back). Run 12: each machine's own node plus the other's through one SSH tunnel (`docs/mac-setup.md` section 6, step 2a: a
    dedicated key that can only open the two forwards, and what to do when the other machine's address changes), and two
    Sepolia endpoints per side; both machines were on one private network. Before the first run with two Parano1d nodes make the read-only
    producer check of section 7 ("Bob, once before the first run with two Parano1d nodes") on a copy of Bob's file. Download from the release page named in

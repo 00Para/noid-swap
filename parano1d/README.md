@@ -279,7 +279,8 @@ is unchanged; real proofs only in the last test). Whole harness, run 2026-11-04:
   that a proof made WITHOUT the secret is rejected: the public prover API cannot
   produce one, so soundness against a malicious prover is still assumed.
 - The vendor's own `object_capsule_binds_the_opened_authority_and_deadline_branch`
-  test was not run; the harness reproduces its flow against the compiled HTLC.
+  test has not been run (no document and no build job of this repository records a run);
+  the harness reproduces its flow against the compiled HTLC.
 - `build_call` refuses to build some invalid calls, so a few negative tests
   hand-edit the page body (`with_body`) to reach `check_call` directly.
 - The `ensures terminal;` postcondition is weak by construction (see above).

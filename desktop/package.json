@@ -1,7 +1,7 @@
 {
   "name": "no1d-swap",
   "productName": "No1d Swap",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "No1d Swap: a desktop program for atomic swaps between Parano1d (NOID) and Ethereum, test networks only in this version.",
   "private": true,
   "main": "main.js",

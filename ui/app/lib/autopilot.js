@@ -50,6 +50,8 @@ const SWEEP_RETRY_MS = 5 * 60 * 1000; // a refused sweep ("lock still open", "in
 const FRESH_LOOK_MS = 60 * 1000; // program mode: the view and the loop read every input of an approval again (no cache) this often, so a tool file changed with its metadata kept does not show "on" until the next spend
 const RECORD_RETRY_MS = 60 * 1000; // the recording of the recovery close (tick --closed-by) is tried again about once a minute until the tool takes it
 const REPLACE_ORDER = ["send-reveal-replace", "send-refund-eth-replace"];
+const NOTHING_LEFT_TEXT = { "send-sweep-noid": "Nothing is left in the swap wallet to send back." }; // the page's finished line for a sweep that ended as "nothing left"
+const SWAP_FINISHED_TEXT = "This swap is finished: nothing more is left for the autopilot to do.";
 const FIRST_SPEND = { alice: "send-fund", bob: "send-lock" }; // the step whose amount the approval's typed text is compared with
 
 // What a refusal for one of these reasons means: the tick or the dry run was not fresh enough at that moment, not that anything is wrong with the step.
@@ -101,6 +103,7 @@ class Autopilot {
     this.forcedOff = new Set(); // a role whose approval file could not be deleted: not used by this process
     this.freshLook = new Map(); // program mode: role -> ms of the last look at the approval's inputs with no cache
     this.timedWait = new Map(); // spend id -> ms until which a refused sweep is not tried again
+    this.nothingLeft = new Map(); // spend id -> { at_ms, dir }: the NOID sweep the tool refused because the swap wallet holds no coin worth sweeping; in memory only (a restart tries it once more)
     this.holdMark = new Map(); // spend id -> the tick (its own clock) a wallet helper said "nothing to send now" on: tried again only for a newer tick
     this.startedOn = new Map(); // spend id -> the tick the last automatic start of it ran on
     this.recordMark = 0; // the last time the recovery close's recording was started
@@ -709,6 +712,7 @@ class Autopilot {
           ...(this.programMode() ? { version_changed: !!ap.version_changed, why: ap.in_force ? null : ap.why || null } : {}),
           doing: ap.in_force ? st.doing : null,
           waiting_reason: ap.in_force ? st.waiting_reason : null,
+          finished_notes: ap.in_force ? this.finishedNotes(role) : [],
           needs_you: ap.exists ? this.needViews(role) : [],
           funding_statements_valid_until: role === "alice" && !wallet && this.fundingStatementsValid(nowMs) ? Math.floor((this.fundingStatements.at_ms + FUNDING_WINDOW_MS) / 1000) : null,
           expected_typed: exp ? exp.text : null,
@@ -723,6 +727,51 @@ class Autopilot {
       }
     }
     return out;
+  }
+
+  // ------------------------------------------------------------------ a sweep with nothing to send
+  /** The tool refused this NOID sweep because the swap wallet holds nothing worth sweeping: it is not tried again (until a newer wallet status shows a coin, or a restart). */
+  markNothingLeft(id) {
+    this.nothingLeft.set(id, { at_ms: this.now(), dir: this.runDir() });
+    this.timedWait.delete(id);
+    this.dryMark.delete(id);
+    this.refusals.delete(id);
+  }
+
+  /**
+   * Is this sweep "nothing left" now? It ends when the run folder is another one, or when a wallet status read AFTER the mark is clean, is about the
+   * wallet and shows a plain coin: then the sweep is tried again (its dry run decides; a coin under the fee is refused again and marked again).
+   */
+  nothingLeftNow(id) {
+    const m = this.nothingLeft.get(id);
+    if (!m) return false;
+    if (m.dir !== this.runDir()) {
+      this.nothingLeft.delete(id);
+      return false;
+    }
+    const spend = SPEND_TABLE[id];
+    const st = this.actions.walletStatus && spend ? this.actions.walletStatus[spend.role] : null;
+    if (st && st.ok === true && st.noid && typeof st.at_ms === "number" && st.at_ms > m.at_ms && typeof st.noid.plain_micronoid === "string" && /^[0-9]{1,18}$/.test(st.noid.plain_micronoid) && BigInt(st.noid.plain_micronoid) > 0n) {
+      this.nothingLeft.delete(id);
+      return false;
+    }
+    return true;
+  }
+
+  /** The finished lines for the page: one per sweep of this role that ended as "nothing left". */
+  finishedNotes(role) {
+    return AUTO_ORDER.filter((id) => SPEND_TABLE[id].role === role && NOTHING_LEFT_TEXT[id] && this.nothingLeftNow(id)).map((id) => NOTHING_LEFT_TEXT[id]);
+  }
+
+  /**
+   * A wallet run whose file is over and whose sweeps are all done or "nothing left": no spend of this role is offered any more, so no watch loop is needed for a tick.
+   * `ctxs` is the spend context of each of this role's spends.
+   */
+  swapFinished(role, run, ctxs) {
+    if (this.actions.walletRun().use_swap_wallet !== true) return false;
+    const tick = run && run.roles && run.roles[role] ? run.roles[role].tick : null;
+    if (!sweepReady(role, tick)) return false;
+    return !AUTO_ORDER.some((id) => SPEND_TABLE[id].role === role && ctxs.get(id).relevant && !this.nothingLeftNow(id));
   }
 
   // ------------------------------------------------------------------ the loop
@@ -776,9 +825,13 @@ class Autopilot {
       st.waiting_reason = ap.why;
       return false;
     }
+    const ctxs = new Map();
+    for (const id of [...AUTO_ORDER, ...REPLACE_ORDER]) if (SPEND_TABLE[id].role === role) ctxs.set(id, a.spendContext(SPEND_TABLE[id], run, nowMs));
+    // a wallet run that is over, with every sweep done or "nothing left": no tick is needed any more, so no watch loop is started for it
+    const finished = this.swapFinished(role, run, ctxs);
     // amendment K: a watch loop is started only when no loop file was updated for 180 s AND this console knows of no loop of its own that is still alive
     const w = a.watchView(run);
-    if (!w.started_here && (w.loop_file_age_s === null || w.loop_file_age_s > WATCH_DEAD_S)) {
+    if (!finished && !w.started_here && (w.loop_file_age_s === null || w.loop_file_age_s > WATCH_DEAD_S)) {
       try {
         a.startAction("watch-start");
         st.doing = "starting the watch loop";
@@ -791,8 +844,6 @@ class Autopilot {
     const walletRun = a.walletRun().use_swap_wallet === true;
     // a wallet run's recovery close, once it is sent: the swap file must record it (tick --closed-by) when the tool will take it
     if (walletRun && role === "alice" && this.recordCloseStep(role, run, nowMs)) return true;
-    const ctxs = new Map();
-    for (const id of [...AUTO_ORDER, ...REPLACE_ORDER]) if (SPEND_TABLE[id].role === role) ctxs.set(id, a.spendContext(SPEND_TABLE[id], run, nowMs));
     // amendment E: a re-send becoming relevant is for the person
     for (const id of REPLACE_ORDER) {
       const c = ctxs.get(id);
@@ -818,9 +869,16 @@ class Autopilot {
         } else if (c !== code) this.stopSeen.delete(key);
       }
     }
-    const spend = AUTO_ORDER.map((id) => SPEND_TABLE[id]).find((s) => s.role === role && ctxs.get(s.id).relevant && !((this.timedWait.get(s.id) || 0) > nowMs));
+    // a NOID sweep the tool said has nothing to send is not offered again (its finished line is on the page)
+    const offered = (s) => s.role === role && ctxs.get(s.id).relevant && !this.nothingLeftNow(s.id);
+    const spend = AUTO_ORDER.map((id) => SPEND_TABLE[id]).find((s) => offered(s) && !((this.timedWait.get(s.id) || 0) > nowMs));
     if (!spend) {
-      const waiting = AUTO_ORDER.map((id) => SPEND_TABLE[id]).find((s) => s.role === role && ctxs.get(s.id).relevant);
+      const waiting = AUTO_ORDER.map((id) => SPEND_TABLE[id]).find((s) => offered(s));
+      if (!waiting && finished) {
+        st.doing = SWAP_FINISHED_TEXT;
+        st.waiting_reason = null;
+        return false;
+      }
       if (waiting) {
         st.doing = `waiting: ${waiting.label}`;
         st.waiting_reason = `The tool did not accept this yet (it may not be ready, or there may be nothing left to sweep). It is tried again in ${Math.max(1, Math.ceil(((this.timedWait.get(waiting.id) || 0) - nowMs) / 60000))} min.`;
@@ -955,6 +1013,7 @@ class Autopilot {
       const rec = a.jobs.find((j) => j.job === p.job) || null;
       if (p.kind === "dry") {
         if (rec && rec.state === "running") keep.push(p);
+        else if (rec && rec.nothing_left === true && SWEEP_IDS.has(p.spend)) this.markNothingLeft(p.spend); // the tool's own "no plain coin worth more than the fee" refusal of the dry run
         continue;
       }
       if (rec && rec.state !== "done") {
@@ -970,6 +1029,7 @@ class Autopilot {
     const spend = SPEND_TABLE[p.spend];
     const role = p.role;
     if (!rec) return void this.unknownOutcome(role, spend, "its record is gone");
+    if (rec.nothing_left === true && SWEEP_IDS.has(spend.id)) return void this.markNothingLeft(spend.id); // the same refusal on a real sweep: nothing was sent, nothing is left
     let clean = rec.ok === true && !rec.warning;
     const walletText = /^wallet-(fund|recover|sweep)\.sh$/.test(rec.script || "") && (spend.kind === "fund_noid" || spend.kind === "refund_noid" || spend.id === "send-sweep-noid");
     if (clean && walletText) clean = rec.sent_line === true; // a wallet helper's evidence is its own validated `outcome sent` line

@@ -361,7 +361,12 @@ mutation). Manual check: `BONSAI_API_KEY=x`, `BONSAI_API_URL=…`, `RISC0_PROVER
   proving times there came from a memory-starved VM and are not a benchmark.
 * Derive is verified against its cited source and the report's `o125...` vector, but never against a real running
   wallet.
-* ZK property of the chosen proof system and receipt type is taken from the vendor's documentation, not audited.
+* ZK property of the chosen proof system and receipt type is taken from the vendor's documentation, not audited. What the pinned
+  `risc0-zkvm` 3.0.6 crate's own documentation says (read in the crate source on 2026-11-19: `README.md` and the docs of `Receipt` in
+  `src/receipt.rs`): a receipt is a zero-knowledge proof of computation, and publishing it reveals no additional information about the
+  execution, the inputs for example. It makes no separate statement for the succinct receipt kind used here, and none for the 98-bit
+  conjectured figure (that one is the repository README's, quoted in section 5 "Choice"). So the property for this exact receipt kind
+  and version is still taken on trust.
 * Guest multiplication is deliberately naive; a 5-10x cycle reduction is available (section 6) if proving cost matters.
 * The 98-bit conjectured security of RISC Zero's default parameters is below 128; decide whether that suffices
   for the swap value.

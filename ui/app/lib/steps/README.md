@@ -179,7 +179,7 @@ swap's wallet keys and its swap file, so each refuses before it writes anything 
 | `setup.sh` | `setup(ctx)` | 0; 2 a setting or the folder is wrong, the other role's swap file is in the folder, an old `passphrase.txt` is in the folder, the vault gives no passphrase, a start file is not a plain file, or no log start could be chosen (the folders made before it stay) |
 | `wallet-setup.sh ROLE [--dry-run]` | `walletSetup(ctx, role, { dryRun })` | 0; 2 not this run's role, other role's swap file, no passphrase, a tool missing, the wallet-setup folder cannot be made (nothing made); 3 the swap file, the addresses file or half-made wallet files exist (nothing made), or a step failed (its own words are shown, the files made so far stay, the addresses file is not written) |
 | `prepare.sh` (poseidon, wallet run) | `prepare(ctx)` | 0; 2 a setting, a tool or a wallet file is wrong; 3 Alice's swap file exists (nothing written, the sealed files untouched); 5 the node gave no usable tip; 6 no bundle came out, or the new swap file does not show the wallet, key and payouts the setup made (the sealed files are KEPT) |
-| `join.sh [BUNDLE]` (poseidon, wallet run) | `join(ctx, bundlePath)` | 0; 2 a setting, a tool or an argument is wrong; 3 Bob's swap file exists; 4 alice.bundle.json exists with other content; 6 no usable bundle; 8 new-bob failed; 9 new-bob exited 0 but its file, check line or digest line is wrong; 10 the swap file does not show the key and payout the setup made (the sealed key file is KEPT) |
+| `join.sh [BUNDLE]` (poseidon, wallet run) | `join(ctx, bundlePath)` | 0; 2 a setting, a tool or an argument is wrong; 3 Bob's swap file exists; 4 alice.bundle.json is not a plain file (or has other content while Bob's swap file exists; with no swap file an earlier copy with other content is moved aside to `alice.bundle.json.refused-<UTC time>`, kept, and the file given is used); 6 no usable bundle; 8 new-bob failed; 9 new-bob exited 0 but its file, check line or digest line is wrong; 10 the swap file does not show the key and payout the setup made (the sealed key file is KEPT) |
 
 Nothing here ever sends to a chain, so the rule "2 or 3 only before the first child that can sign or send" has no case: the codes 3, 5, 6, 8, 9 and 10 come after
 files were made, as in the helpers, and each message says what is on disk. The role of the run is enforced (2, nothing started) and so is design 12.4's "a run
@@ -251,6 +251,11 @@ form or the offer he approved).
 - The hashlock registry moves from the WSL home to the Windows home: the import of an old run folder (4.6) appends the old `hashlocks.txt` lines when the person gives the old `.noid-swap` folder; when they do not, the new run folder's `import.json` says "the old lock records were not imported".
 - When `wallet new` printed no readable address, `noid-wallet.json` exists but is not listed in `files`.
 - Bob's own `eth_payout` is not among the terms printed for him to check before `new-bob` (bash prints the same list).
+- FIXED (final pass, R410-2): a copy of Alice's file that `new-bob` had refused stayed in Bob's run folder as `alice.bundle.json` and blocked the right file (exit 4). While Bob has no swap
+  file, a copy with other content is now moved aside to `alice.bundle.json.refused-<UTC time>` (kept, never deleted; a counter follows if the name is taken), the step says so by file name,
+  and the file given is used. With Bob's swap file (exit 3 comes first) and for a destination that is not a plain file (4) nothing changes. The registry no longer has a `wx` rule for that file.
+- New (final pass, left): the refused copies stay in the run folder (`alice.bundle.json.refused-*`); nothing lists or removes them, and the step's file list names only the one made by that run.
+- New (final pass, left): in a real reveal the exit-1 line says "MAY BE PUBLIC" even when live.js refused before it could send; a `sent:` line is the only proof it was broadcast, and its absence is not proof it was not.
 
 ## Passphrase and recovery (4.6)
 
@@ -393,8 +398,8 @@ then give only the codes of the table; two of them (the Ethereum sweep's 3 and t
 | `walletSweep` | 2 | refused before any child was started: a setting, a payout setting, a tool, the role, no passphrase, no swap file, an unknown option |
 | `walletSweep` | 3 | REFUSED, nothing sent: the payout in the swap file is not the payout in run.json, the key's role is not the asked one, or the tool refused before it sent anything (eth: in a dry run only, live.js printed its own `error:` line, no `sent:` line, no result; a real Ethereum sweep that ended in an error is 1) |
 | `walletSweep` | 4 | noid only: nothing was sent by this run (the tool says to wait, or that the sweep is already done; the marker is written for done) |
-| `walletSweep` | 6 | the sweep MAY have been sent (noid: run it again, same bytes; eth: live.js printed `sent:` and did not finish: look at the key's balance) |
-| `walletSweep` | null | may have been sent: the sender was killed, timed out, could not be started, or this step failed after it started |
+| `walletSweep` | 6 | noid only: the sweep MAY have been sent: run it again, the tool sends the same recorded bytes (the Ethereum sweep never returns 6: it has no recorded bytes) |
+| `walletSweep` | null | may have been sent: the sender was killed, timed out, could not be started, or this step failed after it started (eth: also live.js printed `sent:` and did not finish: look at the key's balance) |
 | `boardSign` | 0 | signed: the signer is Bob's Ethereum address; the lines `board-sign: purpose`, `text-sha256`, `address`, `signature` and `done` are printed |
 | `boardSign` | 2 | refused before any child was started: a setting, a tool, the role, no passphrase, no handover file, a value that is not what it must be |
 | `boardSign` | 3 | nothing reported: swap-cli bundle did not give exactly one digest, live.js sign-message failed or answered in another shape, or the signer is not Bob's address (nothing is sent to any chain by this step) |
@@ -450,18 +455,19 @@ but live.js prints `sent:` only after the send call returned, and the node may h
 but live.js says it finished (null).
 
 **Low points of the read (left; the final pass decides).**
-- `walletStep` counts an unreadable report size as 0, which could give 3 next to a `maybe_sent` report (almost unreachable; fix: count it as 1).
+- FIXED (final pass, 4.4-1): `walletStep` counted an unreadable report size as 0, which could give 3 next to a `maybe_sent` report; it is counted as 1 now.
 - `boardSign` returns 3 after the signer started; no chain is touched, but it breaks the letter of design 12.6 (write the exception, or return 1).
 - In lock, reveal and refund a failed key emit gives 1 where bash gave 2; the console latch then holds the intent, so 4.5 must show "cancel the
   intent, then retry".
-- `reveal`: when the result file cannot be opened, live.js never starts and the step rightly says "may be public", but then summarizes the
-  `eth-claim.json` of an earlier reveal; skip the summary when live.js did not start.
-- `reveal` exit 3 with an unreadable result: no hash saved and no loud "SECRET IS PUBLIC" line (the code still says it; bash the same); print the
-  line on every 3.
-- `walletRecover` record mode's 3 prints no "REFUSED, nothing sent" line (meaning right, wording differs).
+- FIXED (final pass, 4.4-4): `reveal`, when live.js was not started (its result file could not be opened), summarized the `eth-claim.json` of an earlier reveal. The result file is
+  read, and copied to `pub/`, only when live.js was started by this run; otherwise the step says so and shows nothing of the old file.
+- FIXED (final pass, 4.4-5): `reveal` exit 3 with a result that gave no hash printed no loud "SECRET IS PUBLIC" line. A real reveal that ended on live.js exit 3 (without a
+  hash to save), on exit 1, or on exit 0 with a key or secret that did not arrive whole, now prints a `!!!` line (the secret IS public, or MAY BE public).
+- FIXED (final pass, 4.4-6): `walletRecover` record mode's 3 prints `wallet-recover REFUSED, nothing sent: closed-by NOT recorded yet ...`, the line the console reads. After a send
+  (stage B of the send) the old words stay: the close was sent, so nothing there is "nothing sent".
 - A null from a wallet step stops the autopilot; running it again would send the same recorded bytes (a 4.5 design choice).
-- The Ethereum sweep reuses 6, whose text means "same bytes" for NOID; the console falls to unknown (no `outcome maybe_sent` line), so it is
-  safe, but null would be clearer.
+- FIXED (final pass, 4.4-8): the Ethereum sweep reused 6, whose text means "same bytes" for NOID. A real Ethereum sweep that live.js broadcast and did not finish is null now
+  (the console and the autopilot read it as may have been sent and show "needs you"); 6 is the NOID sweep's only.
 - No time limit on senders or emitters (bash the same); a stuck emitter leaves live.js waiting on stdin.
 - The lock precheck's decoder drops a UTF-8 byte-order mark that Python refused (swap-cli never prints one).
 - Test gaps: on Windows the kill sweep accepts 1 as well as null (2 and 3 are still refused); the throw injection does not reach the direct

@@ -147,12 +147,14 @@ module.exports = [
     prepare: bobFiles,
     scenario: joinScenario(),
     run: joinRun(),
-    wx: ["alice.bundle.json"],
+    // no `wx` entry for alice.bundle.json: an earlier copy with other content is moved aside (kept) and the file given put in its place (R410-2); the cases below and
+    // final-pass-steps-join.test.js show that the earlier copy is never lost
     cases: [
       { label: "ordinary", expect: 0 },
       { label: "a term of Bob's is not assigned", expect: 2, settings: { bob_noid: null } },
       { label: "Bob's swap file exists", expect: 3, prepare: (h) => { bobFiles(h); h.swapFile("bob"); } },
-      { label: "another bundle is already in the folder", expect: 4, prepare: (h) => { bobFiles(h); h.write("alice.bundle.json", '{"other":1}\n'); } },
+      { label: "another bundle is already in the folder and nothing was joined: it is moved aside", expect: 0, prepare: (h) => { bobFiles(h); h.write("alice.bundle.json", '{"other":1}\n'); } },
+      { label: "alice.bundle.json is not a plain file", expect: 4, prepare: (h) => { bobFiles(h); fs.mkdirSync(path.join(h.runDir, "alice.bundle.json")); } },
       { label: "no bundle at the path", expect: 6, run: joinRun("missing.json") },
       { label: "new-bob refuses", expect: 8, scenario: joinScenario({ newBob: { stdout: "error: the stub refuses\n", code: 3, writeOut: undefined } }) },
       { label: "new-bob exits 0 and prints no check line", expect: 9, scenario: joinScenario({ newBob: { stdout: "swap file written\n" } }) },

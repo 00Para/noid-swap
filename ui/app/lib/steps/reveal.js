@@ -110,7 +110,12 @@ function reveal(ctx, opts = {}) {
         out.say("NOTE: the claim was broadcast. Run a tick for Alice with --apply right now (the watch loop does it on its next pass): the swap file learns that the secret may be public only from a tick that sees this claim, and a re-send is judged by what the file knows.");
       }
       if (res.emitFailed) out.say("claim: the swap key or the secret could not be emitted from Alice's swap file; live.js got an incomplete input and was judged by its own answer");
-      const sum = summarize(S.readText(ctx, jsonPath, 1024 * 1024));
+      // the result file is read only when live.js was started by this run (it opens the file with truncation): when it never started, a file of that name
+      // is an earlier run's, and its text, its hash and a copy of it in pub/ must not appear as this run's
+      const started = !l.error;
+      let sum = { lines: [], reverted: null };
+      if (started) sum = summarize(S.readText(ctx, jsonPath, 1024 * 1024));
+      else out.say(`claim: live.js was not started, so this run wrote no result file: an ${jsonName} of an earlier run, if there is one, is not shown and not copied to pub/`);
       for (const line of sum.lines) out.say(line);
       // a claim that was MINED AND REVERTED paid nobody and published the secret: keep its hash where the next tick finds it (--reveal-tx)
       if (sum.reverted !== null) {
@@ -126,7 +131,19 @@ function reveal(ctx, opts = {}) {
         out.say(`!!! THE CLAIM ${sum.reverted} WAS MINED AND REVERTED: THE SECRET IS PUBLIC.${saved ? ` Saved to ${keep}; the next tick and claim pass --reveal-tx for it.` : " It could NOT be saved to reveal-reverted-tx.txt: write that hash into the file by hand."}`);
         out.say("!!! Run a tick for Alice with --apply now (it records that the secret is public, so a re-send is judged by the late cutoff), then decide on a re-send.");
       }
-      if (S.copyToPub(ctx, jsonPath, "eth-claim.json")) out.file("pub/eth-claim.json");
+      // a send was started and its result is not a mined-and-reverted one that was read: live.js exit 3 still means mined and reverted (the secret IS public)
+      // even when its result file could not be read; any other end that is not a clean 0 may have sent (the abnormal and undocumented ends said so above)
+      if (sum.reverted === null && !abnormal) {
+        if (l.code === 3) {
+          out.say("!!! THE CLAIM WAS MINED AND REVERTED (live.js exit 3) AND NO HASH OF IT COULD BE READ FROM ITS RESULT: THE SECRET IS PUBLIC. Nothing was saved to reveal-reverted-tx.txt: take it from the Ethereum account and write it there by hand.");
+          out.say("!!! Run a tick for Alice with --apply now (it records that the secret is public, so a re-send is judged by the late cutoff), then decide on a re-send.");
+        } else if (l.code === 0 && res.emitFailed) {
+          out.say("!!! live.js says it finished although its key or the secret did not arrive whole: the claim may have been sent: THE SECRET MAY BE PUBLIC. Run a tick for Alice with --apply now and look at the Ethereum account before doing anything else.");
+        } else if (l.code === 1) {
+          out.say("!!! live.js ended on its own error (exit 1): the claim may have been sent: THE SECRET MAY BE PUBLIC. Run a tick for Alice with --apply now and look at the Ethereum account before doing anything else.");
+        }
+      }
+      if (started && S.copyToPub(ctx, jsonPath, "eth-claim.json")) out.file("pub/eth-claim.json");
       return out.done(code);
     },
     { secret: true },

@@ -18,7 +18,8 @@
  * Exit code: 0 new-bob exited 0, printed the expected check line, and Bob's swap file exists (and, in the wallet run, shows the key and the payout);
  *   2 a setting, a tool or an argument is wrong (nothing written; a failed folder, move or copy after the checks also gives 2 and can leave bob/ or the copy);
  *   3 Bob's swap file already exists (nothing written);
- *   4 alice.bundle.json exists with other content than the bundle given, or is not a plain file (nothing written);
+ *   4 alice.bundle.json is not a plain file (nothing written); or it has other content than the bundle given AND Bob's swap file exists (nothing written).
+ *     With no swap file of Bob's yet, an earlier copy with other content is moved aside to alice.bundle.json.refused-<UTC time> (kept, never deleted) and the file given is used;
  *   6 no usable bundle: missing, not a regular file, a symbolic link, empty, above 1 MB, not JSON, or without the fields printed (nothing written);
  *   8 new-bob exited non-zero (left: bob/, the bundle copy, join-new-bob.out with the tool's whole output, and the hashlock entries the tool made before it
  *     saves the file: a retry can be refused by the tool until those lines are removed, as its refusal says);
@@ -168,6 +169,7 @@ function join(ctx, bundlePath) {
       }
       const f = bundleFields(text);
       if (f.why) return stop(6, `no usable bundle: ${src}: ${f.why} (nothing was written)`);
+      let asideOld = false;
       if (lexists(BUNDLE)) {
         let plain = false;
         try {
@@ -177,10 +179,32 @@ function join(ctx, bundlePath) {
           plain = false;
         }
         if (!plain) return stop(4, `${BUNDLE} exists and is not a plain file; nothing was written`);
-        if (!fs.readFileSync(BUNDLE).equals(copy)) return stop(4, `${BUNDLE} already exists with other content than the file given: move one of them away; nothing was written`);
+        if (!fs.readFileSync(BUNDLE).equals(copy)) {
+          // an earlier copy that differs from the file given (for example one that new-bob refused): while nothing was joined (no swap file of Bob's) it is
+          // moved aside, never deleted, and the file given is used; with a swap file the refusal stays
+          if (lexists(BOB_FILE)) return stop(4, `${BUNDLE} already exists with other content than the file given: move one of them away; nothing was written`);
+          asideOld = true;
+        }
       }
       // nothing above left anything but the temporary copy (removed on exit); from here it is put in place
       ownerOnlyDir(path.dirname(BOB_FILE), `the folder of ${BOB_FILE}`);
+      if (asideOld) {
+        // a name that does not exist yet: the stamp is UTC to the second, and a counter follows when a second move comes in the same second
+        const stamp = new Date(C.nowMs(ctx)).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+        let aside = "";
+        for (let i = 1; i <= 99 && !aside; i++) {
+          const cand = `${BUNDLE}.refused-${stamp}${i === 1 ? "" : `-${i}`}`;
+          if (!lexists(cand)) aside = cand;
+        }
+        try {
+          if (!aside) throw new Error("no free name");
+          fs.renameSync(BUNDLE, aside);
+        } catch {
+          throw new C.Refusal(2, `cannot move the earlier ${BUNDLE} aside; nothing else was written`);
+        }
+        out.file(path.basename(aside));
+        say(`the earlier alice.bundle.json in this folder differs from the file given (new-bob may have refused it): it was moved aside to ${path.basename(aside)} (kept, not deleted) and the file given is used`);
+      }
       if (!lexists(BUNDLE)) {
         try {
           fs.renameSync(tmp, BUNDLE);

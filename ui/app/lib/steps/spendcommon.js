@@ -72,8 +72,8 @@ const CODE_TABLE = {
     2: "refused before any child was started: a setting, a payout setting, a tool, the role, no passphrase, no swap file, an unknown option",
     3: "REFUSED, nothing sent: the payout in the swap file is not the payout in run.json, the key's role is not the asked one, or the tool refused before it sent anything (eth: in a dry run only, live.js printed its own `error:` line, no `sent:` line, no result; a real Ethereum sweep that ended in an error is 1)",
     4: "noid only: nothing was sent by this run (the tool says to wait, or that the sweep is already done; the marker is written for done)",
-    6: "the sweep MAY have been sent (noid: run it again, same bytes; eth: live.js printed `sent:` and did not finish: look at the key's balance)",
-    null: "may have been sent: the sender was killed, timed out, could not be started, or this step failed after it started",
+    6: "noid only: the sweep MAY have been sent: run it again, the tool sends the same recorded bytes (the Ethereum sweep never returns 6: it has no recorded bytes)",
+    null: "may have been sent: the sender was killed, timed out, could not be started, or this step failed after it started (eth: also live.js printed `sent:` and did not finish: look at the key's balance)",
   },
   boardSign: {
     0: "signed: the signer is Bob's Ethereum address; the lines `board-sign: purpose`, `text-sha256`, `address`, `signature` and `done` are printed",

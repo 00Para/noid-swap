@@ -52,6 +52,12 @@ const GONE_PAGE =
       "<h1>This window stopped working</h1><p>Quit No1d Swap from its tray icon or its menu, then open it again.</p></body>"
   );
 
+// What the program asks of its own page to open the settings screen: the same click a person makes on the page's menu item "Settings". Fixed text, no
+// argument, nothing from outside; it answers true only when that item was found. The page's top bar is drawn only in program mode, so on any other
+// page the answer is false and nothing happens.
+const OPEN_SETTINGS_SCRIPT =
+  "(() => { for (const b of document.querySelectorAll('.pg-menu-list button')) { if (b.textContent === 'Settings') { b.click(); return true; } } return false; })()";
+
 /**
  * @param {object} o
  * @param {object} o.electron
@@ -116,15 +122,40 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   const loadResult = win.loadURL(url);
   if (loadResult && typeof loadResult.catch === "function") loadResult.catch(() => {});
 
+  function showAndFocus() {
+    if (win.isDestroyed()) return;
+    if (typeof win.isMinimized === "function" && win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  }
+
   return {
     window: win,
     webContents: wc,
     whenLoaded: () => loaded,
-    showAndFocus() {
-      if (win.isDestroyed()) return;
-      if (typeof win.isMinimized === "function" && win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+    showAndFocus,
+    /**
+     * Shows the window and opens the page's settings screen. The page is asked only while it is the program's own page (the private scheme),
+     * never the "this window stopped working" page. True when the page opened it; false when it could not (the window is shown anyway).
+     */
+    async openSettings() {
+      showAndFocus();
+      try {
+        await loaded;
+        if (win.isDestroyed()) return false;
+        if (typeof wc.getURL === "function") {
+          let current = null;
+          try {
+            current = new URL(wc.getURL());
+          } catch {
+            return false;
+          }
+          if (originOf(current) !== PAGE_ORIGIN) return false;
+        }
+        return (await wc.executeJavaScript(OPEN_SETTINGS_SCRIPT, true)) === true;
+      } catch {
+        return false;
+      }
     },
     hide() {
       if (!win.isDestroyed()) win.hide();
@@ -139,4 +170,4 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   };
 }
 
-module.exports = { createMainWindow, baseWebPreferences, isReloadKey, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE };
+module.exports = { createMainWindow, baseWebPreferences, isReloadKey, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT };

@@ -47,7 +47,7 @@
     return ["alice", "bob"].map((r) => {
       const x = ap[r];
       if (!x) return null;
-      return [x.available, x.on, x.terms_changed, x.expected_typed, x.funding_offered, !!x.funding_statements_valid_until, (x.needs_you || []).map((n) => [n.spend, n.reason, n.retrying]), x.on ? [x.doing, x.waiting_reason] : null];
+      return [x.available, x.on, x.terms_changed, x.expected_typed, x.funding_offered, !!x.funding_statements_valid_until, (x.needs_you || []).map((n) => [n.spend, n.reason, n.retrying]), x.on ? [x.doing, x.waiting_reason, x.finished_notes] : null];
     });
   }
 
@@ -563,6 +563,7 @@
       needs_you: needs,
       doing: x.doing || null,
       waiting_reason: x.waiting_reason || null,
+      finished_notes: Array.isArray(x.finished_notes) ? x.finished_notes.filter((t) => typeof t === "string") : [],
       approved_at: x.approved_at || null,
       valid_until: x.funding_statements_valid_until || null,
       funding_offered: alice ? x.funding_offered === true : null,
@@ -620,6 +621,7 @@
     if (f.on) {
       box.appendChild(H.el("p", { class: "plain", text: f.doing || "Starting." }));
       if (f.waiting_reason) box.appendChild(H.el("p", { class: "dim", text: `Waiting for: ${f.waiting_reason}` }));
+      for (const t of f.finished_notes) box.appendChild(H.el("p", { class: "dim", text: t }));
       if (f.approved_at) box.appendChild(H.el("p", { class: "dim", text: `Approved ${H.clock(f.approved_at)}. ${isProgram() ? "A change of the terms, of this swap's settings, of the program or of its tools turns it off by itself." : "A change of the terms, of env.local.sh or of the helpers turns it off by itself."}` }));
       if (f.valid_until) box.appendChild(H.el("p", { class: "dim", text: `The two funding statements are good for one automatic funding, until ${H.clock(f.valid_until)}.` }));
       box.appendChild(

@@ -823,9 +823,57 @@ function schemeOriginOk(req) {
   return sfs === undefined || sfs === "same-origin";
 }
 
+/**
+ * Program mode: every text the console sends to the page shows a path below the program's data folder relative to it (`runs\ID\alice.bundle.json`) and a path below the home
+ * folder as `~` plus the rest, so a screenshot a user shares does not carry the account name (4.5-L10). One place, on the way out: the step lines, the job records, the
+ * refusal and error texts and the autopilot's words all leave through the program handler's `send`. Files on disk (the logs, the audit lines, the steps' own output files) keep
+ * their full paths; only the answer to the page is changed. Both roots come from the program object. A path outside both is shown unchanged. Both separators are read, and
+ * a Windows drive path is read without regard to letter case. Returns a function that rewrites a string, or every string inside an object or an array (a Buffer is left as it is).
+ * @returns {(value:any)=>any}
+ */
+function pagePathRewriter(program) {
+  const rules = [];
+  const add = (dir, kind) => {
+    if (typeof dir !== "string") return;
+    const root = dir.replace(/[\\/]+$/, "");
+    if (root.length < 3) return;
+    const body = root
+      .split(/[\\/]+/)
+      .map((seg) => seg.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("[\\\\/]+");
+    // the root, then a separator (taken with it) or the end of the name; never the start of a longer name (`/home/ab` is not `/home/a`)
+    rules.push({ kind, re: new RegExp(`(?<![\\w.~-])${body}(?:[\\\\/]+|(?![\\w-]))`, /^[A-Za-z]:/.test(root) ? "gi" : "g") });
+  };
+  if (program) {
+    add(program.dataDir, "data"); // first: the data folder usually lies below the home folder
+    add(program.home, "home");
+  }
+  if (!rules.length) return (value) => value;
+  const text = (s) => {
+    if (s.length < 3) return s;
+    let out = s;
+    for (const r of rules) {
+      out = out.replace(r.re, (m) => {
+        const sep = /[\\/]$/.test(m) ? m[m.length - 1] : ""; // a separator at the end was taken with the root
+        if (r.kind === "data") return sep ? "" : "the program's data folder";
+        return sep ? `~${sep}` : "~";
+      });
+    }
+    return out;
+  };
+  const walk = (v, depth) => {
+    if (typeof v === "string") return text(v);
+    if (v === null || typeof v !== "object" || depth > 40 || typeof v.toJSON === "function" || Buffer.isBuffer(v)) return v;
+    if (Array.isArray(v)) return v.map((x) => walk(x, depth + 1));
+    return Object.fromEntries(Object.keys(v).map((k) => [k, walk(v[k], depth + 1)]));
+  };
+  return (value) => walk(value, 0);
+}
+
 /** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
 function programRequestHandler(program, swapSet, getServer) {
-  const send = (res, status, body, type) => sendWith(CSP_SCHEME, res, status, body, type); // every answer of program mode carries the scheme's policy
+  const forPage = pagePathRewriter(program);
+  const send = (res, status, body, type) => sendWith(CSP_SCHEME, res, status, body !== null && typeof body === "object" && !Buffer.isBuffer(body) ? forPage(body) : body, type); // every answer of program mode carries the scheme's policy, and no path of the data or home folder (the page's own files, a string or a Buffer, are sent as they are)
   const swapOf = (id, res) => {
     if (typeof id !== "string" || !SWAP_ID_RE.test(id)) {
       send(res, 400, { error: "swap must be a swap id: 32 lower-case hexadecimal characters" });
@@ -991,6 +1039,6 @@ async function startProgramServer(program, deps = {}) {
   return { scheme: SCHEME_NAME, token, swapSet, handler, mark, maxBody: Math.max(...Object.values(PROGRAM_BODY_MAX)), stop };
 }
 
-module.exports = { createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig, startProgramServer, schemeHostOk, schemeOriginOk, SCHEME_ORIGIN, CSP_SCHEME };
+module.exports = { createServer, parseArgs, collectSwap, collectAll, readStatusFile, LiveSources, MockSources, hostOk, originOk, runnerConfig, startProgramServer, pagePathRewriter, schemeHostOk, schemeOriginOk, SCHEME_ORIGIN, CSP_SCHEME };
 
 if (require.main === module) main();

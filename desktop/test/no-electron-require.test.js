@@ -49,7 +49,7 @@ test("package.json pins exact versions and has no runtime dependencies", () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(DESKTOP, "package.json"), "utf8"));
   assert.equal(pkg.name, "no1d-swap");
   assert.equal(pkg.productName, "No1d Swap");
-  assert.equal(pkg.version, "0.1.0");
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/,"a plain version number, raised at every build given to users (an update with the same number reads as changed terms)");
   assert.equal(pkg.private, true);
   assert.equal(pkg.main, "main.js");
   assert.equal(pkg.dependencies, undefined);

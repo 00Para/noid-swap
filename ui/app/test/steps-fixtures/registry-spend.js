@@ -218,7 +218,7 @@ const ethSweep = (role) => {
     role,
     exports: ["walletSweep"],
     passphraseFor: ["ethkey emit"],
-    codes: [0, 1, 2, 3, 6, null],
+    codes: [0, 1, 2, 3, null],
     prepare: (h) => h.swapFile(role),
     scenario: () => scenario(),
     run: (ctx) => steps.walletSweep(ctx, "eth", role, {}),
@@ -228,7 +228,7 @@ const ethSweep = (role) => {
     cases: [
       { label: "sent", expect: 0 },
       { label: "live.js ends on its error line with no 'sent:' line (the node may have taken the transaction): unknown, never nothing sent", expect: 1, scenario: () => scenario({ stdout: "", stderr: "error: lock still open\n", code: 1 }) },
-      { label: "live.js broadcast and did not finish", expect: 6, scenario: () => scenario({ stdout: "", stderr: `${F.LIVE_SENT_ERR}error: timed out\n`, code: 1 }) },
+      { label: "live.js broadcast and did not finish (6 is the NOID sweep's, never this one: there are no recorded bytes to send again)", expect: null, scenario: () => scenario({ stdout: "", stderr: `${F.LIVE_SENT_ERR}error: timed out\n`, code: 1 }) },
       { label: "live.js ends on an error line with no 'sent:' line but a result", expect: 1, scenario: () => scenario({ stderr: "error: x\n", code: 1 }) },
       { label: "live.js ended on exit 1 without its error line", expect: 1, scenario: () => scenario({ stdout: "", stderr: "", code: 1 }) },
       { label: "the key could not be emitted but live.js says it finished", expect: null, scenario: () => ({ ...scenario(), swapCli: { "ethkey address": { stdout: F.ethkeyAddr(role) }, "ethkey emit": { stdout: "", stderr: "error: wrong passphrase\n", code: 1 } } }) },

@@ -266,6 +266,10 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   const showWindow = () => {
     if (windowCtl) windowCtl.showAndFocus();
   };
+  // The menu's "Settings": the window forward and the page's settings screen open.
+  const openSettings = () => {
+    if (windowCtl) windowCtl.openSettings().catch(() => {});
+  };
 
   function dispatchStake(list) {
     stakeList = list;
@@ -584,7 +588,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     buildApplicationMenu({
       electron,
       isPackaged,
-      onSettings: showWindow,
+      onSettings: openSettings,
       onRecoveryCode: () => program.open("recovery-code"),
       onHelp: () => program.open("help"),
       onCheckUpdate: () => program.open("update-check"),

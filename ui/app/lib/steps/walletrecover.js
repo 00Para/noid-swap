@@ -22,8 +22,8 @@ const { tick } = require("./tick");
 
 const { Refusal } = C;
 
-/** Stage B. Returns 0 recorded, 3 refused (nothing written), 4 no txid on file. Never throws. */
-async function recordClose(ctx, out, N) {
+/** Stage B. Returns 0 recorded, 3 refused (nothing written), 4 no txid on file. Never throws. `alone`: record mode, where nothing else was sent by the step. */
+async function recordClose(ctx, out, N, alone = false) {
   const txFile = path.join(ctx.runDir, "wallet-recovered-txid.txt");
   let tx = "";
   try {
@@ -57,7 +57,8 @@ async function recordClose(ctx, out, N) {
     out.say(`wallet-recover: closed-by recorded txid ${tx}`);
     return 0;
   }
-  out.say(`wallet-recover: closed-by NOT recorded yet (tick exit ${ec}); the swap file was not changed. The tool's words:`);
+  // in record mode alone the step's 3 is a refusal and nothing was sent by it; after a send (stage A) the close was sent, so the old words stay there
+  out.say(`wallet-recover${alone ? " REFUSED, nothing sent:" : ":"} closed-by NOT recorded yet (tick exit ${ec}); the swap file was not changed. The tool's words:`);
   for (const line of merged.split("\n").filter((l) => l !== "").slice(0, 6)) out.say(`  | ${C.san(line.slice(0, 300))}`);
   return 3;
 }
@@ -80,7 +81,7 @@ function walletRecover(ctx, opts = {}) {
     const N = C.clock(C.nowMs(ctx), false);
     out.say(`== start ${C.clock(C.nowMs(ctx), true)}, run ${ctx.runNumber}, wallet recovery (${record ? "record" : dry ? "dry" : "send"})`);
     if (record) {
-      const rc = await recordClose(pctx, out, N);
+      const rc = await recordClose(pctx, out, N, true);
       out.say(`== end ${C.clock(C.nowMs(ctx), true)}`);
       return out.done(rc);
     }

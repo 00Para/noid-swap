@@ -250,3 +250,15 @@ test("the signature changes with what is drawn and not with the clocks", () => {
   const on = (doing) => NA.signature({ ...base, autopilot: { alice: AP(), bob: AP({ on: true, doing }) } });
   assert.notEqual(on("a"), on("b"), "what it is doing is drawn while it is on");
 });
+
+test("on, a sweep with nothing left: the finished line is drawn as a plain line (not 'Waiting for'), and it changes the signature", () => {
+  state.payload = payload(AP(), AP({ on: true, approved_at: 1800000000, doing: "This swap is finished: nothing more is left for the autopilot to do.", waiting_reason: null, finished_notes: ["Nothing is left in the swap wallet to send back."] }));
+  const box = NA.autopilotBlock(bobView(), state.payload);
+  assert.match(texts(box), /This swap is finished/);
+  assert.match(texts(box), /Nothing is left in the swap wallet to send back\./);
+  assert.doesNotMatch(texts(box), /Waiting for/);
+  const base = { enabled: true, autopilot: { alice: AP(), bob: AP({ on: true, doing: "x" }) } };
+  assert.notEqual(NA.signature({ ...base, autopilot: { alice: AP(), bob: AP({ on: true, doing: "x", finished_notes: ["a"] }) } }), NA.signature(base));
+  // an older payload without the field draws as before
+  assert.doesNotThrow(() => NA.autopilotBlock(bobView(), payload(AP(), AP({ on: true, doing: "x" }))));
+});

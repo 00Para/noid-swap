@@ -260,6 +260,12 @@ const REFUND_GAS_RESERVE = { sha256: 100_000n, poseidon: 200_000n };
 const TRANSFER_GAS = 21_000n; // a plain ETH transfer to an address without code
 const RESERVE_NUM = 125n; // the reserve is gas x fee ceiling x 1.25, in integers: (x * 125 + 99) / 100
 const RESERVE_DEN = 100n;
+// A floor on the price per gas the DEPOSIT reserve is sized from, applied only when the ceiling is the node's own suggestion (a typed cap is what a send would use, so it is
+// reserved as typed). On a test network the suggestion can be a few wei per gas (17 to 33 on Sepolia), which made the reserve almost nothing: a rise in the fee between the
+// deposit and the reveal could then stop the reveal. With 1 gwei the reserve is at least gas x 1 gwei (0.001 ETH for 1,000,000 gas), and it is swept back after the swap. It
+// changes only the amount `reserve` asks for: the maximum fee of a real send and the fee a sweep uses are still chosen by feeCeiling and --gas-price-gwei, never by this.
+// On mainnet the cap is always typed (--max-fee-gwei), so nothing changes there.
+const RESERVE_FLOOR_WEI = 10n ** 9n;
 // Chains on which this tool will send transactions: Sepolia, Holesky, Hardhat/ganache-style local.
 // Ethereum mainnet (1) is refused unless the command carries --mainnet (see mainnetFlags); it is never in this set.
 // Another chain needs an explicit allowChainId.
@@ -3720,7 +3726,7 @@ async function requireSwapChain(provider, args, sw) {
 
 /**
  * reserve (read-only): the ETH the swap's key must hold before the swap goes on (amendment C), and whether it does. Alice: the claim's fixed gas limit x the fee ceiling x 1.25.
- * Bob: amount_wei + (lock gas ceiling + refund gas ceiling) x the fee ceiling x 1.25. All amounts are wei, decimal strings; integer arithmetic only. `covered` false makes the
+ * Bob: amount_wei + (lock gas ceiling + refund gas ceiling) x the fee ceiling x 1.25. When the ceiling is the node's own suggestion the reserve is also at least gas x RESERVE_FLOOR_WEI. All amounts are wei, decimal strings; integer arithmetic only. `covered` false makes the
  * command line exit with status 3.
  */
 async function reserve(provider, signer, args) {
@@ -3754,7 +3760,11 @@ async function reserve(provider, signer, args) {
   const parts = role === "alice" ? { claimGasLimit: claimGas } : { lockGasCeiling: LOCK_GAS_RESERVE[kind], refundGasCeiling: REFUND_GAS_RESERVE[kind] };
   const gas = role === "alice" ? claimGas : LOCK_GAS_RESERVE[kind] + REFUND_GAS_RESERVE[kind];
   const amountWei = role === "bob" ? sw.amountWei : 0n;
-  const reserveWei = withMargin(gas * ceiling.capWei);
+  // The floor applies to the node's suggestion only; reserve = the larger of gas x ceiling x 1.25 and gas x floor.
+  const floorApplies = ceiling.source === "the node's fee suggestion";
+  const floorWei = floorApplies ? gas * RESERVE_FLOOR_WEI : 0n;
+  const marginWei = withMargin(gas * ceiling.capWei);
+  const reserveWei = marginWei > floorWei ? marginWei : floorWei;
   const requiredWei = amountWei + reserveWei;
   const balanceWei = await provider.getBalance(key);
   const covered = balanceWei >= requiredWei;
@@ -3771,6 +3781,8 @@ async function reserve(provider, signer, args) {
     feeCeilingGwei: ethers.formatUnits(ceiling.capWei, "gwei"),
     feeCeilingSource: ceiling.source,
     margin: "1.25",
+    reserveFloorWei: floorWei.toString(),
+    reserveFloorApplied: floorWei > marginWei,
     reserveWei: reserveWei.toString(),
     requiredWei: requiredWei.toString(),
     balanceWei: balanceWei.toString(),
@@ -4225,7 +4237,7 @@ async function main(argv) {
 
 module.exports = {
   keygen, keygenStdout, balance, keyAddress, signMessage, verifyMessage, MESSAGE_DOMAIN, deploy, lock, claim, refund, send, sweep, reserve, status,
-  loadSigner, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
+  loadSigner, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, RESERVE_FLOOR_WEI, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,

@@ -655,7 +655,7 @@ test("reveal: a reverted flag with a txHash that is no string saves nothing; a f
   const r = await steps.reveal(h.ctx, {});
   assert.equal(r.code, 3);
   assert.equal(h.exists("reveal-reverted-tx.txt"), false);
-  assert.ok(!r.stdout.includes("!!!"));
+  has(r.stdout, "!!! THE CLAIM WAS MINED AND REVERTED (live.js exit 3) AND NO HASH OF IT COULD BE READ FROM ITS RESULT: THE SECRET IS PUBLIC.");
   const h2 = mk("alice", { liveJs: { claim: { stdout: JSON.stringify({ reverted: true, txHash: F.TXH }), code: 3 } } });
   const io = { ...fs, writeFileSync: (p, ...a) => (String(p).endsWith("reveal-reverted-tx.txt") ? (() => { throw Object.assign(new Error("disk"), { code: "ENOSPC" }); })() : fs.writeFileSync(p, ...a)) };
   const r2 = await steps.reveal({ ...h2.ctx, io }, {});
@@ -1214,7 +1214,7 @@ test("(s18) wallet-sweep eth (real): exit 0, no --dry-run, the marker with the t
   assert.equal(noHash.read("wallet-swept-eth-alice.marker").split("\n")[1], "txid unknown");
 });
 
-test("(s18) wallet-sweep eth (real): an error with no sent: line is 1 (unknown, never 'nothing sent': the node may have taken the transaction before the send call failed); the dry run's refusal is 3; with `sent:` and exit 1: 6; an exit status other than 0 and 1: 1", async () => {
+test("(s18) wallet-sweep eth (real): an error with no sent: line is 1 (unknown, never 'nothing sent': the node may have taken the transaction before the send call failed); the dry run's refusal is 3; with `sent:` and exit 1: null; an exit status other than 0 and 1: 1", async () => {
   const refuse = mk("alice", wsEth("alice", { stdout: "", stderr: "error: lock still open\n", code: 1 }));
   const r = await steps.walletSweep(refuse.ctx, "eth", "alice", {});
   assert.equal(r.code, 1);
@@ -1233,7 +1233,7 @@ test("(s18) wallet-sweep eth (real): an error with no sent: line is 1 (unknown, 
   has(rd.stdout, "wallet-sweep REFUSED, nothing sent: the dry run was refused");
   const sent = mk("alice", wsEth("alice", { stdout: "", stderr: `${F.LIVE_SENT_ERR}error: timed out\n`, code: 1 }));
   const r2 = await steps.walletSweep(sent.ctx, "eth", "alice", {});
-  assert.deepEqual([r2.code, sent.exists("wallet-swept-eth-alice.marker")], [6, false]);
+  assert.deepEqual([r2.code, sent.exists("wallet-swept-eth-alice.marker")], [null, false], "6 means the same recorded bytes are sent again, true only for the NOID wallet");
   has(r2.stdout, "live.js broadcast the sweep and did not finish (exit 1): it MAY have been sent");
   const other = mk("alice", wsEth("alice", { stdout: "", stderr: "error: x\n", code: 3 }));
   assert.equal((await steps.walletSweep(other.ctx, "eth", "alice", {})).code, 1);

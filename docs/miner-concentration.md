@@ -313,9 +313,9 @@ At the typical spans (453, 173) the limits are one grid step higher in most rows
 
 **Suggested threshold.** Take the free-tie, lead-10, 0.1 % limit as the working figure: 0.42 for the production profile. With `N` = 2,880 (2 sigma 1.9 points) and 5 points for drift, `X` is about **35 %**. For the sepolia profile (0.35) it is about **28 %**. If Bob re-sends by hand (`rho` 10) the production limit falls to somewhere near 0.40 (strict-tie figures: 0.40 gives 0.05 %, 0.45 gives 5.4 %; with free ties both are higher) and `X` to about 33 %. A shorter second look at the last 720 to 1,000 blocks (the span of a swap) should use the same `X` plus its own, larger, 2-sigma margin. As of the measurement the gate would have refused every swap for the last 20 days.
 
-**Two more refusals, proposed in review (not decided).**
-- **The two largest addresses together above 50 %** of the window. Two addresses that are one party are a majority; 50 % is the lowest sum at which a joint majority is possible. It refuses more often than the single-address rule: three of the four full days before the largest address first appeared had a top-two share of 52.6 % to 53.8 % (table in Section 1).
-- **A reorg deeper than 3 blocks in the window** (phase 2). The deepest reorg seen in the node's logs is 3 (Section 1). The node's RPC exposes no reorg history, so this needs `swap-cli` to record its own chain of tip hashes while it ticks, or a read of the node's log, and it cannot be retroactive; a window with no record must say "no record", not "no reorg". `docs/bob-concentration-gate.md`, Section 4.
+**Two more rules, proposed in review (the first is built as a warning, the second is not built).**
+- **The two largest addresses together above 50 %** of the window. Two addresses that are one party are a majority; 50 % is the lowest sum at which a joint majority is possible. It refuses more often than the single-address rule: three of the four full days before the largest address first appeared had a top-two share of 52.6 % to 53.8 % (table in Section 1). **Decided and built as a warning only** (Section 8, item 2; `TASKS.md` T21-2 and T21-6): the gate warns on it and does not refuse.
+- **A reorg deeper than 3 blocks in the window** (phase 2). **Not built and not decided** (`TASKS.md` T21-7). The deepest reorg seen in the node's logs is 3 (Section 1). The node's RPC exposes no reorg history, so this needs `swap-cli` to record its own chain of tip hashes while it ticks, or a read of the node's log, and it cannot be retroactive; a window with no record must say "no record", not "no reorg". `docs/bob-concentration-gate.md`, Section 4.
 
 **Limits.**
 - One operator can use several addresses, so a measured share is a lower bound. The gate cannot see a partner of Alice either; the top two or three addresses together (71.5 % and 85.9 % now) are a worry the model shows is real, but a threshold on sums would refuse nearly always.
@@ -323,6 +323,8 @@ At the typical spans (453, 173) the limits are one grid step higher in most rows
 - A new miner can appear within hours (a share can rise inside one swap); the gate looks backwards.
 - It is for Bob only; Alice's own tool has no such exposure.
 - It must fail closed (a node that cannot answer means no lock) and be one more gate in the list of the tool, like the others.
+
+**State.** The Bob-side gate is built, as a screen and not as a defence (Section 8, item 2; `docs/bob-concentration-gate.md`). The risk it cannot remove (a miner who is Alice, a producer on several addresses, a new producer that joins after the measurement) is accepted for the trial amounts, and it is stated at the top of the README.
 
 ## 6. A daily snapshot (proposal; not written, not scheduled)
 
@@ -349,7 +351,7 @@ With the difficulty feedback switched off the continuous-time race reproduces th
 
 ## 8. Decisions for the owner
 
-1. **Is the stated assumption (no party holds a majority) acceptable as it stands?** It is false at the time of measurement (52.7 % of 24 hours, 45 % to 63 % of every day for 20 days). The honest statement for the README and the review packet is: with the measured concentration the protocol offers no defence against a miner who is Alice (the realistic chance for a prepared majority miner is about 100 %); amounts stay at trial size.
+1. **Is the stated assumption (no party holds a majority) acceptable as it stands?** It is false at the time of measurement (52.7 % of 24 hours, 45 % to 63 % of every day for 20 days). The honest statement for the README and the review packet is: with the measured concentration the protocol offers no defence against a miner who is Alice (the realistic chance for a prepared majority miner is about 100 %); amounts stay at trial size. Answered: the README states it at the top, and the remaining risk is accepted.
 2. **Build the Bob-side concentration gate?** Decided and built (2026-11-08): `X` 35 % over 2,880 blocks for the production profile (28 % for sepolia and rehearsal), with a second look over 720 blocks; the two largest addresses together above 50 % only warn; hard under production, a warning under the other profiles. It refuses every production swap today. Design and the decisions: `docs/bob-concentration-gate.md`, Section 9.
 3. **Lengthen the window?** Useful only against a share up to about 0.47; at 0.50 it needs about 1,900 blocks with strict ties (16 hours of worst-case NOID lockup, about 12.7 hours more than now) and more with free ties; against a share above 0.50 it is useless. Suggested: do not change `B_post` now.
 4. **Make the re-send faster?** Moving `rho` from 10 or 20 (by hand) to about 2 is worth three orders of magnitude at 0.45; it needs a decision on re-submitting an already-built claim without an operator step.
