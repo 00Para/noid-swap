@@ -51,7 +51,8 @@ function makeEnv(opts = {}) {
         rec.push(`createFolderGuard:${d}`);
         return (dir, o) => {
           rec.push(`folderGuard:${dir}:${o && o.fresh ? "fresh" : "cached"}`);
-          return opts.guardFails ? { ok: false, why: "another account can read this folder" } : { ok: true, why: null };
+          if (opts.guardFails) return { ok: false, why: "another account can read this folder", ...(opts.guardDetail ? { detail: opts.guardDetail } : {}) };
+          return { ok: true, why: null };
         };
       },
       makeOwnerOnlyDir() {},

@@ -110,7 +110,13 @@ the output of a packed GUI program may not reach a redirect on Windows; the host
 relative path is ignored, and a normal start never reads the variable. An error that is not a start-up failure (a throw no step
 handled, an uncaught error or rejection while the self-test runs) also becomes the line, `an unexpected error ended the start:` and the
 error's name and first 300 characters of its message on one line, and the program exits 1 with no dialog. Outside the self-test such an
-error still ends in `main.js`'s dialog, which shows no error text.
+error still ends in `main.js`'s dialog, which shows no error text. When a system command of the folder steps fails (`whoami`, `icacls`,
+the read of the access list), the self-test's line adds `(detail: ...)`: a timeout, or the exit code and the first line of the
+command's error; a normal start shows the fixed sentence alone.
+
+The access list of a folder is read through PowerShell with one .NET call (`[System.IO.Directory]::GetAccessControl`), not with
+`Get-Acl`: that command's module is found by looking through every module folder PowerShell knows, which on a machine with many
+modules took longer than the 20 s limit (build run 12).
 
 ## Tests
 

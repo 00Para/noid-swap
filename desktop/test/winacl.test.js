@@ -98,7 +98,7 @@ test("the ACL read is one argument vector: an absolute PowerShell, a fixed comma
   const c = acl.aclReadCommand("C:\\Users\\x\\AppData\\Local\\No1d Swap\\runs\\a b", WINENV);
   assert.equal(c.file, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   assert.ok(path.win32.isAbsolute(c.file));
-  assert.deepEqual(c.args, ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:NO1D_ACL_PATH).Sddl"]);
+  assert.deepEqual(c.args, ["-NoProfile", "-NonInteractive", "-Command", acl.ACL_READ_TEXT]);
   assert.equal(c.env.NO1D_ACL_PATH, "C:\\Users\\x\\AppData\\Local\\No1d Swap\\runs\\a b");
   assert.ok(!c.args.join(" ").includes("Users"));
   assert.deepEqual(Object.keys(c.env).sort(), ["NO1D_ACL_PATH", "SystemRoot", "TEMP", "windir"].sort());
@@ -139,7 +139,7 @@ test("checkOwnerOnly on Windows: reads the SDDL through PowerShell, takes the SI
   assert.deepEqual(r, { ok: true, why: null });
   assert.equal(calls.length, 2);
   const ps = calls.find((c) => c.file.endsWith("powershell.exe"));
-  assert.deepEqual(ps.args, ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:NO1D_ACL_PATH).Sddl"]);
+  assert.deepEqual(ps.args, ["-NoProfile", "-NonInteractive", "-Command", acl.ACL_READ_TEXT]);
   assert.equal(ps.env.NO1D_ACL_PATH, dir);
   const who = calls.find((c) => c.file.endsWith("whoami.exe"));
   assert.deepEqual(who.args, ["/user", "/fo", "csv", "/nh"]);
@@ -186,6 +186,31 @@ test("makeOwnerOnlyDir on Windows: creates the folder, runs icacls with the exac
   // the folder is a link
   const link = { lstatSync: () => ({ isSymbolicLink: () => true, isDirectory: () => false }), mkdirSync() {} };
   assert.throws(() => acl.makeOwnerOnlyDir(dir, { platform: "win32", env: WINENV, exec, fs: link }), /not a plain folder/);
+});
+
+test("the ACL read loads no PowerShell module: a .NET call with a fixed text, no Get-Acl, no other command", () => {
+  assert.ok(!/Get-Acl|Import-Module|;|\|/.test(acl.ACL_READ_TEXT));
+  assert.match(acl.ACL_READ_TEXT, /^\[System\.IO\.Directory\]::GetAccessControl\(\$env:NO1D_ACL_PATH, 'Owner, Group, Access'\)\.GetSecurityDescriptorSddlForm\('Owner, Group, Access'\)$/);
+});
+
+test("a failed system command carries a short detail for the self-test (a timeout, an exit code and the first line of stderr); the reason stays the fixed sentence", () => {
+  assert.equal(acl.execDetail(Object.assign(new Error("spawnSync powershell.exe ETIMEDOUT"), { code: "ETIMEDOUT" })), "timed out after 20 s");
+  assert.equal(acl.execDetail({ killed: true, signal: "SIGTERM" }), "timed out after 20 s");
+  assert.equal(acl.execDetail({ status: 1, stderr: "\r\n  Exception calling \"GetAccessControl\"  with \"2\"\r\nAt line:1\r\n" }), 'exit 1: Exception calling "GetAccessControl" with "2"');
+  assert.equal(acl.execDetail({ code: "ENOENT" }), "ENOENT");
+  assert.equal(acl.execDetail(null), "unknown");
+  assert.ok(acl.execDetail({ status: 1, stderr: "x".repeat(500) }).length <= 200);
+  const dir = "C:\\Users\\me\\AppData\\Local\\No1d Swap";
+  const who = (file) => (file.endsWith("whoami.exe") ? `"X\\me","${USER}"` : null);
+  const slow = (file) => who(file) || (() => { throw Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }); })();
+  const r = acl.checkOwnerOnly(dir, { platform: "win32", env: WINENV, exec: slow, fs: dirStat });
+  assert.deepEqual(r, { ok: false, why: "the folder's access list could not be read", detail: "timed out after 20 s" });
+  // makeOwnerOnlyDir passes the detail on with its error, after icacls and after the check
+  const fsFake = { ...dirStat, mkdirSync() {} };
+  const slowAfterIcacls = (file, args) => (file.endsWith("icacls.exe") ? "ok" : slow(file, args));
+  assert.throws(() => acl.makeOwnerOnlyDir(dir, { platform: "win32", env: WINENV, exec: slowAfterIcacls, fs: fsFake }), (e) => /could not be read/.test(e.message) && e.detail === "timed out after 20 s");
+  const noIcacls = (file) => who(file) || (() => { throw Object.assign(new Error("x"), { status: 5, stderr: "Access is denied." }); })();
+  assert.throws(() => acl.makeOwnerOnlyDir(dir, { platform: "win32", env: WINENV, exec: noIcacls, fs: fsFake }), (e) => e.message === "the folder could not be made owner-only" && e.detail === "exit 5: Access is denied.");
 });
 
 test("windowsUserSid reads the SID from whoami's csv and refuses anything else", () => {
@@ -285,6 +310,13 @@ test("on Windows the real commands run: whoami gives a SID and the ACL of a temp
     const r = acl.checkOwnerOnly(d, {});
     assert.equal(typeof r.ok, "boolean");
     assert.ok(r.ok || typeof r.why === "string");
+    // the read itself works: an open temporary folder is refused for what it is, never because its list could not be read
+    assert.notEqual(r.why, "the folder's access list could not be read", r.detail);
+    const cmd = acl.aclReadCommand(d, process.env);
+    const t0 = Date.now();
+    const sddl = require("child_process").execFileSync(cmd.file, cmd.args, { env: cmd.env, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    assert.match(sddl, /^O:[^]+G:[^]+D:/);
+    assert.ok(Date.now() - t0 < acl.EXEC_TIMEOUT_MS, "well inside the limit");
     // the result of a real read is the same one the pure function gives for a protected, owner-only descriptor of this user
     assert.equal(acl.sddlOwnerOnly(`O:${sid}G:BAD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)`, sid, { requireProtected: true }).ok, true);
   } finally {

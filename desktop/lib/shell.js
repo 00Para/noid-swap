@@ -195,6 +195,9 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       return "unknown";
     }
   };
+  // The folder steps' own reason for a failed system command (winacl's `detail`), added to the line in the self-test only: a normal start shows
+  // the fixed sentence alone.
+  const selfTestDetail = (x) => (selfTestMode && x && typeof x.detail === "string" && x.detail ? ` (detail: ${x.detail.slice(0, 200)})` : "");
   const unexpected = (e) => {
     stage("unexpected error");
     printLine(JSON.stringify({ selftest: "failed", why: `an unexpected error ended the start: ${errorWords(e)}` }));
@@ -349,7 +352,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     try {
       mod("datadirs").ensureDataDirs(dataDir, { makeOwnerOnlyDir: winacl.makeOwnerOnlyDir });
     } catch (e) {
-      fail(`The program's data folder cannot be made private: ${e && e.message ? e.message : "unknown reason"}`);
+      fail(`The program's data folder cannot be made private: ${e && e.message ? e.message : "unknown reason"}${selfTestDetail(e)}`);
     }
     const folderGuard = winacl.createFolderGuard({ dataDir });
     let g;
@@ -358,7 +361,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     } catch {
       g = null;
     }
-    if (!g || g.ok !== true) fail(`The program's data folder is not private to you: ${(g && g.why) || "its access could not be checked"}`);
+    if (!g || g.ok !== true) fail(`The program's data folder is not private to you: ${(g && g.why) || "its access could not be checked"}${selfTestDetail(g)}`);
 
     await app.whenReady();
     if (!startHidden && platform === "darwin" && startedAtLogin(app)) startHidden = true;

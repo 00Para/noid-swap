@@ -269,6 +269,16 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   its stage lines and its line to the file `NO1D_SELFTEST_REPORT` names, the Windows step judges the result from that file, and both
   of its errors carry the last stage, the line and the number of lines that reached stdout. An error no step handled, which before
   ended the self-test with code 1 and no words, is now its line.
+- Run 12 (`9a82f1f`) named the fault: stdout did reach its file (2 lines), and the line said "The program's data folder cannot be
+  made private: the folder is not owner-only after it was made so: the folder's access list could not be read", at the `dirs`
+  stage. `icacls` and `whoami` had worked; the read of the access list, PowerShell's `Get-Acl`, had not. `Get-Acl` lives in a module
+  that PowerShell finds by looking through every module folder it knows; with the environment built from scratch it has no
+  module cache, and a hosted Windows machine carries many large modules (300 small extra modules made it 8.6 s instead of 0.3 s on
+  a fast machine; the limit is 20 s). The read is now one .NET call that loads no module and gives the same text (compared with
+  `Get-Acl` on real folders: an owner-only folder, a run folder below it, an open folder and the Windows folder). A failed system
+  command in the folder steps now adds a short detail (a timeout, or the exit code and the first line of its error) to the
+  self-test's line, never to a normal start's dialog. The same slow read would have hit a user's machine with many modules at
+  every start.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

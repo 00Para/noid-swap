@@ -8,7 +8,7 @@
  *   createFolderGuard({ dataDir, ...opts }) -> (dir, { fresh }) => { ok, why }       the program's `folderGuard`: cached 10 s unless { fresh: true } (before a spend)
  *   lsHasAcl(text)              -> boolean          macOS: does `ls -lde` show an access list entry
  *
- * Windows: the access list is read with PowerShell (absolute path, argument vector, never a shell; the folder's path goes in ONE variable of an environment
+ * Windows: the access list is read through PowerShell with one .NET call, no module (absolute path, argument vector, never a shell; the folder's path goes in ONE variable of an environment
  * built from scratch, never inside the command text) and decided by sddlOwnerOnly. The folder is made owner-only with icacls (argument vector): inheritance
  * removed, full control for the user's SID, SYSTEM and Administrators only, inherited by everything below. It is applied to the data folder once; run folders
  * inherit from it. macOS: the folder is a directory (not a link) owned by the user with no group or other bits, and `/bin/ls -lde` shows no ACL entry.
@@ -196,13 +196,41 @@ function windowsUserSid(opts = {}) {
   return m[1];
 }
 
+/**
+ * The access list is read with .NET itself, not with the Get-Acl command: Get-Acl lives in a module that PowerShell finds by looking through every
+ * module folder it knows, which on a machine with many modules took longer than the 20 s limit (the hosted Windows start-up job, build run 12:
+ * "the folder's access list could not be read"; 300 small extra modules made it 8.6 s instead of 0.3 s on a fast machine). The .NET call gives the
+ * same text (owner, group and access list, checked against Get-Acl on real folders) and loads no module.
+ */
+const ACL_READ_TEXT =
+  "[System.IO.Directory]::GetAccessControl($env:NO1D_ACL_PATH, 'Owner, Group, Access').GetSecurityDescriptorSddlForm('Owner, Group, Access')";
+
 /** The command lines, exposed so a test can check them as argument vectors. */
 function aclReadCommand(dir, env) {
   return {
     file: winPath(env, "WindowsPowerShell", "v1.0", "powershell.exe"),
-    args: ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:NO1D_ACL_PATH).Sddl"],
+    args: ["-NoProfile", "-NonInteractive", "-Command", ACL_READ_TEXT],
     env: childEnv(env, { NO1D_ACL_PATH: dir }),
   };
+}
+
+/**
+ * Why a system command failed, in a few words: for the self-test's line only (the program shows its fixed sentences, never this). It may name the
+ * folder, as the command's own error text does.
+ */
+function execDetail(e) {
+  try {
+    if (!e) return "unknown";
+    if (e.code === "ETIMEDOUT" || (e.killed && e.signal)) return `timed out after ${EXEC_TIMEOUT_MS / 1000} s`;
+    const first = String(e.stderr || "")
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => l !== "");
+    const head = typeof e.status === "number" ? `exit ${e.status}` : e.code ? String(e.code) : "failed";
+    return `${head}${first ? `: ${first}` : ""}`.replace(/\s+/g, " ").slice(0, 200);
+  } catch {
+    return "unknown";
+  }
 }
 function icaclsCommand(dir, userSid, env) {
   return {
@@ -243,14 +271,14 @@ function checkOwnerOnly(dir, opts = {}) {
       let sddl;
       try {
         sddl = String(exec(cmd.file, cmd.args, { env: cmd.env })).trim();
-      } catch {
-        return fail("the folder's access list could not be read");
+      } catch (e) {
+        return { ...fail("the folder's access list could not be read"), detail: execDetail(e) };
       }
       let sid;
       try {
         sid = opts.userSid || windowsUserSid(opts);
-      } catch {
-        return fail("the user's identity could not be read");
+      } catch (e) {
+        return { ...fail("the user's identity could not be read"), detail: execDetail(e) };
       }
       return sddlOwnerOnly(sddl, sid, { requireProtected: !!opts.requireProtected });
     }
@@ -291,8 +319,8 @@ function makeOwnerOnlyDir(dir, opts = {}) {
     const cmd = icaclsCommand(dir, sid, env);
     try {
       exec(cmd.file, cmd.args, { env: cmd.env });
-    } catch {
-      throw new Error("the folder could not be made owner-only");
+    } catch (e) {
+      throw Object.assign(new Error("the folder could not be made owner-only"), { detail: execDetail(e) });
     }
   } else if (platform === "darwin") {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -303,7 +331,7 @@ function makeOwnerOnlyDir(dir, opts = {}) {
     throw new Error("this system is not supported");
   }
   const r = checkOwnerOnly(dir, { ...opts, requireProtected: true });
-  if (!r.ok) throw new Error(`the folder is not owner-only after it was made so: ${r.why}`);
+  if (!r.ok) throw Object.assign(new Error(`the folder is not owner-only after it was made so: ${r.why}`), r.detail ? { detail: r.detail } : {});
 }
 
 /**
@@ -331,6 +359,9 @@ module.exports = {
   sddlParts,
   sddlOwnerOnly,
   aclReadCommand,
+  ACL_READ_TEXT,
+  EXEC_TIMEOUT_MS,
+  execDetail,
   icaclsCommand,
   windowsUserSid,
   lsHasAcl,

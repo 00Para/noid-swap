@@ -472,6 +472,25 @@ test("the self-test and an unexpected error: a throw that is no start-up failure
   }
 });
 
+test("the folder guard's detail is added to the self-test's line, never to a normal start's dialog", async () => {
+  const s = makeEnv({ argv: ["x.exe", "--self-test"], guardFails: true, guardDetail: "timed out after 20 s" });
+  try {
+    await s.shell.start();
+    assert.equal(JSON.parse(s.stdout.join("").trim()).why, "The program's data folder is not private to you: another account can read this folder (detail: timed out after 20 s)");
+  } finally {
+    s.cleanup();
+  }
+  const n = makeEnv({ guardFails: true, guardDetail: "timed out after 20 s" });
+  try {
+    await n.shell.start().catch(() => {});
+    const box = n.electron.calls.find((c) => c.name === "showErrorBox");
+    assert.ok(box);
+    assert.ok(!JSON.stringify(box).includes("detail"), "the dialog shows the fixed sentence only");
+  } finally {
+    n.cleanup();
+  }
+});
+
 test("NO1D_SELFTEST_HOLD_SECONDS is read from the program's environment by the self-test", async () => {
   const e = makeEnv({ argv: ["x.exe", "--self-test"] });
   e.proc.env.NO1D_SELFTEST_HOLD_SECONDS = "1";
