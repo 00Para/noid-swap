@@ -46,12 +46,12 @@ const withRunJson = (content) => {
 test("run.json: a production file for each role is valid, and at the caps it still is", () => {
   assert.deepEqual(rs.validate(aliceP()), []);
   assert.deepEqual(rs.validate(bobP()), []);
-  assert.deepEqual(rs.validate(aliceP({ amount_micronoid: "2500000000", amount_wei: "500000000000000000" })), []);
+  assert.deepEqual(rs.validate(aliceP({ amount_micronoid: "20000000000", amount_wei: "1000000000000000000" })), []);
 });
 
 test("run.json: one above a cap, on either coin, is refused on production", () => {
-  assert.deepEqual(keys(aliceP({ amount_micronoid: "2500000001" })), ["amount_micronoid"]);
-  assert.deepEqual(keys(aliceP({ amount_wei: "500000000000000001" })), ["amount_wei"]);
+  assert.deepEqual(keys(aliceP({ amount_micronoid: "20000000001" })), ["amount_micronoid"]);
+  assert.deepEqual(keys(aliceP({ amount_wei: "1000000000000000001" })), ["amount_wei"]);
   // the test networks keep their own tiny caps
   assert.deepEqual(keys({ ...aliceP(), profile: "sepolia", chain_id: 11155111, gas_price_gwei: null, priority_fee_gwei: null, amount_micronoid: "20000001" }), ["amount_micronoid"]);
 });
@@ -77,7 +77,7 @@ test("run.json: production needs a fee cap, version 1, two Ethereum nodes, no si
 test("productionReason: a valid production file is acted on, an invalid one that says production is still refused", () => {
   const good = withRunJson(JSON.stringify(aliceP(), null, 2));
   assert.equal(rs.productionReason(good), null);
-  const bad = withRunJson(JSON.stringify(aliceP({ amount_micronoid: "2500000001" }), null, 2));
+  const bad = withRunJson(JSON.stringify(aliceP({ amount_micronoid: "20000000001" }), null, 2));
   assert.equal(rs.productionReason(bad), rs.PRODUCTION_TEXT);
   const noCap = withRunJson(JSON.stringify(aliceP({ gas_price_gwei: null, priority_fee_gwei: null }), null, 2));
   assert.equal(rs.productionReason(noCap), rs.PRODUCTION_TEXT);
@@ -96,8 +96,8 @@ test("migration of an old production env.local.sh stays refused", () => {
 test("the terminal form and the board keep the test table: no production there; program mode has it, with the owner's caps and the mainnet deployment as its pin", () => {
   assert.deepEqual(Object.keys(form.PROFILES), ["sepolia", "rehearsal"]);
   assert.equal(form.PROGRAM_PROFILES.production.chain, 1);
-  assert.equal(form.PROGRAM_PROFILES.production.max_noid_micro, 2_500_000_000n);
-  assert.equal(form.PROGRAM_PROFILES.production.max_eth_wei, 500_000_000_000_000_000n);
+  assert.equal(form.PROGRAM_PROFILES.production.max_noid_micro, 20_000_000_000n);
+  assert.equal(form.PROGRAM_PROFILES.production.max_eth_wei, 1_000_000_000_000_000_000n);
   assert.equal(form.pinFor("production", null), null);
   assert.equal(form.programPinFor("production", null), "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70");
   assert.equal(form.programPinFor("production", { board: { pinned_htlc: { 1: "0x" + "ab".repeat(20) } } }), "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70", "no setting overrides the mainnet pin");
@@ -181,18 +181,40 @@ const goodTick = (o = {}) => ({
   },
 });
 
-test("producerScreen: the measured share fills the statement; every reason the flag cannot waive refuses; anything missing refuses", () => {
+test("producerScreen: the measured share is said in plain words and never refuses; an unreadable share is unknown with a warning; a second-node problem still refuses", () => {
   const ok = producerScreen(goodTick(), 5010);
   assert.equal(ok.ok, true);
+  assert.equal(ok.known, true);
   assert.equal(ok.share_text, "52.8");
-  assert.ok(ok.share_permille <= 650);
+  assert.equal(ok.level, "high");
+  assert.equal(ok.sentence, "One producer mined 52.8 % of recent Parano1d blocks.");
+  assert.equal(ok.warning, "One producer mined 52.8 % of recent Parano1d blocks. A Bob who faces that miner as Alice can lose his ETH: above half of the blocks, no time window protects him.");
+  // a share above the old 65 % ceiling: allowed, same warning (the named 76 % case)
+  const big = producerScreen(goodTick({ p: { long: { n: 2880, largest: 2190, largest_id: "x", top_two: 2500, distinct: 3 } } }), 5010);
+  assert.equal(big.ok, true);
+  assert.equal(big.level, "high");
+  assert.match(big.warning, /^One producer mined 76\.\d % of recent Parano1d blocks\. A Bob who faces that miner as Alice can lose his ETH/);
+  // a milder band and a quiet one
+  assert.equal(producerScreen(goodTick({ p: { long: { n: 2880, largest: 1100, largest_id: "x", top_two: 1500, distinct: 5 }, short: { n: 720, largest: 200, largest_id: "x", top_two: 300, distinct: 5 } } }), 5010).level, "mild");
+  const quiet = producerScreen(goodTick({ p: { long: { n: 2880, largest: 500, largest_id: "x", top_two: 800, distinct: 9 }, short: { n: 720, largest: 100, largest_id: "x", top_two: 200, distinct: 9 } } }), 5010);
+  assert.equal(quiet.level, "none");
+  assert.equal(quiet.warning, "");
+  // unknown: nothing read, an error, incomplete, stale, behind the tip -> allowed, with the unknown warning
+  const unknown = (t) => {
+    const r = producerScreen(t, 5010);
+    assert.equal(r.ok, true);
+    assert.equal(r.known, false);
+    assert.equal(r.level, "unknown");
+    assert.equal(r.share_text, null);
+    assert.match(r.warning, /^The share of one producer in recent Parano1d blocks is unknown right now\. /);
+  };
+  unknown(null);
+  unknown({});
+  unknown(goodTick({ p: { error: "node said no" } }));
+  unknown(goodTick({ p: { complete: false } }));
+  unknown(goodTick({ p: { read_at: 4000 } }));
+  unknown(goodTick({ p: { header_tip: 990 } }));
   const no = (t, o) => assert.equal(producerScreen(t, 5010, o).ok, false);
-  no(null);
-  no({});
-  no(goodTick({ p: { error: "node said no" } }));
-  no(goodTick({ p: { complete: false } }));
-  no(goodTick({ p: { read_at: 4000 } }), "stale read");
-  no(goodTick({ p: { header_tip: 990 } }), "headers behind the tip");
   no(goodTick({ p: { second: { state: "differs", height: 9, first: "a", second: "b" } } }));
   no(goodTick({ p: { second: { state: "producer_differs", height: 9 } } }));
   no(goodTick({ p: { second: { state: "unreadable", reason: "x" } } }));
@@ -203,22 +225,20 @@ test("producerScreen: the measured share fills the statement; every reason the f
   no(goodTick({ noid: { producer_marker: { state: "remembered", at: 1 } } }));
   no(goodTick({ noid: { producer_marker: { state: "unreadable", reason: "x" } } }));
   no(goodTick({ noid: { second_error: "unreachable" } }));
-  const over = goodTick({ p: { long: { n: 2880, largest: 1900, largest_id: "x", top_two: 2000, distinct: 2 } } });
-  no(over);
-  assert.match(producerScreen(over, 5010).why, /above the 65 %/);
   assert.equal(producerScreen(goodTick({ noid: { producer_marker: { state: "absent" } } }), 5010).ok, true);
 });
 
 test("producerScreen: swap-cli's own producer_screen verdict refuses first when enforced and not waivable; a waivable one still needs the page's reading", () => {
   const withPs = (ps, o) => ({ ...goodTick(o), producer_screen: { enforced: true, limit_permille: 350, hard_max_permille: 650, ...ps } });
-  for (const state of ["concentrated", "disagrees", "remembered", "one_node", "stale", "cannot_check", "something_new"]) {
+  for (const state of ["disagrees", "remembered", "one_node", "cannot_check", "something_new"]) {
     const r = producerScreen(withPs({ state, waivable_by_acknowledgement: false }), 5010, { ownNodeIsLoopback: true });
     assert.equal(r.ok, false, state);
     assert.ok(r.why.length > 20, state);
   }
-  assert.equal(producerScreen(withPs({ state: "concentrated", waivable_by_acknowledgement: true }), 5010).ok, true);
-  assert.equal(producerScreen(withPs({ state: "concentrated" }), 5010).ok, false, "a missing flag is not a yes");
-  assert.equal(producerScreen(withPs({ state: "concentrated", waivable_by_acknowledgement: true }, { p: { complete: false } }), 5010).ok, false, "the page's own reading still has to pass");
+  // the share states are never refusals: swap-cli reports them as waivable
+  for (const state of ["concentrated", "share_unknown"]) assert.equal(producerScreen(withPs({ state, waivable_by_acknowledgement: true }), 5010).ok, true, state);
+  assert.equal(producerScreen(withPs({ state: "concentrated" }), 5010).ok, false, "a missing flag is not a yes (an old swap-cli that never says waivable)");
+  assert.equal(producerScreen(withPs({ state: "disagrees", waivable_by_acknowledgement: true }, { p: { second: { state: "differs", height: 9, first: "a", second: "b" } } }), 5010).ok, false, "the page's own reading of the second node still has to pass");
   assert.equal(producerScreen({ ...goodTick(), producer_screen: { enforced: false, state: "pass", waivable_by_acknowledgement: true } }, 5010).ok, true);
   assert.equal(producerScreen({ ...goodTick(), producer_screen: null }, 5010).ok, true, "null outside Bob's early phases: the page's reading decides");
 });
@@ -264,9 +284,9 @@ test("invitation: mainnet is made with the production caps and read back; versio
   assert.equal(r.fields.noid_amount, "5");
   const mod = (k, v) => JSON.stringify({ ...JSON.parse(text), [k]: v });
   assert.equal(inv.parse(mod("contract_version", 2)).ok, false);
-  assert.equal(inv.parse(mod("noid_micronoid", "2500000001")).ok, false);
-  assert.equal(inv.parse(mod("noid_micronoid", "2500000000")).ok, true);
-  assert.equal(inv.parse(mod("eth_wei", "500000000000000001")).ok, false);
+  assert.equal(inv.parse(mod("noid_micronoid", "20000000001")).ok, false);
+  assert.equal(inv.parse(mod("noid_micronoid", "20000000000")).ok, true);
+  assert.equal(inv.parse(mod("eth_wei", "1000000000000000001")).ok, false);
   assert.equal(inv.parse(mod("network", "production")).ok, false);
   assert.equal(inv.parse(mod("network", "rehearsal")).ok, false);
   // a Sepolia invitation keeps its own, tiny cap
@@ -313,6 +333,36 @@ test("program mode: a valid production run.json is opened and acted on; a tick o
   }
 });
 
+test("the top bar's network chip: lit by an open mainnet swap (being set up or active), never by one that is done or by a test swap (run 24 F10)", async () => {
+  const { barNetwork } = require("../lib/swapset");
+  const env = makeEnv();
+  try {
+    const main = env.addSwap({ role: "alice", settings: MAIN });
+    const test_ = env.addSwap({ role: "alice" });
+    const set = new SwapSet({ program: env.program, deps: env.deps() });
+    set.scan();
+    assert.equal(barNetwork(set.list()), "mainnet", "a mainnet swap being set up (no tick yet) lights it");
+    env.swapFile(main, "alice");
+    env.writeTick(main, "alice", { ...tickOf(1), phase_after: "done" });
+    set.get(main.id).snapshot = null; // the set's short read cache
+    assert.equal(set.summary(set.get(main.id)).phase, "done");
+    assert.equal(barNetwork(set.list()), "test", "a finished mainnet swap does not light it over a test swap");
+    env.swapFile(test_, "alice");
+    env.writeTick(test_, "alice", tickOf(11155111));
+    set.get(test_.id).snapshot = null;
+    assert.equal(barNetwork(set.list()), "test");
+    // the pure rule
+    assert.equal(barNetwork([{ network: "mainnet", active: true, phase: "funded" }]), "mainnet");
+    assert.equal(barNetwork([{ network: "mainnet", active: false, phase: null, unstarted: true }]), "test");
+    assert.equal(barNetwork([{ network: "mainnet", active: false, phase: "aborted" }, { network: "test", active: true, phase: "created" }]), "test");
+    assert.equal(barNetwork([]), "test");
+    assert.equal(barNetwork(null), "test");
+    await set.stopAll();
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("program mode: an approval on a production swap is refused when a handover file makes it a board run", async () => {
   const env = makeEnv();
   try {
@@ -327,4 +377,44 @@ test("program mode: an approval on a production swap is refused when a handover 
   } finally {
     await env.cleanup();
   }
+});
+
+test("mainnet cap: 1 ETH is accepted and 1 ETH plus 1 wei is refused", () => {
+  assert.deepEqual(rs.validate(aliceP({ amount_wei: "1000000000000000000" })), []);
+  assert.deepEqual(keys(aliceP({ amount_wei: "1000000000000000001" })), ["amount_wei"]);
+  assert.equal(form.PROGRAM_PROFILES.production.max_eth_wei, 10n ** 18n);
+});
+
+test("the mainnet NOID cap is 20,000 NOID: exactly the cap is accepted, one micro-NOID above is refused (form, run.json, invitation, page field)", () => {
+  assert.equal(form.PROGRAM_PROFILES.production.max_noid_micro, 20_000_000_000n);
+  assert.deepEqual(rs.validate(aliceP({ amount_micronoid: "20000000000" })), []);
+  assert.deepEqual(keys(aliceP({ amount_micronoid: "20000000001" })), ["amount_micronoid"]);
+  const text = JSON.parse(inv.build({ role: "bob", profile: "production", contract: E("1"), contract_version: 1, amount_micronoid: "5000000", amount_wei: "1000000000000000", bob_noid: A3 }, E("2")));
+  assert.equal(inv.parse(JSON.stringify({ ...text, noid_micronoid: "20000000000" })).ok, true);
+  assert.equal(inv.parse(JSON.stringify({ ...text, noid_micronoid: "20000000001" })).ok, false);
+  // the test networks keep 20 NOID
+  assert.equal(form.PROGRAM_PROFILES.sepolia.max_noid_micro, 20_000_000n);
+});
+
+test("producerScreen: an unreadable share never skips the second-node refusals (logic audit M1)", () => {
+  // (a) one node, not on this computer, headers unreadable (error, then stale): refused for the one-node reason
+  const failed = { error: "header read failed", complete: false, long: null, short: null, second: { state: "not_configured" } };
+  const a1 = producerScreen(goodTick({ p: failed }), 5010);
+  assert.equal(a1.ok, false);
+  assert.match(a1.why, /no second Parano1d node/);
+  const a2 = producerScreen(goodTick({ p: { read_at: 4000, second: { state: "not_configured" } } }), 5010);
+  assert.equal(a2.ok, false);
+  assert.match(a2.why, /no second Parano1d node/);
+  // with a loopback node, or with two nodes in the tick and an incomplete read, it stays an unknown share
+  assert.equal(producerScreen(goodTick({ p: failed }), 5010, { ownNodeIsLoopback: true }).level, "unknown");
+  assert.equal(producerScreen(goodTick({ p: failed, noid: { second: { tip: 1000 } } }), 5010).level, "unknown");
+  // (b) stale share read plus a second node that differs, or cannot be read on a complete read: refused for the disagreement
+  const stale = { read_at: 4000 };
+  const b1 = producerScreen(goodTick({ p: { ...stale, second: { state: "differs", height: 9, first: "a", second: "b" } } }), 5010);
+  assert.equal(b1.ok, false);
+  assert.match(b1.why, /disagree/);
+  assert.equal(producerScreen(goodTick({ p: { ...stale, second: { state: "unreadable", reason: "x" } } }), 5010).ok, false);
+  // an incomplete first read makes the second node's "not checked" part of the unknown share
+  assert.equal(producerScreen(goodTick({ p: { ...failed, second: { state: "unreadable", reason: "not checked: the first node's headers are not complete" } } }), 5010).level, "unknown");
+  assert.equal(producerScreen(goodTick({ p: { ...failed, second: { state: "differs", height: 9, first: "a", second: "b" } } }), 5010).ok, false);
 });

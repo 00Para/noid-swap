@@ -61,7 +61,7 @@ test("Alice's first screen: a clean wallet step moves the next step to Prepare; 
   const jobs = [F.job("setup"), F.job("wallet-setup-alice")];
   const page = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs, wallet: { roles: { alice: { swap_file: false, addresses_file: true, status: null }, bob: {} } } }));
   assert.match(squash(page.text("next-action")), /Prepare the swap file Step 2 of 2, your step/);
-  assert.match(squash(page.text("pg-details-body")), /Back up the whole run folder \(the swap file and run\.json are in it\) and keep your recovery code/);
+  assert.match(squash(page.text("pg-details-body")), /Save a backup of this swap and keep your recovery code/);
   assert.doesNotMatch(squash(page.text("start")), /back (it|the swap file) up|Back up the swap file/i);
   // the stage card holds the button; Details keeps no second one, no strip with a button and no list of steps
   assert.equal(btnWith(page.byId("pg-details"), "Prepare the swap file"), null, "no second Prepare button under Details");
@@ -117,8 +117,8 @@ test("the swap page with a tick: today's view, the run controls in the program's
   assert.match(panel, /Tick Alice \(read-only\)/);
   assert.doesNotMatch(panel, /Tick Bob/, "a swap has one role: the other role's tick is not offered");
   assert.doesNotMatch(panel, /Install helpers|Check object file/);
-  assert.doesNotMatch(panel, /Back up the whole run folder/, "the advice is the first line of Details, not repeated in the run controls");
-  assert.equal((page.text("pg-details-body").match(/Back up the whole run folder/g) || []).length, 1, "said once under Details");
+  assert.doesNotMatch(panel, /Save a backup of this swap/, "the advice is the first line of Details, not repeated in the run controls");
+  assert.equal((page.text("pg-details-body").match(/Save a backup of this swap/g) || []).length, 1, "said once under Details");
   assert.match(squash(page.text("swap-head")), /You sell NOID|Alice|NOID/);
   assert.equal(page.document.title, "You sell 5 NOID for 0.001 ETH · No1d Swap", "the swap's plain label and the product, never the engine's phase");
   assert.doesNotMatch(page.document.title, /lock_final|funding_final|created|Alice,/);

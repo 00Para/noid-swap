@@ -631,3 +631,111 @@ test("rule 10: nothing the autopilot sends bypasses startSpend: the new spends c
     A.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------------------------- a sweep mined and failed (rehearsal 2026-11-26, F5b)
+const MINED_TX = "0x406afab61e2844f6a2abfff7c07131ba6c23fc1138808862892377b9a43c353e";
+const MINED_FAILED = `sweep SEND exit 1\nsent: ${MINED_TX} nonce 1 maxFeePerGas 0.000000034 gwei tip 0.000000002 gwei\nerror: transaction ${MINED_TX} failed (status 0)\n`;
+const aliceAtDone = (wallet) => {
+  const A = makeWallet({ role: "alice", behaviour: { wallet } });
+  A.runner.walletPoll();
+  A.tick("alice", "fund_noid");
+  A.loop("alice");
+  assert.equal(A.approve("alice", { statements: OK_STATEMENTS }).status, 200);
+  A.adv(10000);
+  put(A, "alice", endedTick("done"));
+  A.loop("alice");
+  return A;
+};
+const endLines = (h, id) => h.audit.all().filter((r) => r.action === id && r.phase === "end").map((r) => r.result);
+
+test("F5b: an Ethereum sweep mined with status 0 says 'nothing moved, only the fee was spent', never 'may have been sent', and is built again once, after the sweep timer", () => {
+  const wallet = { exits: { "wallet-sweep.sh:eth alice": 1 }, stdout: { "wallet-sweep.sh": MINED_FAILED } };
+  const A = aliceAtDone(wallet);
+  try {
+    steps(A, 8);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1);
+    assert.deepEqual(needs(A, "alice").filter((n) => n.spend === "send-sweep-eth-alice"), [], "no stop: the chain says nothing moved");
+    assert.ok(endLines(A, "send-sweep-eth-alice").some((r) => /^failed, mined with status 0: nothing moved, only the fee was spent/.test(r)), JSON.stringify(endLines(A, "send-sweep-eth-alice")));
+    assert.ok(!endLines(A, "send-sweep-eth-alice").some((r) => /may have been sent/.test(r)));
+    steps(A, 3);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 1, "not again before the sweep timer");
+    // the retry succeeds (this build's sweep signs the node's estimate)
+    wallet.exits["wallet-sweep.sh:eth alice"] = 0;
+    delete wallet.stdout["wallet-sweep.sh"];
+    A.adv(AP.SWEEP_RETRY_MS + 1000);
+    put(A, "alice", endedTick("done"));
+    A.loop("alice");
+    steps(A, 8);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 2, "built again once");
+    assert.deepEqual(needs(A, "alice").filter((n) => n.spend === "send-sweep-eth-alice"), []);
+  } finally {
+    A.cleanup();
+  }
+});
+
+test("F5b: a second mined failure of the sweep stops with the plain words; a status-0 line without the matching 'sent:' line stays 'may have been sent'", () => {
+  const wallet = { exits: { "wallet-sweep.sh:eth alice": 1 }, stdout: { "wallet-sweep.sh": MINED_FAILED } };
+  const A = aliceAtDone(wallet);
+  try {
+    steps(A, 8);
+    A.adv(AP.SWEEP_RETRY_MS + 1000);
+    put(A, "alice", endedTick("done"));
+    A.loop("alice");
+    steps(A, 8);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 2);
+    const n = needs(A, "alice").find((x) => x.spend === "send-sweep-eth-alice");
+    assert.ok(n, JSON.stringify(needs(A, "alice")));
+    assert.match(n.reason, /mined and FAILED \(status 0, transaction 0x406afab6/);
+    assert.match(n.reason, /nothing moved, only the fee was spent/);
+    assert.doesNotMatch(n.reason, /may have been sent/);
+    A.adv(AP.SWEEP_RETRY_MS + 1000);
+    put(A, "alice", endedTick("done"));
+    A.loop("alice");
+    steps(A, 8);
+    assert.equal(real(A, "wallet-sweep.sh", "eth alice"), 2, "never a third time by itself");
+  } finally {
+    A.cleanup();
+  }
+  const other = "0x" + "ab".repeat(32);
+  const B = aliceAtDone({ exits: { "wallet-sweep.sh:eth alice": 1 }, stdout: { "wallet-sweep.sh": `sweep SEND exit 1\nsent: ${other} nonce 1\nerror: transaction ${MINED_TX} failed (status 0)\n` } });
+  try {
+    steps(B, 8);
+    const n = needs(B, "alice").find((x) => x.spend === "send-sweep-eth-alice");
+    assert.ok(n, "a stop, as before");
+    assert.match(n.reason, /may have been sent/);
+  } finally {
+    B.cleanup();
+  }
+});
+
+test("rebuildFromAudit clears nothing-to-sweep and names mined-failed", () => {
+  const A = makeWallet({ role: "alice" });
+  try {
+    const rec = (action, phase, result, t) => ({ action, phase, result, t: new Date(t).toISOString() });
+    const ends = (list) => {
+      A.ap.actions.audit = { all: () => list };
+      return A.ap.rebuildFromAudit("alice");
+    };
+    // "nothing to sweep" is a clean end: no entry after a restart
+    assert.deepEqual(ends([rec("send-sweep-noid", "start", "", 1000), rec("send-sweep-noid", "end", "nothing to sweep (exit 3)", 2000)]), []);
+    // a send mined and FAILED: the first Ethereum sweep failure is not an entry (it is built again once), and a second one names the failure in plain words
+    const failed = "failed, mined with status 0: nothing moved, only the fee was spent (exit 5)";
+    const one = [rec("send-sweep-eth-alice", "start", "", 1000), rec("send-sweep-eth-alice", "end", failed, 2000)];
+    assert.deepEqual(ends(one), []);
+    const two = one.concat([rec("send-sweep-eth-alice", "start", "", 3000), rec("send-sweep-eth-alice", "end", failed, 4000)]);
+    const e2 = ends(two);
+    assert.equal(e2.length, 1);
+    assert.equal(e2[0].spend, "send-sweep-eth-alice");
+    assert.match(e2[0].reason, /mined and FAILED \(status 0\): nothing moved, only the fee was spent/);
+    assert.doesNotMatch(e2[0].reason, /may have been sent/);
+    // any other step that was mined and failed is an entry at once, in the same words
+    const other = ends([rec("send-fund", "start", "", 1000), rec("send-fund", "end", failed, 2000)]);
+    assert.equal(other.length, 1);
+    assert.match(other[0].reason, /mined and FAILED/);
+    // unchanged: an unknown end still reads as "may have been sent"
+    const unknown = ends([rec("send-fund", "start", "", 1000), rec("send-fund", "end", "failed (exit 1)", 2000)]);
+    assert.match(unknown[0].reason, /may have been sent/);
+  } finally {
+    A.cleanup();
+  }
+});

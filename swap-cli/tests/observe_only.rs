@@ -132,16 +132,22 @@ fn a_full_apply_on_a_file_advanced_by_observe_ticks_equals_one_advanced_by_full_
 
 #[test]
 fn observe_only_keeps_the_history_entries_that_go_with_an_offered_action_for_the_full_tick() {
-    // Production, the screen cannot be completed and the operator accepted the risk: the full tick writes the override entry when it offers the
-    // lock; an observe-only tick does not (it offers nothing).
+    // Production, the second-node producer cross-check did not run and the operator accepted the risk: the full tick writes the override entry
+    // when it offers the lock; an observe-only tick does not (it offers nothing).
     let mut s = Scenario::new(Variant::Raw);
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
     s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
-    s.world.borrow_mut().accept_producer_concentration = true;
-    s.world.borrow_mut().producers = SimProducers::Absent;
+    {
+        let mut w = s.world.borrow_mut();
+        let g = w.profile.gates();
+        let mut sum = swap_cli::watch::producers::ProducerSummary::synthetic(w.tip, g.producer_window_long, g.producer_window_short, w.eth_time, 300, 450);
+        sum.second = swap_cli::watch::producers::SecondCheck::NotConfigured;
+        w.accept_producer_concentration = true;
+        w.producers = SimProducers::Fixed(sum);
+    }
     let path = s.dir.path().join("bob-override.swap.json");
     let mut bob = s.bob.file.clone();
     bob.save(&path).unwrap();

@@ -40,3 +40,10 @@ test("help: the dialog carries every paragraph, in order, and the text names no 
   assert.doesNotMatch(all, /co-authored|C:\\Users|\/home\//i);
   for (const p of HELP_PARAGRAPHS) assert.equal(typeof p, "string");
 });
+
+test("help: the cannot-end paragraph names Ethereum mainnet beside Sepolia for the wallet check", () => {
+  const p = HELP_PARAGRAPHS.find((x) => x.startsWith("If a swap cannot end\n"));
+  assert.ok(p, "the entry is there");
+  assert.match(p, /in the wallet app, or on Ethereum \(Sepolia for a test swap, Ethereum mainnet for a real one\), that no funding/);
+  assert.doesNotMatch(p, /or on Sepolia, that no funding/);
+});

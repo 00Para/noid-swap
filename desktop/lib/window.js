@@ -65,16 +65,22 @@ const OPEN_SETTINGS_SCRIPT =
 const OPEN_PRACTICE_SCRIPT =
   "(() => { for (const b of document.querySelectorAll('.pg-menu-list button')) { if (b.textContent === 'Practice swap') { b.click(); return true; } } return false; })()";
 
+// The same for restoring a swap backup (the menu's "Restore a swap…"): fixed text, no argument; false when the item is not there.
+const OPEN_RESTORE_SCRIPT =
+  "(() => { for (const b of document.querySelectorAll('.pg-menu-list button')) { if (b.textContent === 'Restore a swap\\u2026') { b.click(); return true; } } return false; })()";
+
 /**
  * @param {object} o
  * @param {object} o.electron
  * @param {object} o.guard        hardening.createGuard(electron)
  * @param {boolean} o.isPackaged
  * @param {string} o.url          no1d://app/#token=...
+ * @param {string} [o.iconPath]   absolute path of the window icon (a PNG of the program's own assets; the system uses the installed program's icon when none is given)
  * @param {boolean} [o.hidden]    started at login: do not show
  * @param {() => boolean} o.shouldHide   true while any swap is active
+ * @param {() => void} [o.onHiddenToTray]   called the first time in a session that a close is turned into a hide (the shell shows one notice)
  */
-function createMainWindow({ electron, guard, isPackaged, url, hidden = false, shouldHide }) {
+function createMainWindow({ electron, guard, isPackaged, url, hidden = false, shouldHide, iconPath, onHiddenToTray }) {
   const { BrowserWindow } = electron;
   // The page is on the private scheme and nowhere else (compared by hand: .origin of this scheme is "null").
   let parsed = null;
@@ -91,6 +97,7 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
     minHeight: 600,
     show: false,
     title: "No1d Swap",
+    ...(typeof iconPath === "string" && iconPath ? { icon: iconPath } : {}),
     // the page's ground, so that no white shows before it is drawn
     backgroundColor: WINDOW_BACKGROUND,
     webPreferences: baseWebPreferences({ isPackaged, partition: MAIN_PARTITION, preload: undefined }),
@@ -114,11 +121,20 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   });
 
   let quitting = false;
+  let hideNoticed = false;
   win.on("close", (event) => {
     if (quitting) return;
     if (typeof shouldHide === "function" && shouldHide()) {
       event.preventDefault();
       win.hide();
+      if (!hideNoticed) {
+        hideNoticed = true;
+        try {
+          if (typeof onHiddenToTray === "function") onHiddenToTray();
+        } catch {
+          /* a notice that fails changes nothing */
+        }
+      }
     }
   });
   if (!hidden) win.once("ready-to-show", () => win.show());
@@ -175,6 +191,10 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
     async openPractice() {
       return askPage(OPEN_PRACTICE_SCRIPT);
     },
+    /** Shows the window and opens the page's restore-a-swap screen: the same way as openPractice, with its own fixed script. */
+    async openRestore() {
+      return askPage(OPEN_RESTORE_SCRIPT);
+    },
     hide() {
       if (!win.isDestroyed()) win.hide();
     },
@@ -188,4 +208,4 @@ function createMainWindow({ electron, guard, isPackaged, url, hidden = false, sh
   };
 }
 
-module.exports = { createMainWindow, baseWebPreferences, isReloadKey, WINDOW_BACKGROUND, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT, OPEN_PRACTICE_SCRIPT };
+module.exports = { createMainWindow, baseWebPreferences, isReloadKey, WINDOW_BACKGROUND, MAIN_PARTITION, PAGE_ORIGIN, GONE_PAGE, OPEN_SETTINGS_SCRIPT, OPEN_PRACTICE_SCRIPT, OPEN_RESTORE_SCRIPT };

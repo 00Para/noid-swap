@@ -8,9 +8,11 @@
 
 const path = require("node:path");
 const os = require("node:os");
+const crypto = require("node:crypto");
 const nodefs = require("node:fs");
 const { HELP_TITLE, HELP_PARAGRAPHS } = require("./helptext");
 const sealedFiles = require("./sealed");
+const backupfile = require("./backupfile");
 
 const OPEN_KINDS = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
 const SWAP_ID = /^[0-9a-f]{32}$/;
@@ -221,6 +223,227 @@ function createProgram(o) {
       dialogOpen = false;
     }
     return typeof f === "string" && P.isAbsolute(f) ? f : null;
+  }
+
+  // ---- swap backup sealing and atomic file writes
+  // Track unsettled backup writes (including timed-out ones still blocked in the OS) so a hung
+  // network drive cannot freeze the main thread or pile up libuv worker threads and stall other I/O.
+  const MAX_HUNG_BACKUP_WRITES = 1;
+  const activeBackupTargets = new Set();
+  let hungBackupWrites = 0;
+
+  async function validateBackupTargetAsync(chosen, fsp) {
+    if (typeof chosen !== "string" || !chosen || !P.isAbsolute(chosen)) return { ok: false, status: "refused" };
+    try {
+      const resolved = P.resolve(chosen);
+      const dir = P.dirname(resolved);
+      let parent;
+      try {
+        parent = typeof fsp.realpath === "function" ? await fsp.realpath(dir) : realPath(dir);
+      } catch (e) {
+        return { ok: false, status: e && e.code === "ENOENT" ? "cannot_write" : "refused" };
+      }
+      let target = P.join(parent, P.basename(resolved));
+      try {
+        const st = typeof fsp.lstat === "function" ? await fsp.lstat(target) : fs.lstatSync(target);
+        if (st.isDirectory()) return { ok: false, status: "refused" };
+        if (st.nlink > 1) return { ok: false, status: "refused" };
+        target = typeof fsp.realpath === "function" ? await fsp.realpath(target) : realPath(target);
+      } catch (e) {
+        if (!e || e.code !== "ENOENT") return { ok: false, status: "refused" };
+      }
+      if (insideDataDir(parent) || insideDataDir(target)) return { ok: false, status: "refused" };
+      return { ok: true, target };
+    } catch {
+      return { ok: false, status: "refused" };
+    }
+  }
+
+  /**
+   * Async target check + atomic temp + rename write with timeout and concurrency/hung-write cap.
+   * Never performs synchronous I/O on the target folder (so an unresponsive network drive cannot
+   * freeze the 3 s timer) and refuses new writes while an earlier write to the same target
+   * or any timed-out OS write is still unsettled (so hung writes cannot exhaust the thread pool).
+   */
+  function validateAndWriteBackupAsync(chosen, bytes, timeoutMs = 10000) {
+    if (typeof chosen !== "string" || !chosen || !P.isAbsolute(chosen)) return Promise.resolve({ status: "refused", target: null });
+    const normTarget = P.resolve(chosen);
+    if (activeBackupTargets.has(normTarget) || hungBackupWrites >= MAX_HUNG_BACKUP_WRITES) {
+      return Promise.resolve({ status: "cannot_write", target: null });
+    }
+    const fsp = fs.promises || nodefs.promises;
+    activeBackupTargets.add(normTarget);
+    let timedOut = false;
+
+    const work = (async () => {
+      let fh = null;
+      let tmp = null;
+      try {
+        const check = await validateBackupTargetAsync(chosen, fsp);
+        if (!check.ok) return { status: check.status, target: null };
+        if (timedOut) return { status: "cannot_write", target: null };
+        const target = check.target;
+        tmp = P.join(P.dirname(target), `.${P.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`);
+        fh = await fsp.open(tmp, "wx", 0o600);
+        if (timedOut) {
+          await fh.close();
+          fh = null;
+          try {
+            await fsp.unlink(tmp);
+          } catch {
+            /* ignore */
+          }
+          return { status: "cannot_write", target: null };
+        }
+        await fh.writeFile(bytes);
+        if (typeof fh.sync === "function") await fh.sync();
+        await fh.close();
+        fh = null;
+        if (timedOut) {
+          try {
+            await fsp.unlink(tmp);
+          } catch {
+            /* ignore */
+          }
+          return { status: "cannot_write", target: null };
+        }
+        await fsp.rename(tmp, target);
+        return { status: "saved", target };
+      } catch {
+        if (fh) {
+          try {
+            await fh.close();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (tmp) {
+          try {
+            await fsp.unlink(tmp);
+          } catch {
+            /* ignore */
+          }
+        }
+        return { status: "cannot_write", target: null };
+      } finally {
+        activeBackupTargets.delete(normTarget);
+        if (timedOut && hungBackupWrites > 0) hungBackupWrites -= 1;
+      }
+    })();
+
+    if (!(timeoutMs > 0)) return work;
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          timedOut = true;
+          hungBackupWrites += 1;
+          resolve({ status: "cannot_write", target: null });
+        }
+      }, timeoutMs);
+      if (timer && typeof timer.unref === "function") timer.unref();
+      work.then(
+        (res) => {
+          clearTimeout(timer);
+          if (!settled) {
+            settled = true;
+            resolve(res);
+          }
+        },
+        () => {
+          clearTimeout(timer);
+          if (!settled) {
+            settled = true;
+            resolve({ status: "cannot_write", target: null });
+          }
+        },
+      );
+    });
+  }
+
+  function sealBackup(runId, payloadObj) {
+    if (!o.vault || typeof o.vault.backupSealer !== "function") throw new ProgramError("the vault is not available");
+    const plain = backupfile.buildPlain(payloadObj);
+    let envText;
+    try {
+      envText = o.vault.backupSealer(runId).seal(plain);
+    } finally {
+      plain.fill(0);
+    }
+    const outer = backupfile.formatOuter({ runId, sealedEnvelope: envText });
+    return Buffer.from(outer, "utf8");
+  }
+
+  async function saveBackup(runId, bytes) {
+    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > backupfile.MAX_OUTER_BYTES) {
+      throw new ProgramError("the backup file is empty or too large");
+    }
+    const chooser = typeof o.saveBackupFile === "function" ? (name) => o.saveBackupFile(name) : typeof o.saveFile === "function" ? (name) => o.saveFile("backup", name) : null;
+    if (!chooser) return { status: "refused", target: null };
+    if (dialogOpen) return { status: "busy", target: null };
+    dialogOpen = true;
+    let chosen = null;
+    try {
+      chosen = await chooser(backupfile.defaultBackupName(runId));
+    } catch {
+      chosen = null;
+    } finally {
+      dialogOpen = false;
+    }
+    if (typeof chosen !== "string" || chosen === "") return { status: "cancelled", target: null };
+    return validateAndWriteBackupAsync(chosen, bytes);
+  }
+
+  async function writeBackupTarget(targetPath, bytes, { timeoutMs = 10000 } = {}) {
+    if (!Buffer.isBuffer(bytes) || bytes.length < 1 || bytes.length > backupfile.MAX_OUTER_BYTES) return "refused";
+    const res = await validateAndWriteBackupAsync(targetPath, bytes, timeoutMs);
+    return res.status;
+  }
+
+  async function chooseBackupFile() {
+    const chooser = typeof o.chooseBackupFile === "function" ? () => o.chooseBackupFile() : null;
+    if (!chooser || dialogOpen) return null;
+    dialogOpen = true;
+    let f = null;
+    try {
+      f = await chooser();
+    } catch {
+      f = null;
+    } finally {
+      dialogOpen = false;
+    }
+    return typeof f === "string" && P.isAbsolute(f) ? f : null;
+  }
+
+  function inspectBackupFile(filePath) {
+    if (typeof filePath !== "string" || !P.isAbsolute(filePath)) {
+      throw new backupfile.BackupFileError(backupfile.WORDS.NOT_BACKUP, "not_backup");
+    }
+    let st;
+    try {
+      st = fs.lstatSync(filePath);
+    } catch {
+      throw new backupfile.BackupFileError(backupfile.WORDS.DAMAGED, "damaged");
+    }
+    if (!st.isFile() || st.size === 0 || st.size > backupfile.MAX_OUTER_BYTES) {
+      throw new backupfile.BackupFileError(backupfile.WORDS.DAMAGED, "damaged");
+    }
+    const raw = fs.readFileSync(filePath);
+    return backupfile.parseOuter(raw);
+  }
+
+  async function openBackupFile(filePath, { validateParsed } = {}) {
+    const outer = inspectBackupFile(filePath);
+    if (!o.vault || typeof o.vault.openBackup !== "function") throw new ProgramError("the vault is not available");
+    let parsed = null;
+    const res = await o.vault.openBackup(outer.sealedText, outer.runId, {
+      validatePlain: async (plainBuf) => {
+        parsed = backupfile.parsePlain(plainBuf, { expectedRunId: outer.runId, currentVersion: o.version });
+        if (typeof validateParsed === "function") await validateParsed(parsed);
+      },
+    });
+    return { runId: outer.runId, parsed, adopted: res.adopted };
   }
 
   // ---- the history of payout addresses (launch spec 4.2). Sealed file <dataDir>/payout-history.sealed, AES-256-GCM under the key K(S, "payout-history", "install").
@@ -436,6 +659,12 @@ function createProgram(o) {
     },
     saveCopy,
     chooseInvitationFile,
+    sealBackup,
+    saveBackup,
+    writeBackupTarget,
+    chooseBackupFile,
+    inspectBackupFile,
+    openBackupFile,
     open,
     atStakeChanged: (list) => o.onAtStake(Array.isArray(list) ? list : []),
     settings: () => o.programsettings.load(o.dataDir),

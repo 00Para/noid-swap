@@ -22,7 +22,7 @@ const FAST_WAIT_S = 8; // the fast clock: a wait lasts this long here (the real 
 const BANNER = T.BANNER;
 const STAGE_AT = { setup: 0, check: 1, approve: 2, deposit: 3, swap: 4, done: 5, refund: 5, abort: 5 }; // the index in the card's progress line (stagecard.js PROGRESS)
 const ADVANCING = new Set(["prepare", "match", "choose_file", "approve", "deposited"]); // the moves that end the step; the two save buttons only note that they were pressed
-const ACTS = Object.freeze(["prepare", "save_copy", "match", "save_invitation", "choose_file", "approve", "deposited"]);
+const ACTS = Object.freeze(["prepare", "save_copy", "match", "save_invitation", "post_offer", "choose_file", "approve", "deposited"]);
 
 class PracticeError extends Error {
   constructor(status, message, extra) {
@@ -50,7 +50,7 @@ function buildScript(scenario, role) {
   } else {
     const w = S.BOB_HAPPY[0];
     const never = scenario === "bob-never-locks";
-    pre = [entry("pre", "invitation", w, ["save_invitation", "choose_file"]), entry("pre", "check", w, ["match"]), entry("pre", "approve", w, ["approve"]), entry("pre", "deposit", never ? S.BOB_HAPPY[1] : S.BOB_HAPPY[2], never ? [] : ["deposited"])];
+    pre = [entry("pre", "invitation", w, ["save_invitation", "post_offer", "choose_file"]), entry("pre", "check", w, ["match"]), entry("pre", "approve", w, ["approve"]), entry("pre", "deposit", never ? S.BOB_HAPPY[1] : S.BOB_HAPPY[2], never ? [] : ["deposited"])];
     if (scenario === "settled") steps = S.BOB_HAPPY.slice(3);
     else if (never) steps = [S.BOB_ABORT_A[1]];
     else steps = [S.BOB_HAPPY[3], ...S.BOB_ABORT_B];
@@ -85,7 +85,7 @@ function start(host, body, now) {
   const sc = body && typeof body.scenario === "string" ? body.scenario : "";
   const role = body && typeof body.role === "string" ? body.role : "";
   const script = buildScript(sc, role); // refuses an unknown scenario or role
-  host.session = { id: newId(), scenario: sc, role, script, pos: 0, since: now, flags: { save_copy: false, save_invitation: false, matched: false } };
+  host.session = { id: newId(), scenario: sc, role, script, pos: 0, since: now, flags: { save_copy: false, save_invitation: false, post_offer: false, matched: false } };
   return view(host, now);
 }
 
@@ -137,6 +137,7 @@ function act(host, body, now) {
   }
   if (move === "save_copy") s.flags.save_copy = true;
   else if (move === "save_invitation") s.flags.save_invitation = true;
+  else if (move === "post_offer") s.flags.post_offer = true; // simulated: a note in memory, no key, no relay, no request
   if (ADVANCING.has(move)) {
     s.pos += 1;
     s.since = now;
@@ -167,7 +168,7 @@ function actionOf(s, e, txt) {
     return a;
   }
   if (e.id === "invitation") {
-    return { kind: "invitation", save: { id: "save_invitation", label: "Save an invitation for Alice…", done: s.flags.save_invitation, note: "Practice: nothing is saved. A real swap saves a file that you send to Alice." }, choose: { id: "choose_file", label: "Choose Alice's file…", note: "Practice: no file is opened. Alice's file is played for you." } };
+    return { kind: "invitation", save: { id: "save_invitation", label: "Save an invitation for Alice…", done: s.flags.save_invitation, note: "Practice: nothing is saved. A real swap saves a file that you send to Alice." }, offer: { id: "post_offer", label: "Post to the offers board…", done: s.flags.post_offer, note: "Practice: nothing is posted. A real offer goes to three public relays only when you confirm it, and the relays see your IP address." }, choose: { id: "choose_file", label: "Choose Alice's file…", note: "Practice: no file is opened. Alice's file is played for you." } };
   }
   if (e.id === "approve") {
     const gives = role === "alice" ? T.FIG.noid : T.FIG.eth;

@@ -60,3 +60,12 @@ test("no notification when the system does not support them", () => {
   assert.equal(n.notify("done", ID), false);
   assert.equal(electron.notifications.length, 0);
 });
+
+test("the tray notice is fixed text that names the tray's Quit", () => {
+  const { TRAY_TEXT } = require("../lib/notify");
+  const electron = createFakeElectron();
+  const n = createNotifier({ Notification: electron.Notification, now: () => 0 });
+  assert.equal(n.trayNotice(), true);
+  assert.equal(electron.notifications[0].options.body, TRAY_TEXT);
+  assert.match(TRAY_TEXT, /still running in the tray because a swap is in progress\. To quit, use Quit in the tray menu\./);
+});

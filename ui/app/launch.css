@@ -58,6 +58,12 @@ svg.coin.solid .cut { fill: none; stroke: var(--panel); stroke-width: 1.6; strok
 /* the program screens (batch C): the new-swap form's lines, the tag in the title row and the top bar */
 /* the operator page already has a ul.hist (the audit table, a mono grid): a line of words under an address is a p.hist and keeps the page's sans face */
 p.hist { display: block; font: 400 13px/1.45 var(--sans); }
+/* the market reference (display only): quiet text; grey when stale or unavailable; the swap's own line is bold only when it is far (over 20 %) from the reference, never a warning colour */
+.market-ref { margin: var(--s2) 0 0; }
+.market-ref .market-line { margin: var(--s1) 0 0; font-size: 13.5px; line-height: 1.5; color: var(--quiet); }
+.market-ref.grey .market-line { color: var(--faint); }
+.market-ref .market-line.swap { color: var(--text); }
+.market-ref.far .market-line.swap { font-weight: 600; }
 .ns-facts { margin: var(--s3) 0 var(--s4); }
 .ns-facts .newswap-opt { margin-top: var(--s3); }
 .ns-facts .newswap-opt > :not(summary) { margin-top: var(--s2); }

@@ -533,6 +533,34 @@ function createVault(deps) {
     }
   }
 
+  /** Shared adoption routine: stores S, writes key-check.json and recovery.json, and marks the vault ready and confirmed. */
+  async function adoptSecret(S) {
+    const check = derive.keyCheck(S);
+    await storeSecret(S, false);
+    writeJson(file(F_CHECK), { v: 1, check });
+    writeRecovery(new Date(now()).toISOString()); // the whole code was typed: it is confirmed
+    becomeReady(check);
+    st.confirmed = true;
+    return check;
+  }
+
+  /** Shared adoption eligibility check: refuses when this install holds run folders of another secret. */
+  function canAdoptCheck(check) {
+    const refs = runChecks();
+    const cur = st.ready ? st.check : diskCheck();
+    if (st.ready && cur === check) return { ok: true, same: true, why: null };
+    if (cur && cur !== check && refs.has(cur)) {
+      return { ok: false, same: false, why: "this installation already has swaps under its own secret: it cannot be replaced" };
+    }
+    if (!cur && secretFileExists() && refs.size > 1) {
+      return { ok: false, same: false, why: "the vault's key check is missing and run folders of more than one installation are here: it cannot be told which secret is in use" };
+    }
+    if (refs.size > 0 && !refs.has(check)) {
+      return { ok: false, same: false, why: "this code is not the one of these run folders" };
+    }
+    return { ok: true, same: false, why: null };
+  }
+
   async function restore() {
     const text = await ask("askText", { kind: "restore" });
     if (text === null || typeof text !== "string") return { ok: false, why: "cancelled" };
@@ -545,37 +573,23 @@ function createVault(deps) {
     }
     try {
       const check = derive.keyCheck(S);
-      const refs = runChecks();
-      // the check of the secret this installation holds now: from memory when it is open, else from vault/key-check.json on disk (a LOCKED vault still has a secret)
-      const cur = st.ready ? st.check : diskCheck();
-      if (st.ready && cur === check) {
+      const elig = canAdoptCheck(check);
+      if (elig.same) {
         if (!st.confirmed) {
           writeRecovery(new Date(now()).toISOString()); // the whole code was typed
           st.confirmed = true;
         }
         return { ok: true, why: null }; // the same installation: nothing else to do
       }
-      if (cur && cur !== check && refs.has(cur)) {
+      if (!elig.ok) {
         await tell("say", { kind: "other-install" });
-        return { ok: false, why: "this installation already has swaps under its own secret: it cannot be replaced" };
-      }
-      if (!cur && secretFileExists() && refs.size > 1) {
-        await tell("say", { kind: "other-install" });
-        return { ok: false, why: "the vault's key check is missing and run folders of more than one installation are here: it cannot be told which secret is in use" };
-      }
-      if (refs.size > 0 && !refs.has(check)) {
-        await tell("say", { kind: "other-install" });
-        return { ok: false, why: "this code is not the one of these run folders" };
+        return { ok: false, why: elig.why };
       }
       try {
-        await storeSecret(S, false);
+        await adoptSecret(S);
       } catch (e) {
         return { ok: false, why: e instanceof VaultError ? e.message : "the secret could not be stored" };
       }
-      writeJson(file(F_CHECK), { v: 1, check });
-      writeRecovery(new Date(now()).toISOString()); // the whole code was typed: it is confirmed
-      becomeReady(check);
-      st.confirmed = true;
       return { ok: true, why: null };
     } finally {
       S.fill(0);
@@ -709,6 +723,133 @@ function createVault(deps) {
           });
         },
       };
+    },
+    /**
+     * Sealer for a per-swap backup file (label "swap-backup", run id R, fixed AAD fileName "swap-backup" so a renamed copy still opens).
+     * Throws VaultError when the vault is locked; open() throws SealedError on tag/shape failure.
+     */
+    backupSealer(runId) {
+      if (!derive.isRunId(runId)) throw new VaultError("the run id is not valid");
+      return {
+        seal(plain) {
+          return withSecret((S) => {
+            const key = derive.backupKey(S, runId);
+            try {
+              return sealed.sealToText({ key, label: "swap-backup", runId, fileName: "swap-backup", plain });
+            } finally {
+              key.fill(0);
+            }
+          });
+        },
+        open(envelopeText) {
+          return withSecret((S) => {
+            const key = derive.backupKey(S, runId);
+            try {
+              return sealed.open({ key, label: "swap-backup", runId, fileName: "swap-backup", envelope: envelopeText });
+            } finally {
+              key.fill(0);
+            }
+          });
+        },
+      };
+    },
+    /**
+     * Opens a sealed swap backup envelope.
+     * Tries the current install secret first (no prompt when it matches). Otherwise prompts the secret window for the recovery code,
+     * verifies the GCM tag before touching the vault, optionally runs `validatePlain(plain)` before adoption, asks confirmation
+     * (`backup-adopt`), and adopts via the shared `adoptSecret(S)` routine.
+     * Returns `{ plain: Buffer, adopted: boolean }`. Throws VaultError with `code` on refusal.
+     */
+    async openBackup(envelopeText, runId, opts = {}) {
+      const fail = (msg, code) => {
+        const e = new VaultError(msg);
+        e.code = code;
+        throw e;
+      };
+      if (!derive.isRunId(runId)) fail("the run id is not valid", "invalid");
+      if (typeof envelopeText !== "string" && (!envelopeText || typeof envelopeText !== "object")) {
+        fail("This file is damaged. Try another copy.", "damaged");
+      }
+      if (opts.requireOpen && !st.ready) fail(st.why || "the vault is not open", "locked");
+
+      // 1. Try current install secret when the vault is open (same install: no code asked)
+      if (st.ready) {
+        let samePlain = null;
+        try {
+          samePlain = withSecret((S) => {
+            const key = derive.backupKey(S, runId);
+            try {
+              return sealed.open({ key, label: "swap-backup", runId, fileName: "swap-backup", envelope: envelopeText });
+            } finally {
+              key.fill(0);
+            }
+          });
+        } catch (e) {
+          if (!(e instanceof sealed.SealedError)) throw e;
+          samePlain = null;
+        }
+        if (samePlain !== null) {
+          if (typeof opts.validatePlain === "function") await opts.validatePlain(samePlain);
+          return { plain: samePlain, adopted: false };
+        }
+      }
+
+      // 2. Other install (or locked vault recovering its own code): ask the secret window
+      const text = await ask("askText", { kind: "backup-code" });
+      if (text === null || typeof text !== "string") fail("cancelled", "cancelled");
+      let S = null;
+      try {
+        try {
+          S = rc.decode(text.replace(/[\r\n\t]+/g, " "));
+        } catch {
+          await tell("say", { kind: "backup-wrong-code" });
+          fail("This code does not open this backup. Check each group and try again.", "wrong-code");
+        }
+        let plain = null;
+        const key = derive.backupKey(S, runId);
+        try {
+          plain = sealed.open({ key, label: "swap-backup", runId, fileName: "swap-backup", envelope: envelopeText });
+        } catch {
+          await tell("say", { kind: "backup-wrong-code" });
+          fail("This code does not open this backup. Check each group and try again.", "wrong-code");
+        } finally {
+          key.fill(0);
+        }
+
+        // Validate decrypted payload (offline checks) BEFORE touching the vault
+        if (typeof opts.validatePlain === "function") await opts.validatePlain(plain);
+
+        // Reuse vault.restore's adoption eligibility check
+        const check = derive.keyCheck(S);
+        const elig = canAdoptCheck(check);
+        if (elig.same) {
+          if (!st.confirmed) {
+            writeRecovery(new Date(now()).toISOString());
+            st.confirmed = true;
+          }
+          return { plain, adopted: false };
+        }
+        if (!elig.ok) {
+          await tell("say", { kind: "backup-other-install" });
+          fail("This computer already has swaps under another recovery code (finished ones count too), so it cannot switch codes. Restore in a fresh user account on this computer, on another computer, or with the recovery tool.", "other-install");
+        }
+
+        // Confirm code switch in the secret window before adopting
+        if (typeof secretUi.askConfirm === "function") {
+          const ok = await ask("askConfirm", { kind: "backup-adopt" });
+          if (ok !== true) fail("cancelled", "cancelled");
+        }
+
+        // Adopt through the shared adoptSecret(S) routine
+        try {
+          await adoptSecret(S);
+        } catch (e) {
+          fail(e instanceof VaultError ? e.message : "the secret could not be stored", "store-failed");
+        }
+        return { plain, adopted: true };
+      } finally {
+        if (S) S.fill(0);
+      }
     },
     inviteSecret() {
       if (!st.ready) throw new VaultError(st.why || "the vault is not open");

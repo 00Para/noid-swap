@@ -7,6 +7,8 @@
 (() => {
   "use strict";
   let H = null; // helpers handed over by operator.js
+  // the person's choice in the backup's "Keep this file up to date" box, per swap, for this page: the card is redrawn about every 15 s and must not tick the box again (rehearsal F1, the 0.1.6 rule for ticks)
+  const keepChoice = new Map();
   const A = () => window.NoidActions;
   const V = () => window.NoidView;
   const LF = () => (window.NoidLaunch ? window.NoidLaunch : null);
@@ -111,7 +113,7 @@
    *   claims     the boxes the card draws itself: { handover, autopilot, spend, step }; today's page does not draw them a second time (they carry element ids)
    */
   function plan(input) {
-    const m = { drawn: false, kind: null, tone: null, foot: null, picture: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null, late: null, noticeInfo: false }, timesNote: null, statusAddr: null, bobLock: null, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role, recordClose: false, sweepPending: false };
+    const m = { drawn: false, kind: null, tone: null, foot: null, picture: null, stage: -1, headline: "", status: "", reasons: [], action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false, lockBy: null, late: null, noticeInfo: false }, timesNote: null, statusAddr: null, bobLock: null, claims: {}, forceOpen: false, lookSig: "", view: null, role: input.role, recordClose: false, sweepPending: false, clock: null };
     const Ac = A();
     if (!Ac || !Ac.card) return m;
     const payload = input.payload || null;
@@ -369,6 +371,13 @@
           set("swap", "Your funding was sent", "The next readings follow it. Never fund a second time.");
           return null;
         }
+        // a copy restored from a backup made before the funding or the lock: the coins are already in, and the wallet no longer shows the deposit (it was spent into them).
+        // Never ask for it again (rehearsal F4): the program catches up from the chains.
+        if (!pre && x && x.coins_in === true) {
+          if (role === "alice") set("swap", "Your NOID is already in the swap contract", "This copy was restored from an older backup. The program records your funding from the chain and goes on. Do not fund or deposit again.");
+          else set("swap", "Your lock was already sent", "This copy was restored from an older backup. The program finds your lock once Alice's funding is final. Do not deposit again.");
+          return null;
+        }
         if (Ac.card.depositSeen(a, role)) {
           if (pre) set("swap", "Deposit received", "Waiting for the first reading of the chains.");
           else if (role === "alice") set("swap", "Deposit received", `The program is putting ${amt.noid ? "your " + amt.noid : "your NOID"} into the swap contract.`);
@@ -536,6 +545,7 @@
     // the frame: amber while the swap waits on the person (an action of the card, the approval, the deposit, or a step that needs an answer), mint when it is settled, the alarm colour for a look
     m.tone = m.kind === "look" ? "look" : m.kind === "done" ? "done" : m.action.kind !== "none" || m.kind === "approve" || m.kind === "deposit" || needs || m.safety.autopilot ? "act" : null;
     m.foot = m.kind === "look" ? null : footOf(m, a, x, view, on, needs);
+    m.clock = m.kind === "swap" ? clockOf(role, view, a, on, now) : null;
     if (m.kind === "done") m.done = doneFacts(a, role, amt, swept, own, payload);
     // "The two locks, from now" is on the main view only at the Swap stage, and only once a lock is seen on either chain (a track in a state other than "not locked yet") or while an
     // approval that lapsed in flight is asked for again (the stage stays Swap): before that it stays in Details. The view model's own picture; nothing is computed here.
@@ -640,6 +650,73 @@
   };
 
   /**
+   * The clock strip of the swap card (display only): the next deadline that matters for this role and phase, taken from the view model's own deadline rows (never counted anew), a zone
+   * word, and whether the program is sending now or waiting on the chains. It never tells the person they may close the program. Returns null when there is nothing to show.
+   */
+  function clockOf(role, view, a, on, now) {
+    if (!view || view.status === "no-data" || !view.phase) return null;
+    const id = view.phase.id;
+    const rowOf = (rid) => (Array.isArray(view.deadlines) ? view.deadlines.find((d) => d.id === rid) : null);
+    let label = null;
+    let rid = null;
+    let t = null;
+    let own = false;
+    let bobPassed = false;
+    const pickFirst = (ids) => {
+      for (const r of ids) {
+        const tt = rowTime(view, r, now);
+        if (tt) return { r, tt };
+      }
+      return null;
+    };
+    if (role === "alice" && (id === "funded" || id === "funding_final")) {
+      const p = pickFirst(["d"]);
+      if (p) ({ r: rid, tt: t } = p);
+      label = "Your refund opens";
+    } else if (role === "alice" && (id === "lock_seen" || id === "lock_final")) {
+      const p = pickFirst(["reveal_start_by", "reveal_cutoff"]);
+      if (p) ({ r: rid, tt: t } = p);
+      label = "Reveal must start by";
+      own = true;
+    } else if (role === "bob" && id === "locked") {
+      const tt = rowTime(view, "t_reveal", now);
+      if (tt && tt.passed) {
+        bobPassed = true;
+        label = "Your ETH can be refunded";
+      } else if (tt) {
+        rid = "t_reveal";
+        t = tt;
+        label = "Alice can reveal until";
+      }
+    } else if (role === "bob" && (id === "secret_seen" || id === "claim_submitted" || id === "claim_included")) {
+      const tt = rowTime(view, "claim_target", now);
+      if (tt) {
+        rid = "claim_target";
+        t = tt;
+      }
+      label = "Claim must be in a block by";
+      own = true;
+    }
+    const row = rid ? rowOf(rid) : null;
+    const secs = t ? t.unix - now : null;
+    const open = t && !t.passed && label && !bobPassed;
+    // the person's own deadline (Alice's reveal, Bob's claim) has passed: say so, never "On track" (audit of 0.2.0, L-2)
+    const ownPassed = !!(own && t && t.passed && label);
+    const out = { label: open ? label : bobPassed || ownPassed ? label : null, at_unix: open ? t.unix : null, left_text: null, zone: "track", keep: null };
+    if (open && secs !== null) {
+      if (row && row.kind === "height" && typeof row.blocks_left === "number") out.left_text = `${row.blocks_left} blocks (about ${V().fmtDur(Math.max(0, secs))})`;
+      else out.left_text = `${V().fmtDur(Math.max(0, secs))} left`;
+    }
+    if ((view.timeline && view.timeline.on_recovery === true) || bobPassed) out.zone = "refund";
+    else if (ownPassed) out.zone = "passed";
+    else if (open && own && secs !== null && secs <= 1800) out.zone = "danger";
+    if (on) out.keep = a && a.busy && typeof a.busy === "object" ? "sending" : "waiting";
+    // nothing is running and no deadline is shown (a finished swap with a leftover leg): no "On track" chip (audit of 0.2.0, F-26)
+    if (!out.label && !out.keep) return null;
+    return out;
+  }
+
+  /**
    * The card's last line, from data the page already has: what the program is doing (the approval's own words), or that it is stopped on a step that needs an answer or is still running,
    * and how old the reading of the chains is. "Nothing for you to do." is added only when the card has no action, no step that needs an answer and no safety box of any kind.
    */
@@ -725,6 +802,21 @@
 
   /** "Chains read 4 s ago": the age of the newest reading, from the view model's own figure. */
   const readText = (age) => `Chains read ${V().fmtDur(age)} ago`;
+
+  const CLOCK_ZONE = { track: "On track", refund: "Refund path", danger: "Under 30 minutes", passed: "Deadline passed" };
+  function clockLine(m) {
+    const c = m.clock;
+    if (!c) return null;
+    const p = H.el("p", { class: "sc-clock" });
+    p.appendChild(H.el("span", { class: "chip " + c.zone, text: CLOCK_ZONE[c.zone] || CLOCK_ZONE.track }));
+    if (c.label) {
+      p.appendChild(H.el("span", { class: "when", text: [c.label, c.at_unix ? "about " + A().card.hhmm(c.at_unix) : null, c.left_text].filter(Boolean).join(" · ") }));
+    }
+    if (c.keep) {
+      p.appendChild(H.el("span", { class: "keep" + (c.keep === "sending" ? " sending" : ""), text: c.keep === "sending" ? "Sending now · do not close the program" : "Waiting on the chains · keep the program open" }));
+    }
+    return p;
+  }
 
   function footLine(m) {
     const f = m.foot;
@@ -922,13 +1014,352 @@
     return H.el("div", { class: "sc-record" }, b, H.el("p", { class: "why dim", id: "rc-why", text: why || "Use it when the NOID contract was closed from another computer." }));
   }
 
+  // ------------------------------------------------------------------ Swap backup status & controls (never drawn in practice mode)
+  function fmtBackupClock(isoStr) {
+    if (typeof isoStr !== "string" || !isoStr) return "";
+    const ms = Date.parse(isoStr);
+    if (!Number.isFinite(ms)) return "";
+    const d = new Date(ms);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  }
+
+  /**
+   * Renders the swap backup status & action buttons when `payload.program.backup` is present (real program swaps only;
+   * practice payloads never carry `program.backup`, so zero backup controls ever appear in practice mode).
+   * Requests go through window.NoidProgram so stagecard.js keeps its single fetch boundary.
+   */
+  function backupBlock(payload) {
+    const b = payload && payload.program && payload.program.backup && typeof payload.program.backup === "object" ? payload.program.backup : null;
+    if (!b || typeof b.state !== "string") return null;
+    const swapId = (H.state && H.state.swap) || "";
+    const noKey = !(H.state && H.state.token);
+    const out = H.el("div", { class: "sc-backup-msg", role: "status", "aria-live": "polite" });
+    const wrap = H.el("section", { class: "sc-backup", id: "sc-backup", "aria-label": "Swap backup" });
+
+    const doSave = async (autoRefresh, btn) => {
+      const PG = window.NoidProgram;
+      if (!PG || typeof PG.saveBackup !== "function") return;
+      if (btn) btn.disabled = true;
+      out.textContent = "";
+      let r;
+      try {
+        r = await PG.saveBackup(swapId, autoRefresh);
+      } catch {
+        r = { ok: false, json: {} };
+      }
+      if (btn) btn.disabled = false;
+      if (!r.ok) out.textContent = (r.json && r.json.error) || "Could not save the backup.";
+      else if (r.json && (r.json.saved === true || r.json.status === "saved") && typeof H.reload === "function") await H.reload(true);
+    };
+
+    const doUpdate = async (btn) => {
+      const PG = window.NoidProgram;
+      if (!PG || typeof PG.updateBackup !== "function") return;
+      if (btn) btn.disabled = true;
+      out.textContent = "";
+      let r;
+      try {
+        r = await PG.updateBackup(swapId);
+      } catch {
+        r = { ok: false, json: {} };
+      }
+      if (btn) btn.disabled = false;
+      if (!r.ok) out.textContent = (r.json && r.json.error) || "Could not update the backup.";
+      else if (typeof H.reload === "function") await H.reload(true);
+    };
+
+    if (b.state === "not_needed") {
+      wrap.appendChild(H.el("p", { class: "plain dim", text: "This swap is over. You can delete its backup file once your coins have reached your own payout addresses (a NOID sweep counts once it is mined)." }));
+      return wrap;
+    }
+
+    if (b.state === "none") {
+      const cb = H.el("input", { type: "checkbox", id: "bk-auto-refresh", checked: keepChoice.has(swapId) ? keepChoice.get(swapId) === true : true });
+      cb.addEventListener("change", () => keepChoice.set(swapId, cb.checked === true));
+      const saveBtn = H.el("button", { type: "button", class: "btn sm primary", id: "bk-save", disabled: noKey ? true : null }, "Save a backup");
+      saveBtn.addEventListener("click", () => doSave(cb.checked === true, saveBtn));
+      wrap.appendChild(H.el("h3", { class: "sc-backup-head", text: "Save a backup of this swap" }));
+      wrap.appendChild(
+        H.el("p", {
+          class: "plain",
+          text: "If this computer breaks, the backup and your recovery code bring this swap back on another computer. Save it on a USB stick or in a cloud folder.",
+        })
+      );
+      wrap.appendChild(H.el("label", { class: "ack", for: "bk-auto-refresh" }, cb, " Keep this file up to date"));
+      wrap.appendChild(H.el("p", { class: "plain dim", text: "The program updates the file by itself whenever the swap moves on." }));
+      wrap.appendChild(H.el("div", { class: "row" }, saveBtn));
+      wrap.appendChild(
+        H.el("p", {
+          class: "plain dim",
+          text: "The backup opens only with your recovery code. Keep the code on paper, never next to the backup file. Anyone with both can take this swap's coins.",
+        })
+      );
+      wrap.appendChild(out);
+      return wrap;
+    }
+
+    if (b.state === "up_to_date") {
+      const hm = fmtBackupClock(b.saved_at);
+      const elsewhere = H.el("button", { type: "button", class: "btn sm ghost", id: "bk-save-elsewhere", disabled: noKey ? true : null }, "Save elsewhere\u2026");
+      elsewhere.addEventListener("click", () => doSave(b.keep_updated !== false, elsewhere));
+      wrap.appendChild(H.el("div", { class: "row" }, H.el("span", { class: "plain dim", text: hm ? `Backup up to date, saved ${hm}.` : "Backup up to date." }), elsewhere));
+      wrap.appendChild(out);
+      return wrap;
+    }
+
+    if (b.state === "out_of_date") {
+      const upd = H.el("button", { type: "button", class: "btn sm primary", id: "bk-update", disabled: noKey ? true : null }, "Update backup");
+      upd.addEventListener("click", () => doUpdate(upd));
+      const elsewhere = H.el("button", { type: "button", class: "btn sm ghost", id: "bk-save-elsewhere", disabled: noKey ? true : null }, "Save elsewhere\u2026");
+      elsewhere.addEventListener("click", () => doSave(b.keep_updated !== false, elsewhere));
+      wrap.appendChild(H.el("div", { class: "row" }, H.el("span", { class: "plain", text: "Backup is older than the swap." }), upd, elsewhere));
+      wrap.appendChild(out);
+      return wrap;
+    }
+
+    if (b.state === "cannot_write") {
+      const retry = H.el("button", { type: "button", class: "btn sm", id: "bk-retry", disabled: noKey ? true : null }, "Try again");
+      retry.addEventListener("click", () => doUpdate(retry));
+      const elsewhere = H.el("button", { type: "button", class: "btn sm primary", id: "bk-save-elsewhere", disabled: noKey ? true : null }, "Save elsewhere\u2026");
+      elsewhere.addEventListener("click", () => doSave(b.keep_updated !== false, elsewhere));
+      wrap.appendChild(
+        H.el(
+          "div",
+          { class: "alarm warn", role: "note" },
+          ic("alert"),
+          H.el("span", { class: "lv", text: "Backup" }),
+          H.el("span", { class: "tx", text: "Could not update your backup: the folder is not there (a USB stick taken out?)." })
+        )
+      );
+      wrap.appendChild(H.el("div", { class: "row" }, retry, elsewhere));
+      wrap.appendChild(out);
+      return wrap;
+    }
+
+    return null;
+  }
+
+  // ------------------------------------------------------------------ Post to the offers board (Bob's side; the server is lib/offerpost.js)
+  // the person's choices per swap for this page: the card is redrawn about every 15 s and must not empty the note, tick the box again or close the preview
+  const offerUi = new Map();
+  const OFFER_SAY = "Your offer and a new posting key go to three public relays. The relays see your IP address. Anyone can read it. Nothing secret is sent.";
+
+  function offerBlock(payload) {
+    const o = payload && payload.program && payload.program.offer_post && typeof payload.program.offer_post === "object" ? payload.program.offer_post : null;
+    const PG = window.NoidProgram;
+    if (!o || !PG || typeof PG.offerPreview !== "function") return null;
+    const swapId = (H.state && H.state.swap) || "";
+    const noKey = !(H.state && H.state.token);
+    if (!offerUi.has(swapId)) offerUi.set(swapId, { note: "", mark: true, preview: null, busy: false, msg: "" });
+    const st = offerUi.get(swapId);
+    const wrap = H.el("section", { class: "sc-backup sc-offer", id: "sc-offer", "aria-label": "Offers board" });
+    const hm = (sec) => fmtBackupClock(new Date(sec * 1000).toISOString());
+    const tested = o.network === "sepolia" ? " (a test network)" : "";
+
+    const run = async (fn) => {
+      st.busy = true;
+      st.msg = "";
+      draw();
+      let r;
+      try {
+        r = await fn();
+      } catch {
+        r = { ok: false, json: {} };
+      }
+      st.busy = false;
+      if (!r.ok) st.msg = (r.json && r.json.error) || "The offer could not be handled. The swap is not affected.";
+      return r;
+    };
+    const after = async () => {
+      if (typeof H.reload === "function") await H.reload(true);
+      else draw();
+    };
+
+    function draw() {
+      wrap.textContent = "";
+      const p = o.posted;
+      const live = p && !p.expired;
+      if (live) {
+        wrap.appendChild(H.el("h3", { class: "sc-backup-head", text: `Your offer on the offers board${tested}` }));
+        let line;
+        if (p.pending) line = p.published_status ? `The board still shows the old state. The new one (${p.status}) was not accepted by any relay yet${p.error ? ": " + p.error : "."}` : `Not accepted by any relay yet${p.error ? ": " + p.error : "."} Nothing is posted.`;
+        else if (p.status === "open") line = `Your offer is up: ${p.accepted} of ${p.total} relays took it. It stays until ${hm(p.expires_at)}.`;
+        else if (p.status === "taken") line = "Your offer is marked taken: it no longer shows as open.";
+        else line = "Your offer is withdrawn: it no longer shows as open.";
+        wrap.appendChild(H.el("p", { class: "plain", role: "status", text: line }));
+        const row = H.el("div", { class: "row" });
+        if (p.pending) {
+          const again = H.el("button", { type: "button", class: "btn sm primary", id: "offer-again", disabled: noKey || st.busy ? true : null }, "Try again");
+          again.addEventListener("click", async () => {
+            await run(() => PG.offerStatus(swapId, p.status));
+            await after();
+          });
+          row.appendChild(again);
+        }
+        if (p.status === "open" || (p.pending && p.status !== "closed")) {
+          const w = H.el("button", { type: "button", class: "btn sm", id: "offer-withdraw", disabled: noKey || st.busy ? true : null }, "Withdraw offer");
+          w.addEventListener("click", async () => {
+            await run(() => PG.offerStatus(swapId, "closed"));
+            await after();
+          });
+          row.appendChild(w);
+        }
+        if (row.children.length) wrap.appendChild(row);
+        if (p.status === "open" && !p.pending) wrap.appendChild(H.el("p", { class: "plain dim", text: p.mark_taken ? "The program marks it taken when Alice's funding is seen." : "It is not marked taken by itself: withdraw it when you have your partner." }));
+        if (st.msg) wrap.appendChild(H.el("p", { class: "attn", role: "alert", text: st.msg }));
+        return;
+      }
+      if (!o.can_post) {
+        if (p && p.expired) wrap.appendChild(H.el("p", { class: "plain dim", text: "Your offer on the board has expired by itself." }));
+        else if (o.why) wrap.appendChild(H.el("p", { class: "plain dim", text: o.why }));
+        return;
+      }
+      wrap.appendChild(H.el("h3", { class: "sc-backup-head", text: `Post to the offers board${tested}` }));
+      if (!st.preview) {
+        wrap.appendChild(H.el("p", { class: "plain", text: "Optional. The public offers board (no1dswap.github.io) lists offers so that a counterparty can find yours. You do not need it if you already have someone to swap with." }));
+        wrap.appendChild(H.el("p", { class: "plain dim", text: "This uses the network, and only when you confirm on the next step." }));
+        const inp = H.el("input", { type: "text", id: "offer-note", maxlength: String(o.note_max), autocomplete: "off", spellcheck: "false", placeholder: "A short note (optional)", "aria-label": "A short note for the offer (optional)", value: st.note });
+        inp.addEventListener("input", () => {
+          st.note = inp.value;
+        });
+        const cb = H.el("input", { type: "checkbox", id: "offer-mark", checked: st.mark ? true : null });
+        cb.addEventListener("change", () => {
+          st.mark = cb.checked === true;
+        });
+        wrap.appendChild(H.el("div", { class: "row" }, inp));
+        wrap.appendChild(H.el("label", { class: "ack", for: "offer-mark" }, cb, " Mark it taken when the swap starts"));
+        const go = H.el("button", { type: "button", class: "btn sm primary", id: "offer-preview", disabled: noKey || st.busy ? true : null }, "Post to the offers board…");
+        go.addEventListener("click", async () => {
+          st.note = inp.value;
+          st.mark = cb.checked === true;
+          const r = await run(() => PG.offerPreview(swapId, st.note, st.mark));
+          if (r.ok && r.json && r.json.preview) st.preview = r.json.preview;
+          draw();
+        });
+        wrap.appendChild(H.el("div", { class: "row" }, go));
+      } else {
+        const pv = st.preview;
+        wrap.appendChild(H.el("p", { class: "plain", text: "This is exactly what will be published:" }));
+        const dl = H.el("dl", { class: "facts left" });
+        for (const ln of pv.lines) dl.appendChild(H.el("div", {}, H.el("dt", { text: ln.k }), H.el("dd", { class: "mono", text: ln.v })));
+        wrap.appendChild(dl);
+        wrap.appendChild(H.el("p", { class: "plain", text: `Relays: ${pv.relays.map((u) => u.replace("wss://", "")).join(", ")}` }));
+        wrap.appendChild(H.el("p", { class: "plain stop-rule", id: "offer-say", text: OFFER_SAY }));
+        const pub = H.el("button", { type: "button", class: "btn sm primary", id: "offer-publish", disabled: noKey || st.busy ? true : null }, "Publish offer");
+        pub.addEventListener("click", async () => {
+          const r = await run(() => PG.offerPost(swapId, pv.note, pv.mark_taken, pv.digest));
+          if (r.ok) st.preview = null;
+          await after();
+        });
+        const back = H.el("button", { type: "button", class: "btn sm ghost", id: "offer-back", disabled: st.busy ? true : null }, "Back");
+        back.addEventListener("click", () => {
+          st.preview = null;
+          st.msg = "";
+          draw();
+        });
+        wrap.appendChild(H.el("div", { class: "row" }, pub, back));
+      }
+      if (st.msg) wrap.appendChild(H.el("p", { class: "attn", role: "alert", text: st.msg }));
+    }
+    draw();
+    return wrap.children.length ? wrap : null;
+  }
+
+  /** Renders restored-swap notices (residual note, self-test failure, downtime expiry, restore warnings, stuck reveal, backup suggestion) when present on autopilot view. */
+  function restoredNotices(m, payload) {
+    const out = [];
+    const a = payload && payload.actions;
+    const x = a && a.autopilot && m.role ? a.autopilot[m.role] : null;
+    if (!x) return out;
+    if (x.downtime_expired === true) {
+      out.push(
+        H.el(
+          "div",
+          { class: "alarm warn", role: "note" },
+          ic("clock"),
+          H.el("span", { class: "lv", text: "Paused" }),
+          H.el("span", { class: "tx", text: "This computer was off for more than 15 minutes before the coins went in. Continue this swap on this computer?" })
+        )
+      );
+    }
+    if (x.backup_suggested === true) {
+      out.push(
+        H.el(
+          "div",
+          { class: "alarm info", role: "note" },
+          ic("info"),
+          H.el("span", { class: "lv", text: "Backup" }),
+          H.el("span", { class: "tx", text: "This swap was approved before backups were required. Save a backup so you can recover it if this computer stops." })
+        )
+      );
+    }
+    const rs = x.restored && typeof x.restored === "object" ? x.restored : null;
+    if (!rs) return out;
+    if (Array.isArray(rs.home_warnings)) {
+      for (const w of rs.home_warnings) {
+        out.push(
+          H.el(
+            "div",
+            { class: "alarm warn", role: "alert" },
+            ic("alert"),
+            H.el("span", { class: "lv", text: "Restore warning" }),
+            H.el("span", { class: "tx", text: String(w) })
+          )
+        );
+      }
+    }
+    if (rs.stuck_reveal === true) {
+      out.push(
+        H.el(
+          "div",
+          { class: "alarm warn", role: "alert" },
+          ic("alert"),
+          H.el("span", { class: "lv", text: "Stuck reveal" }),
+          H.el("span", {
+            class: "tx",
+            text: "A send from this swap's Ethereum key is waiting at nonce 0 (the reveal may be stuck in the pool and the secret may be public). Re-send it with a higher fee cap from the box below; the autopilot never re-sends by itself.",
+          })
+        )
+      );
+    }
+    if (rs.residual_note === true) {
+      out.push(
+        H.el(
+          "div",
+          { class: "alarm warn", role: "alert" },
+          ic("alert"),
+          H.el("span", { class: "lv", text: "Restored" }),
+          H.el("span", {
+            class: "tx",
+            text: "Your backup is from before the reveal and the time to reveal has passed. If your old computer sent the reveal just before it stopped, the program can only see it once it shows on a chain. It is watching.",
+          })
+        )
+      );
+    }
+    if (typeof rs.selftest_failed === "string" && rs.selftest_failed) {
+      out.push(
+        H.el(
+          "div",
+          { class: "alarm danger", role: "alert" },
+          ic("alert"),
+          H.el("span", { class: "lv", text: "Self-test" }),
+          H.el("span", {
+            class: "tx",
+            text: `This computer failed the NOID claim prover self-test (${rs.selftest_failed}). Move this swap to another computer before the deadline.`,
+          })
+        )
+      );
+    }
+    return out;
+  }
+
   /** R5: Bob's lock check on the Check stage (mainnet): whether his program would lock this swap now, in four states. */
   function lockCheckLine(c) {
     if (!c) return null;
     if (c.state === "ok") {
-      const calm = H.el("p", { class: "plain lock-check", "data-state": "ok", text: `Your program can lock on this swap now.${c.share_text ? ` One address mined ${c.share_text} % of Parano1d's recent blocks; you will be asked to acknowledge that.` : ""} Tell Alice.` });
-      // above half the blocks the calm line is not enough (nothing is refused by it: the screen's own limit is the program's)
-      if (Number(c.share_text) > 50) return H.el("div", { class: "lock-check-wrap" }, calm, H.el("p", { class: "attn lock-half", role: "note", text: "That is more than half: someone who controls most of the mining can take both sides of a swap. Swap only with someone you have a reason to trust." }));
+      // The share never refuses (the owner's decision of 0.2.0): it is said in plain words, with the warning when it is high or unknown, and Bob confirms that he read it when he approves.
+      const calm = H.el("p", { class: "plain lock-check", "data-state": "ok", text: `Your program can lock on this swap now.${c.warning ? " " + c.warning : c.share_text ? ` One producer mined ${c.share_text} % of recent Parano1d blocks.` : ""} You will be asked to confirm that you read this. Tell Alice.` });
+      if (c.level === "high" || c.level === "unknown" || Number(c.share_text) > 50) return H.el("div", { class: "lock-check-wrap" }, calm, H.el("p", { class: "attn lock-half", role: "note", text: "That is more than half: someone who controls most of the mining can take both sides of a swap, and no time window protects you from that. Swap only with someone you have a reason to trust." }));
       return calm;
     }
     if (c.state === "no") return A().launch.levelBox("warn", "Lock", `Your program would not lock now:${c.why ? " " + c.why : ""} Tell Alice before she deposits.`);
@@ -1052,6 +1483,8 @@
     if (!m || !m.drawn) return null;
     const root = H.el("div", { class: "sc-in" + (m.tone ? " " + m.tone : "") });
     const safety = payload && payload.actions ? safetyBoxes(m, payload) : [];
+    const rNotices = payload && payload.actions ? restoredNotices(m, payload) : [];
+    for (const rn of rNotices) safety.push(rn);
     if (safety.length) {
       const wrap = H.el("div", { class: "sc-safety" });
       for (const n of safety) wrap.appendChild(n);
@@ -1060,6 +1493,8 @@
     root.appendChild(progress(m));
     root.appendChild(H.el("h2", { class: "sc-head", id: "pg-headline" }, m.tone === "done" ? ic("check") : null, coinText(m.headline)));
     root.appendChild(H.el("p", { class: "sc-status" + (m.kind === "look" ? " look" : ""), role: "status" }, coinText(m.status), m.statusAddr ? [" ", H.addrWhole ? H.addrWhole(m.statusAddr.addr, m.statusAddr.label) : H.short(m.statusAddr.addr)] : null));
+    const clk = clockLine(m);
+    if (clk) root.appendChild(clk);
     if (m.timesNote) {
       const lines = ["Parano1d blocks come about every 30 seconds; faster blocks bring it sooner.", m.timesNote === "alice" ? "Your NOID's time is the deadline plus 20 blocks: 19 for finality and 1 for the sweep." : "Your ETH's time is Alice's last moment to take it, plus Ethereum's finality (about 19 minutes) and one more minute."];
       root.appendChild(H.el("details", { class: "deposit-details fact-fold times-fold" }, H.el("summary", { text: "How the times are counted" }), H.el("ul", { class: "fold-list" }, ...lines.map((t) => H.el("li", { text: t })))));
@@ -1072,6 +1507,10 @@
     if (m.kind === "done" && m.done) root.appendChild(doneBlock(m.done));
     const act = payload && payload.actions ? actionArea(m, payload) : null;
     if (act) root.appendChild(act);
+    const bk = payload && payload.actions ? backupBlock(payload) : null;
+    if (bk) root.appendChild(bk);
+    const ob = payload && payload.actions ? offerBlock(payload) : null;
+    if (ob) root.appendChild(ob);
     const rc = recordCloseArea(m, payload);
     if (rc) root.appendChild(rc);
     const foot = footLine(m);
@@ -1105,7 +1544,7 @@
       return t && !t.passed ? about(t) : null;
     };
     // a card that needs a look draws the legs as unknown, except when the view says the secret may be public (a held reveal): then the ticket must not stay silent about the NOID
-    const legs = (m.kind === "look" && !(view && view.secret_may_be_public === true)) || !V().legsFor ? null : V().legsFor(view, role, { about: aboutRow, sweep_pending: m.sweepPending === true });
+    const legs = (m.kind === "look" && !(view && view.secret_may_be_public === true)) || !V().legsFor ? null : V().legsFor(view, role, { about: aboutRow, sweep_pending: m.sweepPending === true, coins_in: !!(a && a.autopilot && a.autopilot[role] && a.autopilot[role].coins_in === true) });
     const L = legs || (V().legsFor ? V().legsFor(null, role) : null);
     if (!L) return null;
     const amts = amounts(payload, view && view.header ? view : null);
@@ -1171,6 +1610,7 @@
     plan,
     draw,
     drawTicket,
+    backupBlock,
     plainEngine,
     stepName,
     tick,

@@ -55,12 +55,27 @@ var TEXTS = {
     submit: "Save",
     cancel: "Cancel",
   },
+  "backup-code": {
+    title: "Open a swap backup",
+    lines: ["Type the recovery code that No1d Swap showed you on the computer this backup came from: 14 groups of 4 characters."],
+    field: { name: "text", label: "Recovery code", type: "text" },
+    submit: "Continue",
+    cancel: "Cancel",
+  },
+  "backup-adopt": {
+    title: "Use this recovery code?",
+    lines: ["This computer will use the code you just typed from now on. The code it showed you earlier is no longer needed."],
+    submit: "Use this code",
+    cancel: "Cancel",
+  },
   say: {
     "wrong-code": "That code does not match. Check it and try again.",
     "wrong-passphrase": "That passphrase is not right.",
     "wrong-passphrase-short": "Use at least 12 characters.",
     "wrong-passphrase-mismatch": "The two entries differ. Start again.",
     "other-install": "That recovery code belongs to a different installation. Nothing was changed.",
+    "backup-wrong-code": "This code does not open this backup. Check each group and try again.",
+    "backup-other-install": "This computer already has swaps under another recovery code (finished ones count too), so it cannot switch codes. Restore in a fresh user account on this computer, on another computer, or with the recovery tool.",
     "not-imported": "Nothing was imported.",
   },
 };
@@ -91,12 +106,16 @@ function buildModel(payload) {
       cancel: g.cancel,
     };
   }
-  if (p.type === "text" && Object.prototype.hasOwnProperty.call(TEXTS, p.kind) && p.kind !== "say" && p.kind !== "groups" && p.kind !== "recovery-code") {
+  if (p.type === "text" && Object.prototype.hasOwnProperty.call(TEXTS, p.kind) && p.kind !== "say" && p.kind !== "groups" && p.kind !== "recovery-code" && p.kind !== "backup-adopt") {
     var x = TEXTS[p.kind];
     if (p.kind === "fallback-new" && p.again === true) {
       return { type: "text", kind: p.kind, title: x.title, lines: ["Type the same passphrase a second time."], code: [], fields: [x.fieldAgain], submit: "Save", cancel: x.cancel };
     }
     return { type: "text", kind: p.kind, title: x.title, lines: x.lines, code: [], fields: [x.field], submit: x.submit, cancel: x.cancel };
+  }
+  if (p.type === "confirm" && p.kind === "backup-adopt") {
+    var c = TEXTS["backup-adopt"];
+    return { type: "confirm", kind: p.kind, title: c.title, lines: c.lines, code: [], fields: [], submit: c.submit, cancel: c.cancel };
   }
   if (p.type === "say") {
     var line;
@@ -114,7 +133,7 @@ function buildModel(payload) {
 /** What the page may send for a model and the typed values; null while it is not ready to send. */
 function collect(model, values) {
   var v = values && typeof values === "object" ? values : {};
-  if (model.type === "show" || model.type === "say") return { ack: true };
+  if (model.type === "show" || model.type === "say" || model.type === "confirm") return { ack: true };
   if (model.type === "groups") {
     var out = [];
     for (var i = 0; i < model.fields.length; i++) {

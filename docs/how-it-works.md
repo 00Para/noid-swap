@@ -68,13 +68,15 @@ too. A longer window does not protect Bob against a majority miner. Only Bob is 
 So Bob's program checks it before he locks. It reads from the chain's own block headers who produced the last 24 hours and the
 last 6 hours of blocks:
 
-- **Above 35 % in either window:** the program asks Bob to accept the share in his approval. He is told the measured number.
-- **Above 65 % in either window: nobody can waive it.** The swap cannot start, and the page refuses Bob's approval.
+- **Above 35 % in either window:** a warning, with the measured number.
+- **Above 50 % in either window:** a loud warning. A miner who is Alice can take both sides, and no time window protects Bob.
+- **Unreadable:** the share is reported as unknown, with a warning.
 
-While one producer is above 65 %, swaps cannot start. The screen reopens on its own once the producer's share is back at or
-under 65 % in both windows. Recent readings have been above it.
+Since version 0.2.0 none of this refuses the swap (the owner's decision; before it the program refused Bob's approval above 65 %).
+Bob's approval carries a statement that he read the warning, and nothing else changes: the risk is real and stated, not removed.
+Today (readings of late November 2026) one producer is above half of the blocks.
 
-Between 35 % and 65 % the screen is not a defence either. It cannot see a miner who uses many addresses, and a share can
+The screen is not a defence at any share. It cannot see a miner who uses many addresses, and a share can
 rise after Bob locks. Sell ETH only to someone you have a reason to trust. The measurement and the model are in
 [`miner-concentration.md`](miner-concentration.md), the screen in [`bob-concentration-gate.md`](bob-concentration-gate.md).
 
@@ -98,7 +100,7 @@ refuses a contract with other code.
 
 ## Caps and fees
 
-- **Caps per swap:** at most **0.5 ETH and 2,500 NOID**. The program refuses more.
+- **Caps per swap:** at most **1 ETH and 20,000 NOID**. The program refuses more.
 - **Smallest swap:** **5 NOID**. The contract's fee limit for a close is at least 50,000 micro-NOID and may not exceed 1 % of
   the amount, so a smaller swap is refused.
 - **Ethereum gas.** Bob pays for the lock and, if the swap stops, the refund. Alice pays for the reveal. Measured gas: about

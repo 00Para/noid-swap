@@ -59,7 +59,7 @@ test("form: the main fields in order, the remember tick on, the single-node tick
   assert.equal(g("ns-single_node_ok").checked, false);
   assert.match(textOf(root), /Every value is checked by the program before anything is made\. A new swap sends nothing to any chain; coins move only after you approve and deposit\./);
   assert.match(textOf(root), /Use these addresses for my next swaps/);
-  assert.match(textOf(root), /Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap/);
+  assert.match(textOf(root), /Ethereum mainnet: everything is real, at most 20,000 NOID and 1 ETH per swap/);
 });
 
 test("form: Alice's labels and hints", async () => {

@@ -19,7 +19,7 @@ const fs = require("fs");
 const path = require("path");
 const { isRunId } = require("./derive");
 
-const LABELS = Object.freeze(["migrated-passphrase", "board", "board-invite", "payout-history"]);
+const LABELS = Object.freeze(["migrated-passphrase", "board", "board-invite", "payout-history", "swap-backup"]);
 const MAX_CT = 1024 * 1024;
 const FIELDS = ["v", "alg", "label", "run_id", "nonce", "ct", "tag"];
 

@@ -27,6 +27,7 @@
 const P = require("./phases");
 const E = require("./enginetext");
 const { engineParams } = require("./dryrun");
+const RG = require("./restoregate");
 
 // What an ALARM / ANOMALY note in the engine's tick does to a spend. The engine prints an ALARM note on EVERY tick while a late lock of Bob's is
 // open (phases `locked` and `refund_submitted`), so "any alarm refuses everything" would refuse Bob's ETH refund, the step that protects him.
@@ -219,6 +220,37 @@ function describeSpend(spend, terms, tick, opts = {}) {
   return { title, lines, expected_typed: amt ? amt.text : null, next: NEXT[spend.kind] || "" };
 }
 
+/**
+ * Whether the tick shows Alice's fresh per-swap Ethereum key has a send waiting at nonce 0
+ * (latest 0, pending 1) in lock_seen or lock_final with no mined claim yet. In program mode
+ * Alice's swap key sends nothing before the reveal, so nonce 0 can only be the reveal.
+ * When a second Ethereum node is configured (`eth.second` or `eth.second_error`), both nodes
+ * must agree (mirroring swap-cli's engine).
+ */
+function revealMaybePending(tick) {
+  if (!tick || typeof tick !== "object") return false;
+  if (tick.phase_after !== "lock_seen" && tick.phase_after !== "lock_final") return false;
+  const eth = tick.eth || {};
+  const nodePendingAtZero = (obs) => {
+    if (!obs || typeof obs !== "object" || obs.claimed) return false;
+    if (obs.signer_nonce_latest === 0 && obs.signer_nonce_pending === 1) return true;
+    return tick.reveal_maybe_pending === true && obs.signer_nonce_latest === 0 && typeof obs.signer_nonce_pending === "number" && obs.signer_nonce_pending > 0;
+  };
+  if (!nodePendingAtZero(eth)) return false;
+  if (eth.second_error) return false;
+  if (eth.second !== undefined && eth.second !== null) {
+    if (typeof eth.second !== "object" || !nodePendingAtZero(eth.second)) return false;
+  }
+  return true;
+}
+
+function revealCutoffPassed(tick) {
+  if (!tick) return false;
+  if (tick.reveal_cutoff_passed === true) return true;
+  const r = tick.action && tick.action.reason;
+  return E.revealCutoffHeld(r) || (typeof r === "string" && /\breveal cutoff passed\b/i.test(r));
+}
+
 /** Evidence in the tick that the spend of this kind is already out / on chain. */
 function tickEvidence(spend, tick) {
   const eth = (tick && tick.eth) || {};
@@ -228,7 +260,12 @@ function tickEvidence(spend, tick) {
     return tick && tick.phase_after && tick.phase_after !== "created" ? `this file is already past "created" (phase ${tick.phase_after})` : null;
   }
   if (spend.kind === "lock_eth") return eth.lock ? "Bob's lock is already visible on Ethereum" : null;
-  if (spend.kind === "reveal_eth") return eth.pending_preimage ? "the claim is already in the Ethereum mempool" : eth.claimed ? "the lock is already claimed" : null;
+  if (spend.kind === "reveal_eth") {
+    if (eth.pending_preimage) return "the claim is already in the Ethereum mempool";
+    if (eth.claimed) return "the lock is already claimed";
+    if (revealMaybePending(tick)) return "a send from Alice's swap Ethereum key is waiting at nonce 0 (the reveal may be pending)";
+    return null;
+  }
   if (spend.kind === "refund_eth") return eth.refunded ? "the lock is already refunded" : null;
   if (spend.kind === "claim_noid" || spend.kind === "refund_noid") {
     const n = (tick && tick.noid) || {};
@@ -243,7 +280,7 @@ function tickEvidence(spend, tick) {
  * offered only when the engine's fresh decision of the same tick was that same step (the note "held: fresh decision was KIND", lib/enginetext.js);
  * otherwise the engine does not offer the step now and the page shows the engine's reason instead. A re-send (`--replace`) has no such fresh
  * decision (the engine never offers one: its fresh decision beside a pending claim is a wait), so it needs the held intent and evidence of the
- * transaction, and is withheld while the engine says the held reveal's cutoff has passed.
+ * transaction (or, for Alice's fresh swap key after restore, a pending send at nonce 0), and is withheld while the engine says the reveal's cutoff has passed.
  */
 function relevantFor(spend, tick, sentHash) {
   if (!tick) return false;
@@ -253,7 +290,10 @@ function relevantFor(spend, tick, sentHash) {
   const recorded = !!tick.action && tick.action.action === spend.kind && !!tick.intent && tick.intent.status === "recorded" && !!it && it.action === spend.kind;
   const held = !!tick.intent && tick.intent.status === "held" && !!it && it.action === spend.kind;
   const evidence = tickEvidence(spend, tick) || sentHash;
-  if (spend.replace) return held && !!evidence && !E.revealCutoffHeld(tick.action && tick.action.reason);
+  if (spend.replace) {
+    const nonceZeroReplace = spend.kind === "reveal_eth" && revealMaybePending(tick);
+    return (held || nonceZeroReplace) && !!evidence && !revealCutoffPassed(tick);
+  }
   const heldOffered = held && E.heldFreshDecision(tick.notes) === spend.kind && !E.doNotSend(tick.action && tick.action.reason);
   return (recorded || heldOffered) && !evidence;
 }
@@ -426,8 +466,9 @@ function evaluateSpend(spend, ctx) {
       if (evidence) no("already_sent", `Not sending again: ${evidence}. Use the re-send button if it is stuck.`);
     } else {
       const held = tick.intent && tick.intent.status === "held" && it && it.action === spend.kind;
-      if (!held) no("intent_not_held", `A re-send needs the engine to show the ${spend.kind} intent as held (the first send was decided); it does not.`);
-      if (held && E.revealCutoffHeld(tick.action && tick.action.reason)) no("engine_cutoff", `The engine says this reveal's cutoff has passed and its printed parameters are not to be used: ${tick.action.reason}`);
+      const nonceZeroReplace = spend.kind === "reveal_eth" && revealMaybePending(tick);
+      if (!held && !nonceZeroReplace) no("intent_not_held", `A re-send needs the engine to show the ${spend.kind} intent as held (the first send was decided); it does not.`);
+      if ((held || nonceZeroReplace) && revealCutoffPassed(tick)) no("engine_cutoff", `The engine says this reveal's cutoff has passed and its printed parameters are not to be used: ${tick.action && tick.action.reason ? tick.action.reason : "reveal cutoff passed"}`);
       if (!evidence) no(spend.kind === "reveal_eth" ? "no_pending_claim" : "no_pending_tx", 'A re-send needs evidence of the transaction to replace (the engine\'s pending claim, or the helper\'s "sent:" line); there is none.');
     }
     const l = ctx.latch;
@@ -455,6 +496,26 @@ function evaluateSpend(spend, ctx) {
   // status of this run, which must be clean, for the party's own addresses, and younger than RESERVE_FRESH_S.
   if (w && terms && (spend.kind === "fund_noid" || spend.kind === "lock_eth")) walletDepositReasons(spend, terms, w, nowS, no);
   if (b && (spend.kind === "fund_noid" || spend.kind === "lock_eth")) boardReasons(spend, run, tick, b, nowS, no);
+  // Backup requirement gates ONLY coins-in steps (`fund_noid`, `lock_eth`), never exits (reveal, claim, refund, recovery, sweeps).
+  if (RG.COINS_IN_KINDS.has(spend.kind) && ctx.backupRequired === true && ctx.hasBackup !== true) {
+    no("backup_missing", RG.BACKUP_MISSING_TEXT);
+  }
+  // Restored Alice funding pause and 2x-balance refusal (never Ethereum lock, never exit steps).
+  if (spend.kind === "fund_noid" && ctx.restored) {
+    const rg = RG.evaluateRestoreFundGate({
+      spend,
+      tick,
+      walletStatus: w ? w.status : null,
+      restored: ctx.restored,
+      hasFundingRecord: ctx.hasFundingRecord === true,
+    });
+    if (!rg.ok) no(rg.code, rg.text);
+  }
+  // Restored Bob must pass client R self-test on this machine before locking ETH (never blocks claim or refund).
+  if (spend.kind === "lock_eth" && ctx.restored) {
+    const st = RG.needsRestoreSelftest("bob", tick && tick.phase_after, ctx.restored);
+    if (st.blocksLock) no("restore_selftest", RG.SELFTEST_NEEDED_TEXT);
+  }
 
   const exp = terms ? expectedAmount(spend, terms) : null;
   if (!exp) no("amount_unknown", "The terms do not state the amount to confirm.");
@@ -487,4 +548,4 @@ function factsReady(spend, ctx) {
   return { ok: reasons.length === 0, reasons, ignored, notices: g.notices || [], expected_typed: g.expected_typed };
 }
 
-module.exports = { isNothingToSweep, NOTHING_TO_SWEEP_RE, BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, STATEMENT_ALICE_CHECK, LINE_MATCH_MISSING, SPENDS, evaluateSpend, factsReady, relevantFor, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };
+module.exports = { isNothingToSweep, NOTHING_TO_SWEEP_RE, BOARD_FRESH_S, BOARD_REVOKABLE, boardReasons, WALLET_SPENDS, ALL_SPENDS, SWEEP_KINDS, ENDED_PHASES, sweepReady, RESERVE_FRESH_S, walletDepositReasons, ALARM_REFUSES, ALARM_TOLERATED, ALERT_REFUSES, STATEMENT_NO_PENDING, STATEMENT_BOB_CHECK, STATEMENT_ALICE_CHECK, LINE_MATCH_MISSING, SPENDS, evaluateSpend, factsReady, relevantFor, revealMaybePending, tickEvidence, describeSpend, expectedAmount, typedMatches, TICK_FRESH_S, DRY_MAX_AGE_S, NEXT, ethText, noidText };

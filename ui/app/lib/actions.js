@@ -27,7 +27,7 @@ const { scrubText, readRun, pathCandidates, wslParts } = require("./runfolder");
 const { samePath } = require("./paths");
 const { redactDeep } = require("./secrets");
 const { checkDryRun } = require("./dryrun");
-const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, expectedAmount, isNothingToSweep } = require("./gate");
+const { ALL_SPENDS: SPEND_TABLE, evaluateSpend, describeSpend, relevantFor, revealMaybePending, expectedAmount, isNothingToSweep } = require("./gate");
 const { envLocalWallet, parseWalletStatus } = require("./walletrun");
 const { classifySpendExit, classifyStepExit, NOT_SENT } = require("./exitcodes");
 const { productionReason, programNetworkReason } = require("./production");
@@ -36,6 +36,8 @@ const { STEP_OF, TERMINAL_ONLY } = require("./stepexec");
 const firststeps = require("./firststeps");
 const { readBobKeyAddress } = require("./invitation");
 const { decimalToInt } = require("./swapform");
+const { readRestoredMarker } = require("./restore");
+const RG = require("./restoregate");
 
 /** Own-property lookup: an id such as "__proto__" or "constructor" is not a spend. */
 const SPENDS = new Proxy(SPEND_TABLE, { get: (t, k) => (typeof k === "string" && Object.prototype.hasOwnProperty.call(t, k) ? t[k] : undefined) });
@@ -313,6 +315,18 @@ function listFiles(dir, re) {
   return [];
 }
 
+
+// A send that was mined and FAILED (receipt status 0): live.js prints "sent: H" before it waits, then "transaction H failed (status 0)" (RevertedTx) when the receipt says so.
+// Both lines with the same hash are needed: then the chain itself says nothing moved and only the fee was spent (rehearsal F5b: the page said "may have been sent").
+const ETH_SWEEP_SPENDS = new Set(["send-sweep-eth-alice", "send-sweep-eth-bob"]);
+function minedFailedTx(text) {
+  const t = String(text || "");
+  const m = /\btransaction (0x[0-9a-fA-F]{64}) failed \(status 0\)/.exec(t);
+  if (!m) return null;
+  const hash = m[1].toLowerCase();
+  return t.split("\n").some((line) => line.trim().toLowerCase().startsWith(`sent: ${hash}`)) ? m[1] : null;
+}
+
 class ActionRunner {
   /**
    * @param {{distro:string|null, runDir:string, binDir:string, runNumber:number, repoLiveDir?:string, runDirs:string[]}} cfg
@@ -568,10 +582,72 @@ class ActionRunner {
   /**
    * The gate's facts of program mode outside a board run (lib/gate.js): the funding and the lock wait for the line match (a record of the run folder, for the CURRENT check line),
    * and Bob's lock also asks for the statement that Alice's check line matches his. A terminal console and a board run give nothing here, so the gate is as before for them.
+   * Also supplies backup-saved status (only when program supports backups), restored marker, and funding-record presence for restore/backup gating.
    */
-  programGateCtx(spend) {
+  programGateCtx(spend, run = null) {
     if (!this.programMode || this.boardRun().on) return {};
-    return { lineMatchRequired: true, lineMatch: !!firststeps.lineMatchFor(this.runFolder(), spend.role), aliceCheckRequired: spend.kind === "lock_eth" };
+    const dir = this.runFolder();
+    const preUpgradeExempt = !!(
+      this.autopilot &&
+      typeof this.autopilot.preUpgradeApproved === "function" &&
+      this.autopilot.preUpgradeApproved(spend.role, run)
+    );
+    const backupRequired = !preUpgradeExempt && !!(this.program && typeof this.program.saveBackup === "function");
+    const hasBackup = backupRequired ? RG.isBackupSaved(dir) : true;
+    const restored = dir ? readRestoredMarker(dir) : null;
+    let hasFundingRecord = false;
+    if (spend.kind === "fund_noid" && dir) {
+      hasFundingRecord = !!this.walletMarker("wallet-funded.marker") || listFiles(dir, /^alice\.swap\.json\.wallet-fund\.json$/).length > 0;
+    }
+    return {
+      lineMatchRequired: true,
+      lineMatch: !!firststeps.lineMatchFor(dir, spend.role),
+      aliceCheckRequired: spend.kind === "lock_eth",
+      backupRequired,
+      hasBackup,
+      restored,
+      hasFundingRecord,
+    };
+  }
+
+  /**
+   * Runs Bob's client R self-test on a restored swap without blocking the timer loop.
+   * Uses `program.runSelfTest` when injected (tests), otherwise `swap-cli self-test <bob.swap.json>`.
+   */
+  runRestoreSelftest(run) {
+    const dir = this.runFolder();
+    if (!dir) return Promise.resolve({ ok: false, error: "no run folder" });
+    if (this.program && typeof this.program.runSelfTest === "function") {
+      return Promise.resolve().then(() => this.program.runSelfTest(dir, run));
+    }
+    const argv = this.program && this.program.tools && Array.isArray(this.program.tools.swapCli) ? this.program.tools.swapCli : null;
+    if (!argv || !argv.length) return Promise.resolve({ ok: false, error: "swap-cli tool not configured" });
+    const swapPath = path.join(dir, "bob", "bob.swap.json");
+    const loaded = this.settingsSource ? this.settingsSource.load() : { ok: false };
+    const args = ["self-test", swapPath];
+    const tick = run && run.roles && run.roles.bob ? run.roles.bob.tick : null;
+    const restored = readRestoredMarker(dir);
+    const firstTip = restored && restored.first_read && Number.isSafeInteger(restored.first_read.noid_tip) ? restored.first_read.noid_tip : null;
+    if (tick && tick.noid && Number.isSafeInteger(tick.noid.tip)) {
+      args.push("--call-height", String(tick.noid.tip + 1));
+    } else if (firstTip !== null) {
+      // no tick yet: the height the restore's first reading saw (audit F-05), so the test needs no node of its own
+      args.push("--call-height", String(firstTip + 1));
+    } else if (loaded.ok && loaded.settings && loaded.settings.noid_rpc) {
+      // a node of the settings: the same transport a tick uses (the default one refuses https)
+      args.push("--noid-rpc", loaded.settings.noid_rpc, "--transport", "curl");
+      if (this.program.tools.curl) args.push("--curl-path", this.program.tools.curl);
+    }
+    return new Promise((resolve) => {
+      const env = {};
+      for (const k of ["PATH", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG"]) {
+        if (process.env[k]) env[k] = process.env[k];
+      }
+      execFile(argv[0], [...argv.slice(1), ...args], { env, shell: false, windowsHide: true, timeout: 120000, maxBuffer: 1024 * 1024, encoding: "utf8" }, (err, _out, stderr) => {
+        if (!err) resolve({ ok: true });
+        else resolve({ ok: false, error: String((stderr || err.message || "self-test failed")).trim().slice(0, 220) });
+      });
+    });
   }
 
   /** The reason a table entry (or spend) is refused by the run's mode, or null. */
@@ -724,9 +800,51 @@ class ActionRunner {
     if (spend.kind === "reveal_eth") {
       const t = run && run.roles && run.roles.alice && run.roles.alice.tick;
       const h = t && t.eth && t.eth.pending_preimage && t.eth.pending_preimage.tx_hash;
-      return typeof h === "string" && TX_RE.test(h.toLowerCase()) ? h.toLowerCase() : null;
+      if (typeof h === "string" && TX_RE.test(h.toLowerCase())) return h.toLowerCase();
+      // Program mode never fills pending_preimage: take the newest hash of the reveal fee record (live.js writes it before every broadcast at nonce 0 and never
+      // truncates it), else the helper's own `sent:` line, so a later re-send raises its fees over the earlier ones even after a refused run.
+      const rec = this.revealFeeHash();
+      if (rec) return rec;
+      const local = this.sentHashFor(spend, run);
+      const m = typeof local === "string" ? local.match(/0x[0-9a-fA-F]{64}/) : null;
+      return m ? m[0].toLowerCase() : null;
     }
     return this.sentHashFor(spend);
+  }
+
+  /** The newest transaction hash in `alice.swap.json.reveal-fees` of the run folder (an append-only record, no secret), or null. live.js checks the hash and the lock. */
+  revealFeeHash() {
+    const dir = this.runFolder();
+    if (!dir) return null;
+    let text;
+    try {
+      const f = path.join(dir, "alice.swap.json.reveal-fees");
+      if (fs.statSync(f).size > 1048576) return null;
+      text = fs.readFileSync(f, "utf8");
+    } catch {
+      return null;
+    }
+    let h = null;
+    for (const l of text.split("\n")) {
+      try {
+        const j = JSON.parse(l);
+        if (j && j.version === 1 && j.nonce === 0 && typeof j.tx_hash === "string" && /^[0-9a-f]{64}$/.test(j.tx_hash)) h = "0x" + j.tx_hash;
+      } catch {
+        /* a torn or empty line */
+      }
+    }
+    return h;
+  }
+
+  /**
+   * Program mode only: Alice's fresh per-swap Ethereum key has a send waiting at nonce 0
+   * (latest 0, pending 1) in lock_seen or lock_final, so claim --replace may replace nonce 0
+   * without a transaction hash.
+   */
+  allowNonceZeroRevealReplace(spend, run) {
+    if (!this.programMode || !spend || !spend.replace || spend.kind !== "reveal_eth") return false;
+    const t = run && run.roles && run.roles.alice && run.roles.alice.tick;
+    return revealMaybePending(t);
   }
 
   /** The content (a UTC time stamp) of `funded.marker` in the run folder, or null. fund.sh writes it, atomically, before it calls the wallet CLI; it stays when the CLI fails. */
@@ -876,7 +994,7 @@ class ActionRunner {
     } catch {
       expectedDry = null;
     }
-    return { tick, relevant, replaceTx, gate: { run, nowMs, dry: this.dryFor(spend, run, replaceTx, nowMs), expectedDryCommand: expectedDry, latch: this.latchOf(spend.id), sentHash, wallet: this.walletCtx(spend), board: this.boardCtx(spend), ...this.programGateCtx(spend) } };
+    return { tick, relevant, replaceTx, gate: { run, nowMs, dry: this.dryFor(spend, run, replaceTx, nowMs), expectedDryCommand: expectedDry, latch: this.latchOf(spend.id), sentHash, wallet: this.walletCtx(spend), board: this.boardCtx(spend), ...this.programGateCtx(spend, run) } };
   }
 
   /** What the gate needs to know about the latch of a spend id. */
@@ -917,7 +1035,7 @@ class ActionRunner {
       } catch {
         expectedDry = null;
       }
-      const g = evaluateSpend(s, { run, nowMs, dry: dryRec, expectedDryCommand: expectedDry, requireTyped: false, latch: this.latchOf(s.id), sentHash, wallet: this.walletCtx(s), board: this.boardCtx(s), ...this.programGateCtx(s) });
+      const g = evaluateSpend(s, { run, nowMs, dry: dryRec, expectedDryCommand: expectedDry, requireTyped: false, latch: this.latchOf(s.id), sentHash, wallet: this.walletCtx(s), board: this.boardCtx(s), ...this.programGateCtx(s, run) });
       // The typed text is the only reason that may be open in the preview: everything else is already decided.
       const plain = describeSpend(s, run && run.terms, run && run.roles && run.roles[s.role] && run.roles[s.role].tick, { wallet: !!this.walletCtx(s) });
       let cmd = null;
@@ -1259,12 +1377,14 @@ class ActionRunner {
     let run = null;
     let txHash = null;
     let spend = null;
+    let nonceZeroReplace = false;
     if (e.spend) {
       spend = SPENDS[e.spend];
       run = this.readRunFn(this.cfg.runDirs, this.nowS());
       if (spend.replace) {
         txHash = this.replaceTxFor(spend, run);
-        if (!txHash) {
+        nonceZeroReplace = !txHash && this.allowNonceZeroRevealReplace(spend, run);
+        if (!txHash && !nonceZeroReplace) {
           // the helper would search the pool itself; the console wants the hash so that the dry run is bound to ONE transaction
           throw Object.assign(new Error("no pending transaction hash is known to compare against (the engine's tick or the helper's stderr names none)"), { status: 409 });
         }
@@ -1287,7 +1407,7 @@ class ActionRunner {
       bundleFromPublic = !jf.run_bundle && !!(jf.public_bundle && jf.public_bundle.ok && jf.public_arg);
     }
     const cmd = this.command(id, txHash, { bundleFromPublic, newCap: capInfo ? capInfo.cap : null });
-    return this.launch(e, cmd, { ...meta, role: e.role || null, spend, run, replaceTx: txHash, bundleFromPublic, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
+    return this.launch(e, cmd, { ...meta, role: e.role || null, spend, run, replaceTx: txHash, nonceZeroReplace, bundleFromPublic, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
   }
 
   /** The confirmed spend. `typed` is what the operator typed; the gate re-checks everything. */
@@ -1314,7 +1434,8 @@ class ActionRunner {
     this.preflight(id);
     const capInfo = this.newCapFor(id, meta.newCapGwei);
     const replaceTx = this.replaceTxFor(spend, run);
-    if (spend.replace && !replaceTx) {
+    const nonceZeroReplace = spend.replace && !replaceTx && this.allowNonceZeroRevealReplace(spend, run);
+    if (spend.replace && !replaceTx && !nonceZeroReplace) {
       this.audit.append({ action: id, role: spend.role, phase: "refused", result: "refused: no_pending_tx" });
       throw Object.assign(new Error("no pending transaction hash is known to replace"), { status: 422, reasons: [{ code: "no_pending_tx", text: "The engine's tick and the helper's stderr name no pending transaction to replace." }] });
     }
@@ -1345,7 +1466,7 @@ class ActionRunner {
       bobCheck = auto.statements;
       aliceCheck = auto.aliceCheck === true;
     }
-    const programGate = this.programGateCtx(spend);
+    const programGate = this.programGateCtx(spend, run);
     const g = evaluateSpend(spend, { run, nowMs, dry, expectedDryCommand: expectedDry, typed: typedText, requireTyped: true, latch: this.latchOf(id), sentHash: this.sentHashFor(spend, run), statement, bobCheck, aliceCheck, wallet: this.walletCtx(spend), board: this.boardCtx(spend), ...programGate });
     if (!g.ok) {
       this.audit.append({ action: id, role: spend.role, phase: "refused", result: "refused: " + g.reasons.map((r) => r.code).join(","), dry_hash: dry && dry.check ? dry.check.hash : null, detail: auto ? `auto=1; approval=${auto.approval}` : null });
@@ -1356,7 +1477,7 @@ class ActionRunner {
     const tick = run.roles[spend.role].tick;
     const latch = { tickNow: typeof tick.now === "number" ? tick.now : null, intentAt: tick.intent && tick.intent.intent && typeof tick.intent.intent.decided_at === "number" ? tick.intent.intent.decided_at : null };
     this.dry.delete(id); // a dry run authorizes one start
-    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, aliceCheckRequired: programGate.aliceCheckRequired === true, role: spend.role, spend, run, replaceTx, dryHash: dry.check.hash, latch, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
+    return this.launch(e, cmd, { ...meta, auto: undefined, autoApproval: auto ? auto.approval : null, aliceCheckRequired: programGate.aliceCheckRequired === true, role: spend.role, spend, run, replaceTx, nonceZeroReplace, dryHash: dry.check.hash, latch, newCap: capInfo ? capInfo.cap : null, approvedCap: capInfo ? capInfo.approved : null });
   }
 
   /**
@@ -1431,7 +1552,7 @@ class ActionRunner {
         Object.assign(rec, extra);
         this.collect(e, rec, before, started, meta, stdout, stderr);
         // A spend the helper refused cleanly sent nothing (lib/exitcodes.js): its latch is released, and the audit end line says so (the latch rebuild reads it).
-        if (e.group === "spend" && rec.nothing_sent) {
+        if (e.group === "spend" && (rec.nothing_sent || rec.outcome === "mined_failed")) {
           if (latchBefore) this.latch.set(e.id, latchBefore);
           else this.latch.delete(e.id);
         }
@@ -1442,6 +1563,8 @@ class ActionRunner {
         const mayHave = e.group === "spend" ? ", the transaction may have been sent" : "";
         const result = rec.nothing_left
           ? `nothing to sweep (exit ${rec.exit_code})`
+          : rec.outcome === "mined_failed"
+          ? `failed, mined with status 0: nothing moved, only the fee was spent (exit ${rec.exit_code})`
           : rec.nothing_sent
           ? `refused, nothing sent (${rec.script || (e.script && e.script.name)} exit ${rec.exit_code})`
           : rec.rerun_safe
@@ -1498,6 +1621,7 @@ class ActionRunner {
   runStep(e, rec, meta, finish) {
     const x = {};
     if (meta.replaceTx) x.tx = meta.replaceTx;
+    if (meta.nonceZeroReplace === true) x.nonceZero = true;
     if (typeof meta.newCap === "string") x.newCap = meta.newCap;
     if (typeof meta.bundlePath === "string") x.bundlePath = meta.bundlePath;
     let p;
@@ -1599,6 +1723,33 @@ class ActionRunner {
         rec.secret_certain = true;
         if (!rec.warning) rec.warning = "The claim was mined and reverted (the helper exited 3): it paid nobody, but the SECRET IS PUBLIC now. Run a tick with --apply at once (the watch loop does) and decide on a re-send with the engine; do not wait.";
       }
+      // mined and failed: the chain says nothing moved. An Ethereum sweep that failed so is not "may have been sent": it can be built again (with a fresh gas estimate)
+      let mf = null;
+      if (e.id !== "send-reveal" && e.id !== "send-reveal-replace" && !cls.nothing_sent) {
+        // the step's own output carries only the head of live.js's stderr: the newest .err of the step is read whole as well
+        let errs = "";
+        // only this step's own stem: another step's .err in the same folder must never lend its lines (the independent read of 2026-11-26)
+        const ownErr = { "send-sweep-eth-alice": /^eth-sweep-alice-\d+\.err$/, "send-sweep-eth-bob": /^eth-sweep-bob-\d+\.err$/, "send-lock": /^eth-lock-\d+\.err$/, "send-refund-eth": /^eth-refund-\d+\.err$/ }[e.id] || null;
+        if (dir && ownErr) {
+          const fresh = listFiles(dir, ownErr).filter((x) => x.mtimeMs >= startedMs - 5000).sort((a, b) => b.mtimeMs - a.mtimeMs);
+          if (fresh.length) {
+            try {
+              errs = fs.readFileSync(fresh[0].full, "utf8").slice(0, 1024 * 1024);
+            } catch {
+              errs = "";
+            }
+          }
+        }
+        mf = minedFailedTx(`${stdout || ""}\n${stderr || ""}\n${errs}`);
+      }
+      if (mf) {
+        rec.mined_failed = true;
+        rec.tx = mf;
+        if (ETH_SWEEP_SPENDS.has(e.id)) {
+          rec.outcome = "mined_failed";
+          this.noteSpendRun(e.id, false);
+        }
+      }
       if (cls.nothing_sent) rec.error = `${cls.waiting ? "Nothing to send now" : "Refused"} by ${rec.script || e.script.name}, nothing was sent: ${cls.why}. The step can be tried again after a fresh dry run (this console released its latch for it).`;
       else if (cls.rerun_safe) rec.error = `${rec.script} says the transaction MAY have been sent: ${cls.why}. This console lets the step run again on a later tick.`;
     }
@@ -1639,7 +1790,8 @@ class ActionRunner {
           }
         }
       }
-      if (!main) rec.error = `${rec.error || ""} (no result file found: do not assume the transaction was not sent; wait for the next tick)`.trim();
+      if (rec.mined_failed) rec.error = `Mined and FAILED (status 0, transaction ${rec.tx}): nothing moved, only the fee was spent.`;
+      else if (!main) rec.error = `${rec.error || ""} (no result file found: do not assume the transaction was not sent; wait for the next tick)`.trim();
       else if (!rec.ok) rec.error = `${rec.error || ""} (the helper failed, but it may have sent the transaction before it did: do not assume it was not; wait for the next ticks and use the terminal if you must retry)`.trim();
       // A reveal that did not end in a clean success or a documented clean refusal (an unknown or a delivered-and-rejected outcome of the claim's
       // bounded send, a timeout, a signal, no readable result) may have published the secret: the careful reading, whatever the helper's text says.

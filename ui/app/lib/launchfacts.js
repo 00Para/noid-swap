@@ -22,7 +22,9 @@
     lock: Object.freeze({ measured: 583853n, ceiling: 700000n }),
     reveal: Object.freeze({ measured: 689324n, ceiling: 1000000n }),
     refund: Object.freeze({ measured: 158608n, ceiling: 200000n }),
-    sweep: Object.freeze({ measured: 21000n, ceiling: 21000n }),
+    // the sweep signs the node's own estimate plus 20 % (eth/scripts/live.js sweepGasLimit): 25,202 to a payout that already holds coins (21,001 estimated); a payout that never held
+    // anything costs far more on some networks (207,391 estimated on Sepolia, 2026-11-26), and live.js refuses above its cap of 300,000
+    sweep: Object.freeze({ measured: 25202n, ceiling: 300000n }),
   });
   // ---- NOID fees in micro-NOID, used before the node's own figure is known (runs 19 and 22; the close and the leftover sweep are the formula's minimum)
   const NOID_FEE = Object.freeze({ funding: 9000n, close: 5800n, sweep: 5800n });
@@ -141,7 +143,7 @@
   };
 
   /**
-   * The Ethereum fees of one role on one path. A step's price is min(cap, base + tip) times its measured gas; the sweep always counts 21,000 gas at the cap (it sends the balance minus that,
+   * The Ethereum fees of one role on one path. A step's price is min(cap, base + tip) times its measured gas; the sweep always counts its gas limit at the cap (it sends the balance minus that,
    * so what is under the cap stays in the swap key: the honest cost to the person). `max_wei` is the sum of the ceilings at the cap. `now_wei` is null when the base fee is not known
    * (or not fresh), and both are null when there is no cap.
    * @returns {{now_wei:string|null, max_wei:string|null, steps:{id:string, gas:string, ceiling:string, wei:string|null}[]}|null}

@@ -422,6 +422,23 @@ test("a role file that never saw the lock while the chain shows it settled raise
   assert.ok(!view("bob", mkTick({ phase: "received" })).alarms.some((a) => a.id === "file-behind-chain"));
 });
 
+test("a restored copy behind the chain names the restore, not another machine (run 24 F9)", () => {
+  const tick = mkTick({ phase: "funded", lock: mkLock({ claimed: true }), action: { action: "wait", reason: "waiting for funding finality" } });
+  const al = V.buildView({ ...input("bob", tick), restored: true }).alarms.find((a) => a.id === "file-behind-chain");
+  assert.ok(al);
+  assert.equal(al.level, "attn");
+  assert.match(al.text, /restored from a backup made at "funded"/);
+  assert.match(al.text, /already claimed/);
+  assert.match(al.text, /catches up by itself/);
+  assert.match(al.text, /Do not deposit again/);
+  assert.doesNotMatch(al.text, /another machine|Look at the machine/);
+  const alice = V.buildView({ ...input("alice", mkTick({ phase: "created", lock: mkLock({ refunded: true }) })), restored: true }).alarms.find((a) => a.id === "file-behind-chain");
+  assert.match(alice.text, /already refunded/);
+  // not restored, or restored: false: the old words
+  assert.match(V.buildView({ ...input("bob", tick), restored: false }).alarms.find((a) => a.id === "file-behind-chain").text, /another machine/);
+  assert.match(view("bob", tick).alarms.find((a) => a.id === "file-behind-chain").text, /another machine/);
+});
+
 // ---------------------------------------------------------------- which machine drives which role
 test("machineStatus: --role says it; a console on both roles infers it from which role has tick or loop data", () => {
   assert.deepEqual(V.machineStatus("alice", { alice: null, bob: { tick: {} } }), { alice: "here", bob: "other", inferred: false });
@@ -467,4 +484,49 @@ test("Bob's claim target is D - 19: a claim included there is final (tip >= incl
   const r = row(view("bob", mkTick({ tip: D - 302, phase: "funding_final" })), "claim_target");
   assert.equal(r.target, D - 19);
   assert.match(r.label, /D − 19/);
+});
+
+// ---------------------------------------------------------------- audit F-04
+test("restored Alice with a send waiting at nonce 0 gets no 'nobody loses' or 'do nothing until D' words", () => {
+  const tick = mkTick({ phase: "lock_final", lock: mkLock() });
+  tick.eth.signer_nonce_latest = 0;
+  tick.eth.signer_nonce_pending = 1;
+  tick.eth.second = { ...tick.eth.second, signer_nonce_latest: 0, signer_nonce_pending: 1 };
+  const v = view("alice", tick);
+  assert.equal(v.secret_may_be_public, true);
+  assert.doesNotMatch(v.abort.headline, /nobody loses/);
+  assert.match(v.abort.headline, /secret may be public/);
+  assert.ok(v.abort.you.some((t) => /secret may already be public/.test(t)));
+  assert.ok(!v.abort.you.some((t) => /do nothing until/.test(t)));
+  // the explicit flag of the tick does the same
+  const t2 = mkTick({ phase: "lock_final", lock: mkLock() });
+  t2.reveal_maybe_pending = true;
+  assert.equal(view("alice", t2).secret_may_be_public, true);
+  // and a clean tick keeps the quiet words
+  const clean = view("alice", mkTick({ phase: "lock_final", lock: mkLock() }));
+  assert.equal(clean.secret_may_be_public, false);
+  assert.match(clean.abort.headline, /nobody loses/);
+});
+
+test("the viewmodel's copy of revealMaybePending agrees with gate.revealMaybePending", () => {
+  const G = require("../lib/gate");
+  const base = (over = {}) => ({ phase_after: "lock_final", eth: {}, ...over });
+  const cases = [];
+  for (const phase of ["lock_final", "lock_seen", "funded", undefined]) {
+    for (const flag of [true, undefined]) {
+      for (const [l, p] of [[0, 1], [0, 2], [1, 1], [0, 0], [undefined, undefined]]) {
+        for (const claimed of [false, true]) {
+          for (const second of [undefined, null, { signer_nonce_latest: 0, signer_nonce_pending: 1 }, { signer_nonce_latest: 1, signer_nonce_pending: 2 }, "x"]) {
+            for (const second_error of [undefined, "down"]) {
+              const t = base({ phase_after: phase, reveal_maybe_pending: flag });
+              t.eth = { signer_nonce_latest: l, signer_nonce_pending: p, ...(claimed ? { claimed: { tx_hash: "0x1" } } : {}), ...(second !== undefined ? { second } : {}), ...(second_error ? { second_error } : {}) };
+              cases.push(t);
+            }
+          }
+        }
+      }
+    }
+  }
+  cases.push(null, undefined, "x", {});
+  for (const t of cases) assert.equal(V.revealMaybePendingCopy(t), G.revealMaybePending(t), JSON.stringify(t));
 });

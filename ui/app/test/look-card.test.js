@@ -219,10 +219,10 @@ test("the swap bar: the way back is a button with an icon and the words Your swa
   assert.equal(squash(textOf(back)), "Your swaps");
   // the title says what is sold and bought, so the role is not said again; the advice about the run folder is the first thing under Details, not a line above the card
   assert.equal(squash(textOf(bar)), "Your swaps / You sell 5 NOID for 0.001 ETH");
-  assert.doesNotMatch(textOf(bar), /Back up the whole run folder/);
+  assert.doesNotMatch(textOf(bar), /Save a backup of this swap/);
   assert.equal(bar.all((n) => n.className.split(/\s+/).includes("chip")).length, 0, "no role chip");
   const first = page.byId("pg-details-body").children[0];
-  assert.equal(squash(textOf(first)), "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough.");
+  assert.equal(squash(textOf(first)), "Save a backup of this swap and keep your recovery code: together they bring the swap back on another computer. The backup file alone is not enough.");
   assert.equal(first.className.includes("backup-note"), true);
   assert.equal(page.byId("pg-details-body").all((n) => n.tag === "p" && n.className.includes("backup-note")).length, 1, "once");
   assert.equal(page.document.body.classList.contains("on-swap"), true);

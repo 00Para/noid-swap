@@ -78,8 +78,9 @@ function createPageServer(pageDir, readFile = fs.readFileSync) {
   };
 }
 
-const ASK_KINDS = new Set(["restore", "fallback-new", "fallback", "invite"]);
-const SAY_KINDS = new Set(["wrong-code", "wrong-passphrase", "other-install", "imported", "not-imported"]);
+const ASK_KINDS = new Set(["restore", "fallback-new", "fallback", "invite", "backup-code"]);
+const CONFIRM_KINDS = new Set(["backup-adopt"]);
+const SAY_KINDS = new Set(["wrong-code", "wrong-passphrase", "other-install", "backup-wrong-code", "backup-other-install", "imported", "not-imported"]);
 const FOLDER_KINDS = new Map([
   ["import-run", "Choose the old run folder to import"],
   ["import-home", "Choose the old .noid-swap folder (its lock records)"],
@@ -97,11 +98,12 @@ function closedError() {
  * @param {object} o.guard          hardening.createGuard(electron)
  * @param {string} o.preloadPath    absolute path of preload-secret.js
  * @param {string} o.htmlPath       absolute path of secret/secret.html (its folder holds the page's three files)
+ * @param {string} [o.iconPath]    absolute path of the window icon (PNG)
  * @param {() => (object|null)} [o.getParent]   the main window, when there is one
  *
  * Called after the app is ready: the page's scheme handler is attached to the secret partition's session here.
  */
-function createSecretUi({ electron, guard, preloadPath, htmlPath, getParent }) {
+function createSecretUi({ electron, guard, preloadPath, htmlPath, getParent, iconPath }) {
   const { BrowserWindow, ipcMain, dialog } = electron;
   electron.session.fromPartition(PARTITION).protocol.handle(SCHEME, createPageServer(path.dirname(htmlPath)));
 
@@ -116,6 +118,7 @@ function createSecretUi({ electron, guard, preloadPath, htmlPath, getParent }) {
       maximizable: false,
       fullscreenable: false,
       title: "No1d Swap",
+      ...(typeof iconPath === "string" && iconPath ? { icon: iconPath } : {}),
       backgroundColor: WINDOW_BACKGROUND,
       autoHideMenuBar: true,
       parent: parent || undefined,
@@ -261,6 +264,12 @@ function createSecretUi({ electron, guard, preloadPath, htmlPath, getParent }) {
         return { ok: true, value: text };
       });
       return r.cancelled ? null : r.value;
+    },
+
+    async askConfirm({ kind }) {
+      if (!CONFIRM_KINDS.has(kind)) throw new TypeError("secret window: unknown confirm kind");
+      const r = await ask({ type: "confirm", kind }, (v) => (v && v.ack === true ? { ok: true, value: true } : { ok: false, error: "That was not accepted." }));
+      return !r.cancelled && r.value === true;
     },
 
     async askFolder({ kind }) {

@@ -144,3 +144,19 @@ test("isEnvelope tells a sealed file from the board's plain key file", () => {
   assert.equal(sealed.isEnvelope(null), false);
   assert.equal(sealed.isEnvelope([]), false);
 });
+
+test("swap-backup label: fixed AAD fileName lets a renamed file still open, while any changed byte fails", () => {
+  const envText = sealed.sealToText({ key: KEY, label: "swap-backup", runId: R, fileName: "swap-backup", plain: PLAIN });
+  assert.ok(sealed.open({ key: KEY, label: "swap-backup", runId: R, fileName: "swap-backup", envelope: envText }).equals(PLAIN));
+  const d = tmp();
+  cleanup.push(d);
+  const f1 = path.join(d, "backup-a.no1dbackup");
+  const f2 = path.join(d, "backup-b (1).no1dbackup");
+  fs.writeFileSync(f1, envText);
+  fs.copyFileSync(f1, f2);
+  assert.ok(sealed.open({ key: KEY, label: "swap-backup", runId: R, fileName: "swap-backup", envelope: fs.readFileSync(f2) }).equals(PLAIN));
+  const parsed = JSON.parse(envText);
+  parsed.ct = (parsed.ct[0] === "0" ? "1" : "0") + parsed.ct.slice(1);
+  assert.throws(() => sealed.open({ key: KEY, label: "swap-backup", runId: R, fileName: "swap-backup", envelope: parsed }), sealed.SealedError);
+  assert.throws(() => sealed.seal({ key: KEY, label: "swap-backup", runId: "install", fileName: "swap-backup", plain: PLAIN }), sealed.SealedError);
+});

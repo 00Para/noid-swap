@@ -41,7 +41,7 @@ const FORM = {
   profiles: {
     sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF" },
     rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null },
-    production: { chain: 1, max_noid: 2500, max_eth: 0.5, contract: "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70", mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" },
+    production: { chain: 1, max_noid: 20000, max_eth: 1, contract: "0x4e364cC86EdBF307CC6F336F3a72e1a24d284D70", mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" },
   },
   roles: ["alice", "bob"],
 };
@@ -65,8 +65,8 @@ test("new swap: amount hints follow the chosen network and state each coin's own
   assert.equal(textOf(g("ns-hint-eth_amount")), "Test limit: at most 0.01 ETH per swap.");
   g("ns-profile").value = "production";
   await g("ns-profile").fire("change");
-  assert.equal(textOf(g("ns-hint-noid_amount")), "At most 2,500 NOID per swap on mainnet.");
-  assert.equal(textOf(g("ns-hint-eth_amount")), "At most 0.5 ETH per swap on mainnet.");
+  assert.equal(textOf(g("ns-hint-noid_amount")), "At most 20,000 NOID per swap on mainnet.");
+  assert.equal(textOf(g("ns-hint-eth_amount")), "At most 1 ETH per swap on mainnet.");
   assert.doesNotMatch(textOf(g("ns-hint-noid_amount")), /test limit/i);
   assert.doesNotMatch(textOf(g("ns-hint-eth_amount")), /Same limit rule/i);
   g("ns-profile").value = "sepolia";

@@ -362,11 +362,11 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       expect(dry.code, dry.err).to.equal(0);
       const d = JSON.parse(dry.out);
       expect(d.dryRun).to.equal(true);
-      expect(d.sweep.valueWei).to.equal((before - 21000n * CAP_WEI).toString());
+      expect(d.sweep.valueWei).to.equal((before - SWEEP_LIMIT * CAP_WEI).toString());
       expect(await bal(bob.address)).to.equal(before);
       const real = await cli(["sweep", ...flags, "--key-stdin"], bob.key + "\n");
       expect(real.code, real.err).to.equal(0);
-      expect(JSON.parse(real.out).valueWei).to.equal((before - 21000n * CAP_WEI).toString());
+      expect(JSON.parse(real.out).valueWei).to.equal((before - SWEEP_LIMIT * CAP_WEI).toString());
       noKey(bob.key, dry.out, dry.err, real.out, real.err);
       // a second sweep: only dust is left
       const again = await cli(["sweep", ...flags, "--key-stdin"], bob.key + "\n");
@@ -587,6 +587,8 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
 
   // ---------------------------------------------------------------- sweep
   describe("sweep", () => {
+    // The in-process chain estimates 21,001 gas for a transfer to a payout address that exists or not, so the limit a sweep signs here is that plus 20 %.
+    const SWEEP_LIMIT = live.sweepGasLimit(21_001n);
     const sweepArgs = (file, to, extra = {}) => ({ swap: file, to, gasPriceGwei: CAP, ...extra });
 
     /** Bob's swap: a lock that is refunded (the swap failed) or still open. Returns what the tests need. */
@@ -605,18 +607,18 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       return { alice, bob, payout, hashlock, l, file };
     }
 
-    it("Bob after a refund: the whole balance minus 21,000 gas at the capped fee reaches the payout address, exactly", async () => {
+    it("Bob after a refund: the whole balance minus the estimated gas (+20 %) at the capped fee reaches the payout address, exactly", async () => {
       const { bob, payout, file } = await bobSwap();
       const before = await bal(bob.address);
       const to0 = await bal(payout.address);
-      const expected = before - 21000n * CAP_WEI;
+      const expected = before - SWEEP_LIMIT * CAP_WEI;
       const r = await live.sweep(provider, bob.w, sweepArgs(file, payout.address));
       expect(r.valueWei).to.equal(expected.toString());
       expect(r).to.include({ to: payout.address, from: bob.address, role: "bob", balanceBeforeWei: before.toString(), feeCapWei: CAP_WEI.toString() });
       expect(await bal(payout.address)).to.equal(to0 + expected);
       const left = await bal(bob.address);
       expect(left).to.be.gte(0n);
-      expect(left).to.be.lt(21000n * CAP_WEI); // only the part of the fee cap the chain did not charge
+      expect(left).to.be.lt(SWEEP_LIMIT * CAP_WEI); // only the part of the fee cap the chain did not charge
       expect(await nonce(bob.address, "pending")).to.equal(await nonce(bob.address));
     });
 
@@ -627,9 +629,9 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       const files = fs.readdirSync(dir).sort();
       const r = await live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun: true }));
       expect(r).to.include({ dryRun: true, sent: false, to: payout.address, from: bob.address });
-      expect(r.valueWei).to.equal((before - 21000n * CAP_WEI).toString());
-      expect(r.gasLimit).to.equal("21000");
-      expect(r.sweep).to.include({ role: "bob", key: bob.address, payout: payout.address, balanceWei: before.toString(), feeWei: (21000n * CAP_WEI).toString(), valueWei: r.valueWei });
+      expect(r.valueWei).to.equal((before - SWEEP_LIMIT * CAP_WEI).toString());
+      expect(r.gasLimit).to.equal(SWEEP_LIMIT.toString());
+      expect(r.sweep).to.include({ role: "bob", key: bob.address, payout: payout.address, balanceWei: before.toString(), feeWei: (SWEEP_LIMIT * CAP_WEI).toString(), valueWei: r.valueWei });
       expect(r.sweep.locksSeen).to.have.length(1);
       expect(r.sweep.locksSeen[0].state).to.equal("refunded");
       expect(await nonce(bob.address)).to.equal(n);
@@ -637,15 +639,15 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       expect(fs.readdirSync(dir).sort()).to.deep.equal(files);
     });
 
-    it("without a cap flag the node's own fee suggestion is pinned and the amount is still the balance minus 21,000 gas x that cap", async () => {
+    it("without a cap flag the node's own fee suggestion is pinned and the amount is still the balance minus the estimated gas x that cap", async () => {
       const { bob, payout, file } = await bobSwap();
       const before = await bal(bob.address);
       const dry = await live.sweep(provider, bob.w, { swap: file, to: payout.address, dryRun: true });
       const fee = BigInt(dry.sweep.feeWei);
-      expect(fee % 21000n).to.equal(0n);
+      expect(fee % SWEEP_LIMIT).to.equal(0n);
       expect(dry.sweep.valueWei).to.equal((before - fee).toString());
       const r = await live.sweep(provider, bob.w, { swap: file, to: payout.address });
-      expect(BigInt(r.valueWei) + BigInt(r.feeCapWei) * 21000n).to.equal(before);
+      expect(BigInt(r.valueWei) + BigInt(r.feeCapWei) * SWEEP_LIMIT).to.equal(before);
     });
 
     it("refuses while Bob's lock is open, naming the lock, and sends nothing; then allows it once the lock is refunded", async () => {
@@ -695,8 +697,8 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       const to0 = await bal(payout.address);
       const r = await live.sweep(provider, alice.w, sweepArgs(file, payout.address));
       expect(r.role).to.equal("alice");
-      expect(await bal(payout.address)).to.equal(to0 + before - 21000n * CAP_WEI);
-      expect(r.valueWei).to.equal((before - 21000n * CAP_WEI).toString());
+      expect(await bal(payout.address)).to.equal(to0 + before - SWEEP_LIMIT * CAP_WEI);
+      expect(r.valueWei).to.equal((before - SWEEP_LIMIT * CAP_WEI).toString());
     });
 
     it("Alice with a refunded lock may sweep her reserve (the swap failed); with no lock on chain only an ended phase allows it", async () => {
@@ -818,6 +820,24 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       expect(await nonce(bob.address)).to.equal(n);
     });
 
+    it("audit M-1: code at the payout seen only at \"pending\", or an unreadable code answer, refuses the sweep", async () => {
+      const bob = party();
+      const alice = party();
+      const hashlock = sha256Raw(rand32());
+      const payout = party().address;
+      await fund(bob.address, ethers.parseEther("0.5"));
+      const file = swapFile({ role: "bob", hashlock, alice: alice.address, bob: bob.address, payout, phase: "aborted" });
+      const n = await nonce(bob.address);
+      const wrap = (fn) => new Proxy(provider, { get: (t, k) => (k === "getCode" ? fn : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+      const pendingOnly = wrap(async (a, tag) => (tag === "pending" ? "0xef0100" + "ab".repeat(20) : provider.getCode(a, tag)));
+      for (const dryRun of [true, false]) {
+        await expect(live.sweep(pendingOnly, bob.w, sweepArgs(file, payout, { dryRun }))).to.be.rejectedWith(/has code on this chain/);
+      }
+      const unreadable = wrap(async (a, tag) => { if (String(a).toLowerCase() === payout.toLowerCase()) throw new Error("boom"); return provider.getCode(a, tag); });
+      await expect(live.sweep(unreadable, bob.w, sweepArgs(file, payout))).to.be.rejectedWith(/code could not be read/);
+      expect(await nonce(bob.address)).to.equal(n);
+    });
+
     it("refuses on the wrong chain, and the mainnet gate is the other sends'", async () => {
       const { bob, payout, hashlock, alice } = await bobSwap();
       const n = await nonce(bob.address);
@@ -859,11 +879,11 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       const dry = await live.sweep(asChain1, bob.w, { swap: file, to: payout.address, mainnet: true, maxFeeGwei: "25", dryRun: true });
       expect(dry.chainId).to.equal("1");
       expect(dry.feeCheck).to.include({ minRatio: "1" });
-      expect(dry.sweep.feeWei).to.equal((21000n * 25n * GWEI).toString());
-      expect(dry.worstCaseFeeWei).to.equal((21000n * 25n * GWEI).toString());
+      expect(dry.sweep.feeWei).to.equal((SWEEP_LIMIT * 25n * GWEI).toString());
+      expect(dry.worstCaseFeeWei).to.equal((SWEEP_LIMIT * 25n * GWEI).toString());
       const before = await bal(bob.address);
       const real = await live.sweep(asChain1, bob.w, { swap: file, to: payout.address, mainnet: true, maxFeeGwei: "25" });
-      expect(real.valueWei).to.equal((before - 21000n * 25n * GWEI).toString());
+      expect(real.valueWei).to.equal((before - SWEEP_LIMIT * 25n * GWEI).toString());
     });
 
     it("refuses a fee cap below the base fee, and a balance that does not exceed the fee", async () => {
@@ -875,8 +895,170 @@ describe("the swap's own Ethereum key (live.js, piece 2b)", function () {
       const bob2 = party();
       const alice = party();
       const file2 = swapFile({ role: "bob", hashlock: sha256Raw(rand32()), alice: alice.address, bob: bob2.address, payout: payout.address, phase: "aborted" });
-      await fund(bob2.address, 21000n * CAP_WEI);
+      await fund(bob2.address, SWEEP_LIMIT * CAP_WEI);
       await expect(live.sweep(provider, bob2.w, sweepArgs(file2, payout.address))).to.be.rejectedWith(/nothing to sweep/);
+    });
+
+    // The sweep asks the node for the gas of its own transfer (public Sepolia: about 207,391 for a payout address that never held anything, 21,000 for a funded one; the
+    // in-process chain estimates 21,001 for both). So the node's answer is stubbed here, for eth_estimateGas only; every other call goes to the chain.
+    describe("the gas of the transfer is the node's estimate", () => {
+      const estimateOf = (impl) => {
+        const orig = provider.send;
+        provider.send = async function (method, params) {
+          return method === "eth_estimateGas" ? impl(params) : orig.call(provider, method, params);
+        };
+        return () => delete provider.send; // back to the prototype's own send
+      };
+      const paddedLimit = (e) => (e * 120n + 99n) / 100n;
+
+      it("an estimate above 21,000 (a payout address that must be created): the limit is the estimate +20 %, the amount is balance - limit x cap, and the send is mined with status 1", async () => {
+        const { bob, payout, file } = await bobSwap();
+        const before = await bal(bob.address);
+        const to0 = await bal(payout.address);
+        const asked = [];
+        const restore = estimateOf((params) => (asked.push(params[0]), "0x" + (207_391).toString(16)));
+        try {
+          const limit = paddedLimit(207_391n);
+          expect(limit).to.equal(248_870n);
+          const dry = await live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun: true }));
+          expect(dry.gasEstimate).to.equal("207391");
+          expect(dry.gasLimit).to.equal(limit.toString());
+          expect(dry.sweep).to.include({ gasEstimate: "207391", gasLimit: limit.toString(), feeWei: (limit * CAP_WEI).toString(), balanceWei: before.toString() });
+          expect(dry.valueWei).to.equal((before - limit * CAP_WEI).toString());
+          expect(dry.sweep.valueWei).to.equal(dry.valueWei);
+          // the estimate is for the transfer it will send: from the key, to the payout, with a value above zero that the key holds
+          expect(asked[0].from).to.equal(bob.address);
+          expect(asked[0].to).to.equal(payout.address);
+          expect(BigInt(asked[0].value)).to.be.gt(0n);
+          expect(BigInt(asked[0].value)).to.be.lte(before);
+          expect(await bal(bob.address)).to.equal(before); // the dry run sent nothing
+          const r = await live.sweep(provider, bob.w, sweepArgs(file, payout.address));
+          expect(r.valueWei).to.equal(dry.valueWei);
+          expect(r.gasLimit).to.equal(limit.toString());
+          const rc = await provider.getTransactionReceipt(r.txHash);
+          expect(rc.status).to.equal(1);
+          const tx = await provider.getTransaction(r.txHash);
+          expect(tx.gasLimit, "the limit that was signed is the estimated one, not 21,000").to.equal(limit);
+          expect(await bal(payout.address)).to.equal(to0 + BigInt(dry.valueWei));
+          expect(await bal(bob.address)).to.be.lt(limit * CAP_WEI); // only the part of the fee cap the chain did not charge
+        } finally {
+          restore();
+        }
+      });
+
+      it("a transfer that costs more than 21,000 is out of gas under a fixed 21,000 (what Sepolia did to the old sweep), and goes through under the limit the sweep now signs", async () => {
+        const art = hre.artifacts.readArtifactSync("CostlyReceive");
+        const factory = new ethers.ContractFactory(art.abi, art.bytecode, carol);
+        const c = await factory.deploy();
+        await c.waitForDeployment();
+        const target = await c.getAddress();
+        const est = BigInt(await provider.send("eth_estimateGas", [{ from: funder.address, to: target, value: "0x1" }, "latest"]));
+        expect(est).to.be.gt(21000n);
+        let status = null;
+        try {
+          status = (await (await funder.sendTransaction({ to: target, value: 1n, gasLimit: 21000n })).wait()).status;
+        } catch (e) {
+          // the in-process chain may refuse an out-of-gas transaction at send time instead of mining it with status 0
+          status = e && e.receipt ? e.receipt.status : /out of gas|reverted|gas/i.test(String(e && (e.message || e.shortMessage))) ? 0 : "error: " + (e && e.message);
+        }
+        expect(status, "21,000 gas is not enough for this transfer: out of gas").to.equal(0);
+        const ok = await (await funder.sendTransaction({ to: target, value: 1n, gasLimit: sweepGasLimitOf(est) })).wait();
+        expect(ok.status).to.equal(1);
+      });
+
+      const sweepGasLimitOf = (e) => live.sweepGasLimit(e);
+
+      it("an estimate of exactly 21,000 (an existing payout address) is signed at 25,200: the margin is always applied, and the limit is never below 21,000", async () => {
+        const { bob, payout, file } = await bobSwap();
+        const before = await bal(bob.address);
+        const restore = estimateOf(() => "0x" + (21_000).toString(16));
+        try {
+          const r = await live.sweep(provider, bob.w, sweepArgs(file, payout.address));
+          expect(r.gasLimit).to.equal("25200");
+          expect(r.valueWei).to.equal((before - 25_200n * CAP_WEI).toString());
+          expect((await provider.getTransactionReceipt(r.txHash)).status).to.equal(1);
+        } finally {
+          restore();
+        }
+      });
+
+      it("the limit is never above the cap: 300,000 is refused as an estimate above it, and an estimate of 290,000 is signed at 300,000 (not at +20 %)", async () => {
+        expect(live.SWEEP_GAS_CAP).to.equal(300_000n);
+        expect(live.sweepGasLimit(290_000n)).to.equal(300_000n);
+        expect(live.sweepGasLimit(21_000n)).to.equal(25_200n);
+        expect(live.sweepGasLimit(100_000n)).to.equal(120_000n);
+        const { bob, payout, file } = await bobSwap();
+        const n = await nonce(bob.address);
+        const before = await bal(bob.address);
+        let restore = estimateOf(() => "0x" + (300_001).toString(16));
+        try {
+          for (const dryRun of [true, false]) {
+            await expect(live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun })), String(dryRun)).to.be.rejectedWith(/estimates 300001 gas .* above the limit of 300000.*probably a contract.*nothing was sent/);
+          }
+        } finally {
+          restore();
+        }
+        restore = estimateOf(() => "0x" + (290_000).toString(16));
+        try {
+          const dry = await live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun: true }));
+          expect(dry.gasLimit).to.equal("300000");
+          expect(dry.valueWei).to.equal((before - 300_000n * CAP_WEI).toString());
+        } finally {
+          restore();
+        }
+        expect(await nonce(bob.address)).to.equal(n);
+        expect(await bal(bob.address)).to.equal(before);
+      });
+
+      it("a failing estimate (a node error, an empty or odd answer, a number below 21,000) refuses the dry run and the send, sends nothing, and never falls back to 21,000", async () => {
+        const { bob, payout, file } = await bobSwap();
+        const n = await nonce(bob.address);
+        const before = await bal(bob.address);
+        const bad = [
+          [() => { throw Object.assign(new Error("execution reverted: receiver rejects"), { error: { code: 3, message: "execution reverted" } }); }, /could not estimate the gas of the sweep transfer \(execution reverted\).*nothing was sent.*does not guess a gas limit/],
+          [() => null, /is not a number.*nothing was sent/],
+          [() => "0x", /is not a number/],
+          [() => undefined, /is not a number/],
+          [() => 207391, /is not a number/],
+          [() => "0x0", /below the 21,000 of any transfer/],
+        ];
+        for (const [impl, re] of bad) {
+          const restore = estimateOf(impl);
+          try {
+            for (const dryRun of [true, false]) await expect(live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun })), String(impl)).to.be.rejectedWith(re);
+          } finally {
+            restore();
+          }
+        }
+        expect(await nonce(bob.address)).to.equal(n);
+        expect(await nonce(bob.address, "pending")).to.equal(n);
+        expect(await bal(bob.address)).to.equal(before);
+      });
+
+      it("a balance that covers 21,000 gas but not the estimated limit is refused as nothing to sweep, and sends nothing", async () => {
+        const { payout } = await bobSwap();
+        const bob2 = party();
+        const alice = party();
+        const file2 = swapFile({ role: "bob", hashlock: sha256Raw(rand32()), alice: alice.address, bob: bob2.address, payout: payout.address, phase: "aborted" });
+        await fund(bob2.address, 100_000n * CAP_WEI); // more than 21,000 x cap, less than 248,870 x cap
+        const n = await nonce(bob2.address);
+        const restore = estimateOf(() => "0x" + (207_391).toString(16));
+        try {
+          for (const dryRun of [true, false]) await expect(live.sweep(provider, bob2.w, sweepArgs(file2, payout.address, { dryRun }))).to.be.rejectedWith(/does not exceed the fee of the transfer at the cap \(248870 gas x 10\.0 gwei.*nothing to sweep/);
+        } finally {
+          restore();
+        }
+        expect(await nonce(bob2.address)).to.equal(n);
+      });
+
+      it("the dry run prints the estimate, its note and the limit (here the chain's own answer, 21,001)", async () => {
+        const { bob, payout, file } = await bobSwap();
+        const r = await live.sweep(provider, bob.w, sweepArgs(file, payout.address, { dryRun: true }));
+        expect(r.gasEstimate).to.equal("21001");
+        expect(r.gasLimit).to.equal(SWEEP_LIMIT.toString());
+        expect(r.gasEstimateNote).to.match(/estimated by the node/);
+        expect(r.sweep.gasEstimate).to.equal("21001");
+      });
     });
 
     it("an unresolved lock record beside the swap file refuses; one that names a refunded or claimed lock does not", async () => {

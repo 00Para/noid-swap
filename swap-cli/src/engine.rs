@@ -1682,7 +1682,18 @@ fn alice_fact(
 /// Review H1: this file shows that Alice's claim reached the Ethereum network (sent through the tool, mined, reorged, dropped): the
 /// secret may be public. A reveal merely DECIDED on the CLI path is not enough (it may never have been sent).
 pub fn secret_may_be_public(file: &SwapFile) -> bool {
-    file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_claim_mined" | "eth_claim_reorged" | "eth_reveal_dropped" | REVEAL_PENDING_SEEN | REVEAL_REVERTED_SEEN))
+    file.history.iter().any(|h| {
+        matches!(
+            h.event.as_str(),
+            "reveal_submitted"
+                | "eth_claim_mined"
+                | "eth_claim_reorged"
+                | "eth_reveal_dropped"
+                | REVEAL_PENDING_SEEN
+                | REVEAL_MAYBE_PENDING
+                | REVEAL_REVERTED_SEEN
+        )
+    })
 }
 
 /// REVIEW-6 R6-3: a claim of Alice's for this lock was MINED AND REVERTED (checked against the node from the hash the operator gave with
@@ -1727,12 +1738,21 @@ pub(crate) fn alice_lock_id(file: &SwapFile) -> Option<[u8; 32]> {
     }
 }
 
-/// Alice's file only: record [`REVEAL_REVERTED_SEEN`] once, from a reverted claim the watcher verified (and, with two Ethereum nodes, both).
+/// Alice's file only: record [`REVEAL_REVERTED_SEEN`] once, either from an explicit reverted claim verified by the watcher
+/// (and both nodes when two Ethereum nodes are configured), or in program mode (`file.eth_key.is_some()`) when Alice's
+/// fresh per-swap Ethereum key already has a mined send (`latest > 0`) while the HTLC lock is still open (unclaimed and
+/// unrefunded, confirmed by both nodes if a second node is configured).
 fn note_reverted_reveal(file: &mut SwapFile, eth: &EthObservation, now: u64) {
     if file.role != Role::Alice || last_history(file, REVEAL_REVERTED_SEEN).is_some() {
         return;
     }
     if reverted_claim_evidence(eth, alice_lock_id(file)) == Ok(true) {
+        file.log(REVEAL_REVERTED_SEEN, now);
+        return;
+    }
+    if matches!(file.phase, Phase::Alice(AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. }))
+        && alice_lock_id(file).is_some_and(|id| eth_mined_reveal_lock_still_open(file, eth, &id, now))
+    {
         file.log(REVEAL_REVERTED_SEEN, now);
     }
 }
@@ -1763,6 +1783,11 @@ fn reveal_pending_unknown(file: &SwapFile) -> bool {
 /// `reveal_eth` intent was held, so the claim was most likely sent and her secret is in the public mempool. Written once by
 /// [`tick_apply`]; `secret_may_be_public` counts it, `live.js` reads the same name.
 pub const REVEAL_PENDING_SEEN: &str = "reveal_pending_seen";
+/// Program mode (fresh per-swap Ethereum key): in `lock_seen` or `lock_final`, the file holds no reveal evidence yet, but the node
+/// reports a pending send waiting on Alice's swap key (latest nonce 0, pending nonce > 0). Because Alice's fresh swap key sends nothing
+/// before the reveal, that send can only be the reveal, so the secret may already be public and the late cutoff `T_reveal - DE` applies.
+/// Written once by [`tick_apply`]; `secret_may_be_public` counts it, `live.js` reads the same name.
+pub const REVEAL_MAYBE_PENDING: &str = "reveal_maybe_pending";
 /// T21-11: `live.js claim --swap FILE` wrote the reveal sidecar (`<swap file>.reveal-sent`) for THIS lock just before it broadcast the claim, so
 /// the secret may be public although no tick saw the claim in the pool. Written once by `tick` (see `reveal_sidecar`). It is evidence that a send
 /// was STARTED, like [`REVEAL_MAYBE_SENT`], so it relaxes the CUTOFF of a re-send only (`T_reveal - DE` instead of `T_reveal - M_A`, in
@@ -1773,12 +1798,76 @@ pub const REVEAL_SIDECAR_SEEN: &str = "reveal_sidecar_seen";
 /// been sent). Written once. A failure the executor knows sent nothing leaves no marker.
 pub const REVEAL_MAYBE_SENT: &str = "reveal_maybe_sent";
 
-/// REVIEW-5 R5-1: while a `reveal_eth` intent is held, a signer transaction in the node's mempool (pending nonce above latest, on a fresh
-/// observation) is the operator's send. Records [`REVEAL_PENDING_SEEN`] once, so a re-send past the `M_A` cutoff is judged by the late
-/// cutoff (`T_reveal - DE`) and not as a first publication. The nonce is the receiver key's, which a swap uses for nothing else; the same
-/// signal `intent --cancel` already reads to refuse a cancel.
+fn pending_preimage_matches(file: &SwapFile, lock_id: [u8; 32], p: &crate::watch::PendingPreimage) -> bool {
+    if p.lock_id != lock_id {
+        return false;
+    }
+    let s = crate::secret::Secret::from_bytes(p.preimage);
+    s.lock_word(file.public.params.eth.lock_kind) == file.public.hashlock
+}
+
+/// Program mode (fresh per-swap key): does the observation (and the second Ethereum node, if configured)
+/// agree that Alice's swap key has latest nonce 0 and a pending send waiting?
+fn eth_pending_at_zero_agreed(file: &SwapFile, eth: &EthObservation, now: u64) -> bool {
+    if eth.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S)
+        || eth.chain_id != Some(file.public.params.eth.chain_id)
+        || eth.second_error.is_some()
+    {
+        return false;
+    }
+    let p1 = matches!((eth.signer_nonce_latest, eth.signer_nonce_pending), (Some(0), Some(p)) if p > 0);
+    let p2 = match eth.second.as_deref() {
+        Some(s) => {
+            s.observed_at.is_some_and(|t| t.abs_diff(now) <= MAX_OBSERVATION_AGE_S)
+                && s.chain_id == Some(file.public.params.eth.chain_id)
+                && matches!((s.signer_nonce_latest, s.signer_nonce_pending), (Some(0), Some(p)) if p > 0)
+        }
+        None => true,
+    };
+    p1 && p2
+}
+
+/// Program mode (fresh per-swap key): does either configured Ethereum node already report a mined send (latest nonce > 0)?
+fn eth_mined_nonce_seen(eth: &EthObservation) -> Option<u64> {
+    eth.signer_nonce_latest
+        .filter(|&l| l > 0)
+        .or_else(|| eth.second.as_deref().and_then(|s| s.signer_nonce_latest.filter(|&l| l > 0)))
+}
+
+/// Program mode (fresh per-swap key): do all configured Ethereum nodes agree that Alice's swap key already has
+/// a mined send (`latest > 0`) while this swap's HTLC lock is still open (unclaimed and unrefunded)?
+/// Because Alice's swap key sends nothing before the reveal, a mined send with the lock still open can only be
+/// a reverted reveal whose calldata already published the secret.
+fn eth_mined_reveal_lock_still_open(file: &SwapFile, eth: &EthObservation, lock_id: &[u8; 32], now: u64) -> bool {
+    if file.role != Role::Alice || file.eth_key.is_none() {
+        return false;
+    }
+    let node_shows_reverted = |obs: &EthObservation| {
+        obs.observed_at.is_some_and(|t| t.abs_diff(now) <= MAX_OBSERVATION_AGE_S)
+            && obs.chain_id == Some(file.public.params.eth.chain_id)
+            && obs.signer_nonce_latest.is_some_and(|l| l > 0)
+            && obs.claimed.is_none()
+            && obs.refunded.is_none()
+            && obs.find_lock(lock_id).is_some_and(|l| !l.claimed && !l.refunded)
+    };
+    if eth.second_error.is_some() || !node_shows_reverted(eth) {
+        return false;
+    }
+    match eth.second.as_deref() {
+        Some(s) => node_shows_reverted(s),
+        None => true,
+    }
+}
+
+/// Records pending-reveal evidence once from a fresh Ethereum observation on our chain (requiring both nodes to agree whenever a second
+/// Ethereum node is configured):
+/// 1. [`REVEAL_PENDING_SEEN`]: a `reveal_eth` intent is held and the receiver key's pending nonce exceeds its latest nonce, OR Alice is
+///    in `lock_seen`/`lock_final` and the watcher reports a pending claim of her lock carrying the valid preimage.
+/// 2. [`REVEAL_MAYBE_PENDING`]: program mode only (`file.eth_key.is_some()`), Alice is in `lock_seen` or `lock_final` with no reveal
+///    evidence in the file yet and no mined claim observed, and the node reports latest nonce 0 and pending nonce > 0 on Alice's swap key.
+/// Once either is recorded, `secret_may_be_public` is true and the late cutoff (`T_reveal - DE`) applies immediately.
 fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
-    if !file.pending_intent.as_ref().is_some_and(|i| i.action == "reveal_eth") || last_history(file, REVEAL_PENDING_SEEN).is_some() {
+    if file.role != Role::Alice {
         return;
     }
     if eth.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S) {
@@ -1787,23 +1876,64 @@ fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
     if eth.chain_id != Some(file.public.params.eth.chain_id) {
         return;
     }
-    let primary_pending = matches!((eth.signer_nonce_latest, eth.signer_nonce_pending), (Some(l), Some(p)) if p > l);
-    if !primary_pending {
-        return;
-    }
-    // When a second Ethereum node is configured, a single primary node alone cannot flip REVEAL_PENDING_SEEN.
+    // When a second Ethereum node is configured, a single primary node alone cannot flip the pending-reveal markers.
     if eth.second_error.is_some() {
         return;
     }
-    if let Some(second) = eth.second.as_deref() {
-        if second.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S)
-            || second.chain_id != Some(file.public.params.eth.chain_id)
-            || !matches!((second.signer_nonce_latest, second.signer_nonce_pending), (Some(l), Some(p)) if p > l)
-        {
-            return;
+    let second_ok = eth.second.as_deref().map(|s| {
+        s.observed_at.is_some_and(|t| t.abs_diff(now) <= MAX_OBSERVATION_AGE_S)
+            && s.chain_id == Some(file.public.params.eth.chain_id)
+    });
+    if second_ok == Some(false) {
+        return;
+    }
+
+    if last_history(file, REVEAL_PENDING_SEEN).is_none() {
+        // Held reveal_eth intent + receiver pending nonce > latest nonce.
+        let intent_path = if file.pending_intent.as_ref().is_some_and(|i| i.action == "reveal_eth") {
+            let p1 = matches!((eth.signer_nonce_latest, eth.signer_nonce_pending), (Some(l), Some(p)) if p > l);
+            let p2 = match eth.second.as_deref() {
+                Some(s) => matches!((s.signer_nonce_latest, s.signer_nonce_pending), (Some(l), Some(p)) if p > l),
+                None => true,
+            };
+            p1 && p2
+        } else {
+            false
+        };
+
+        // Explicit pending claim of Alice's own lock carrying the valid preimage, even with no held intent.
+        let pending_claim_path = if matches!(file.phase, Phase::Alice(AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. })) {
+            if let Some(lock_id) = alice_lock_id(file) {
+                let p1 = eth.pending_preimage.as_ref().filter(|p| pending_preimage_matches(file, lock_id, p));
+                match (p1, eth.second.as_deref()) {
+                    (Some(a), Some(s)) => s.pending_preimage.as_ref().is_some_and(|b| b.lock_id == lock_id && b.preimage == a.preimage),
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if intent_path || pending_claim_path {
+            file.log(REVEAL_PENDING_SEEN, now);
         }
     }
-    file.log(REVEAL_PENDING_SEEN, now);
+
+    // Fresh per-swap Ethereum key (program mode): in lock_seen or lock_final with no reveal evidence in the file yet,
+    // a pending send waiting on Alice's swap key (latest nonce 0, pending nonce > 0) can only be the reveal.
+    if file.eth_key.is_some()
+        && last_history(file, REVEAL_MAYBE_PENDING).is_none()
+        && matches!(file.phase, Phase::Alice(AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. }))
+        && !reveal_evidence(file)
+        && !secret_may_be_public(file)
+        && eth.claimed.is_none()
+        && eth_pending_at_zero_agreed(file, eth, now)
+    {
+        file.log(REVEAL_MAYBE_PENDING, now);
+    }
 }
 
 /// The latest time Alice's reveal may still be sent under this file's profile: the `M_A` cutoff, or `T_reveal - DE` once the reveal may
@@ -1822,7 +1952,17 @@ fn reveal_evidence(file: &SwapFile) -> bool {
     let decided = last_history(file, "intent_decided:reveal_eth");
     let cancelled = last_history(file, "intent_cancelled:reveal_eth");
     (decided.is_some() && decided > cancelled)
-        || file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_reveal_dropped" | REVEAL_SIDECAR_SEEN))
+        || file.history.iter().any(|h| {
+            matches!(
+                h.event.as_str(),
+                "reveal_submitted"
+                    | "eth_reveal_dropped"
+                    | REVEAL_PENDING_SEEN
+                    | REVEAL_MAYBE_PENDING
+                    | REVEAL_REVERTED_SEEN
+                    | REVEAL_SIDECAR_SEEN
+            )
+        })
 }
 
 /// CHAOS F-17: once the recorded instance has been seen at the contract in a poll where Bob's claim could no longer be included
@@ -2323,6 +2463,26 @@ fn alice_action(
             if params::alice_refund_ready(noid.tip, d) {
                 return refund(noid);
             }
+            if let A::LockSeen { lock, .. } = p {
+                if file.eth_key.is_some() {
+                    if let Some(l) = eth_mined_nonce_seen(eth) {
+                        if eth_mined_reveal_lock_still_open(file, eth, &lock.lock_id, now) {
+                            notes.push(format!(
+                                "Alice's swap Ethereum key already has latest nonce {l} (> 0) while the lock is still open (unclaimed and unrefunded): treating this as a reverted reveal whose secret may be public"
+                            ));
+                        } else {
+                            notes.push(format!(
+                                "Alice's swap Ethereum key already has latest nonce {l} (> 0) and the lock state is not confirmed open on all configured nodes; waiting for the lock state from the chain"
+                            ));
+                        }
+                    } else if eth_pending_at_zero_agreed(file, eth, now) {
+                        notes.push(format!(
+                            "Alice's swap Ethereum key has a send waiting at nonce 0 (latest 0, pending {}); the reveal may be pending and the secret may be public; re-send with --replace at a higher fee cap instead of a plain second send",
+                            eth.signer_nonce_pending.unwrap_or(1)
+                        ));
+                    }
+                }
+            }
             Action::Wait {
                 reason: if last_history(file, "eth_claim_final").is_some() {
                     "the ETH was already received; only the NOID recovery is left".into()
@@ -2337,6 +2497,36 @@ fn alice_action(
         }
         A::LockFinal { lock, .. } => {
             let t_now = eth_now(eth, now);
+            // Program mode (fresh per-swap Ethereum key): if the swap key already has a mined send (latest nonce > 0):
+            // - if the lock is confirmed still open (unclaimed and unrefunded) on all configured nodes, the mined send
+            //   was a reverted reveal (secret may already be public), so record REVEAL_REVERTED_SEEN and allow a re-send
+            //   under the late cutoff T_reveal - DE;
+            // - otherwise (lock claimed/refunded, lagging, or second node disagrees), wait and never send a second reveal.
+            if file.eth_key.is_some() {
+                if let Some(latest_n) = eth_mined_nonce_seen(eth) {
+                    if eth_mined_reveal_lock_still_open(file, eth, &lock.lock_id, now) {
+                        notes.push(format!(
+                            "Alice's swap Ethereum key already has latest nonce {latest_n} (> 0) while the lock is still open (unclaimed and unrefunded): treating this as a reverted reveal whose secret may already be public; offering a re-send under the late cutoff T_reveal - DE"
+                        ));
+                    } else {
+                        let why = format!(
+                            "Alice's swap Ethereum key already has latest nonce {latest_n} (> 0) and the lock is not confirmed open on all configured nodes; waiting for the lock state from the chain and never sending a second reveal"
+                        );
+                        notes.push(why.clone());
+                        // After D the NOID contract only allows recovery, so an Ethereum read that fails or lags must not hold it back.
+                        return if params::alice_refund_ready(noid.tip, d) {
+                            refund(noid)
+                        } else {
+                            Action::Wait { reason: why }
+                        };
+                    }
+                }
+            }
+            if eth.pending_preimage.as_ref().is_some_and(|p| pending_preimage_matches(file, lock.lock_id, p)) {
+                notes.push(
+                    "a pending reveal of this lock carrying the secret is already in the Ethereum mempool; re-send with --replace at a higher fee cap instead of a plain second send".into(),
+                );
+            }
             // Review H1: once the secret may already be public (a reveal that was sent, mined, reorged or dropped), the reason for the
             // `M_A` cutoff is gone (it protects a first publication that has no time to be final); what is left is to get a claim mined
             // before `T_reveal`, so a re-send is allowed until `T_reveal - DE`.
@@ -2353,6 +2543,16 @@ fn alice_action(
             });
             match i2 {
                 Ok(()) => {
+                    // Program mode (fresh per-swap key): if latest nonce is 0 and a send is already waiting in the mempool
+                    // with no held intent in this file, never offer a plain second reveal; direct the operator to re-send with --replace.
+                    if file.eth_key.is_some() && file.pending_intent.is_none() && eth_pending_at_zero_agreed(file, eth, now) {
+                        let pending_n = eth.signer_nonce_pending.unwrap_or(1);
+                        let why = format!(
+                            "Alice's swap Ethereum key has a send waiting at nonce 0 (latest 0, pending {pending_n}); the reveal may be pending and the secret may be public; re-send with --replace at a higher fee cap instead of a plain second send"
+                        );
+                        notes.push(why.clone());
+                        return Action::Wait { reason: why };
+                    }
                     // CHAOS F-13: the instance she would hand over must be at the contract in THIS poll (a one-block funding reorg
                     // would otherwise let her reveal while Bob has nothing to claim until it comes back).
                     let visible = p.instance().and_then(|i| noid.find_instance(i)).is_some_and(|v| instance_fits(file, &v));
@@ -3714,9 +3914,9 @@ fn bob_action(
                         notes.push(format!("not lock_eth: {why}"));
                         return Action::Wait { reason: why };
                     }
-                    // T21 (docs/bob-concentration-gate.md): the producer-concentration screen. Under `production` a failing or incomplete
-                    // screen holds the lock back (unless the operator accepted the risk); under the other profiles it only warns. It reads the
-                    // observation and changes no state; every other decision is untouched.
+                    // T21 (docs/bob-concentration-gate.md): the producer screen. Since 0.2.0 the share (high or unknown) only warns and never holds the lock back;
+                    // under `production` a failing second-node cross-check or a remembered disagreement still does (unless the operator accepted it).
+                    // It reads the observation and changes no state; every other decision is untouched.
                     if let Some(why) = producer_gate::lock_gate(g, noid, now, notes).wait {
                         return Action::Wait { reason: why };
                     }
@@ -3974,11 +4174,38 @@ fn reveal_cutoff_wait_reason(intent: &PendingIntent) -> String {
     )
 }
 
+/// Audit F-03: the wait reason of a funding that is not to be made because the secret is already public on Ethereum or the swap is past its funding: a claim
+/// of this swap's lock or of another lock of its lock word (a claim carries the secret, so nobody can make one without it), or (with a per-swap Ethereum key) a
+/// send of that key on either node, mined or waiting. A lock or a refund alone does not count: anyone can make a lock with the public lock word, and a stranger's
+/// lock must not keep Alice from her first funding (scenario f10). `None` when nothing of the kind is seen.
+fn eth_shows_swap_used_text(file: &SwapFile, eth: &EthObservation) -> Option<String> {
+    let seen = |o: &EthObservation| {
+        o.claimed.is_some()
+            || !o.other_claims.is_empty()
+            || (file.eth_key.is_some() && (o.signer_nonce_latest.is_some_and(|n| n > 0) || o.signer_nonce_pending.is_some_and(|n| n > 0)))
+    };
+    if seen(eth) || eth.second.as_deref().is_some_and(seen) {
+        Some("this swap already has an Ethereum claim or a send from its swap key: a funding now could be closed to Bob with the public secret; not funding".to_string())
+    } else {
+        None
+    }
+}
+
 /// `fund_noid` is never offered while an instance already sits at our root and was not accepted (a second funding would make a second
 /// instance: live run 9). One function for the CLI path ([`tick_apply`]) and the library path ([`Runner::tick`]); `decide` itself
 /// still returns the `FundNoid` that its phase leads to.
-fn guard_fund_noid(file: &SwapFile, noid: &NoidObservation, decision: &mut Decision) {
-    if !matches!(decision.action, Action::FundNoid { .. }) || noid.instance.is_none() {
+fn guard_fund_noid(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, decision: &mut Decision) {
+    if !matches!(decision.action, Action::FundNoid { .. }) {
+        return;
+    }
+    // Audit F-03: a swap whose secret already shows on Ethereum (a claim) or whose fresh swap key already sent something is
+    // past its funding. A funding now could land beside a secret that is public, and anyone could close it to Bob.
+    if let Some(why) = eth_shows_swap_used_text(file, eth) {
+        decision.notes.push(format!("not fund_noid: {why}"));
+        decision.action = Action::Wait { reason: why };
+        return;
+    }
+    if noid.instance.is_none() {
         return;
     }
     let why = alice_instance_problem_text(file, noid)
@@ -4058,8 +4285,9 @@ pub fn tick_observe(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObserv
 
 fn tick_core(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObservation, now: u64, mode: TickMode) -> Result<TickOutcome, InvalidTransition> {
     let record = mode == TickMode::Record;
-    // REVIEW-6 R6-3: first, so this very decision already judges a re-send by the late cutoff.
+    // Record reverted or pending reveal evidence first, so this very decision already judges a re-send by the late cutoff.
     note_reverted_reveal(file, eth, now);
+    note_reveal_pending(file, eth, now);
     let mut decision = decide(file, noid, eth, now);
     for e in &decision.events {
         file.apply(e, now)?;
@@ -4085,7 +4313,7 @@ fn tick_core(file: &mut SwapFile, noid: &NoidObservation, eth: &EthObservation, 
     // Guards that only make sense against the ledger's own kinds.
     let kind = decision.action.kind();
     if kind == "fund_noid" {
-        guard_fund_noid(file, noid, &mut decision);
+        guard_fund_noid(file, noid, eth, &mut decision);
     } else if kind == "refund_noid" && our_instance_gone(file, noid) && alice_recovery_adoption(file, &file.phase, noid, now).is_none() {
         let why = "the instance is not visible, so there is nothing to refund (already closed? verify the contract receipts)".to_string();
         decision.notes.push(format!("not refund_noid: {why}"));
@@ -4659,7 +4887,7 @@ impl<E: Executor> Runner<E> {
     pub fn tick(&mut self, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Result<TickReport, RunnerError> {
         let mut decision = decide(&self.file, noid, eth, now);
         // The same guard as the CLI path: no second funding beside an instance that was not accepted.
-        guard_fund_noid(&self.file, noid, &mut decision);
+        guard_fund_noid(&self.file, noid, eth, &mut decision);
         let mut notes = decision.notes;
         let mut names = Vec::new();
         let phase_before = self.file.phase.clone();
@@ -5025,12 +5253,59 @@ mod tests {
             let n = foreign(tip);
             let mut d = decide(&file, &n, &eth_at(1, 1_000), 1_000);
             // From the opening on `decide` still returns the funding; the one guard of both paths turns it into the wait.
-            guard_fund_noid(&file, &n, &mut d);
+            guard_fund_noid(&file, &n, &eth_at(1, 1_000), &mut d);
             let Action::Wait { reason } = &d.action else { panic!("tip {tip}: {:?}", d.action) };
             reasons.push(reason.clone());
         }
         assert!(reasons.iter().all(|r| r.contains("is not counted as a funding") && !r.contains("too early")), "{reasons:?}");
         assert!(reasons.windows(2).all(|w| w[0] == w[1]), "{reasons:?}");
+    }
+
+    #[test]
+    fn created_with_eth_lock_or_used_swap_key_does_not_fund() {
+        let s = Secret::generate().unwrap();
+        let file = alice_file(&s);
+        let tip = file.public.params.h_create;
+        let n = noid_at(tip);
+        let guarded = |file: &SwapFile, eth: &EthObservation| {
+            // `decide` gives the funding its phase leads to; the guard is what reads the Ethereum observation.
+            let mut d = decide(file, &n, &eth_at(1, 1_000), 1_000);
+            assert_eq!(d.action, FUND);
+            guard_fund_noid(file, &n, eth, &mut d);
+            d.action
+        };
+        // a clean observation still funds
+        assert_eq!(guarded(&file, &eth_at(1, 1_000)), FUND);
+        let is_wait = |a: &Action| matches!(a, Action::Wait { reason } if reason.contains("already has an Ethereum claim or a send from its swap key"));
+        // a lock alone (anyone can make one with the public lock word) still funds
+        let mut eth = eth_at(1, 1_000);
+        eth.lock = Some(lock_for(&file, 1_000_000, 1));
+        assert_eq!(guarded(&file, &eth), FUND, "a lock alone");
+        // a claim was seen
+        let mut eth = eth_at(1, 1_000);
+        eth.claimed = Some(EthClaimed { lock_id: [3; 32], preimage: [2; 32], block_number: 1, tx_hash: [1; 32] });
+        assert!(is_wait(&guarded(&file, &eth)), "claimed");
+        // a nonce above 0 of the swap key, latest or pending, on the first node or the second one, counts only for a file with a swap key
+        let mut with_key = alice_file(&s);
+        with_key.eth_key = Some(crate::swapfile::EthKeyRecord { address: String::new(), secret: with_key.secret.clone().unwrap(), payout: String::new() });
+        let mut eth = eth_at(1, 1_000);
+        eth.signer_nonce_latest = Some(1);
+        assert!(is_wait(&guarded(&with_key, &eth)), "latest nonce 1");
+        assert_eq!(guarded(&file, &eth), FUND, "no swap key in the file: the nonce is not read");
+        let mut eth = eth_at(1, 1_000);
+        eth.signer_nonce_latest = Some(0);
+        eth.signer_nonce_pending = Some(1);
+        assert!(is_wait(&guarded(&with_key, &eth)), "pending nonce 1");
+        let mut eth = eth_at(1, 1_000);
+        let mut second = eth_at(1, 1_000);
+        second.signer_nonce_latest = Some(1);
+        eth.second = Some(Box::new(second));
+        assert!(is_wait(&guarded(&with_key, &eth)), "second node nonce 1");
+        // nonce 0 everywhere: still funds
+        let mut eth = eth_at(1, 1_000);
+        eth.signer_nonce_latest = Some(0);
+        eth.signer_nonce_pending = Some(0);
+        assert_eq!(guarded(&with_key, &eth), FUND);
     }
 
     #[test]

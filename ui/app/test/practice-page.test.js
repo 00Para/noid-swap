@@ -244,7 +244,7 @@ test("Bob's side: the invitation and Alice's file are two parts, the check line,
   await page.flush();
   assert.equal(headline(page), "Approve this swap");
   assert.equal(root(page).all((n) => n.tag === "input" && /^ap-stmt-/.test(n.attrs.id || "")).length, 4);
-  assert.match(squash(textOf(root(page))), /65 %/);
+  assert.match(squash(textOf(root(page))), /does not refuse/);
   assert.match(squash(textOf(root(page).querySelector("#ap-typed-hint"))), /0\.001 ETH/);
 });
 

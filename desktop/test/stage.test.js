@@ -42,6 +42,9 @@ function makeRepo(root, { liveJs = LIVE_JS, poseidonJs = POSEIDON_JS, pkg } = {}
   put(repo, "desktop/secret/secret.html");
   put(repo, "desktop/secret/secret.js");
   put(repo, "desktop/assets/tray.png");
+  put(repo, "desktop/assets/icon.png");
+  put(repo, "desktop/build/icon.png");
+  put(repo, "desktop/build/icon.ico");
   put(repo, "desktop/tools/recovery.js");
   put(repo, "desktop/test/a.test.js");
   put(repo, "desktop/scripts/stage.js");
@@ -90,6 +93,7 @@ test("stage lays out exactly what ships, and leaves out tests, scripts, mocks an
   try {
     const { r } = run(t);
     assert.deepEqual(listAll(r.out), [
+      "desktop/assets/icon.png",
       "desktop/assets/tray.png",
       "desktop/lib/shell.js",
       "desktop/lib/updates.js",
@@ -180,6 +184,9 @@ test("every required input missing stops the stage, and the output is not writte
     "desktop/lib",
     "desktop/secret",
     "desktop/assets",
+    "desktop/assets/icon.png",
+    "desktop/build/icon.png",
+    "desktop/build/icon.ico",
     "desktop/tools/recovery.js",
     "desktop/runtime/package.json",
     "desktop/runtime/package-lock.json",

@@ -766,7 +766,7 @@ test("12.2: the vault exposes no function that hands the secret or the recovery 
   const { vault, ui, dataDir } = makeVault();
   assert.deepEqual(
     Object.keys(vault).sort(),
-    ["boardSealer", "historySealer", "inviteSecret", "keyCheck", "mode", "newSwapAllowed", "open", "passphraseFor", "ready", "recoveryConfirmed", "restore", "setInviteSecret", "showRecoveryCode", "state", "writeMigratedPassphrase"].sort(),
+    ["backupSealer", "boardSealer", "historySealer", "inviteSecret", "keyCheck", "mode", "newSwapAllowed", "open", "openBackup", "passphraseFor", "ready", "recoveryConfirmed", "restore", "setInviteSecret", "showRecoveryCode", "state", "writeMigratedPassphrase"].sort(),
   );
   await vault.open();
   const S = secretFromShown(ui);

@@ -224,8 +224,8 @@ test("program mode: opening a swap reads /api/run?swap=ID with the key; the swap
   const bar = page.text("pg-swapbar");
   assert.match(bar, /Your swaps/);
   assert.match(bar, /You sell 5 NOID for 0.001 ETH/); // the swap's name, with no role chip after it
-  assert.doesNotMatch(bar, /Back up the whole run folder/, "the advice is inside Details, not above the card");
-  assert.match(page.text("pg-details-body").replace(/\s+/g, " ").trim(), /^Back up the whole run folder .* keep your recovery code/);
+  assert.doesNotMatch(bar, /Save a backup of this swap/, "the advice is inside Details, not above the card");
+  assert.match(page.text("pg-details-body").replace(/\s+/g, " ").trim(), /^Save a backup of this swap .* keep your recovery code/);
   assert.doesNotMatch(bar, /back up the swap file/i);
   // the first screen of a swap with no tick: the steps of this swap, no install, no terms
   const steps = page.text("start");
@@ -323,7 +323,7 @@ test("program mode: the new-swap form offers the test networks and Ethereum main
   const profile = form.all((n) => n.attrs.id === "ns-profile")[0];
   assert.deepEqual(profile.children.map((o) => o.attrs.value), ["sepolia", "rehearsal", "production"]);
   const whole = textOf(form);
-  assert.match(whole, /Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap/);
+  assert.match(whole, /Ethereum mainnet: everything is real, at most 20,000 NOID and 1 ETH per swap/);
   assert.match(whole, /Never tick this for a swap with someone you do not know/);
   const bobEth = form.all((n) => n.attrs.id === "ns-bob_eth")[0].parent;
   const role = form.all((n) => n.attrs.id === "ns-role")[0];

@@ -35,7 +35,7 @@ Plain words for the pieces (the design doc explains them in full):
 | `src/watch/http.rs` | `HttpJsonRpc`: HTTP/1.1 `POST` over `std::net::TcpStream`, `http://` only; reply by Content-Length, chunked or to EOF; one deadline for the whole call (default 30 s); HTTP ≠ 200 → `Transport`, JSON-RPC `error` → `Remote` | 9 unit tests against a loopback listener (Content-Length, chunked split across writes, no length, HTTP 500, 401, JSON-RPC error, malformed replies, timeout, connect refused) |
 | `src/watch/exec.rs` | `ExecJsonRpc`: spawns `curl` (default `/mnt/c/Windows/System32/curl.exe` if it exists, else `curl`) with the request on stdin; reaches `http://127.0.0.1:9601` from WSL and any `https://` endpoint; watchdog kills a hung program | 6 unit tests with fake shell-script programs (no socket, no curl) |
 | `src/watch/producers.rs` | **T21** the producer reader: `paranoid_getBlockHeader` in JSON-RPC batches of up to 250 (single calls when a batch is refused), a rolling cache `<swap file>.producers`, a re-read below a hash mismatch, the link check on `prev_hash`, a 40 s budget per tick, the counts of the last 2,880 and 720 blocks, the cross-check against the second node; `ProducerSummary` (no address in it) | unit-tested in `tests/producer_gate.rs` |
-| `src/producer_gate.rs` | **T21** what the engine makes of the summary: the single-address limit (35 % production, 28 % sepolia and rehearsal), the stale and fail-closed rules, the top-two warning, the override, and the texts of every note | unit-tested and in `tests/producer_gate.rs` |
+| `src/producer_gate.rs` | **T21** what the engine makes of the summary: the single-address warning limit (35 % production, 28 % sepolia and rehearsal; since 0.2.0 a warning, never a refusal), the unknown-share warning, the second-node and remembered-disagreement refusals, the top-two warning, the override, and the texts of every note | unit-tested and in `tests/producer_gate.rs` |
 | `src/watch/record.rs` | `RecordingRpc`: wraps any transport, appends every node answer (result or JSON-RPC error; never transport failures) to a fixture file `FixtureRpc` replays; refuses to overwrite a recording | 1 unit test + round trip through the binary |
 | `src/contract_params.rs` | the Parano1d contract parameters of a swap in the forms the stock wallet takes (`pruv` params, SDK definition JSON), compiled through `noid_pruv` and checked against the swap file's 699-byte opening; `check_object_file` | tested (`tests/alice_params.rs`) |
 | `src/watch/parano1d.rs` | **M2.4** Parano1d watcher: tip, epoch anchor, fee floor and estimate, our instance (`getObjectInstances`/`getObjectStatus`), pending calls whose mempool opening is ours, tracked txid | method names and shapes **verified against the live node 2026-11-04** (table below); `idle.json`, `recorded_misc.json` and six LIVE RUN 1 files (funded unfinal / final / first seen, claim pending / included / final) are real recordings of the first real swap; `funded.json` (drives the `cli.rs` tick test) and `pending_claim.json` (a second contract's call next to ours) stay synthesized; drift-guard test over the vendor source |
@@ -337,6 +337,11 @@ until `tip + 1 >= H_create`, so the funding was offered only from `H_create` to 
 2. An instance at the contract root that is not accepted: a `wait` with the instance text (unchanged). Before the funding opens it comes from
    `alice_action`, from then on through `guard_fund_noid` (which turns a `fund_noid` into a wait while any instance sits at the root); the words are
    the same, and a second funding is never offered.
+   `guard_fund_noid` also turns a `fund_noid` into a wait when the secret already shows on Ethereum (a claim of this swap's lock or of another lock of its
+   lock word; a claim carries the secret, so nobody makes one without it) or, for a file with a swap key, when that key's nonce is above 0 (latest or pending)
+   on either node: a funding then could land beside a public secret (audit of 0.2.0, F-03; test `created_with_eth_lock_or_used_swap_key_does_not_fund`). A lock
+   or a refund alone does not hold the funding back: anyone can make a lock with the public lock word, and a stranger's lock must not keep Alice from her first
+   funding (scenario `f10_a_bad_first_lock_does_not_hide_the_correct_second_one`).
 3. `tip + 1 < max(H_create - D_offset, 279,388)`: `wait`, "too early to fund: the funding opens at height X (tip T); a funding before it would lock the
    NOID for more than twice the swap's planned length (D is D_offset blocks after H_create)", or, when the trial start sets X, "... the trial start; no
    swap starts before it". `D_offset` is the profile's own (738 / 122 / 302). Saturating arithmetic: an `H_create` below `D_offset` opens at the trial
@@ -671,9 +676,12 @@ Design, numbers and the full texts: [`../docs/bob-concentration-gate.md`](../doc
 leg, `tick` reads who produced the last 2,880 and the last 720 Parano1d blocks from his own node's headers. **It is a screen, not a defence**: it stops
 a swap against a producer that is visibly large, and nothing else.
 
-- **What it does.** Under `production`, `lock_eth` is not offered (the action is `wait`, the reason and a note start with `ALARM:`) while one address
-  produced more than 35 % of either window (a share exactly at the limit passes; the comparison is on integers), or when the headers cannot be read in
-  full, are stale (more than 2 blocks below the tip, or read more than 120 s ago), the chain of `prev_hash` does not link, no summary was read, or the
+- **Since 0.2.0 (the owner's decision) the share never refuses.** One address above 35 % of either window (28 % under `sepolia` and `rehearsal`; the comparison is on integers)
+  gives a `WARNING:` note; above 50 % a second, loud `WARNING (T21): one producer mined ...` note (above half of the blocks no time window protects Bob); headers that cannot be
+  read in full, stale headers (more than 2 blocks below the tip, or read more than 120 s ago), a chain of `prev_hash` that does not link or no summary at all give the share as
+  unknown, with a `WARNING (T21): the share ... cannot be read now (unknown)` note. `lock_eth` is offered in every one of these cases, in every profile. The risk stays: a miner
+  who is Alice can take both legs.
+- **What still refuses.** Under `production`, `lock_eth` is not offered (the action is `wait`, the reason and a note start with `ALARM:`) when the
   second Parano1d node names another block or another producer at the anchor height (three below the lower tip) or at a sampled height, or could
   not be read for the cross-check, or an earlier such finding is on record beside the swap file or in its history (below). Under `sepolia`
   and `rehearsal` (limit 28 %) the same evaluation runs and only prints a `WARNING:` note; the lock is offered as before. The two largest addresses
@@ -735,17 +743,16 @@ a swap against a producer that is visibly large, and nothing else.
   change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is
   never implied by a profile, and under `sepolia` and `rehearsal` it changes nothing. The helpers pass it only when `ACCEPT_PRODUCER_CONCENTRATION=1`
   is set in `env.local.sh`.
-- **The narrow acknowledgement (2026-11-20).** `--acknowledge-producer-share PERMILLE` (a whole number from 1 to 650; a compiled maximum, anything else is refused at
-  parse time, before a node is asked) is for program-mode production swaps between people who have a reason to trust each other. Under `production` it waives
-  **only** (a) the refusal "one address above the limit" while the measured share is at most PERMILLE in BOTH windows (integer comparison on the counts, so a share
-  exactly at PERMILLE passes), and (b) the refusal "no second Parano1d node" for Bob's `lock_eth` when exactly one `--noid-rpc` was given and its host is loopback
+- **The narrow acknowledgement (2026-11-20; since 0.2.0 only the loopback waiver).** `--acknowledge-producer-share PERMILLE` (a whole number from 1 to 650; a compiled maximum, anything else is refused at
+  parse time, before a node is asked) is kept for compatibility. The share part is a no-op since 0.2.0: the share never refuses. Under `production` it waives
+  **only** the refusal "no second Parano1d node" for Bob's `lock_eth` when exactly one `--noid-rpc` was given and its host is loopback
   (`127.0.0.1`, `localhost`, `[::1]`: the person's own node). It **never** waives unreadable, incomplete or stale headers, a second node that disagrees or cannot be read,
   a remembered disagreement (the `.producer-differs` file or `producer_differs_seen` in the history), the alert latch of a pending lock, or a share above PERMILLE.
-  When it is the reason a lock is offered the tick prints `ACKNOWLEDGED: producer share N permille <= ceiling C ...` (not `OVERRIDDEN`) and the swap file's history
+  When it is the reason a lock is offered the tick prints `ACKNOWLEDGED (--acknowledge-producer-share C): producer share N permille ...` (not `OVERRIDDEN`) and the swap file's history
   gets one entry `producer_share_acknowledged: largest L permille of 2880 and S permille of 720, ceiling C permille, at T`, written once per swap like the override
   entry; `eth/scripts/live.js lock` does not count it as an override of its own refusals. With `--accept-producer-concentration` also given, the old flag keeps its own
   entry and the acknowledgement writes none. Under `sepolia` and `rehearsal` it changes nothing. The tick JSON carries a `producer_screen` object (Bob, before his lock; `null`
-  otherwise): `state` (`pass`, `concentrated`, `cannot_check`, `stale`, `disagrees`, `one_node`, `remembered`), `enforced`, `share_permille_long`, `share_permille_short`,
+  otherwise): `state` (`pass`, `concentrated` and `share_unknown` (warnings), `cannot_check`, `stale`, `disagrees`, `one_node`, `remembered`), `share_known`, `warning` (the plain warning text or null), `share_refuses` (always false), `enforced`, `share_permille_long`, `share_permille_short`,
   `limit_permille`, `second_node` (`ok`, `missing`, `disagrees`, `remembered`, `unreadable`), `single_node_loopback`, `waivable_by_acknowledgement` (the screen passes or fails
   only for a reason the flag can waive), `hard_max_permille` (650), `acknowledged_ceiling_permille` and `waived_by_acknowledgement`; it is computed without the flag, so it shows
   why the screen refuses on its own. Tests: `tests/producer_gate.rs` (the D2 block at the end).
@@ -1635,7 +1642,7 @@ D_offset = B_fund + B_final + B_bob + RHS(I1) + margin
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` | |
 | Full "Alice never reveals" cycle (creation to her final refund) | 756 blocks | 140 blocks | 320 blocks (≈ 2 h 40) | `D_offset + 18` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s | local Hardhat finalizes at once; Sepolia does not |
-| caps | 2,500 NOID (2,500,000,000 micro-NOID), 0.5 ETH (500,000,000,000,000,000 wei), Ethereum chain **1 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
+| caps | 20,000 NOID (20,000,000,000 micro-NOID), 1 ETH (1,000,000,000,000,000,000 wei), Ethereum chain **1 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
 
 A happy path under `sepolia` still settles in about 45 minutes (Alice's funding final ≈ 9 min, Bob's Sepolia lock finalized ≈ 13–19 min, the reveal,
 Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody does not show up.
@@ -1799,6 +1806,16 @@ digest; Bob's file; the blobs of the claim secret, the NOID wallet, the Ethereum
 error showing the key; `ethkey address` and `emit` on both kinds of file; `new-alice` and `new-bob` through the binary. **Not tested:** that `ethkey new` and `ethkey emit`
 refuse a terminal (the test runner has none; the check is `IsTerminal` on stdin and stdout), and that the address belongs to the key (`live.js address` does that, with its own
 tests).
+
+## Swap backup and restore: what the swap tool added (0.2.0)
+
+Three changes in the engine and one command serve the backup and restore of the desktop program (`ui/app/README.md`, "Swap backup and restore"). Offline only.
+
+- **`swap-cli verify-sealed FILE`** opens every sealed field the swap file holds (the secret, the swap wallet, the Ethereum swap key) with the passphrase from the environment, never argv, checks each against the file's public section (the claim authority, the wallet address, the key's address) and prints only which fields opened and the two addresses, never a secret byte. The restore pipeline runs it on a restored file before it renames the folder into place. `status` also prints `pending_intent`, `history_count` and `eth_chain_id`.
+- **A reveal that may already be public (program mode, the fresh per-swap Ethereum key).** Alice's key sends nothing before the reveal, so in `lock_seen` or `lock_final`: a send waiting at nonce 0 (latest 0, pending above 0, both nodes agreeing when two are configured) is recorded once as `reveal_maybe_pending`; a mined send (latest above 0) while the lock is still open on every configured node is recorded as `reveal_reverted_seen`. Both count in `secret_may_be_public`, so a re-send is judged by the late cutoff `T_reveal - DE` and a plain second reveal is not offered while a send is waiting (the note says to re-send with `--replace` at a higher fee cap). If the lock is not confirmed open (claimed, refunded, a lagging or disagreeing node) the tool waits and never sends a second reveal; after `D` Alice's NOID recovery is not held back by an Ethereum read that fails or lags. `tick` prints `reveal_maybe_pending` and `reveal_cutoff_passed`.
+- **`live.js`:** `claim --replace` may replace the nonce-0 send of Alice's fresh swap key without identifying it, only in program mode (`--key-stdin`), at latest nonce 0 and pending nonce 1, with the swap file in `lock_seen` or `lock_final`, no pending action and no other Ethereum send in its history; the tip is the asked tip raised by 12.5 %, kept at or under the cap (a test network without a cap lets the node price it), and an under-priced refusal says it needs a higher fee cap. Every other replacement keeps the strict rule. A real `lock` is refused when the swap's fresh key already has a latest nonce above 0 (it sent something the file does not account for: another copy of Bob's file may have locked).
+
+Tests: `tests/verify_sealed.rs`, `tests/restore_stale.rs`, `tests/two_copies.rs` (two copies of one file against one simulated chain, all six step orders); on the Ethereum side `eth/test/live-claim-replace-nonce0.test.js` and `eth/test/live-lock-nonce.test.js` (a two-copy lock on a Hardhat chain).
 
 ## Known gaps (follow-ups, not bugs in what is tested)
 

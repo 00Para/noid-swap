@@ -109,11 +109,11 @@ test("without the swap's numbers the lines that need them are shortened and noth
 });
 
 test("the loud-fee box appears at 500 basis points and not at 499; a base fee that is not read leaves the 'at most' figure", async () => {
-  // run 8's amounts at the production profile: 26.4 %
+  // run 8's amounts at the production profile: 26.8 % (the sweep counts its estimated gas limit since 2026-11-26)
   const loud = await openSwap(SW, (r) => payload(r, { autopilot: aliceAp() }));
   const box = approvalOf(loud).all((n) => has(n, "alarm") && has(n, "warn"))[0];
   assert.ok(box);
-  assert.match(squash(textOf(box)), /Network fees are about 26\.4 % of what you swap\. A larger amount, or a time when Ethereum fees are lower, costs a smaller share\./);
+  assert.match(squash(textOf(box)), /Network fees are about 26\.8 % of what you swap\. A larger amount, or a time when Ethereum fees are lower, costs a smaller share\./);
   // the edge: a launch object at 500 and at 499 basis points (the page draws what `loud` says)
   const at = async (bp) => {
     const l = mkLaunch("alice");
@@ -218,10 +218,13 @@ test("Alice's ask line on mainnet only: in the approval and on the Check stage's
 
 test("Bob's lock check on the Check stage (mainnet): ok, not ok, loading and stale", async () => {
   const at = async (c) => openSwap(SB, (r) => payload(r, { line_match: null, autopilot: bobAp(), prog: { summary: { network: "mainnet" }, bob_can_lock: c } }));
-  assert.match(card(await at({ ok: true, state: "ok", why: null, share_text: "52.7" })), /Your program can lock on this swap now\. One address mined 52\.7 % of Parano1d's recent blocks; you will be asked to acknowledge that\. Tell Alice\./);
+  assert.match(card(await at({ ok: true, state: "ok", why: null, share_text: "52.7" })), /Your program can lock on this swap now\. One producer mined 52\.7 % of recent Parano1d blocks\. You will be asked to confirm that you read this\. Tell Alice\./);
   assert.match(card(await at({ ok: false, state: "no", why: "There is no second Parano1d node.", share_text: null })), /Your program would not lock now: There is no second Parano1d node\. Tell Alice before she deposits\./);
   assert.match(card(await at({ ok: false, state: "loading", why: null, share_text: null })), /Reading who mined Parano1d's recent blocks…/);
   assert.match(card(await at({ ok: false, state: "stale", why: null, share_text: null })), /The last reading is old; the program reads again\./);
+  // the share never refuses: a warning, said in words, and an unknown share too
+  assert.match(card(await at({ ok: true, state: "ok", why: null, share_text: "76.0", known: true, level: "high", warning: "One producer mined 76.0 % of recent Parano1d blocks. A Bob who faces that miner as Alice can lose his ETH: above half of the blocks, no time window protects him." })), /Your program can lock on this swap now\. One producer mined 76\.0 % of recent Parano1d blocks\. A Bob who faces that miner as Alice can lose his ETH: above half of the blocks, no time window protects him\. You will be asked to confirm that you read this\./);
+  assert.match(card(await at({ ok: true, state: "ok", why: null, share_text: null, known: false, level: "unknown", warning: "The share of one producer in recent Parano1d blocks is unknown right now. A Bob who faces a miner who is Alice can lose his ETH." })), /Your program can lock on this swap now\. The share of one producer in recent Parano1d blocks is unknown right now\./);
   // not on a test network
   const test = await openSwap(SB, (r) => payload(r, { line_match: null, autopilot: bobAp(), l: { profile: "sepolia" }, prog: { bob_can_lock: { ok: true, state: "ok", share_text: "10" } } }));
   assert.doesNotMatch(card(test), /Your program can lock/);

@@ -526,6 +526,40 @@ test("--replace: the hash comes from the engine's tick (reveal) or the helper's 
   }
 });
 
+test("replaceTxFor reveal_eth falls back to the eth-claim.err hash", () => {
+  const s = setup();
+  try {
+    s.f.writeTick("alice", F.spendTick("reveal_eth", { held: true }));
+    // nothing sent yet: no hash
+    assert.equal(s.runner.replaceTxFor(SPENDS["send-reveal-replace"], null), null);
+    // program mode never fills pending_preimage: the local `sent:` line of the last re-send is the hash
+    s.f.write("eth-claim.err", `warning
+sent: ${TX} nonce 0 maxFeePerGas 25 gwei
+`);
+    assert.equal(s.runner.replaceTxFor(SPENDS["send-reveal-replace"], null), TX);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test("replaceTxFor reveal_eth keeps the earlier re-send's hash after a refused run truncated eth-claim.err (reveal fee record)", () => {
+  const s = setup();
+  try {
+    s.f.writeTick("alice", F.spendTick("reveal_eth", { held: true }));
+    const R1 = "0x" + "a1".repeat(32);
+    const R2 = "0x" + "b2".repeat(32);
+    s.f.write("alice.swap.json.reveal-fees", `${JSON.stringify({ version: 1, lock_id: "cd".repeat(32), tx_hash: R1.slice(2), nonce: 0, max_fee_per_gas: "25000000000", max_priority_fee_per_gas: "1125000000", at: 1 })}
+${JSON.stringify({ version: 1, lock_id: "cd".repeat(32), tx_hash: R2.slice(2), nonce: 0, max_fee_per_gas: "30000000000", max_priority_fee_per_gas: "1265625000", at: 2 })}
+{"torn":
+`);
+    // the refused real run left an eth-claim.err with no `sent:` line
+    s.f.write("eth-claim.err", "refusing: the fee cap is under 2 x the base fee");
+    assert.equal(s.runner.replaceTxFor(SPENDS["send-reveal-replace"], null), R2);
+  } finally {
+    s.cleanup();
+  }
+});
+
 test("a reveal that was mined and reverted says the secret is public, in the job and in the audit log", () => {
   const s = setup();
   try {
@@ -1421,5 +1455,41 @@ test("C2: a console whose run lock is no longer its own spends nothing (the file
   } finally {
     fs.rmSync(lockDir, { recursive: true, force: true });
     s.cleanup();
+  }
+});
+
+test("restore selftest uses call-height from first_read when no tick", async () => {
+  const fsx = require("fs");
+  const osx = require("os");
+  const pathx = require("path");
+  const root = fsx.mkdtempSync(pathx.join(osx.tmpdir(), "no1d-selftest-"));
+  try {
+    const argsFile = pathx.join(root, "args.json");
+    const stub = pathx.join(root, "stub.js");
+    fsx.writeFileSync(stub, `require("fs").writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));`);
+    const dir = pathx.join(root, "run");
+    fsx.mkdirSync(pathx.join(dir, "bob"), { recursive: true });
+    fsx.writeFileSync(pathx.join(dir, "restored.json"), JSON.stringify({ v: 1, restored_at: "2026-11-25T10:00:00Z", backup_seq: 1, backup_made_at: "2026-11-25T09:00:00Z", backup_phase: "funding_final", first_read: { noid_tip: 300100, eth_block: 5, at: "2026-11-25T10:00:00Z" } }));
+    const { ActionRunner } = require("../lib/actions");
+    const mk = (noidRpc) => {
+      const r = Object.create(ActionRunner.prototype);
+      r.cfg = { runDirs: [dir] };
+      r.program = { tools: { swapCli: [process.execPath, stub], curl: "/usr/bin/curl" } };
+      r.settingsSource = { load: () => ({ ok: true, settings: { noid_rpc: noidRpc } }) };
+      return r;
+    };
+    const read = () => JSON.parse(fsx.readFileSync(argsFile, "utf8"));
+    // no tick: the height of the restore's first reading, plus one
+    let res = await mk("https://node.example/rpc").runRestoreSelftest({ roles: { bob: null } });
+    assert.equal(res.ok, true);
+    assert.deepEqual(read().slice(0, 1), ["self-test"]);
+    assert.deepEqual(read().slice(2), ["--call-height", "300101"]);
+    // no tick and no first reading: the settings' node with the transport a tick uses
+    fsx.rmSync(pathx.join(dir, "restored.json"));
+    res = await mk("https://node.example/rpc").runRestoreSelftest({ roles: { bob: null } });
+    assert.equal(res.ok, true);
+    assert.deepEqual(read().slice(2), ["--noid-rpc", "https://node.example/rpc", "--transport", "curl", "--curl-path", "/usr/bin/curl"]);
+  } finally {
+    fsx.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -301,8 +301,8 @@ test("new swap: every error is by form field; production, unknown fields, an uns
     };
     assert.match(errors(FORM({ profile: "bogus" })).profile, /one of/);
     // Ethereum mainnet: the caps (one above each), version 1 only and no single-node switch are refused by field
-    assert.match(errors(FORM({ profile: "production", noid_amount: "2500.000001" })).noid_amount, /cap|over/);
-    assert.match(errors(FORM({ profile: "production", eth_amount: "0.500000000000000001" })).eth_amount, /cap|over/);
+    assert.match(errors(FORM({ profile: "production", noid_amount: "20000.000001" })).noid_amount, /cap|over/);
+    assert.match(errors(FORM({ profile: "production", eth_amount: "1.000000000000000001" })).eth_amount, /cap|over/);
     assert.match(errors(FORM({ profile: "production", contract_version: 2 })).contract_version, /1 only/);
     assert.match(errors(FORM({ profile: "production", single_node_ok: true })).single_node_ok, /not on Ethereum mainnet/);
     assert.match(errors(FORM({ extra: "x" })).extra, /unknown field/);

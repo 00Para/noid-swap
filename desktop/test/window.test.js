@@ -285,3 +285,27 @@ test("the token still appears only in loadURL arguments after a reload", () => {
     assert.ok(!JSON.stringify(c.args).includes("tok-abc"), `${c.who}.${c.name} carries the token`);
   }
 });
+
+test("the first close that only hides tells the shell once; a close that really closes does not", () => {
+  const electron = createFakeElectron();
+  const guard = createGuard(electron);
+  guard.install();
+  let active = true;
+  let notices = 0;
+  const ctl = createMainWindow({ electron, guard, isPackaged: true, url: URL_WITH_TOKEN, shouldHide: () => active, onHiddenToTray: () => notices++ });
+  assert.equal(ctl.window.close(), false);
+  assert.equal(notices, 1);
+  assert.equal(ctl.window.close(), false);
+  assert.equal(notices, 1, "once per session");
+  active = false;
+  assert.equal(ctl.window.close(), true);
+  assert.equal(notices, 1);
+});
+
+test("a notice that throws does not stop the hide", () => {
+  const electron = createFakeElectron();
+  const guard = createGuard(electron);
+  guard.install();
+  const ctl = createMainWindow({ electron, guard, isPackaged: true, url: URL_WITH_TOKEN, shouldHide: () => true, onHiddenToTray: () => { throw new Error("x"); } });
+  assert.equal(ctl.window.close(), false);
+});

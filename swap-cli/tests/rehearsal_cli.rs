@@ -106,25 +106,25 @@ fn the_caps_are_enforced_when_the_file_is_built_and_when_it_is_checked() {
     let mut big = base.clone();
     big.params.eth.amount_wei = 10u128.pow(17);
     assert!(big.check().unwrap_err().to_string().contains("wei"));
-    // Production carries caps too (2026-11-20): 2,500 NOID, 0.5 ETH, chain 1. At the cap passes, one unit above fails, and the test chains are refused.
+    // Production carries caps too (NOID cap 20,000 since 2026-11-27): 20,000 NOID, 1 ETH, chain 1. At the cap passes, one unit above fails, and the test chains are refused.
     let prod_build = |amount: u64, wei: u128, chain: u64| {
         let mut eth = base.params.eth.clone();
         eth.chain_id = chain;
         eth.amount_wei = wei;
         SwapPublic::build(&secret, Variant::Raw, &cast.alice, &cast.bob, amount, 5_800, 300_000, eth)
     };
-    assert!(prod_build(2_500_000_000, 500_000_000_000_000_000, 1).is_ok());
-    assert!(prod_build(2_500_000_001, 500_000_000_000_000_000, 1).unwrap_err().to_string().contains("micro-NOID"));
-    assert!(prod_build(2_500_000_000, 500_000_000_000_000_001, 1).unwrap_err().to_string().contains("wei"));
+    assert!(prod_build(20_000_000_000, 1_000_000_000_000_000_000, 1).is_ok());
+    assert!(prod_build(20_000_000_001, 1_000_000_000_000_000_000, 1).unwrap_err().to_string().contains("micro-NOID"));
+    assert!(prod_build(20_000_000_000, 1_000_000_000_000_000_001, 1).unwrap_err().to_string().contains("wei"));
     assert!(prod_build(5_000_000, 10u128.pow(15), 11_155_111).unwrap_err().to_string().contains("chain id"));
     assert!(prod_build(5_000_000, 10u128.pow(15), 31_337).unwrap_err().to_string().contains("chain id"));
     // A production file edited by hand above the cap is refused when it is checked (Bob'"'"'s side: a bundle over the cap).
     let mut ok = prod_build(5_000_000, 10u128.pow(15), 1).unwrap();
     assert!(ok.check().is_ok());
-    ok.params.eth.amount_wei = 500_000_000_000_000_001;
+    ok.params.eth.amount_wei = 1_000_000_000_000_000_001;
     assert!(ok.check().unwrap_err().to_string().contains("wei"));
     ok.params.eth.amount_wei = 10u128.pow(15);
-    ok.params.amount_micronoid = 2_500_000_001;
+    ok.params.amount_micronoid = 20_000_000_001;
     assert!(ok.check().is_err());
 }
 
@@ -423,4 +423,13 @@ fn gates_prints_the_sepolia_numbers() {
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v["t_reveal"].as_str().unwrap().contains("B_bob"), "{v}");
+}
+
+#[test]
+fn production_cap_is_one_eth_accepted_and_one_wei_more_refused() {
+    use swap_cli::params::ProfileName;
+    let g = ProfileName::Production.gates();
+    assert_eq!(g.max_eth_wei, Some(1_000_000_000_000_000_000));
+    assert!(g.check_caps(1, 1_000_000_000_000_000_000, 1).is_ok());
+    assert!(g.check_caps(1, 1_000_000_000_000_000_001, 1).is_err());
 }

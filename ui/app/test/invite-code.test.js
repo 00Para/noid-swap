@@ -16,8 +16,8 @@ const BOB_MAINNET = makeSettings({
   profile: "production",
   chain_id: 1,
   contract: MAINNET_CONTRACT,
-  amount_micronoid: "2500000000",
-  amount_wei: "500000000000000000",
+  amount_micronoid: "20000000000",
+  amount_wei: "1000000000000000000",
   alice_noid: null,
   alice_eth: null,
   bob_eth: null,
@@ -44,8 +44,8 @@ test("encodeCode -> parseCode round-trips Sepolia and mainnet invitations with e
   const r2 = inv.parseCode(mainCode);
   assert.equal(r2.ok, true);
   assert.equal(r2.fields.profile, "production");
-  assert.equal(r2.fields.noid_amount, "2500");
-  assert.equal(r2.fields.eth_amount, "0.5");
+  assert.equal(r2.fields.noid_amount, "20000");
+  assert.equal(r2.fields.eth_amount, "1");
 
   // Raw JSON still parses through parseCode as well
   const raw = inv.build(BOB, BOB_ETH);
@@ -136,4 +136,73 @@ test("Bob's stage card exposes 'Copy invite code' and posts to /api/invitation/c
   await page.flush();
   assert.deepEqual(posted, [{ swap: F.SWAP_B }]);
   assert.deepEqual(copied, [code]);
+});
+
+// Run 24 findings F6 and F7.
+async function bobCardPage(opts) {
+  const code = inv.encodeCode(BOB, BOB_ETH);
+  const page = await loadPage({
+    navigator: opts.navigator || {},
+    fetch: F.router({
+      "GET /api/program": () => ({ status: 200, body: F.prog() }),
+      "GET /api/run": () => ({
+        status: 200,
+        body: F.runPayload("bob", {
+          jobs: [F.job("setup"), F.job("wallet-setup-bob")],
+          wallet: { roles: { alice: {}, bob: { swap_file: false, addresses_file: true, key_address: BOB_ETH, status: null } } },
+        }),
+      }),
+      "POST /api/invitation/code": () => ({ status: 200, body: { ok: true, code } }),
+    }),
+  });
+  if (opts.exec) page.document.execCommand = opts.exec;
+  const rows = page.byId("pg-root").all((n) => n.tag === "button" && n.className.includes("pg-row"));
+  await rows[1].click();
+  await page.flush();
+  const btn = page.byId("pg-card").all((n) => n.tag === "button" && textOf(n).includes("Copy invitation code"))[0];
+  await btn.click();
+  await page.flush();
+  return { page, code };
+}
+
+test("F6: with no clipboard API the code is copied through the hidden textarea", async () => {
+  let execs = 0;
+  const { page } = await bobCardPage({ navigator: {}, exec: (c) => (c === "copy" ? (execs++, true) : false) });
+  assert.equal(execs, 1);
+  assert.match(textOf(page.byId("pg-card")), /Copied invitation code\. Send it to Alice\./);
+});
+
+test("F6: a refused clipboard also falls back to the hidden textarea", async () => {
+  let execs = 0;
+  const { page } = await bobCardPage({ navigator: { clipboard: { writeText: async () => { throw new Error("denied"); } } }, exec: () => (execs++, true) });
+  assert.equal(execs, 1);
+  assert.match(textOf(page.byId("pg-card")), /Copied invitation code/);
+});
+
+test("F6: when both ways fail the code shows in a read-only wrapping box and a line says to copy by hand", async () => {
+  const { page, code } = await bobCardPage({ navigator: {}, exec: () => false });
+  const card = page.byId("pg-card");
+  assert.match(textOf(card), /Copy failed: select the code and copy it by hand\./);
+  assert.doesNotMatch(textOf(card), /Invitation code:\s*$/);
+  const ta = card.all((n) => n.tag === "textarea" && n.attrs["aria-label"] === "Invitation code")[0];
+  assert.ok(ta, "a code box");
+  assert.equal(ta.value, code);
+  assert.ok(String(ta.attrs.readonly).length > 0);
+  assert.match(String(ta.attrs.style), /break-all/);
+  assert.ok(code.startsWith("no1dinv1:"));
+});
+
+test("F7: Use code with an empty box says what to do right under the box and focuses the box", async () => {
+  const form = { profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: CONTRACT } }, roles: ["alice", "bob"] };
+  const page = await loadPage({ fetch: F.router({ "GET /api/program": () => ({ status: 200, body: F.prog({ form }) }), "GET /api/settings": { ok: true, settings: null } }) });
+  await page.byId("pg-new").click();
+  await page.flush();
+  const root = page.byId("pg-root");
+  const g = (id) => root.all((n) => n.attrs.id === id)[0];
+  await g("ns-paste-invitation").click();
+  await page.flush();
+  assert.equal(textOf(g("ns-inv-code-msg")), "Paste Bob's invitation code into this box first (Ctrl+V, or Cmd+V on a Mac), then press Use code.");
+  assert.equal(textOf(g("ns-general")), "");
+  assert.equal(page.document.activeElement, g("ns-inv-code"));
+  assert.match(g("ns-inv-code").attrs.placeholder, /Ctrl\+V/);
 });

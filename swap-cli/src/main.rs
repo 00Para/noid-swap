@@ -150,12 +150,14 @@ const USAGE: &str = "usage:
   the two Parano1d nodes to agree (same instance, tips within 2 blocks); Alice's reveal needs the two Ethereum nodes to agree (same lock, finalized
   heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3); a second node that runs on another machine and is reached through a local port (an SSH tunnel) can be declared with --noid-rpc2-is-remote / --eth-rpc2-is-remote, which changes the text of the same-host note and nothing else. An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).
   Producer concentration (threat T21, docs/bob-concentration-gate.md): before Bob locks, `tick` reads the Parano1d block headers from his own node (--noid-rpc, never a
-  fixture), keeps them in FILE.producers, and counts who produced the last 2,880 and the last 720 blocks. Under the production profile `lock_eth` is not offered while one
-  address produced more than 35 % of either window, or when the headers cannot be read in full, are stale, or the second Parano1d node disagrees or is missing (under production
-  --single-node-ok does not relax the second-node part of this check); under sepolia and rehearsal the same check only warns. The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives the production refusals: it
-  prints a warning on every tick and writes one history entry; it is never implied by a profile. --acknowledge-producer-share PERMILLE (1 to 650; tick and the other commands that read the nodes) is the narrow form, production only: it waives
-  only 'one address above the limit' while the share in BOTH windows is at most PERMILLE, and 'no second Parano1d node' when the one --noid-rpc is a loopback node (127.0.0.1, localhost, [::1]); it never waives unreadable or stale headers, a second node
-  that disagrees, a remembered disagreement or the alert latch; the tick prints an ACKNOWLEDGED line and the history records producer_share_acknowledged. The tick JSON carries the structured `producer_screen` object. A detection that cannot come from two honest nodes (another producer for a
+  fixture), keeps them in FILE.producers, and counts who produced the last 2,880 and the last 720 blocks. Since 0.2.0 THE SHARE NEVER REFUSES: one address above 35 % (production)
+  gets a warning, above 50 % a loud one (no time window protects Bob from a majority miner who is Alice), and a share that cannot be read (no headers, incomplete, stale) is
+  reported as unknown with a warning; `lock_eth` is offered in every case. Under the production profile `lock_eth` is still not offered while the second Parano1d node disagrees
+  or is missing (under production --single-node-ok does not relax the second-node part of this check) or after a remembered disagreement; under sepolia and rehearsal that check only warns.
+  The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives those production refusals: it
+  prints a warning on every tick and writes one history entry; it is never implied by a profile. --acknowledge-producer-share PERMILLE (1 to 650; tick and the other commands that read the nodes) is kept for compatibility: production only,
+  it waives 'no second Parano1d node' when the one --noid-rpc is a loopback node (127.0.0.1, localhost, [::1]) and nothing about the share (the share part is a no-op since 0.2.0); it never waives a second node
+  that disagrees, a remembered disagreement or the alert latch; the tick prints an ACKNOWLEDGED line and the history records producer_share_acknowledged. The tick JSON carries the structured `producer_screen` object (state, share_known, warning). A detection that cannot come from two honest nodes (another producer for a
   block with equal hashes, confirmed by a second ask; or another block below an anchor they agree on) is kept in FILE.producer-differs and, with `tick --apply`, in the history
   of FILE, and refuses the lock for the rest of that swap file under production: once a `tick --apply` has run, removing the marker does not clear it (the swap file's history keeps it); the ways on are the flag above or a new swap file.
   It is a screen, not a defence.";
@@ -199,6 +201,7 @@ fn run(args: &[String]) -> Res<()> {
         "new-bob" => new_bob(&flags),
         "bundle" => bundle(positional.first().ok_or(USAGE)?),
         "status" => status(positional.first().ok_or(USAGE)?),
+        "verify-sealed" => verify_sealed(positional.first().ok_or(USAGE)?, &flags),
         "secret" => secret(positional.first().ok_or(USAGE)?, &flags),
         "self-test" => self_test(positional.first().ok_or(USAGE)?, &flags),
         "tick" => tick(positional.first().ok_or(USAGE)?, &flags),
@@ -947,6 +950,8 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
         "observe_only": observe_only,
         "action_executed": false,
         "phase_after": if apply { work.phase.name() } else { file.phase.name() },
+        "reveal_maybe_pending": work.history.iter().any(|h| h.event == swap_cli::engine::REVEAL_MAYBE_PENDING),
+        "reveal_cutoff_passed": decision.reveal_cutoff_passed,
     });
     print_json(&v)
 }
@@ -1583,7 +1588,10 @@ fn summary_json(file: &SwapFile) -> Res<String> {
         "phase": file.phase.name(),
         "phase_detail": file.phase,
         "pending_action": file.pending_action,
+        "pending_intent": file.pending_intent.as_ref().map(|i| serde_json::json!({ "action": i.action, "decided_at": i.decided_at })),
+        "history_count": file.history.len(),
         "history": file.history,
+        "eth_chain_id": p.eth.chain_id,
         "hashlock": format!("0x{}", hex::encode(file.public.hashlock)),
         "claim_authority": file.public.claim_authority,
         "contract_root": file.public.contract_root,
@@ -1614,6 +1622,55 @@ fn summary_json(file: &SwapFile) -> Res<String> {
 fn status(path: &str) -> Res<()> {
     let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
     println!("{}", summary_json(&file)?);
+    Ok(())
+}
+
+/// `verify-sealed FILE`: opens every sealed field present in the swap file with the passphrase from the environment
+/// (never argv), proves binding to the public section (claim authority, wallet address, Ethereum account), prints
+/// only which fields opened (never any secret bytes), and zeroizes on drop.
+fn verify_sealed(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
+    let pass = passphrase(flags)?;
+    let mut opened: Vec<&'static str> = Vec::new();
+    let mut wallet_address: Option<String> = None;
+    let mut eth_address: Option<String> = None;
+
+    if file.secret.is_some() {
+        let s = file.decrypt_secret(&pass).map_err(|e| e.to_string())?;
+        let auth = s.authority(file.public.params.variant).to_bech32();
+        if auth != file.public.claim_authority {
+            return Err("secret claim authority does not match the swap file".into());
+        }
+        drop(s);
+        opened.push("secret");
+    }
+    if let Some(w) = &file.wallet {
+        let m = file.decrypt_wallet(&pass).map_err(|e| e.to_string())?;
+        let key = swap_cli::wallet::key::WalletKey::from_secret(m);
+        let addr = key.address().to_bech32();
+        if addr != w.address {
+            return Err("wallet master secret does not derive the recorded wallet address".into());
+        }
+        wallet_address = Some(addr);
+        drop(key);
+        opened.push("wallet");
+    }
+    if file.eth_key.is_some() {
+        let k = file.decrypt_eth_key(&pass).map_err(|e| e.to_string())?;
+        eth_address = Some(swap_cli::ethkey::address_hex(&k.address()));
+        drop(k);
+        opened.push("eth_key");
+    }
+
+    let out = serde_json::json!({
+        "ok": true,
+        "role": file.role.to_string(),
+        "phase": file.phase.name(),
+        "opened": opened,
+        "wallet_address": wallet_address,
+        "eth_address": eth_address,
+    });
+    println!("{}", serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?);
     Ok(())
 }
 

@@ -207,7 +207,7 @@
  *                    ceiling x 1.25 (the gas ceilings are LOCK_GAS_RESERVE and REFUND_GAS_RESERVE below: above what the live runs measured). The fee ceiling is the cap a send
  *                    would use (--max-fee-gwei on mainnet, --gas-price-gwei elsewhere, else the node's own suggestion). Prints the numbers (wei, decimal strings) and
  *                    `covered`; exit status 0 when the key's balance covers it, 3 when it does not. Integer arithmetic only.
- *   sweep --swap FILE --to ADDR --key-stdin|--key-file F [--dry-run]   sends the key's whole balance minus the fee (21,000 gas x the capped fee) to ADDR, and refuses unless ALL
+ *   sweep --swap FILE --to ADDR --key-stdin|--key-file F [--dry-run]   sends the key's whole balance minus the fee (the node's gas estimate of the transfer, +20 %, 21,000 to 300,000 gas, x the capped fee) to ADDR, and refuses unless ALL
  *                    hold: the key is the file's own account (alice_receiver for Alice, bob_sender for Bob) and the file's eth_key record's address; ADDR is the payout address
  *                    stored in the file's eth_key record (and not the key itself); the file holds no pending lock_eth, refund_eth or reveal_eth intent (nor a pending action
  *                    of those kinds); the node is on the file's chain (and mainnet only with --mainnet, the production file and --max-fee-gwei) and the contract is the pinned
@@ -257,7 +257,15 @@ const SHA256_CLAIM_GAS_LIMIT = 200_000n;
 // on the local chain) so the reserve covers them with room. The claim's gas is the fixed limit above.
 const LOCK_GAS_RESERVE = { sha256: 250_000n, poseidon: 700_000n };
 const REFUND_GAS_RESERVE = { sha256: 100_000n, poseidon: 200_000n };
-const TRANSFER_GAS = 21_000n; // a plain ETH transfer to an address without code
+const TRANSFER_GAS = 21_000n; // a plain ETH transfer to an address that already exists: the least a transfer can cost, never the amount a sweep signs
+// The sweep asks the node what its transfer costs. Fixed 21,000 gas was wrong on Sepolia: a plain transfer to an address that had never held anything cost about
+// 207,391 gas there (eth_estimateGas; 21,000 to a funded address), so a sweep signed with 21,000 was mined out of gas, status 0, and only the fee was spent. No code runs for it
+// (read-only check of a mined sweep of run 24: type 2, empty input, no authorization list, the payout had no code before and after): the newer fork Sepolia runs charges the
+// creation of a new account inside a plain transfer. The cost depends on whether the recipient is empty, not on the amount, so the estimate is taken with the real (affordable) value. The signed limit is the estimate plus 20 %, but never more
+// than SWEEP_GAS_CAP; an estimate above the cap is refused (a payout that needs that much is probably a contract, and the program pays plain addresses only).
+const SWEEP_GAS_CAP = 300_000n;
+const SWEEP_GAS_MARGIN_NUM = 120n; // +20 %, rounded up: (x * 120 + 99) / 100
+const SWEEP_GAS_MARGIN_DEN = 100n;
 const RESERVE_NUM = 125n; // the reserve is gas x fee ceiling x 1.25, in integers: (x * 125 + 99) / 100
 const RESERVE_DEN = 100n;
 // A floor on the price per gas the DEPOSIT reserve is sized from, applied only when the ceiling is the node's own suggestion (a typed cap is what a send would use, so it is
@@ -276,7 +284,11 @@ const LOG_RANGE_MAX = 50000; // blocks per eth_getLogs request: the cap of publi
 const DEFAULT_MARGIN_S = 1800; // M_A, docs/protocol-design.md section 4.3
 // REVIEW-4 R4-3: swap-cli history events that show Alice's secret may already be public (engine.rs `secret_may_be_public`).
 // (+ REVIEW-6 R6-3 `reveal_reverted_seen`: a claim of this lock was mined and reverted, so its calldata published the secret.)
-const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen", "reveal_sidecar_seen"]);
+const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_maybe_pending", "reveal_reverted_seen", "reveal_sidecar_seen"]);
+// Events in a swap file that account for an Ethereum send other than a pending reveal at nonce 0.
+const OTHER_ETH_SEND_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_final", "eth_refund_mined", "eth_refund_final", "eth_sweep_sent"]);
+// Ethereum node errors indicating a same-nonce replacement fee was rejected as under-priced.
+const UNDERPRICED_REPLACE_RE = /replacement transaction underpriced|transaction underpriced|underpriced|fee too low|max fee per gas less than|effective priority fee|gas price too low/i;
 // REVIEW-5 R5-1: DE (Ethereum inclusion delay, seconds) per swap-cli profile (params.rs `de_s`): the late cutoff is T_reveal - DE. Only the
 // fallback for a --replace of a reveal_eth intent recorded before REVIEW-5, which carries no `late_cutoff` of its own.
 const PROFILE_DE_S = { production: 120n, sepolia: 120n, rehearsal: 60n };
@@ -284,6 +296,11 @@ const PROFILE_DE_S = { production: 120n, sepolia: 120n, rehearsal: 60n };
 const bumped = (v) => (v * 1125n + 999n) / 1000n;
 
 class UserError extends Error {}
+
+// The node refused a nonce-0 replacement as under-priced although it cleared every price this swap's record holds, so the pool holds a send priced higher than
+// the record shows. The tip of a nonce-0 re-send is min(cap, 1 gwei) (or --priority-fee-gwei) raised by 12.5 % and above the recorded tips: a higher cap alone does not raise it.
+const UNDERPRICED_WORDS =
+  "the node refused the replacement at nonce 0 as under-priced: it holds a send priced higher than this swap's fee record shows. Raise the fee cap and also the tip (--priority-fee-gwei, which a higher cap alone does not raise)";
 
 /**
  * REVIEW-6 R6-3: a transaction that WAS sent and mined but reverted (receipt status 0). A reverted claim has still put the secret into a block, so the
@@ -502,12 +519,16 @@ const FEE_WHY = {
 };
 
 /** The pending transaction of `from` at `nonce`, if it can be found: by hash (--replace-tx), else in the node's pending block. Or null. */
-async function findPendingTx(provider, args, from, nonce) {
+async function findPendingTx(provider, args, from, nonce, { unknownHashOk = false } = {}) {
   let t = null;
   if (args.replaceTx !== undefined) {
     const hash = hex32("--replace-tx", args.replaceTx);
     const tx = await provider.getTransaction(hash);
-    if (!tx) throw new UserError(`--replace-tx ${hash} is not known to this node; refusing`);
+    if (!tx) {
+      // A re-send priced under the base fee is held by no node that has no txpool: the caller may fall back to nonce 0 (fresh swap key only).
+      if (unknownHashOk) return null;
+      throw new UserError(`--replace-tx ${hash} is not known to this node; refusing`);
+    }
     if (tx.blockNumber !== null && tx.blockNumber !== undefined) throw new UserError(`--replace-tx ${hash} is already mined (block ${tx.blockNumber}); nothing to replace; refusing`);
     if (!sameAddr(tx.from, from) || BigInt(tx.nonce) !== BigInt(nonce)) {
       throw new UserError(`--replace-tx ${hash} is from ${tx.from} nonce ${tx.nonce}, not this signer ${from} at its oldest pending nonce ${nonce}; refusing`);
@@ -546,20 +567,58 @@ async function findPendingTx(provider, args, from, nonce) {
 }
 
 /**
+ * Whether Alice's swap file and flags qualify for replacing an uninspected transaction at nonce 0
+ * with this swap's claim: program mode (--key-stdin), a fresh per-swap Ethereum key matching
+ * alice_receiver, phase in lock_seen or lock_final with the lock recorded, and no other Ethereum
+ * send accounted for by the file.
+ */
+function isNonceZeroFreshKeyEligible(sw, args) {
+  if (!sw || sw.role !== "alice") return false;
+  if (!args || args.keyStdin !== true) return false;
+  if (!sw.ethKey || sw.ethKey.invalid === true || !sameAddr(sw.ethKey.address, sw.aliceReceiver)) return false;
+  if (sw.phaseName !== "lock_seen" && sw.phaseName !== "lock_final") return false;
+  if (!sw.phaseLock || !sw.phaseLock.lockId) return false;
+  if (sw.pendingActionKind !== null && sw.pendingActionKind !== undefined) return false;
+  if (Array.isArray(sw.historyEvents) && sw.historyEvents.some((e) => OTHER_ETH_SEND_EVENTS.has(e))) return false;
+  return true;
+}
+
+/**
  * REVIEW-5 R5-2: find and identify the transaction a --replace would replace. The signer's OLDEST pending nonce must hold a
  * pending transaction that is this very call (`name` of this lock at this contract): it is looked for by --replace-tx HASH, else in the
  * node's pending block and pool. When it cannot be found, or is something else, the command refuses (never "whatever sits at the
- * oldest nonce": a key shared between swaps could cancel another swap's claim or lock). Returns { from, nonce, old }.
+ * oldest nonce": a key shared between swaps could cancel another swap's claim or lock).
+ * The one narrow exception is Alice's fresh per-swap Ethereum key in program mode at latest nonce 0, pending nonce 1, with no other
+ * send recorded in the swap file: nonce 0 of that key can only be this swap's reveal, so claim --replace may replace it at nonce 0
+ * without identifying the old transaction. Every other case keeps the strict R5-2 rule unchanged.
+ * Returns { from, nonce, old, nonceZeroFreshKey? }.
  */
-async function resolveReplaced(provider, signer, args, { name, contractAddr, lockId }) {
+async function resolveReplaced(provider, signer, args, { name, contractAddr, lockId, sw = null }) {
   const from = await signer.getAddress();
   const [latestN, pendingN] = await Promise.all([provider.getTransactionCount(from, "latest"), provider.getTransactionCount(from, "pending")]);
   if (pendingN <= latestN) {
     throw new UserError(`--replace: ${from} has no pending transaction (latest nonce ${latestN} = pending nonce ${pendingN}); nothing to replace; refusing (send the ${name} without --replace)`);
   }
+  if (sw && !sw.intent && (latestN !== 0 || pendingN !== 1)) {
+    throw new UserError(
+      `--replace: replacing without a held intent requires latest nonce 0 and pending nonce 1 (got latest ${latestN}, pending ${pendingN}); refusing`
+    );
+  }
   const nonce = latestN;
-  const old = await findPendingTx(provider, args, from, nonce);
+  const nonceZeroOk = name === "claim" && latestN === 0 && pendingN === 1 && isNonceZeroFreshKeyEligible(sw, args);
+  // The reveal fee record (review M-1): every reveal this tool signed at nonce 0 for this swap. It gives the newest hash when none was given, and the
+  // highest fees a replacement must clear, whatever the node still shows.
+  const record = nonceZeroOk && sw && sw.realFile ? readRevealFees(sw.realFile, lockId) : null;
+  let old = null;
+  if (record !== null && args.replaceTx === undefined && record.newestHash !== null) {
+    old = await findPendingTx(provider, { ...args, replaceTx: record.newestHash }, from, nonce, { unknownHashOk: true });
+  }
+  if (old === null) old = await findPendingTx(provider, args, from, nonce, { unknownHashOk: nonceZeroOk });
+  const recordFloor = record !== null && (record.maxFee !== null || record.maxTip !== null) ? { maxFee: record.maxFee, maxTip: record.maxTip, file: record.file } : null;
   if (!old) {
+    if (name === "claim" && latestN === 0 && pendingN === 1 && isNonceZeroFreshKeyEligible(sw, args)) {
+      return { from, nonce: 0, old: null, nonceZeroFreshKey: true, recordFloor };
+    }
     throw new UserError(
       `--replace: the pending transaction of ${from} at nonce ${nonce} could not be shown by this node (one priced under the base fee is often missing from its pending block), ` +
         `so it cannot be checked to be this ${name} of lock ${lockId}; give --replace-tx HASH (the hash printed when it was sent); refusing`
@@ -574,26 +633,89 @@ async function resolveReplaced(provider, signer, args, { name, contractAddr, loc
   if (!old.to || !sameAddr(old.to, contractAddr) || !parsed || parsed.name !== name || String(parsed.args[0]).toLowerCase() !== lockId.toLowerCase()) {
     throw new UserError(`--replace: the pending transaction at nonce ${nonce} is not a ${name} of lock ${lockId} at ${contractAddr}; replacing it would cancel something else; refusing`);
   }
-  return { from, nonce, old };
+  return { from, nonce, old, recordFloor };
 }
 
 /**
  * REVIEW-4 R4-1: --replace. Re-send the SAME call at the signer's OLDEST pending nonce with both fee fields raised by at
  * least 12.5 % and the cap at least 2 x the latest base fee. Refuses when the signer has nothing pending, or when the pending
- * transaction there is not found and identified as this very call (claim / refund of this lock; R5-2). Never a second nonce.
- * `resolved` is the result of resolveReplaced when the caller has it already. Returns { fees, report }.
+ * transaction there is not found and identified as this very call (claim / refund of this lock; R5-2), except for Alice's
+ * fresh per-swap key at nonce 0 (latest 0, pending 1), which raises the asked tip by 12.5 %, bounded by the cap (the node's own price when no cap is given on a test network).
+ * Never a second nonce. `resolved` is the result of resolveReplaced when the caller has it already. Returns { fees, report }.
  */
 async function replacePlan(provider, signer, args, ctx, resolved) {
   const { mainnet } = mainnetFlags(args);
-  const { nonce, old } = resolved || (await resolveReplaced(provider, signer, args, ctx));
+  const res = resolved || (await resolveReplaced(provider, signer, args, ctx));
+  const { nonce, old } = res;
   const blk = await latestBlock(provider);
   const base = blk.baseFeePerGas;
   if ((base === null || base === undefined) && mainnet) throw new UserError("refusing: the latest block carries no baseFeePerGas, so the replacement fee cannot be checked against it");
+  const floor = res.recordFloor || null;
+  const g = (v) => ethers.formatUnits(v, "gwei");
+  // What the fee record forces (review M-1): both fee fields over the highest this swap's key already signed at nonce 0, by the replacement margin.
+  const floorCap = floor !== null && floor.maxFee !== null ? bumped(floor.maxFee) : 0n;
+  const floorTip = floor !== null && floor.maxTip !== null ? bumped(floor.maxTip) : 0n;
+  const floorWords = () =>
+    `this swap's key already signed a reveal at nonce 0 with a fee cap of ${floor.maxFee === null ? "unknown" : g(floor.maxFee) + " gwei"} and a tip of ${floor.maxTip === null ? "unknown" : g(floor.maxTip) + " gwei"} (record ${floor.file})`;
+  if (res.nonceZeroFreshKey === true) {
+    const given = feeOverrides(args);
+    if (given.maxFeePerGas === undefined && floor !== null) {
+      const needTip = floorTip > bumped(GWEI) ? floorTip : bumped(GWEI);
+      const needCap = floorCap > needTip ? floorCap : needTip;
+      throw new UserError(`--replace: ${floorWords()}; a replacement must raise both by 12.5 %: give --max-fee-gwei of at least ${g(needCap)} (the tip will be ${g(needTip)} gwei); refusing`);
+    }
+    if (given.maxFeePerGas === undefined) {
+      // No cap given (never on mainnet: --mainnet always needs --max-fee-gwei): the same as a claim without a cap, the node prices it.
+      // If that is too low to replace the pending send, the node refuses it as under-priced and the operator is told to give a higher cap.
+      return {
+        fees: { nonce: 0 },
+        report: {
+          feeCheck: null,
+          replace: { nonce: 0, replacesTx: null, nonceZeroFreshKey: true, oldFeeKnown: false, oldMaxFeeGwei: null, oldTipGwei: null, newMaxFeeGwei: null, newTipGwei: null },
+        },
+      };
+    }
+    const cap = given.maxFeePerGas;
+    // The old send's fees cannot be read here. It was priced by the same rule as a first send: the tip min(cap, 1 gwei), or the
+    // given tip when larger. So the asked tip is raised by 12.5 % (a replacement must raise the tip too, or the node refuses it as
+    // under-priced), and kept at or under the cap.
+    const rule = cap < GWEI ? cap : GWEI;
+    const flagTip = mainnetFlags(args).tipWei;
+    const asked = flagTip !== null && flagTip > rule ? flagTip : rule;
+    let tip = bumped(asked) < cap ? bumped(asked) : cap;
+    if (floor !== null) {
+      const needTip = floorTip > bumped(asked) ? floorTip : bumped(asked);
+      const needCap = floorCap > needTip ? floorCap : needTip;
+      if (cap < needCap) {
+        throw new UserError(
+          `--replace: ${floorWords()}; a replacement must raise both by 12.5 % (the tip is ${g(needTip)} gwei): the fee cap must be at least ${g(needCap)} gwei, you gave ${g(cap)}. Give --max-fee-gwei of at least ${g(needCap)}; refusing`
+        );
+      }
+      tip = needTip;
+    }
+    const feeCheck = await checkFeeCap(provider, { maxFeePerGas: cap, maxPriorityFeePerGas: tip }, 2n, mainnet, FEE_WHY.claim);
+    const report = {
+      feeCheck,
+      replace: {
+        nonce: 0,
+        replacesTx: null,
+        nonceZeroFreshKey: true,
+        oldFeeKnown: false,
+        oldMaxFeeGwei: null,
+        oldTipGwei: null,
+        newMaxFeeGwei: ethers.formatUnits(cap, "gwei"),
+        newTipGwei: ethers.formatUnits(tip, "gwei"),
+      },
+    };
+    return { fees: { maxFeePerGas: cap, maxPriorityFeePerGas: tip, nonce: 0 }, report };
+  }
   const minByBase = 2n * (base || 0n);
   const oldCap = old.maxFeePerGas !== null && old.maxFeePerGas !== undefined ? old.maxFeePerGas : old.gasPrice;
   const oldTip = old.maxPriorityFeePerGas !== null && old.maxPriorityFeePerGas !== undefined ? old.maxPriorityFeePerGas : old.gasPrice;
-  const minCap = oldCap !== null && bumped(oldCap) > minByBase ? bumped(oldCap) : minByBase;
-  const minTip = oldTip !== null ? bumped(oldTip) : 0n;
+  let minCap = oldCap !== null && bumped(oldCap) > minByBase ? bumped(oldCap) : minByBase;
+  let minTip = oldTip !== null ? bumped(oldTip) : 0n;
+  if (floorCap > minCap) minCap = floorCap;
+  if (floorTip > minTip) minTip = floorTip;
   const given = feeOverrides(args);
   const { tipWei: flagTip } = mainnetFlags(args);
   let cap;
@@ -614,7 +736,7 @@ async function replacePlan(provider, signer, args, ctx, resolved) {
           `(the larger of 2 x the latest base fee ${ethers.formatUnits(base || 0n, "gwei")} gwei and the old cap ${oldCap === null ? "unknown" : ethers.formatUnits(oldCap, "gwei") + " gwei"} + 12.5 %); refusing`
       );
     }
-    if (tip > cap) throw new UserError(`--replace: the replacement tip ${ethers.formatUnits(tip, "gwei")} gwei (the larger of min(cap, 1 gwei), the given tip and the old tip + 12.5 %) is above the fee cap ${ethers.formatUnits(cap, "gwei")} gwei; give a higher cap; refusing`);
+    if (tip > cap) throw new UserError(`--replace: the replacement tip ${ethers.formatUnits(tip, "gwei")} gwei (the larger of min(cap, 1 gwei), the given tip and the old or recorded tip + 12.5 %) is above the fee cap ${ethers.formatUnits(cap, "gwei")} gwei; give --max-fee-gwei of at least ${ethers.formatUnits(tip, "gwei")}; refusing`);
   } else {
     tip = minTip > GWEI ? minTip : GWEI;
     cap = minCap > minByBase + tip ? minCap : minByBase + tip;
@@ -1486,6 +1608,16 @@ function readSwapFile(file, want = null) {
       // record does not parse, which only sweep reads, and refuses).
       role: j.role === "alice" || j.role === "bob" ? j.role : null,
       phaseName: j.phase && typeof j.phase === "object" && typeof j.phase.phase === "string" ? j.phase.phase : null,
+      phaseLock:
+        j.phase && typeof j.phase === "object" && j.phase.lock && typeof j.phase.lock === "object" && typeof j.phase.lock.lock_id === "string"
+          ? {
+              lockId: hex32("swap file phase.lock.lock_id", j.phase.lock.lock_id),
+              tReveal:
+                j.phase.lock.t_reveal !== undefined && j.phase.lock.t_reveal !== null
+                  ? uint("swap file phase.lock.t_reveal", j.phase.lock.t_reveal)
+                  : null,
+            }
+          : null,
       pendingActionKind: j.pending_action && typeof j.pending_action === "object" && typeof j.pending_action.kind === "string" ? j.pending_action.kind : null,
       ethKey: ethKeyRecordOf(j.eth_key),
       // REVIEW-4 R4-3: swap-cli's own predicate (`secret_may_be_public`): the file shows Alice's claim reached the network.
@@ -1531,6 +1663,96 @@ const REVEAL_SIDECAR_SUFFIX = ".reveal-sent";
 const REVEAL_SIDECAR_MAX_BYTES = 4096;
 const revealSidecarPath = (swapFile) => String(swapFile) + REVEAL_SIDECAR_SUFFIX;
 const codeOf = (e) => (e && e.code ? e.code : "error");
+
+// ------------------------------------------------ the reveal fee record (audit of 0.2.0, review M-1)
+// `FILE.reveal-fees`: an append-only record of every reveal transaction this tool signed at nonce 0 for this swap (hash and the two fee fields; no
+// preimage, no key). One line is written and synced BEFORE the broadcast, and the file is never truncated or rewritten, so a later re-send still knows the
+// hash and the fees of an earlier one even when a run was refused after it (a real run truncates eth-claim.err) or the node does not return the old
+// transaction. A re-send at nonce 0 raises both fee fields over the highest values in it. Owner-only permissions.
+const REVEAL_FEES_SUFFIX = ".reveal-fees";
+const REVEAL_FEES_MAX_BYTES = 1 << 20;
+const revealFeesPath = (swapFile) => String(swapFile) + REVEAL_FEES_SUFFIX;
+
+/** Appends one record line (nothing secret) and makes it durable. Throws a UserError, and the caller sends nothing, when that cannot be done. */
+function appendRevealFee(swapFile, lockId, txHash, tx) {
+  const target = revealFeesPath(swapFile);
+  const num = (v) => (v === null || v === undefined ? null : BigInt(v).toString());
+  const line =
+    JSON.stringify({
+      version: 1,
+      lock_id: String(lockId).toLowerCase().replace(/^0x/, ""),
+      tx_hash: txHash === null || txHash === undefined ? null : String(txHash).toLowerCase().replace(/^0x/, ""),
+      nonce: 0,
+      max_fee_per_gas: num(tx.maxFeePerGas),
+      max_priority_fee_per_gas: num(tx.maxPriorityFeePerGas),
+      at: Math.floor(Date.now() / 1000),
+    }) + "\n";
+  let fd = null;
+  try {
+    let st = null;
+    try {
+      st = fs.lstatSync(target);
+    } catch (e) {
+      if (!e || e.code !== "ENOENT") throw e;
+    }
+    if (st !== null && (!st.isFile() || st.nlink > 1)) throw Object.assign(new Error("not a plain file"), { code: "ENOTFILE" });
+    fd = fs.openSync(target, "a", 0o600);
+    fs.writeSync(fd, line);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fsyncDir(path.dirname(path.resolve(target)));
+  } catch (e) {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* ignore */
+      }
+    }
+    throw new UserError(
+      `refusing: the reveal fee record ${target} could not be written (${codeOf(e)}); nothing was sent. It is written before the claim is broadcast so that a later re-send is priced over this one; fix the directory and retry.`
+    );
+  }
+}
+
+/**
+ * Reads the reveal fee record of `lockId`: { newestHash, maxFee, maxTip, count, file } (bigint or null). A missing file is an empty record; a file that cannot
+ * be read is a refusal (a re-send priced without it could be under-priced). Lines that are not records of this lock are skipped.
+ */
+function readRevealFees(swapFile, lockId) {
+  const target = revealFeesPath(swapFile);
+  const out = { newestHash: null, maxFee: null, maxTip: null, count: 0, file: target };
+  let text;
+  try {
+    const st = fs.statSync(target);
+    if (st.size > REVEAL_FEES_MAX_BYTES) throw Object.assign(new Error("too large"), { code: "EFBIG" });
+    text = fs.readFileSync(target, "utf8");
+  } catch (e) {
+    if (e && e.code === "ENOENT") return out;
+    throw new UserError(`refusing: the reveal fee record ${target} could not be read (${codeOf(e)}); a re-send priced without it could be under-priced; nothing was signed, nothing was sent`);
+  }
+  const want = String(lockId).toLowerCase().replace(/^0x/, "");
+  for (const l of text.split("\n")) {
+    if (l.trim() === "") continue;
+    let j;
+    try {
+      j = JSON.parse(l);
+    } catch {
+      continue; // a torn last line from a crash: the lines before it still count
+    }
+    if (!j || j.version !== 1 || j.lock_id !== want || j.nonce !== 0) continue;
+    out.count++;
+    if (typeof j.tx_hash === "string" && /^[0-9a-f]{64}$/.test(j.tx_hash)) out.newestHash = "0x" + j.tx_hash;
+    for (const [k, f] of [["max_fee_per_gas", "maxFee"], ["max_priority_fee_per_gas", "maxTip"]]) {
+      if (typeof j[k] === "string" && /^[0-9]{1,30}$/.test(j[k])) {
+        const v = BigInt(j[k]);
+        if (out[f] === null || v > out[f]) out[f] = v;
+      }
+    }
+  }
+  return out;
+}
 
 // ------------------------------------------------ the claim lock
 // A real `claim --swap FILE` holds `FILE.claim-lock` while it can touch the sidecar and send: from before the sidecar is first read until the send has
@@ -2470,7 +2692,13 @@ function bindSwap(args, want) {
   // REVIEW-3 F7: the log-scan start is stored in the file by `swap-cli tick --apply`; --from-block, when given, wins (no comparison).
   if ((args.fromBlock === undefined || args.fromBlock === null || args.fromBlock === "") && sw.ethFromBlock !== null) merged.fromBlock = sw.ethFromBlock.toString();
   const intent = sw.intent;
-  if (!intent) throw new UserError(`the swap file has no pending intent; expected ${want}. Run swap-cli tick --apply first and use the parameters it recorded`);
+  if (!intent) {
+    if (want === "reveal_eth" && args.replace === true && isNonceZeroFreshKeyEligible(sw, args)) {
+      merged.lockId = agree("--lock-id", args.lockId, sw.phaseLock.lockId, sameAddr);
+      return { args: merged, sw };
+    }
+    throw new UserError(`the swap file has no pending intent; expected ${want}. Run swap-cli tick --apply first and use the parameters it recorded`);
+  }
   if (intent.action !== want) {
     throw new UserError(`the swap file's pending intent is ${intent.action}, but this command carries out ${want}; refusing`);
   }
@@ -3030,6 +3258,15 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
           `Wait until it is mined or dropped, then look at the contract and at the lock record (the section "${CLEARING_NAME}" of scripts/live/README.md); a node also drops pending transactions, so the record is the check that counts`
       );
     }
+    // In program mode / swap-wallet runs the Ethereum swap key is fresh per swap and the lock is its very first
+    // transaction. A latest nonce above 0 proves this key already sent a transaction the swap file does not account for
+    // (for example, an earlier copy's lock mined while this node's logs are blind), so a real lock is refused.
+    if (((sw.ethKey && !sw.ethKey.invalid) || args.keyStdin) && nonceLatest !== 0) {
+      throw new UserError(
+        `refusing: this swap's fresh Ethereum key ${sender} already has latest nonce ${nonceLatest} (expected 0); ` +
+          `the key has sent a transaction the swap file does not account for, so sending a lock could lock ETH twice. Nothing was sent.`
+      );
+    }
     // The gas is estimated here (the same estimate execute would make), so that execute can write the record as the very last step before the broadcast.
     const gasLimit = await signer.estimateGas({ ...tx, ...fp.fees });
     let reachedBroadcast = false;
@@ -3307,13 +3544,23 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   let intentLateCutoff = null; // REVIEW-5 R5-1: T_reveal - DE as the intent froze it (swap-cli records it for every reveal_eth intent)
   if (sw) {
     checkLockAgainstSwap(l, sw);
-    const ip = sw.intent.params;
-    if (ip.t_reveal === undefined || ip.cutoff === undefined) {
-      throw new UserError("the reveal_eth intent carries no t_reveal / cutoff (recorded by an older swap-cli); cancel it and run tick --apply again; refusing");
+    if (sw.intent) {
+      const ip = sw.intent.params;
+      if (ip.t_reveal === undefined || ip.cutoff === undefined) {
+        throw new UserError("the reveal_eth intent carries no t_reveal / cutoff (recorded by an older swap-cli); cancel it and run tick --apply again; refusing");
+      }
+      if (!sameUint(ip.t_reveal, l.timelock)) throw new UserError(`the lock's timelock on chain is ${l.timelock} but the reveal_eth intent froze t_reveal ${ip.t_reveal}; refusing`);
+      intentCutoff = uint("intent cutoff", ip.cutoff);
+      if (ip.late_cutoff !== undefined && ip.late_cutoff !== null) intentLateCutoff = uint("intent late_cutoff", ip.late_cutoff);
+    } else {
+      if (sw.phaseLock && sw.phaseLock.tReveal !== null && !sameUint(sw.phaseLock.tReveal, l.timelock)) {
+        throw new UserError(`the lock's timelock on chain is ${l.timelock} but the swap file recorded t_reveal ${sw.phaseLock.tReveal}; refusing`);
+      }
+      const de = PROFILE_DE_S[sw.profile];
+      if (de === undefined) throw new UserError(`unknown profile "${sw.profile}" for late reveal cutoff; refusing`);
+      intentLateCutoff = l.timelock - de;
+      intentCutoff = intentLateCutoff;
     }
-    if (!sameUint(ip.t_reveal, l.timelock)) throw new UserError(`the lock's timelock on chain is ${l.timelock} but the reveal_eth intent froze t_reveal ${ip.t_reveal}; refusing`);
-    intentCutoff = uint("intent cutoff", ip.cutoff);
-    if (ip.late_cutoff !== undefined && ip.late_cutoff !== null) intentLateCutoff = uint("intent late_cutoff", ip.late_cutoff);
   }
   if (secret !== null) {
     // sha256: ethers treats a hex string as the raw bytes. poseidon: Addr(secret) computed LOCALLY (nothing is sent anywhere).
@@ -3356,11 +3603,12 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   // refuses). That transaction is the secret in the mempool: evidence that the secret may be public, with or without the file's history
   // (swap-cli cannot learn of a claim that was only sent). A FIRST claim never has such a transaction and keeps the strict M_A rule.
   let replaced = null;
-  if (args.replace === true) replaced = await resolveReplaced(provider, signer, args, { name: "claim", contractAddr, lockId });
+  if (args.replace === true) replaced = await resolveReplaced(provider, signer, args, { name: "claim", contractAddr, lockId, sw });
   // T5: the pending claim is evidence that THIS secret is public only when its own preimage argument is this lock's secret. That is decided from the LOCK WORD, locally
   // (sha256, or the local Addr; nothing is sent anywhere), so a dry run without --secret and the real run agree. Computed once; the late cutoff and the receiver-code
   // rule below both rest on it. Another preimage is judged as a first reveal (the nonce and fee rules still replace the pending transaction).
-  const pendingPreimage = replaced !== null ? pendingPreimageOf(kind, replaced.old) : null;
+  const nonceZeroPending = replaced !== null && replaced.nonceZeroFreshKey === true;
+  const pendingPreimage = replaced !== null && replaced.old !== null ? pendingPreimageOf(kind, replaced.old) : null;
   let carriesSecret = false;
   if (pendingPreimage !== null) {
     try {
@@ -3374,15 +3622,15 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       `refusing: the given secret is not the preimage in the pending claim ${replaced.old.hash || "(its hash was not shown by the node)"}, although that preimage hashes to the lock's word; the given secret is wrong; nothing was signed, nothing was sent`
     );
   }
-  const replacedForCode = carriesSecret ? replaced : null;
-  const replaceJudgedFirst = replaced !== null && !carriesSecret;
+  const replacedForCode = carriesSecret || nonceZeroPending ? replaced : null;
+  const replaceJudgedFirst = replaced !== null && !carriesSecret && !nonceZeroPending;
   let otherPreimageNote = null;
   if (replaceJudgedFirst) {
     const pendingHash = replaced.old && replaced.old.hash ? replaced.old.hash : "(its hash was not shown by the node)";
     otherPreimageNote = `the pending transaction ${pendingHash} is a claim of this lock with a different preimage, so it does not publish this secret; this run is judged as a first reveal (the strict cutoff and the receiver-code refusal apply unless the swap file or the reveal sidecar show an earlier send); it is still replaced (same nonce, same fee rules)`;
     process.stderr.write(`NOTE: ${otherPreimageNote}\n`);
   }
-  if (carriesSecret && intentLateCutoff === null && sw && PROFILE_DE_S[sw.profile] !== undefined) {
+  if ((carriesSecret || nonceZeroPending) && intentLateCutoff === null && sw && PROFILE_DE_S[sw.profile] !== undefined) {
     intentLateCutoff = l.timelock - PROFILE_DE_S[sw.profile]; // an intent from before REVIEW-5: the profile's DE gives the same number
   }
   // REVIEW-4 R4-3: once the file shows the secret may already be public (swap-cli's late re-send, review H1), a re-send
@@ -3392,7 +3640,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   const sidecar = sw ? readRevealSidecarOf(sw, lockId) : null;
   const sidecarEvidence = sidecar !== null && sidecar.state === "matching";
   const tmpLeft = sw ? [...new Set([...leftoverSidecarTmpFiles(sw.realFile), ...(sw.file !== sw.realFile ? leftoverSidecarTmpFiles(sw.file) : [])])] : [];
-  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || carriesSecret || sidecarEvidence) && !marginGiven;
+  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || carriesSecret || nonceZeroPending || sidecarEvidence) && !marginGiven;
   if (lateResend) {
     // The cutoff the intent froze, or the later T_reveal - DE it froze for exactly this case (a secret that is public already).
     const late = intentLateCutoff !== null && intentLateCutoff > intentCutoff ? intentLateCutoff : intentCutoff;
@@ -3400,13 +3648,15 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     cutoffRule =
       carriesSecret
         ? "T_reveal - DE: the pending claim of this lock at the signer's oldest nonce carries this secret, so it is already public (REVIEW-5 R5-1)"
-        : late === intentCutoff
-          ? sw.secretMayBePublic
-            ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
-            : "the swap file's frozen cutoff (the reveal sidecar beside the file shows the secret may already be public)"
-          : sw.secretMayBePublic
-            ? "the swap file's late cutoff T_reveal - DE (the file shows the secret may already be public)"
-            : "the swap file's late cutoff T_reveal - DE (the reveal sidecar beside the file shows the secret may already be public)";
+        : nonceZeroPending
+          ? "T_reveal - DE: Alice's fresh swap key has a pending send at nonce 0, so the reveal may already be pending and the secret may be public"
+          : late === intentCutoff
+            ? sw.secretMayBePublic
+              ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
+              : "the swap file's frozen cutoff (the reveal sidecar beside the file shows the secret may already be public)"
+            : sw.secretMayBePublic
+              ? "the swap file's late cutoff T_reveal - DE (the file shows the secret may already be public)"
+              : "the swap file's late cutoff T_reveal - DE (the reveal sidecar beside the file shows the secret may already be public)";
   } else if (intentCutoff !== null && intentCutoff < cutoff) {
     cutoff = intentCutoff;
     cutoffRule = "the swap file's frozen cutoff";
@@ -3428,7 +3678,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   }
   // R7-7, early: the receiver's code, before the long scans (also in a dry run, which then shows what the real run would do). A first claim to a receiver
   // with code is refused here; in replace mode the read only warns (see receiverCodeVerdict). The read is made again immediately before signing.
-  const mayBePublic = !!(sw && sw.secretMayBePublic) || sidecarEvidence;
+  const mayBePublic = !!(sw && sw.secretMayBePublic) || sidecarEvidence || nonceZeroPending;
   // The replace rule of the receiver-code check (a warning, not a refusal) rests on the secret being public in the pending claim: see carriesSecret above.
   const earlyReceiverWarning = receiverCodeVerdict(await readReceiverCode(provider, l.receiver), { receiver: l.receiver, replaced: replacedForCode, replaceJudgedFirst, mayBePublic, when: "before the long checks" });
   if (earlyReceiverWarning !== null && args.dryRun) process.stderr.write(`WARNING: ${earlyReceiverWarning}\n`);
@@ -3571,7 +3821,10 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       }
       // T21-11: the sidecar is the last thing preSend does. If it cannot be written and made durable this throws and nothing is sent. With a local
       // key, only the local signature and the synchronous `lastCheck` below sit between this point and the bytes going to the node.
-      if (sw) sidecarWritten = writeRevealSidecar(sw.realFile, lockId, await presignedHash(signer, populated));
+      // The fee record first (review M-1): if it cannot be written nothing is sent and no sidecar was made; a record whose send then does not happen only raises the next price.
+      const signedHash = sw ? await presignedHash(signer, populated) : null;
+      if (sw && sw.role === "alice" && Number(populated.nonce) === 0) appendRevealFee(sw.realFile, lockId, signedHash, populated);
+      if (sw) sidecarWritten = writeRevealSidecar(sw.realFile, lockId, signedHash);
     };
     // The fsyncs and the signature can take time (on a network share above all): the cutoff is checked once more against the WALL CLOCK only, in a
     // synchronous guard that runs immediately before the broadcast (for every claim, with or without --swap). No network read can happen after it.
@@ -3669,21 +3922,29 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
           : `the reveal sidecar ${sidecarWritten.file} that was there before is kept (it is evidence of an earlier attempt)`;
         sidecarWritten = null;
       }
-      throw new UserError(
-        redact(
-          sendOutcomeText(e, {
-            hasSwap: !!sw,
-            sidecarFile: e.outcome !== "not_sent" && sidecarWritten ? sidecarWritten.file : null,
-            fate,
-            lockFile: lockLeft && claimLock !== null ? claimLock.file : null,
-          })
-        )
+      const msg = redact(
+        sendOutcomeText(e, {
+          hasSwap: !!sw,
+          sidecarFile: e.outcome !== "not_sent" && sidecarWritten ? sidecarWritten.file : null,
+          fate,
+          lockFile: lockLeft && claimLock !== null ? claimLock.file : null,
+        })
       );
+      if (nonceZeroPending && (e.outcome === "not_sent" || e.outcome === "delivered_rejected") && UNDERPRICED_REPLACE_RE.test(msg)) {
+        throw new UserError(`${UNDERPRICED_WORDS}: ${msg}`);
+      }
+      throw new UserError(msg);
+    }
+    const baseErr = e instanceof UserError ? redact(e.message) : explain(e);
+    if (nonceZeroPending && UNDERPRICED_REPLACE_RE.test(baseErr)) {
+      const sidecarTail = sidecarWritten
+        ? ` (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: run tick --apply)`
+        : "";
+      throw new UserError(`${UNDERPRICED_WORDS}: the node refused the replacement at nonce 0 as under-priced (${baseErr})${sidecarTail}`);
     }
     if (sidecarWritten) {
       // The sidecar was written before the broadcast and stays: whether the claim reached the network is not known here.
-      const base = e instanceof UserError ? redact(e.message) : explain(e);
-      throw new UserError(`${base} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; run tick --apply)`);
+      throw new UserError(`${baseErr} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; run tick --apply)`);
     }
     throw e;
   }
@@ -3781,6 +4042,9 @@ async function requireSwapChain(provider, args, sw) {
  * reserve (read-only): the ETH the swap's key must hold before the swap goes on (amendment C), and whether it does. Alice: the claim's fixed gas limit x the fee ceiling x 1.25.
  * Bob: amount_wei + (lock gas ceiling + refund gas ceiling) x the fee ceiling x 1.25. When the ceiling is the node's own suggestion the reserve is also at least gas x RESERVE_FLOOR_WEI. All amounts are wei, decimal strings; integer arithmetic only. `covered` false makes the
  * command line exit with status 3.
+ * The reserve has no line for the sweep, on purpose: the sweep sends balance minus its own fee, so it needs nothing held back, and what a sweep that has to create the payout
+ * account costs (up to SWEEP_GAS_CAP gas, see `sweep`) comes out of what is left. If less than that is left the sweep refuses ("nothing to sweep") and the dust stays; no deposit
+ * is lost to it.
  */
 async function reserve(provider, signer, args) {
   if (!signer) throw new UserError("reserve needs the swap's key (--key-stdin or --key-file, exactly one): the amount and the address are printed only for a key whose address is the swap file's own; refusing");
@@ -3878,7 +4142,7 @@ const ENDED_PHASES = new Set(["aborted", "refunded", "lost", "done"]);
 const SWEEP_BLOCKING_ACTIONS = new Set(["lock_eth", "refund_eth", "reveal_eth"]);
 
 /**
- * sweep: send the key's whole balance minus the fee (21,000 gas x the capped fee) to the payout address stored in the swap file. Refuses unless everything in the header's
+ * sweep: send the key's whole balance minus the fee (the node's gas estimate of the transfer, plus 20 %, x the capped fee; 21,000 gas at least, 300,000 at most) to the payout address stored in the swap file. Refuses unless everything in the header's
  * `sweep` paragraph holds (amendments F and M). The local checks come first (the file, the key, --to, the intents), then the node's (chain, contract, --to has no code, no pending
  * nonce, no open lock of this swap, no unresolved lock record), then the fee. `--dry-run` prints what it would send.
  */
@@ -3924,8 +4188,11 @@ async function sweep(provider, signer, args0) {
   const contractAddr = sw.contract;
   const target = await verifyTarget(provider, merged, contractAddr);
   // ---- the payout has no code (amendment M): a contract, or an EIP-7702 delegation, may refuse or redirect a plain transfer
-  const toCode = await provider.getCode(to);
-  if (toCode !== "0x") throw new UserError(`--to ${to} has code on this chain (${(toCode.length - 2) / 2} bytes): a plain transfer to a contract, or to an account with a delegation, may revert or be taken; refusing`);
+  // read at "latest" (it must be readable) and at "pending" (when the node answers it): code at either tag refuses, and so does a "latest" answer that cannot be read;
+  // a "pending" answer that fails or is not hex is ignored and the "latest" answer decides (readReceiverCode)
+  const toRead = await readReceiverCode(provider, to);
+  if (toRead.state === "code") throw new UserError(`--to ${to} has code on this chain (${toRead.bytes} bytes, read at latest or, when the node answers it, at pending): a plain transfer to a contract, or to an account with a delegation, may revert or be taken; refusing`);
+  if (toRead.state !== "none") throw new UserError(`--to ${to}: the payout's code could not be read (${toRead.state}${toRead.detail ? ": " + toRead.detail : ""}); refusing`);
   // ---- the key has nothing in flight
   const [nonceLatest, noncePending] = await Promise.all([provider.getTransactionCount(me, "latest"), provider.getTransactionCount(me, "pending")]);
   if (noncePending !== nonceLatest) {
@@ -3971,19 +4238,61 @@ async function sweep(provider, signer, args0) {
   }
   const { mainnet, tipWei } = mainnetFlags(args0);
   const feeCheck = await checkFeeCap(provider, fees, 1n, mainnet, FEE_WHY.other, tipWei);
-  const feeWei = TRANSFER_GAS * fees.maxFeePerGas;
   const balanceWei = await provider.getBalance(me);
-  if (balanceWei <= feeWei) {
-    throw new UserError(`refusing: the key holds ${ethers.formatEther(balanceWei)} ETH, which does not exceed the fee of the transfer at the cap (${TRANSFER_GAS} gas x ${ethers.formatUnits(fees.maxFeePerGas, "gwei")} gwei = ${ethers.formatEther(feeWei)} ETH): nothing to sweep`);
-  }
+  const nothingToSweep = (gas, feeWei) =>
+    new UserError(`refusing: the key holds ${ethers.formatEther(balanceWei)} ETH, which does not exceed the fee of the transfer at the cap (${gas} gas x ${ethers.formatUnits(fees.maxFeePerGas, "gwei")} gwei = ${ethers.formatEther(feeWei)} ETH): nothing to sweep`);
+  // The least a transfer can cost must be covered before the node is asked anything; the amount of this first look is only what the estimate is taken with (it must be > 0
+  // and affordable: the node refuses an estimate for an amount the key does not hold).
+  const leastFeeWei = TRANSFER_GAS * fees.maxFeePerGas;
+  if (balanceWei <= leastFeeWei) throw nothingToSweep(TRANSFER_GAS, leastFeeWei);
+  const gasEstimate = await estimateSweepGas(provider, me, to, balanceWei - leastFeeWei);
+  const gasLimit = sweepGasLimit(gasEstimate);
+  const feeWei = gasLimit * fees.maxFeePerGas;
+  if (balanceWei <= feeWei) throw nothingToSweep(gasLimit, feeWei);
   const valueWei = balanceWei - feeWei;
   const extra = {
-    sweep: { role: sw.role, key: me, payout: to, balanceWei: balanceWei.toString(), feeWei: feeWei.toString(), valueWei: valueWei.toString(), locksSeen: seen, recordsResolved: records.length, phase: sw.phaseName },
+    // execute() would print "not estimated" for a fixed limit; this one was estimated, so say what it is (top-level fields of the dry run are overridden by `extra`).
+    gasEstimate: gasEstimate.toString(),
+    gasEstimateNote: `estimated by the node for this transfer (eth_estimateGas); the gas limit is the estimate plus 20 %, at most ${SWEEP_GAS_CAP}`,
+    sweep: { role: sw.role, key: me, payout: to, balanceWei: balanceWei.toString(), feeWei: feeWei.toString(), valueWei: valueWei.toString(), gasEstimate: gasEstimate.toString(), gasLimit: gasLimit.toString(), locksSeen: seen, recordsResolved: records.length, phase: sw.phaseName },
     ...(feeCheck ? { feeCheck } : {}),
   };
-  const r = await execute(provider, signer, args0, { to, value: valueWei }, extra, { fees, fixedGas: TRANSFER_GAS });
+  const r = await execute(provider, signer, args0, { to, value: valueWei }, extra, { fees, fixedGas: gasLimit });
   if (r.dry) return r.out;
-  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, from: r.from, to, valueWei: valueWei.toString(), feeCapWei: fees.maxFeePerGas.toString(), balanceBeforeWei: balanceWei.toString(), role: sw.role, ...(feeCheck ? { feeCheck } : {}) };
+  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, from: r.from, to, valueWei: valueWei.toString(), feeCapWei: fees.maxFeePerGas.toString(), gasLimit: gasLimit.toString(), balanceBeforeWei: balanceWei.toString(), role: sw.role, ...(feeCheck ? { feeCheck } : {}) };
+}
+
+/**
+ * The gas the node says the sweep's own transfer costs (eth_estimateGas, from the key to the payout, with the value the sweep would send). Refuses, and never falls back to a
+ * fixed number, when the node errors, answers nothing usable, or the estimate is above SWEEP_GAS_CAP. A transfer cannot cost less than 21,000: a lower answer is refused as a lying node.
+ */
+async function estimateSweepGas(provider, from, to, valueWei) {
+  let raw;
+  try {
+    raw = await provider.send("eth_estimateGas", [{ from, to, value: "0x" + valueWei.toString(16) }, "latest"]);
+  } catch (e) {
+    const inner = (e && e.error) || (e && e.info && e.info.error) || null;
+    const text = inner && typeof inner.message === "string" && inner.message !== "" ? inner.message : (e && (e.shortMessage || e.message)) || String(e);
+    throw new UserError(`refusing: the node could not estimate the gas of the sweep transfer (${plainNodeText(String(text).split("\n")[0]).slice(0, 300)}); nothing was sent, and the sweep does not guess a gas limit. Try again, or use another node`);
+  }
+  let gas;
+  try {
+    if (typeof raw !== "string" || !/^0x[0-9a-fA-F]+$/.test(raw)) throw new Error("not a quantity");
+    gas = BigInt(raw);
+  } catch {
+    throw new UserError("refusing: the node's answer to the gas estimate of the sweep transfer is not a number; nothing was sent, and the sweep does not guess a gas limit");
+  }
+  if (gas < TRANSFER_GAS) throw new UserError(`refusing: the node estimates ${gas} gas for the sweep transfer, below the 21,000 of any transfer; nothing was sent`);
+  if (gas > SWEEP_GAS_CAP) {
+    throw new UserError(`refusing: the node estimates ${gas} gas for the sweep transfer, above the limit of ${SWEEP_GAS_CAP}: a payout that needs this much is probably a contract, and the program pays plain addresses only; nothing was sent`);
+  }
+  return gas;
+}
+
+/** The gas limit a sweep signs: the estimate plus 20 % (rounded up), never below 21,000 and never above SWEEP_GAS_CAP. The margin is always applied: a node's estimate for a plain transfer is not always exact (Hardhat answers 21,001), and unused gas is not charged. */
+function sweepGasLimit(estimate) {
+  const padded = (estimate * SWEEP_GAS_MARGIN_NUM + SWEEP_GAS_MARGIN_DEN - 1n) / SWEEP_GAS_MARGIN_DEN;
+  return padded > SWEEP_GAS_CAP ? SWEEP_GAS_CAP : padded;
 }
 
 // Some providers echo the endpoint, with an API key in it, in their error text: anything that looks like an address (scheme://..., so ws:// and wss:// too) is cut out before the text is printed.
@@ -4297,9 +4606,9 @@ async function main(argv) {
 
 module.exports = {
   keygen, keygenStdout, balance, keyAddress, signMessage, verifyMessage, MESSAGE_DOMAIN, deploy, lock, claim, refund, send, sweep, reserve, status,
-  loadSigner, checkKeyFileMode, receiverCodeVerdict, readReceiverCode, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, RESERVE_FLOOR_WEI, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
+  loadSigner, checkKeyFileMode, receiverCodeVerdict, readReceiverCode, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, SWEEP_GAS_CAP, sweepGasLimit, RESERVE_FLOOR_WEI, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
-  readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
+  appendRevealFee, readRevealFees, revealFeesPath, readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
   approvalText, approvalTermsHash, checkApproval, MAX_OBSERVATION_AGE_S, APPROVAL_FUTURE_SKEW_S, lockLockPath, LOCK_LOCK_SUFFIX, lockSentPath, LOCK_SENT_SUFFIX,
   userLockSentDir, userLockSentPath, setUserLockSentHomeForTests,

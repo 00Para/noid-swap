@@ -57,13 +57,15 @@ const { TICK_FRESH_S } = require("./lib/gate");
 const { Autopilot, STEP_MS } = require("./lib/autopilot");
 const { programWords } = require("./lib/programwords");
 const { BoardHost } = require("./lib/board/host");
-const { SwapSet, ID_RE: SWAP_ID_RE } = require("./lib/swapset");
+const { SwapSet, ID_RE: SWAP_ID_RE, barNetwork } = require("./lib/swapset");
 const practice = require("./lib/practice");
+const offerpost = require("./lib/offerpost");
 const { recordCloseTxid, RECORD_CLOSE_ID } = require("./lib/stepexec");
 const programsettings = require("./lib/programsettings");
 const newSwapNotice = require("./lib/newswapnotice");
 const payoutHistory = require("./lib/payouthistory");
 const Launch = require("./lib/launchfacts");
+const marketfetch = require("./lib/marketfetch");
 const { ETH_RE: WALLET_ETH_RE, NOID_RE: WALLET_NOID_RE } = require("./lib/walletrun");
 
 const APP_DIR = __dirname;
@@ -79,6 +81,7 @@ const STATIC = {
   "/programwords.js": ["lib/programwords.js", "text/javascript; charset=utf-8"],
   // the launch screens' shared pieces (figures, the limits card, the needs-you texts) and their stylesheet, linked after operator.css
   "/launchfacts.js": ["lib/launchfacts.js", "text/javascript; charset=utf-8"],
+  "/marketref.js": ["lib/marketref.js", "text/javascript; charset=utf-8"],
   "/limitstext.js": ["lib/limitstext.js", "text/javascript; charset=utf-8"],
   "/needtext.js": ["lib/needtext.js", "text/javascript; charset=utf-8"],
   "/launch.css": ["launch.css", "text/css; charset=utf-8"],
@@ -759,7 +762,7 @@ async function recordCloseRoute(swap, body) {
 // The operator page and what it loads: the same files as terminal mode, without the old chain console (/console, app.js, styles.css) and its API.
 const PROGRAM_STATIC = Object.fromEntries(Object.entries(STATIC).filter(([p]) => !["/console", "/app.js", "/styles.css"].includes(p)));
 const OPEN_WHAT = new Set(["recovery-code", "restore", "import", "invite", "help", "update-check"]);
-const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384, "/api/invitation/parse": 16384 };
+const PROGRAM_BODY_MAX = { "/api/newswap": 4096, "/api/settings": 16384, "/api/invitation/parse": 16384, "/api/offerpost/preview": 2048, "/api/offerpost/post": 2048 };
 /** The form's view of the networks (the test profiles and Ethereum mainnet): chain, caps, and the program's own contract for the network (`programPinFor`: the settings' override, else the one pin; null when there is none, as on mainnet until a deployment exists). */
 const formProfileView = (settings) => Object.fromEntries(Object.entries(PROGRAM_PROFILES).map(([k, v]) => [k, { chain: v.chain, max_noid: Number(v.max_noid_micro) / 1e6, max_eth: Number(v.max_eth_wei) / 1e18, contract: programPinFor(k, settings) || null, ...(k === "production" ? { mainnet: true, fee_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei, tip_gwei: PRODUCTION_FEE_DEFAULTS.priority_fee_gwei } : { estimate_cap_gwei: PRODUCTION_FEE_DEFAULTS.gas_price_gwei }) }]));
 
@@ -806,9 +809,10 @@ function programPayload(program, swapSet) {
   }
   const ps = swapSet.programSettings();
   const slot = swapSet.slotSwap();
-  // the bar's chip: mainnet as soon as one open swap is a mainnet swap (real funds), else the test network
+  // the bar's chip (lib/swapset.js barNetwork): mainnet as soon as one open swap is a mainnet swap (real funds), else the test network. Open = active, or not read yet (being set up, no tick); a mainnet
+  // swap that is done, aborted or never started does not light it (run 24 F10: a stopped mainnet folder lit it over a test swap)
   const swaps = swapSet.list();
-  const network = swaps.some((x) => x && x.network === "mainnet") ? "mainnet" : "test";
+  const network = barNetwork(swaps);
   let update = { state: "none", latest: null, url: null, unsafe: false, note: null, note_unreadable: false };
   try {
     const u = typeof program.updateStatus === "function" ? program.updateStatus() : null;
@@ -851,7 +855,17 @@ function bobCanLock(screen, tick, now) {
   if (!tick) return { ok: false, state: "loading", why: null, share_text: null };
   const age = typeof tick.now === "number" ? now - tick.now : null;
   if (age === null || age > TICK_FRESH_S || age < -TICK_FRESH_S) return { ok: false, state: "stale", why: null, share_text: null };
-  return { ok: screen.ok === true, state: screen.ok === true ? "ok" : "no", why: screen.ok === true ? null : screen.why || null, share_text: screen.ok === true ? screen.share_text || null : null };
+  const ok = screen.ok === true;
+  return {
+    ok,
+    state: ok ? "ok" : "no",
+    why: ok ? null : screen.why || null,
+    share_text: ok ? screen.share_text || null : null,
+    // the owner's decision of 0.2.0: the share warns and never refuses; `known` false = the share cannot be read now, `level` none | mild | high | unknown
+    known: ok ? screen.known === true : false,
+    level: ok && typeof screen.level === "string" ? screen.level : null,
+    warning: ok && typeof screen.warning === "string" ? screen.warning : "",
+  };
 }
 
 /** The numbers of the launch screens for one swap (R4): the shared figures of lib/launchfacts.js from the swap's own run.json, the base fee of its own network, the deposit status and the terms. Display only. */
@@ -865,7 +879,7 @@ function launchOf(program, swap, run, settings) {
 }
 
 /** GET /api/run?swap=ID: today's run payload for one swap (no path of the data folder in it). */
-async function programRunPayload(program, swapSet, swap) {
+async function programRunPayload(program, swapSet, swap, market) {
   const now = nowS();
   const notice = newSwapNotice.read(program);
   const ps = programsettings.loadSafe(program.dataDir);
@@ -890,13 +904,17 @@ async function programRunPayload(program, swapSet, swap) {
   // R3: the history of the person's own addresses, the count without this run; null when the program has no history (nothing is shown)
   // R23-3: the window to start closed with nothing of this side anywhere (lib/unstarted.js): the page's card says "ended before it started" (display only; the swap file is the engine's)
   prog.unstarted = null;
+  let roleTick = null;
   try {
     const tk = run.roles && role && run.roles[role] ? run.roles[role].tick || null : null;
+    roleTick = tk;
     const un = settings ? swapSet.unstartedOf(swap, role, run, tk) : null;
     if (un) prog.unstarted = { ended: true, holds: un.holds, held: un.held, reason: un.reason };
   } catch {
     prog.unstarted = null;
   }
+  prog.offer_post = offerPostView(program, swapSet, swap, run, role, settings);
+  prog.backup = typeof swapSet.backupStatus === "function" ? swapSet.backupStatus(swap, role, run, roleTick) : null;
   const hist = settings ? await payoutHistory.runView(program, swap.id, settings) : { state: "none", map: {} };
   prog.payout_history = hist.state === "none" ? null : hist.map;
   prog.payout_history_state = hist.state;
@@ -905,6 +923,17 @@ async function programRunPayload(program, swapSet, swap) {
       prog.launch = launchOf(program, swap, run, settings);
     } catch {
       prog.launch = null;
+    }
+    // the market reference (display only): a mainnet swap that is not approved yet asks for the cached reading (and starts one when it is due); a test network swap never does
+    prog.market = null;
+    try {
+      const ap = actionsView && actionsView.autopilot && settings.role ? actionsView.autopilot[settings.role] : null;
+      if (market && settings.profile === "production" && !(ap && ap.on === true) && marketAllowed(program)) {
+        market.trigger();
+        prog.market = market.peek();
+      }
+    } catch {
+      prog.market = null;
     }
     try {
       prog.settlement = swapSet.settlement.view({ dir: swap.dir, role: settings.role, settings, audit: swap.audit, run, marker: (n) => swap.runner.walletMarker(n), walletStatus: swap.runner.walletStatus ? swap.runner.walletStatus[settings.role] : null });
@@ -1230,6 +1259,16 @@ function rememberAddresses(program, swapSet, id) {
   }
 }
 
+/** The market reference follows the update check's opt-out: with "Check for a new version" set to "Never" the program makes no read of the site's snapshot either. */
+function marketAllowed(program) {
+  try {
+    const r = programsettings.loadSafe(program.dataDir);
+    return r.ok === true && r.settings.update_check !== "off";
+  } catch {
+    return false;
+  }
+}
+
 // ---- R3: the clipboard read-back. The page asks whether the clipboard still holds what it copied; the main process answers with a boolean and never the content.
 const CLIPBOARD_MAX_PER_MIN = 10;
 const AMOUNT_SHAPE = /^[0-9]{1,40}(?:\.[0-9]{1,39})?$/;
@@ -1239,8 +1278,114 @@ function clipboardShape(v) {
   return WALLET_ETH_RE.test(v) || WALLET_NOID_RE.test(v) || (v.length <= 40 && AMOUNT_SHAPE.test(v));
 }
 
+// ---- "Post to the offers board" (lib/offerpost.js): Bob's own click posts his invitation to three public relays; nothing here is automatic except "taken" when Alice's funding is seen
+
+/** Alice's funding is seen from Bob's side: his last tick is past "received" (the phases before it are the ones in which nothing of Alice's was recorded). */
+function fundingSeenOf(swapSet, swap) {
+  try {
+    const run = swapSet.runOf(swap);
+    const tk = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+    const ph = tk && typeof tk.phase_after === "string" ? tk.phase_after : null;
+    return { seen: ph !== null && ph !== "received" && ph !== "aborted", phase: ph };
+  } catch {
+    return { seen: false, phase: null };
+  }
+}
+
+/** The page's block for one swap: null where an offer makes no sense (not Bob, not Sepolia or mainnet); else what can be done and what was posted. */
+function offerPostView(program, swapSet, swap, run, role, settings) {
+  try {
+    if (!settings || settings.role !== "bob" || (settings.profile !== "sepolia" && settings.profile !== "production")) return null;
+    const posted = offerpost.viewOf(offerpost.readState(swap.dir), nowS());
+    const key = invitation.readBobKeyAddress(swap.dir);
+    const tk = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+    const ph = tk && typeof tk.phase_after === "string" ? tk.phase_after : null;
+    const open = ph === null || ph === "received";
+    let why = null;
+    if (!key) why = "The offer can be posted once the program has made this swap's key.";
+    else if (!open) why = "Alice's funding is already seen, or the swap has ended: an offer is for a swap that has not started.";
+    else if (swap.readOnly) why = "This swap is open read-only.";
+    return { can_post: !why && !(posted && !posted.expired), why, network: settings.profile === "production" ? "mainnet" : "sepolia", relays: [...offerpost.RELAYS], expiry_hours: 24, note_max: offerpost.NOTE_MAX, posted };
+  } catch {
+    return null;
+  }
+}
+
+/** One pass of the automatic "taken" (the program's timer): for each Bob swap with an open offer whose choice was ticked, once Alice's funding is seen. Never throws. */
+function offerAutoPass(swapSet, offers) {
+  try {
+    for (const swap of swapSet.swaps.values()) {
+      if (!swap.runner || swap.readOnly || !swap.dir || !fs.existsSync(path.join(swap.dir, offerpost.FILE))) continue;
+      const f = fundingSeenOf(swapSet, swap);
+      if (f.phase === "aborted" && offers.autoClose({ dir: swap.dir })) {
+        try {
+          swap.audit.append({ action: "offer-status", role: "bob", phase: "note", result: "offer withdrawn: the swap has ended" });
+        } catch {
+          /* a note that cannot be written changes nothing */
+        }
+      }
+      if (f.seen && offers.autoTaken({ dir: swap.dir, fundingSeen: true })) {
+        try {
+          swap.audit.append({ action: "offer-status", role: "bob", phase: "note", result: "offer marked taken: Alice's funding is seen" });
+        } catch {
+          /* a note that cannot be written changes nothing */
+        }
+      }
+    }
+  } catch {
+    /* tried again at the next pass */
+  }
+}
+
+const OFFER_WORDS_FAIL = "The offer could not be handled. Nothing of the swap was touched.";
+
+/** POST /api/offerpost/preview | post | status {swap, ...}: the preview of exactly what is published, the confirmed post, and taken/closed. */
+async function offerPostRoute(program, swap, offers, p, body, swapSet) {
+  const refuse = (status, error) => ({ status, body: { error } });
+  try {
+    const dir = swap.dir;
+    if (p === "/api/offerpost/status") {
+      // withdrawing never waits on a notice or a check: it only needs this swap's own offer
+      if (!swap.runner || swap.readOnly) return refuse(409, swap.refused || "this folder is not open");
+      const status = ["closed", "taken", "open"].includes(body.status) ? body.status : null;
+      if (!status) return refuse(400, "status must be open (send it again), taken or closed");
+      let v;
+      if (status === "open") {
+        const seenNow = fundingSeenOf(swapSet, swap);
+        if (seenNow.phase !== null && seenNow.phase !== "received") return refuse(409, "Alice's funding is already seen, or the swap has ended: an offer is for a swap that has not started.");
+        const pre = prepareInvitation(program, swap);
+        if (pre.err) return pre.err;
+        v = await offers.republish({ dir, code: invitation.encodeCode(pre.settings, pre.key) });
+      } else v = await offers.setStatus({ dir, status });
+      try {
+        swap.audit.append({ action: "offer-status", role: "bob", phase: "note", result: `offer ${status}: ${v.accepted} of ${v.total} relays took it` });
+      } catch {
+        /* a note that cannot be written changes nothing */
+      }
+      return { status: 200, body: { ok: true, offer: v } };
+    }
+    const pre = prepareInvitation(program, swap);
+    if (pre.err) return pre.err;
+    const f = fundingSeenOf(swapSet, swap);
+    if (f.phase !== null && f.phase !== "received") return refuse(409, "Alice's funding is already seen, or the swap has ended: an offer is for a swap that has not started.");
+    const code = invitation.encodeCode(pre.settings, pre.key);
+    const args = { code, note: body.note, markTaken: body.mark_taken !== false };
+    if (p === "/api/offerpost/preview") return { status: 200, body: { ok: true, preview: offerpost.previewOf(args) } };
+    const v = await offers.post({ dir, ...args, confirm: body.digest });
+    try {
+      swap.audit.append({ action: "offer-post", role: "bob", phase: "note", result: `offer posted: ${v.accepted} of ${v.total} relays took it` });
+    } catch {
+      /* a note that cannot be written changes nothing */
+    }
+    return { status: 200, body: { ok: true, offer: v } };
+  } catch (e) {
+    if (e instanceof offerpost.OfferPostError) return refuse(e.status, e.message);
+    return refuse(500, OFFER_WORDS_FAIL);
+  }
+}
+
 /** The request function of program mode: a plain (req, res) handler for the scheme adapter (no port is ever opened). */
-function programRequestHandler(program, swapSet, getServer, practiceCtx) {
+function programRequestHandler(program, swapSet, getServer, practiceCtx, market, offers) {
   // the practice swap (lib/practice.js): one session in memory; its routes use no program object, no folder, no settings, no step and no network
   const practiceHost = (practiceCtx && practiceCtx.host) || practice.createHost();
   const practiceNow = () => Math.floor((practiceCtx && typeof practiceCtx.now === "function" ? practiceCtx.now() : Date.now()) / 1000);
@@ -1369,10 +1514,31 @@ function programRequestHandler(program, swapSet, getServer, practiceCtx) {
             const out = p === "/api/bundle/save" ? await bundleSaveRoute(program, swap) : await invitationSaveRoute(program, swap);
             return send(res, out.status, out.body);
           }
+          if (p === "/api/backup/save" || p === "/api/backup/update") {
+            const swap = swapOf(body.swap, res);
+            if (!swap) return;
+            const out =
+              p === "/api/backup/save"
+                ? await swapSet.saveBackup(swap, { keepUpdated: body.keep_updated !== false })
+                : await swapSet.updateBackup(swap);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/backup/restore") {
+            const out = await swapSet.restoreBackup({
+              nodeOverrides: body && body.node_overrides && typeof body.node_overrides === "object" ? body.node_overrides : null,
+            });
+            return send(res, out.status || (out.ok ? 200 : 422), out);
+          }
           if (p === "/api/record-close") {
             const swap = swapOf(body.swap, res);
             if (!swap) return;
             const out = await recordCloseRoute(swap, body);
+            return send(res, out.status, out.body);
+          }
+          if (p === "/api/offerpost/preview" || p === "/api/offerpost/post" || p === "/api/offerpost/status") {
+            const swap = swapOf(body.swap, res);
+            if (!swap) return;
+            const out = await offerPostRoute(program, swap, offers, p, body, swapSet);
             return send(res, out.status, out.body);
           }
           if (p === "/api/board/slot") {
@@ -1429,10 +1595,15 @@ function programRequestHandler(program, swapSet, getServer, practiceCtx) {
         return send(res, 200, programPayload(program, swapSet));
       }
       if (p === "/api/practice") return send(res, 200, practice.get(practiceHost, practiceNow()));
+      if (p === "/api/market") {
+        // the market reference (display only): the cached reading, a read first when one is due; "off" when the person turned the update check off; nothing of the page or the swap is read or sent
+        if (!market || !marketAllowed(program)) return send(res, 200, { state: "off", ref: null });
+        return send(res, 200, await market.get());
+      }
       if (p === "/api/run") {
         const swap = swapOf(url.searchParams.get("swap"), res);
         if (!swap) return;
-        return send(res, 200, await programRunPayload(program, swapSet, swap));
+        return send(res, 200, await programRunPayload(program, swapSet, swap, market));
       }
       if (p === "/api/settings") {
         const cur = programsettings.loadSafe(program.dataDir);
@@ -1460,12 +1631,17 @@ async function startProgramServer(program, deps = {}) {
   const swapSet = new SwapSet({ program, deps });
   const token = crypto.randomBytes(24).toString("hex");
   const state = { runToken: token, stopped: false };
-  const handler = programRequestHandler(program, swapSet, () => state, { host: practice.createHost(), now: deps.now });
+  const market = deps.market || marketfetch.createMarketFetcher();
+  const offers = offerpost.createPoster({ publish: deps.offerPublisher || offerpost.relayPublisher(), now: deps.now ? () => Math.floor(deps.now() / 1000) : undefined });
+  const handler = programRequestHandler(program, swapSet, () => state, { host: practice.createHost(), now: deps.now }, market, offers);
   swapSet.scan();
   swapSet.emitStake();
   let timer = null;
   if (deps.timerMs !== 0) {
-    timer = setInterval(() => swapSet.tick(), deps.timerMs || STEP_MS);
+    timer = setInterval(() => {
+      swapSet.tick();
+      offerAutoPass(swapSet, offers);
+    }, deps.timerMs || STEP_MS);
     timer.unref();
   }
   let stopped = null;

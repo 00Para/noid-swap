@@ -19,7 +19,7 @@
 
 const crypto = require("crypto");
 
-const LABELS = Object.freeze(["swap-passphrase", "board", "migrated-passphrase"]);
+const LABELS = Object.freeze(["swap-passphrase", "board", "migrated-passphrase", "swap-backup"]);
 const RUN_ID_RE = /^[0-9a-f]{32}$/;
 
 class DeriveError extends Error {}
@@ -57,6 +57,11 @@ function migratedKey(S, runId) {
   return K(S, "migrated-passphrase", runId);
 }
 
+/** K("swap-backup", R): 32 bytes, AES-256-GCM key for a per-swap sealed backup file. */
+function backupKey(S, runId) {
+  return K(S, "swap-backup", runId);
+}
+
 function inviteKey(S) {
   return mac(S, "no1d-swap/v1/board-invite/install");
 }
@@ -71,4 +76,4 @@ function keyCheck(S) {
   return mac(S, "no1d-swap/v1/key-check").subarray(0, 8).toString("hex");
 }
 
-module.exports = { LABELS, DeriveError, isRunId, K, passphrase, boardKey, migratedKey, inviteKey, historyKey, keyCheck };
+module.exports = { LABELS, DeriveError, isRunId, K, passphrase, boardKey, migratedKey, backupKey, inviteKey, historyKey, keyCheck };

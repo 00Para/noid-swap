@@ -29,7 +29,7 @@ const BOB_ONLINE_MIN = LF.bobOnlineMin("production");
 const BOB_STAY = `After Alice takes the ETH, your program has at least about ${BOB_ONLINE_MIN} minutes to claim your NOID. If this computer is off or offline for all that time, Alice can take the NOID back and you lose the ETH.`;
 
 // the real card's own warning for a share above half (stagecard.js `lockCheckLine`), kept in step by test/practice-core.test.js
-const HALF_WARNING = "If the share is above 50 %, that is more than half: someone who controls most of the mining can take both sides of a swap. Swap only with someone you have a reason to trust.";
+const HALF_WARNING = "If the share is above 50 %, that is more than half: someone who controls most of the mining can take both sides of a swap, and no time window protects you from that. Swap only with someone you have a reason to trust.";
 
 const BANNER = "Practice. Nothing here is real. No coins move.";
 const BANNER_LONG = "Practice. Nothing here is real. No coins move, nothing is sent, and no file is written.";
@@ -123,7 +123,7 @@ const PRE = {
       status: "Nothing is sent until you approve.",
       happened: "The check lines matched. Now the program asks for your approval, once for the whole swap.",
       real: `You tick what you promise and type the amount and unit of your step. On Ethereum mainnet Bob's approval also states how much of Parano1d's recent blocks one address mined, and asks you to accept it. ${BOB_STAY}`,
-      time: "A real approval takes a minute. Today the program refuses to lock your ETH on mainnet when one address mined more than 65 % of Parano1d's recent blocks. Read Limits and risks in the menu.",
+      time: "A real approval takes a minute. Today the program warns, and does not refuse, when one producer mined most of Parano1d's recent blocks: above half of the blocks no time window protects your ETH from a miner who is Alice. Read Limits and risks in the menu.",
     },
     deposit: {
       kind: "deposit",
@@ -226,7 +226,7 @@ const STATEMENTS = Object.freeze({
     Object.freeze({ id: "stay_on", text: "This computer stays on and awake, and the program stays open, until the swap is over." }),
     Object.freeze({ id: "no_hand", text: "I send no step of this swap by hand." }),
     Object.freeze({ id: "line", text: "Alice's check line matches mine." }),
-    Object.freeze({ id: "producer", text: `In practice: one address mined a share of Parano1d's recent blocks. In a real mainnet swap you accept a share up to 65 % here, and the program refuses above it. ${HALF_WARNING}` }),
+    Object.freeze({ id: "producer", text: `In practice: one producer mined a share of Parano1d's recent blocks. In a real mainnet swap you tick that you read the producer warning here; the program warns and does not refuse. ${HALF_WARNING}` }),
   ]),
 });
 

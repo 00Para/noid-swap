@@ -9,6 +9,7 @@ const { main } = require("../tools/recovery");
 const derive = require("../lib/derive");
 const rc = require("../lib/recoverycode");
 const sealed = require("../lib/sealed");
+const backupfile = require("../lib/backupfile");
 const { tmpDir, cleanupAll } = require("./vault-helpers");
 
 test.after(cleanupAll);
@@ -104,4 +105,97 @@ test("a real process: reads the code on stdin only, prints the vectors; the code
   const bad = childProcess.spawnSync(process.execPath, [TOOL, "secret"], { input: "nonsense", encoding: "utf8" });
   assert.equal(bad.status, 1);
   assert.equal(bad.stdout, "");
+});
+
+test("T-D5 + audit L-4: backup-open writes restored.json; round trip, mode 0600, vault-check.json enables passphrase, refuses existing outdir, wrong code, damaged file, and code on argv", () => {
+  const work = tmpDir("no1d-bopen-");
+  const HASHLOCK = "a".repeat(64);
+  const runBytes = Buffer.from(`${JSON.stringify({ v: 1, run_id: R, role: "bob", profile: "sepolia", chain_id: 11155111 })}\n`);
+  const swapBytes = Buffer.from('{"role":"bob","profile":"sepolia","canary":"SUPER-SECRET-CANARY"}\n');
+  const lockBytes = Buffer.from('{"tx":"0x11"}\n');
+  const lockRel = `lock-sent/11155111-${"2".repeat(40)}-${HASHLOCK}.json`;
+  const plain = backupfile.buildPlain({
+    madeBy: "0.1.8",
+    madeAt: "2026-11-25T12:00:00Z",
+    seq: 3,
+    runId: R,
+    role: "bob",
+    profile: "sepolia",
+    chainId: 11155111,
+    phase: "locked",
+    safetyDigest: "b".repeat(64),
+    registry: { hashlock: HASHLOCK, role: "bob" },
+    files: [
+      { path: "run.json", bytes: runBytes },
+      { path: "bob/bob.swap.json", bytes: swapBytes },
+    ],
+    home: [{ path: lockRel, bytes: lockBytes }],
+  });
+  const key = derive.backupKey(S, R);
+  const env = sealed.seal({ key, label: "swap-backup", runId: R, fileName: "swap-backup", plain });
+  key.fill(0);
+  const outerBuf = Buffer.from(backupfile.formatOuter({ runId: R, sealedEnvelope: env }), "utf8");
+  const backupPath = path.join(work, "swap.no1dbackup");
+  fs.writeFileSync(backupPath, outerBuf);
+
+  // 1. Refuses extra argv (e.g. code passed on command line) or missing outdir
+  assert.equal(run(["backup-open", backupPath, path.join(work, "o1"), CODE], "").code, 2);
+  assert.equal(run(["backup-open", backupPath], CODE).code, 2);
+
+  // 2. Refuses an existing output folder without touching it
+  const existing = path.join(work, "already");
+  fs.mkdirSync(existing);
+  fs.writeFileSync(path.join(existing, "keep.txt"), "stay");
+  const rExist = run(["backup-open", backupPath, existing], CODE);
+  assert.equal(rExist.code, 1);
+  assert.match(rExist.err.join(" "), /already exists/);
+  assert.equal(fs.readFileSync(path.join(existing, "keep.txt"), "utf8"), "stay");
+
+  // 3. Wrong code is refused and creates no output folder
+  const other = Buffer.from(S);
+  other[0] ^= 0xff;
+  const outWrong = path.join(work, "out-wrong");
+  const rWrong = run(["backup-open", backupPath, outWrong], rc.encode(other));
+  assert.equal(rWrong.code, 1);
+  assert.equal(fs.existsSync(outWrong), false);
+  assert.equal(rWrong.out.length, 0);
+
+  // 4. Damaged file is refused and creates no output folder
+  const dmgPath = path.join(work, "damaged.no1dbackup");
+  const dmgBuf = Buffer.from(outerBuf);
+  dmgBuf[dmgBuf.length - 10] ^= 0x01;
+  fs.writeFileSync(dmgPath, dmgBuf);
+  const outDmg = path.join(work, "out-dmg");
+  assert.equal(run(["backup-open", dmgPath, outDmg], CODE).code, 1);
+  assert.equal(fs.existsSync(outDmg), false);
+
+  // 5. Real subprocess round trip: reads code on stdin only, writes 0600 files + vault-check.json, prints zero secrets
+  const outDir = path.join(work, "opened");
+  const proc = childProcess.spawnSync(process.execPath, [TOOL, "backup-open", backupPath, outDir], { input: `${CODE}\n`, encoding: "utf8" });
+  assert.equal(proc.status, 0, proc.stderr);
+  assert.match(proc.stdout, new RegExp(`opened ${R}`));
+  assert.equal(proc.stdout.includes("SUPER-SECRET-CANARY"), false, "no secret leaked to stdout");
+  assert.equal(proc.stdout.includes(S.toString("hex")), false, "no install secret in stdout");
+  assert.equal(proc.stderr.includes(CODE), false, "no recovery code in stderr");
+  assert.deepEqual(fs.readFileSync(path.join(outDir, "run.json")), runBytes);
+  assert.deepEqual(fs.readFileSync(path.join(outDir, "bob", "bob.swap.json")), swapBytes);
+  assert.deepEqual(fs.readFileSync(path.join(outDir, "home", ...lockRel.split("/"))), lockBytes);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(outDir, "vault-check.json"), "utf8")).check, derive.keyCheck(S));
+  // audit of 0.2.0, L-4: the by-hand route writes the restore marker, so the restore gates apply to a folder moved into runs/
+  const marker = JSON.parse(fs.readFileSync(path.join(outDir, "restored.json"), "utf8"));
+  assert.equal(marker.v, 1);
+  assert.equal(marker.backup_phase, "locked");
+  assert.equal(marker.backup_seq, 3);
+  assert.equal(marker.backup_made_at, "2026-11-25T12:00:00Z");
+  assert.equal(marker.first_read, null);
+  assert.ok(Number.isFinite(Date.parse(marker.restored_at)));
+  if (process.platform !== "win32") {
+    assert.equal(fs.statSync(path.join(outDir, "bob", "bob.swap.json")).mode & 0o777, 0o600);
+    assert.equal(fs.statSync(path.join(outDir, "vault-check.json")).mode & 0o777, 0o600);
+  }
+
+  // 6. `recovery.js passphrase <outDir>` works immediately on the opened folder!
+  const pp = childProcess.spawnSync(process.execPath, [TOOL, "passphrase", outDir], { input: CODE, encoding: "utf8" });
+  assert.equal(pp.status, 0, pp.stderr);
+  assert.equal(pp.stdout.trim(), "1390979abfa070d153819225d0f04fe3dba89cd5c662d7bdb845ed2b534fe8b1");
 });

@@ -2,8 +2,8 @@
 
 ## Status, in one paragraph
 
-No1d Swap is young software that moves real value. Ethereum mainnet is open in the desktop program, within caps of 2,500 NOID and
-0.5 ETH per swap, and it is meant for two people who have a reason to trust each other. The program itself has not yet run on
+No1d Swap is young software that moves real value. Ethereum mainnet is open in the desktop program, within caps of 20,000 NOID and
+1 ETH per swap, and it is meant for two people who have a reason to trust each other. The program itself has not yet run on
 Ethereum mainnet; it ran on the Sepolia test network (three two-machine rehearsals, 19 to 20 November 2026). The swap tool and its
 helpers settled one swap on Ethereum mainnet (run 8, 5 NOID against 0.001 ETH, 2026-11-06), and the swap's own NOID wallet made its
 first real payments on Parano1d mainnet in run 22. Every review so far was made by the project itself; **none came from an outside

@@ -59,13 +59,12 @@ The program still never downloads or installs anything.
 
 ### The hook for "unsafe for new swaps"
 
-`createUpdateChecker(...).status()` (what `program.updateStatus()` returns to the console server) now always carries
-`unsafeForNewSwaps` (boolean) and `unsafeNote` (the signed sentence, or null). The console server can use them later to refuse to
-**start a new swap** and to show the sentence. They must never block a running swap, a refund, a recovery or a sweep, so a wrong
-or replayed notice can at worst delay new swaps. Notes for whoever wires it:
+`createUpdateChecker(...).status()` (what `program.updateStatus()` returns to the console server) always carries
+`unsafeForNewSwaps` (boolean) and `unsafeNote` (the signed sentence, or null). Since 0.2.0 the console server uses them: it
+refuses to **start a new swap** in a version found unsafe and shows the sentence (the stop flag is used in `ui/app/server.js`
+and `ui/app/lib/swapset.js`). They never block a running swap, a refund, a recovery or a sweep, so a wrong or replayed notice
+can at worst delay new swaps.
 
-- `ui/app/server.js` builds the page's `update` object from `state`, `latest` and `url` only; add the two fields there, and use
-  `unsafeForNewSwaps` in the `new_swap_allowed` answer.
 - A failed check keeps a flag that is already known. A program update (another version than the one that wrote the record in
   `state.json`) discards the record, and the next start checks at once, so a fixed build is never flagged by an old answer.
 - The flag exists only after a check that reached GitHub; with the check set to "off" it is whatever the last check left.

@@ -12,7 +12,7 @@ async function listPage(over = {}) {
 const ITEMS = [
   /^The Parano1d wallet app is open on this computer and in sync\./,
   /^An Ethereum wallet and its address: on Sepolia \(the test network\) for a test swap, on Ethereum mainnet for a real one\. The ETH you get, or what is left, goes there\. Use your own wallet, not an exchange\.$/,
-  /^For a real swap on Ethereum mainnet: real ETH and real NOID, at most 0\.5 ETH and 2,500 NOID per swap\. Start small\. For a test swap: Sepolia test ETH in that wallet\. It has no value and is free from a Sepolia faucet; search for "Sepolia faucet", as they change often\. If you sell NOID, a little is enough: it pays one fee\.$/,
+  /^For a real swap on Ethereum mainnet: real ETH and real NOID, at most 1 ETH and 20,000 NOID per swap\. Start small\. For a test swap: Sepolia test ETH in that wallet\. It has no value and is free from a Sepolia faucet; search for "Sepolia faucet", as they change often\. If you sell NOID, a little is enough: it pays one fee\.$/,
   /^If you sell NOID: the NOID to swap and a little more for the fee, in the Parano1d wallet app\. If you sell ETH: the ETH to swap and a little more for two fees\.$/,
   /^The amounts, agreed with the other person\. The one who sells ETH makes the swap first and sends the other an invitation file\.$/,
   /^About an hour with both computers on and awake\.$/,

@@ -436,8 +436,10 @@ pub fn fund(env: &FlowEnv<'_>) -> Result<StepReport, WalletError> {
     if existing.is_none() && matches!(file.phase, Phase::Alice(AlicePhase::FundingSubmitted { .. })) {
         return Ok(StepReport::new(SendKind::Fund, Outcome::Hold, "this swap's funding was submitted by another path; the wallet does not fund"));
     }
-    let (instances, _) = reads.root_instances(&file.public.opening_hex)?;
+    // Read the wallet's confirmed coins BEFORE the contract's instances so a funding mined between the two reads
+    // cannot hide the spent coin while leaving the remaining coins selectable.
     let view = reads.slots_by_owner(&own)?;
+    let (instances, _) = reads.root_instances(&file.public.opening_hex)?;
 
     if !instances.is_empty() {
         let landed = existing.as_ref().is_some_and(|r| !all_unspent(r, &view.plain));

@@ -340,7 +340,7 @@ pub struct Gates {
     pub producer_limit_permille: u64,
     /// The two largest addresses together above this share of either window (permille) draw a warning, never a refusal.
     pub producer_top_two_permille: u64,
-    /// `true`: Bob's `lock_eth` is not offered when the screen refuses or cannot be completed (`--accept-producer-concentration` waives that).
+    /// `true`: Bob's `lock_eth` is not offered when the second-node cross-check refuses or a remembered disagreement holds (`--accept-producer-concentration` waives that). Since 0.2.0 the producer SHARE (high or unknown) never refuses: it only warns.
     /// `false`: the same evaluation runs and prints a warning; the lock is offered as before.
     pub producer_gate_enforced: bool,
 }
@@ -368,8 +368,8 @@ pub const PRODUCTION: Gates = Gates {
     b_bob: 60,
     margin: 18,
     d_offset: 738,
-    max_noid_micro: Some(2_500_000_000),
-    max_eth_wei: Some(500_000_000_000_000_000),
+    max_noid_micro: Some(20_000_000_000),
+    max_eth_wei: Some(1_000_000_000_000_000_000),
     eth_chain_ids: Some(&[1]),
     producer_window_long: 2_880,
     producer_window_short: 720,
@@ -1239,15 +1239,25 @@ mod tests {
         assert!(matches!(R.check_caps(1, 10_000_000_000_000_001, 31_337), Err(GateError::EthAmountAboveCap { .. })));
         assert!(matches!(R.check_caps(1, 1, 1), Err(GateError::ChainNotAllowed { .. })));
         assert!(matches!(R.check_caps(1, 1, 11_155_111), Err(GateError::ChainNotAllowed { .. })));
-        // Production carries the caps of 2026-11-20: 2,500 NOID, 0.5 ETH, chain 1; at the cap passes, one unit above fails.
-        assert_eq!(P.check_caps(2_500_000_000, 500_000_000_000_000_000, 1), Ok(()));
-        assert!(matches!(P.check_caps(2_500_000_001, 1, 1), Err(GateError::NoidAmountAboveCap { .. })));
-        assert!(matches!(P.check_caps(1, 500_000_000_000_000_001, 1), Err(GateError::EthAmountAboveCap { .. })));
+        // Production carries the caps (the NOID cap 20,000 since 2026-11-27, 2,500 before): 20,000 NOID, 1 ETH, chain 1; at the cap passes, one unit above fails.
+        assert_eq!(P.check_caps(20_000_000_000, 1_000_000_000_000_000_000, 1), Ok(()));
+        assert!(matches!(P.check_caps(20_000_000_001, 1, 1), Err(GateError::NoidAmountAboveCap { .. })));
+        assert!(matches!(P.check_caps(1, 1_000_000_000_000_000_001, 1), Err(GateError::EthAmountAboveCap { .. })));
         assert!(matches!(P.check_caps(1, 1, 11_155_111), Err(GateError::ChainNotAllowed { .. })));
         assert!(matches!(P.check_caps(1, 1, 31_337), Err(GateError::ChainNotAllowed { .. })));
-        assert_eq!(P.max_noid_micro, Some(2_500_000_000));
-        assert_eq!(P.max_eth_wei, Some(500_000_000_000_000_000));
+        assert_eq!(P.max_noid_micro, Some(20_000_000_000));
+        assert_eq!(P.max_eth_wei, Some(1_000_000_000_000_000_000));
         assert_eq!(P.eth_chain_ids, Some(&[1u64][..]));
+    }
+
+    #[test]
+    fn production_noid_cap_is_20000_noid() {
+        // 2026-11-27: the mainnet NOID cap is 20,000 NOID (20,000,000,000 micro-NOID); exactly the cap passes, one micro-NOID above is refused.
+        assert_eq!(P.max_noid_micro, Some(20_000_000_000));
+        assert_eq!(P.check_caps(20_000_000_000, 1, 1), Ok(()));
+        assert!(matches!(P.check_caps(20_000_000_001, 1, 1), Err(GateError::NoidAmountAboveCap { .. })));
+        // the test profiles keep their 20 NOID cap
+        assert_eq!(R.max_noid_micro, Some(20_000_000));
     }
 
     #[test]

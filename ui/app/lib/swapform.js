@@ -25,9 +25,9 @@ const PROFILES = {
   sepolia: { chain: 11155111, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
   rehearsal: { chain: 31337, max_noid_micro: 20_000_000n, max_eth_wei: 10n ** 16n },
 };
-// Ethereum mainnet in program mode (the owner's decision D1): at most 2,500 NOID and 0.5 ETH per swap, chain 1. swap-cli's production profile carries the same two caps (a second,
+// Ethereum mainnet in program mode (the owner's decision D1): at most 20,000 NOID and 1 ETH per swap, chain 1 (the NOID cap was 2,500 until 2026-11-27). swap-cli's production profile carries the same two caps (a second,
 // independent layer); the page's form only shows them, run.json's schema enforces them.
-const PRODUCTION = Object.freeze({ chain: 1, max_noid_micro: 2_500_000_000n, max_eth_wei: 5n * 10n ** 17n });
+const PRODUCTION = Object.freeze({ chain: 1, max_noid_micro: 20_000_000_000n, max_eth_wei: 10n ** 18n });
 const PROGRAM_PROFILES = Object.freeze({ ...PROFILES, production: PRODUCTION });
 // The mainnet fee settings a new production swap starts with (D5): the cap (maxFeePerGas) and the tip, in gwei, both editable per swap and part of the approved bytes.
 const PRODUCTION_FEE_DEFAULTS = Object.freeze({ gas_price_gwei: "1", priority_fee_gwei: "0.05" });

@@ -808,6 +808,13 @@ body.program.on-swap .foot { display: none; }
 .sc-status { margin: var(--s2) 0 0; max-width: 58ch; color: var(--quiet); font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
 .sc-status .c-noid, .sc-status .c-eth { color: inherit; }
 .sc-status.look { color: var(--text); }
+.sc-clock { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); margin: var(--s3) 0 0; max-width: 58ch; font-size: 14px; line-height: 1.5; color: var(--quiet); overflow-wrap: anywhere; }
+.sc-clock .chip { display: inline-block; padding: 1px var(--s3); border: 1px solid var(--rule-2); border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--quiet); }
+.sc-clock .chip.track { color: var(--safe); background: var(--safe-bg); border-color: var(--safe-rule); }
+.sc-clock .chip.passed { color: var(--alarm); background: var(--alarm-bg); border-color: var(--alarm-rule); }
+.sc-clock .chip.danger { color: var(--alarm); background: var(--alarm-bg); border-color: var(--alarm-rule); }
+.sc-clock .keep { flex-basis: 100%; color: var(--faint); font-size: 13px; }
+.sc-clock .keep.sending { color: var(--due); }
 .sc-reasons { display: grid; gap: 6px; margin: var(--s3) 0 0; }
 .sc-reasons li { position: relative; padding-left: var(--s4); color: var(--text); font-size: 15px; overflow-wrap: anywhere; }
 .sc-reasons li::before { content: ""; position: absolute; left: 0; top: 11px; width: 6px; height: 2px; background: var(--alarm); }
@@ -928,7 +935,8 @@ body.program.on-swap main > * { min-width: 0; }
 }
 /* ---- the ticket: the two legs of this swap ---- */
 .tk { display: grid; gap: var(--s4); padding: var(--s5); border: 1px solid var(--rule); border-radius: var(--r-panel); background: var(--panel); margin-top: var(--s4); }
-@media (min-width: 900px) { .tk { margin-top: 0; position: sticky; top: 80px; } }
+/* not sticky: a sticky ticket is held against the whole page, not its own column, and slid over Details and the picture when the page was scrolled (rehearsal F3, 2026-11-26) */
+@media (min-width: 900px) { .tk { margin-top: 0; } }
 @media (max-width: 559px) { .tk { padding: var(--s4); } }
 .tk h2 { font-size: 15px; letter-spacing: 0; }
 .tk p { margin: 0; }
@@ -1147,7 +1155,7 @@ body.program.on-practice .foot { display: none; }
 .pr-grid { display: grid; gap: var(--s5); min-width: 0; align-items: start; }
 .pr-grid > * { min-width: 0; }
 .pr-grid .tk { margin-top: 0; position: static; }
-@media (min-width: 900px) { .pr-grid { grid-template-columns: minmax(0, 1fr) 336px; } .pr-grid .tk { position: sticky; top: 112px; } }
+@media (min-width: 900px) { .pr-grid { grid-template-columns: minmax(0, 1fr) 336px; } }
 .pr-picture { margin-top: var(--s5); }
 .pr-explain, .pr-summary { margin-top: var(--s5); padding: var(--s5); border: 1px solid var(--rule); border-radius: var(--r-panel); background: var(--panel); }
 @media (max-width: 559px) { .pr-explain, .pr-summary { padding: var(--s4); } }
@@ -1160,3 +1168,7 @@ body.program.on-practice .foot { display: none; }
 .pr-opt input { flex: none; margin: 4px 0 0; }
 .pr-opt .t { display: grid; gap: 2px; min-width: 0; }
 .pr-wait .left { font-family: var(--mono); }
+.sc-backup { margin-top: var(--s4); padding-top: var(--s3); border-top: 1px solid var(--rule); display: grid; gap: var(--s2); }
+.sc-backup-head { font-size: 14px; font-weight: 600; margin: 0; }
+.sc-backup-msg { font-size: 13px; color: var(--warn); }
+.pg-restore { display: grid; gap: var(--s3); }

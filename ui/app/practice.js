@@ -132,6 +132,7 @@
       const inv = btn([ic("save"), a.save.label], () => act(d.id, a.save.id), { primary: !a.save.done, big: !a.save.done });
       const join = btn([ic("open"), a.choose.label], () => act(d.id, a.choose.id), { primary: a.save.done, big: a.save.done });
       box.appendChild(el("div", { class: "sc-part" }, A().partTitle(1, "Send Alice an invitation"), A().fileRow("file", "Invitation for Alice", "It holds your terms and your two addresses, so Alice does not type them. It holds no secret. Send it to Alice as a file.", inv), fileNote(a.save.done, a.save.note)));
+      if (a.offer) box.appendChild(el("div", { class: "sc-part" }, A().partTitle(null, "Post to the offers board (optional)"), A().fileRow("file", "Public offer", "Optional. The offers board lists your offer so that someone can find it. In a real swap this uses the network and asks you to confirm first.", btn([ic("save"), a.offer.label], () => act(d.id, a.offer.id), {})), fileNote(a.offer.done, a.offer.note)));
       box.appendChild(el("div", { class: "sc-part" }, A().partTitle(2, "Choose the file Alice sends back"), A().fileRow("open", "Alice's swap file", "The program checks it against your own terms. Nothing is sent.", join), el("p", { class: "dim", text: a.choose.note })));
     } else if (kind === "check") {
       if (a.save) {

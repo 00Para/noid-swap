@@ -54,6 +54,6 @@ test("the advice about the run folder is the first thing of Details, once, and n
   const first = page.byId("pg-details-body").children[0];
   assert.equal(first.tag, "p");
   assert.equal(has(first, "alarm"), false);
-  assert.equal(page.byId("pg-swapbar").all((n) => /Back up the whole run folder/.test(n.textContent || "")).length, 0);
-  assert.match(squash(first.textContent), /^Back up the whole run folder \(the swap file and run\.json are in it\) and keep your recovery code\./);
+  assert.equal(page.byId("pg-swapbar").all((n) => /Save a backup of this swap/.test(n.textContent || "")).length, 0);
+  assert.match(squash(first.textContent), /^Save a backup of this swap and keep your recovery code: together they bring the swap back on another computer\./);
 });

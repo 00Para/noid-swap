@@ -31,11 +31,13 @@ const crypto = require("crypto");
 const { pathCandidates } = require("./runfolder");
 const runsettings = require("./runsettings");
 const { TOOL_KEYS, stepCodeHash } = require("./toolhash");
-const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, ENDED_PHASES, LINE_MATCH_MISSING, TICK_FRESH_S } = require("./gate");
+const { ALL_SPENDS: SPEND_TABLE, factsReady, expectedAmount, typedMatches, sweepReady, revealMaybePending, ENDED_PHASES, LINE_MATCH_MISSING, TICK_FRESH_S } = require("./gate");
 const E = require("./enginetext");
 const FS = require("./firststeps");
-const { producerScreen } = require("./producerscreen");
+const { producerScreen, SHARE_UNKNOWN_SENTENCE } = require("./producerscreen");
 const { lateK } = require("./launchfacts");
+const { readRestoredMarker, writeRestoredMarker } = require("./restore");
+const RG = require("./restoregate");
 const PRODUCER_ACK_PERMILLE = 650; // the ceiling the approval's statement carries to swap-cli (steps/common.js passes it)
 
 const ROLES = ["alice", "bob"];
@@ -52,6 +54,7 @@ const RERUN_KINDS = new Set(["fund_noid", "refund_noid", "sweep_noid"]);
 const SWEEP_IDS = new Set(["send-sweep-noid", "send-sweep-eth-alice", "send-sweep-eth-bob"]);
 const SWEEP_RETRY_MS = 5 * 60 * 1000; // a refused sweep ("lock still open", "instance not closed") is a wait, tried again at most this often
 const FRESH_LOOK_MS = 60 * 1000; // program mode: the view and the loop read every input of an approval again (no cache) this often, so a tool file changed with its metadata kept does not show "on" until the next spend
+const HEARTBEAT_MS = 60 * 1000; // how often the approval file's last_alive_at is refreshed while the program runs
 const RECORD_RETRY_MS = 60 * 1000; // the recording of the recovery close (tick --closed-by) is tried again about once a minute until the tool takes it
 const REPLACE_ORDER = ["send-reveal-replace", "send-refund-eth-replace"];
 const NOTHING_LEFT_TEXT = { "send-sweep-noid": "Nothing is left in the swap wallet to send back." }; // the page's finished line for a sweep that ended as "nothing left"
@@ -61,9 +64,9 @@ const FIRST_SPEND = { alice: "send-fund", bob: "send-lock" }; // the step whose 
 // What a refusal for one of these reasons means: the tick or the dry run was not fresh enough at that moment, not that anything is wrong with the step.
 const FRESHNESS = new Set(["tick_writing", "tick_stale", "tick_clock", "tick_missing", "dry_stale", "dry_missing", "reserve_stale", "reserve_missing"]);
 // What a wallet run's deposit and sweep rules mean: the step is not ready, nothing is wrong (a deposit that has not arrived, a swap that is not over).
-const WAIT_REASONS = new Set(["deposit_short", "reserve_short", "sweep_not_ready"]);
+const WAIT_REASONS = new Set(["deposit_short", "reserve_short", "sweep_not_ready", "restore_quiet", "restore_selftest", "backup_missing"]);
 // Reasons that stop the step for the person: the engine itself says not to send, or it raises an alarm.
-const STOP_REASONS = new Set(["engine_do_not_send", "engine_cutoff", "engine_alarm", "engine_alert", "statement_alice_check"]);
+const STOP_REASONS = new Set(["engine_do_not_send", "engine_cutoff", "engine_alarm", "engine_alert", "statement_alice_check", "restore_quiet_refuse"]);
 // The open case of rule W (the program has no step for it): an abort the engine does not record because a funding or a lock was decided and never cancelled (swap-cli engine.rs tick_apply).
 const NOT_RECORDED_RE = /^abort not recorded: a (fund_noid|lock_eth) was decided for this swap and never cancelled\b/;
 const CLAIM_WATCH_CLEARED = "claim watch: cleared";
@@ -75,17 +78,39 @@ const STATEMENTS = {
   no_pending_funding: "No funding of this contract is pending: I have not run the wallet's fund command or fund.sh for it anywhere else.",
   bob_check_matches: "Bob's check line matches mine: the 16 digits of his bundle check line are the ones of my line, compared over a second channel.",
   alice_check_matches: "Alice's check line matches mine: the 16 digits of her bundle check line are the ones of my line, compared over a second channel.",
-  // Ethereum mainnet, Bob only (decision D2): {SHARE} is filled in with the measured share (`statementText`); the statement is the person's acknowledgement that lets the program pass the swap-cli flag
-  producer_share_ack: "One address mined {SHARE} % of Parano1d's recent blocks; I accept a share up to 65 %. If Alice controls most of the mining she can take both sides. I swap only with someone I have a reason to trust.",
+  // Ethereum mainnet, Bob only (the owner's decision of 0.2.0: the share warns, it never refuses): {SHARE} is filled in with the plain sentence about the measured share (or the unknown one) (`statementText`);
+  // the statement is the person's confirmation that he read the warning; it also lets the program pass the swap-cli flag (the loopback-node waiver). The id stays for existing approval files.
+  producer_share_ack: "I read the producer warning. {SHARE} If the miner behind Alice holds most of the blocks, no time window protects my ETH and she can take both sides. I accept that risk for this swap.",
+  // Restored swap: confirms the old computer is off or its autopilot is off before running on this computer
+  one_computer: RG.ONE_COMPUTER_TEXT,
 };
 // A wallet run's funding statements: only Bob's check line remains (the wallet holds one funding and the tool refuses a funding submitted by another path, so "no pending funding" is not asked).
 // A BOARD run (piece 3): Alice's "Bob's check line matches mine" is NOT asked, and is not accepted in its place anywhere: the funding needs the board's verified handover check (lib/gate.js boardReasons).
 // In the program (outside a board run) Bob also confirms that Alice's check line matches his, as Alice confirms Bob's.
-const requiredStatements = (role, wallet = false, board = false, program = false, mainnet = false) => (role === "bob" && mainnet && program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches", "producer_share_ack"] : role === "alice" ? (wallet ? (board ? ["stay_on", "no_manual_steps"] : ["stay_on", "no_manual_steps", "bob_check_matches"]) : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"]) : program && wallet && !board ? ["stay_on", "no_manual_steps", "alice_check_matches"] : ["stay_on", "no_manual_steps"]);
+// `producer_share_ack` is asked ONLY while Bob's lock is not yet made (`coinsIn !== false`). Restored swaps add `one_computer`.
+const requiredStatements = (role, wallet = false, board = false, program = false, mainnet = false, opts = {}) => {
+  const coinsIn = opts && opts.coinsIn !== undefined ? opts.coinsIn === true : true;
+  const restored = !!(opts && opts.restored === true);
+  let list;
+  if (role === "bob" && mainnet && program && wallet && !board && coinsIn) {
+    list = ["stay_on", "no_manual_steps", "alice_check_matches", "producer_share_ack"];
+  } else if (role === "alice") {
+    list = wallet
+      ? board
+        ? ["stay_on", "no_manual_steps"]
+        : ["stay_on", "no_manual_steps", "bob_check_matches"]
+      : ["stay_on", "no_manual_steps", "no_pending_funding", "bob_check_matches"];
+  } else if (program && wallet && !board) {
+    list = ["stay_on", "no_manual_steps", "alice_check_matches"];
+  } else {
+    list = ["stay_on", "no_manual_steps"];
+  }
+  return restored ? [...list, "one_computer"] : list;
+};
 
-/** The text of a statement for the page and the audit: {SHARE} is the measured share (null: the words "an unknown share" never reach an approval, the approval is refused first). */
-const shareOf = (sc) => (sc && sc.ok ? sc.share_text : null);
-const statementText = (id, share) => String(STATEMENTS[id]).replace("{SHARE}", share === null || share === undefined ? "?" : share);
+/** The text of a statement for the page and the audit: {SHARE} is the plain sentence about the measured share, or the one that says it is unknown. */
+const shareOf = (sc) => (sc && sc.ok ? sc.sentence : null);
+const statementText = (id, share) => String(STATEMENTS[id]).replace("{SHARE}", share === null || share === undefined ? SHARE_UNKNOWN_SENTENCE : share);
 
 const sha256 = (x) => crypto.createHash("sha256").update(x).digest("hex");
 const iso = (ms) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -124,6 +149,7 @@ const CLOSED_TEXT = "The engine says it is too late for this swap: do not send c
 const DEPOSIT_CLEAR_WHY = {
   approval: { any: "the approval is not in force any more" },
   phase: { any: "the swap has moved past the deposit step" },
+  coins_in: { alice: "your NOID is already at the swap contract, so the wallet's balance no longer shows a missing deposit", bob: "this swap's key has already sent your lock, so its balance no longer shows a missing deposit", any: "the coins are already in the swap" },
   started: { alice: "your funding was started, so the wallet's balance no longer shows a missing deposit", bob: "your lock was started, so the key's balance no longer shows a missing deposit", any: "the step this deposit pays for was started" },
 };
 const DEPOSIT_COINS = { alice: ["NOID", "ETH"], bob: ["ETH"] };
@@ -156,11 +182,14 @@ class Autopilot {
     this.forcedOff = new Set(); // a role whose approval file could not be deleted: not used by this process
     this.freshLook = new Map(); // program mode: role -> ms of the last look at the approval's inputs with no cache
     this.timedWait = new Map(); // spend id -> ms until which a refused sweep is not tried again
+    this.minedFailRetried = new Set(); // Ethereum sweeps that were mined and failed once and were built again (one retry per process)
     this.nothingLeft = new Map(); // spend id -> { at_ms, dir }: the NOID sweep the tool refused because the swap wallet holds no coin worth sweeping; in memory only (a restart tries it once more)
     this.holdMark = new Map(); // spend id -> the tick (its own clock) a wallet helper said "nothing to send now" on: tried again only for a newer tick
     this.startedOn = new Map(); // spend id -> the tick the last automatic start of it ran on
     this.recordMark = 0; // the last time the recovery close's recording was started
     this.claimWatch = { loaded: false, first_tip: null, late: null }; // the late-claim watch (Bob, program mode; reads only): the tip of the first tick that showed `secret_seen`, and the alarm once the claim is late
+    this.restoreSelftest = { running: false, attempted: false, failed: null, usedTick: null, retried: false }; // Bob's client R self-test on restore
+    this.lastHeartbeat = new Map(); // role -> ms of last last_alive_at persistence
     this.stepping = false;
     actions.autopilot = this;
     for (const role of ROLES) this.loadNeeds(role);
@@ -464,9 +493,129 @@ class Autopilot {
     const hash = this.termsHash(run, o);
     if (!hash) return { exists: true, in_force: false, terms_changed: true, file: v, hash: null, why: "the terms cannot be read now" };
     const same = hash === v.terms_sha256;
+    // An approval goes out of force if the program was not running for >15 min while coins-in was still ahead (never after coins-in).
+    if (same && this.programMode() && typeof v.last_alive_at === "number") {
+      const coinsIn = this.coinsInAhead(role, run);
+      if (RG.downtimeExpired(v.last_alive_at, this.now(), coinsIn)) {
+        return { exists: true, in_force: false, terms_changed: false, downtime_expired: true, file: v, hash, why: RG.DOWNTIME_EXPIRED_TEXT };
+      }
+    }
     // program mode: an approval that went out of force because the program's version changed says so ("approve again after an update")
     const version = this.programMode() && !same && typeof v.program_version === "string" && this.actions.program && v.program_version !== this.actions.program.version;
     return { exists: true, in_force: same, terms_changed: !same, file: v, hash, version_changed: !!version, why: same ? null : version ? "the program was updated since the approval: approve again after an update" : "the terms changed since the approval" };
+  }
+
+  /** Restored marker of this swap folder (`restored.json`), or null. */
+  restoredInfo() {
+    const d = this.runDir();
+    return d ? readRestoredMarker(d) : null;
+  }
+
+  /** True when this run folder was restored (its marker) AND the tick shows the role's own coins already in although the file says they are not (FS.coinsAlreadyIn). */
+  restoredCoinsIn(role, tick) {
+    try {
+      return !!this.restoredInfo() && FS.coinsAlreadyIn(role, tick);
+    } catch {
+      return false;
+    }
+  }
+
+  /** True while this role's coins-in step (Alice `fund_noid`, Bob `lock_eth`) is still ahead. */
+  coinsInAhead(role, run) {
+    const a = this.actions;
+    const tick = run && run.roles && run.roles[role] ? run.roles[role].tick || null : null;
+    const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
+    // a RESTORED stale copy whose coins are already in (Alice's instance at the contract, Bob's swap key has sent): the coins-in step is behind, not ahead (rehearsal F2/F4).
+    // Only with the restore marker: in a normal swap this would switch off the downtime rule on one wrong answer of a node (the independent read of 2026-11-26).
+    if (this.restoredCoinsIn(role, tick)) return false;
+    const funded = role === "alice" && !!(a.fundedMarker() || a.walletMarker("wallet-funded.marker"));
+    let locked = false;
+    if (role === "bob") {
+      const d = this.runDir();
+      if (d) {
+        try {
+          locked = fs.existsSync(path.join(d, "bob", "bob.swap.json.lock-sent"));
+        } catch {
+          locked = false;
+        }
+      }
+    }
+    return RG.coinsInAhead(role, phase, { funded, locked });
+  }
+
+  /** True when a saved backup is required before approving (program mode, non-board, backup-capable, coins-in still ahead). */
+  backupRequiredFor(role, run, { wallet, board, program }) {
+    return !!(program && wallet && !board && this.actions.program && typeof this.actions.program.saveBackup === "function" && this.coinsInAhead(role, run));
+  }
+
+  /** Updates last_alive_at in autopilot-ROLE.json at most once per minute while running. */
+  touchAlive(role, ap, nowMs) {
+    if (!this.programMode() || !ap || !ap.in_force || !ap.file) return;
+    const prev = this.lastHeartbeat.get(role) || ap.file.last_alive_at || 0;
+    if (nowMs - prev < HEARTBEAT_MS) return;
+    this.lastHeartbeat.set(role, nowMs);
+    try {
+      this.writeFile(role, { ...ap.file, last_alive_at: nowMs, needs_you: this.needs[role] });
+    } catch {
+      /* best effort heartbeat */
+    }
+  }
+
+  /** Runs Bob's client R self-test on a restored swap in every non-terminal phase before `done`. */
+  maybeRunRestoreSelftest(run) {
+    if (!this.programMode() || this.roleBlockedFor("bob") || !this.bobFileExists()) return;
+    const restored = this.restoredInfo();
+    if (!restored) return;
+    const tick = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
+    const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
+    const need = RG.needsRestoreSelftest("bob", phase, restored);
+    if (!need.needed || this.restoreSelftest.running) return;
+    const hasTip = !!(tick && tick.noid && Number.isSafeInteger(tick.noid.tip));
+    // audit F-05: a first attempt made before any tick (no tip yet) that failed gets one more, as soon as a tick with a tip exists
+    const retry = this.restoreSelftest.attempted && this.restoreSelftest.failed !== null && this.restoreSelftest.usedTick === false && this.restoreSelftest.retried !== true && hasTip;
+    if (this.restoreSelftest.attempted && !retry) return;
+    if (typeof this.actions.runRestoreSelftest !== "function") return;
+    this.restoreSelftest.running = true;
+    this.restoreSelftest.attempted = true;
+    if (retry) this.restoreSelftest.retried = true;
+    else this.restoreSelftest.usedTick = hasTip;
+    Promise.resolve()
+      .then(() => this.actions.runRestoreSelftest(run))
+      .then((res) => {
+        if (res && res.ok) {
+          this.restoreSelftest.failed = null;
+          const d = this.runDir();
+          const cur = d ? readRestoredMarker(d) : null;
+          if (d && cur) {
+            try {
+              writeRestoredMarker(d, { ...cur, selftest_passed_at: iso(this.now()) });
+            } catch {
+              /* ignore */
+            }
+          }
+          // the entry the first, failed attempt raised is over once the test has passed
+          if (this.needs.bob.some((e) => e.kind === "restore_selftest")) {
+            this.needs.bob = this.needs.bob.filter((e) => e.kind !== "restore_selftest");
+            this.persist("bob");
+          }
+          this.note("bob", "restore self-test passed");
+        } else {
+          const errText = (res && res.error) || "client R self-test failed on this computer";
+          this.restoreSelftest.failed = errText;
+          if (need.blocksLock) {
+            this.raise("bob", "send-lock", "restore_selftest", `${RG.SELFTEST_NEEDED_TEXT} (${errText})`);
+          } else {
+            // Post-lock self-test alerts early without blocking claim_noid (`retrying: true` is non-blocking)
+            this.raise("bob", "send-claim", "restore_selftest", `${RG.SELFTEST_WARN_TEXT} (${errText})`, { retrying: true });
+          }
+        }
+      })
+      .catch(() => {
+        this.restoreSelftest.failed = "client R self-test could not run";
+      })
+      .finally(() => {
+        this.restoreSelftest.running = false;
+      });
   }
 
   // ------------------------------------------------------------------ the funding statements (amendment B)
@@ -548,6 +697,7 @@ class Autopilot {
     }
     const out = new Map();
     const open = new Map();
+    const minedFails = new Map();
     for (const r of recs) {
       if (r.action === "autopilot" && r.phase === "note") {
         const m = /^cleared: (send-[a-z-]+)$/.exec(String(r.result || ""));
@@ -566,6 +716,21 @@ class Autopilot {
       } else if (r.phase === "end") {
         open.delete(sp.id);
         const res = String(r.result || "");
+        // audit F-14: "nothing to sweep" is a clean end (nothing was sent), and a send that was mined and FAILED moved nothing: after a restart the first such
+        // sweep failure is still built again once (the live run keeps one retry per spend), a second one and any other step name the failure in plain words
+        if (/^nothing to sweep\b/.test(res)) {
+          minedFails.delete(sp.id);
+          out.delete(sp.id);
+          continue;
+        }
+        if (/^failed, mined with status 0:/.test(res)) {
+          const n = (minedFails.get(sp.id) || 0) + 1;
+          minedFails.set(sp.id, n);
+          if (/^send-sweep-eth-/.test(sp.id) && n < 2) out.delete(sp.id);
+          else out.set(sp.id, { reason: `${sp.label}: it was mined and FAILED (status 0): nothing moved, only the fee was spent. The autopilot does not try it again by itself: look at the transaction and the audit log first.`, at: Date.parse(r.t) });
+          continue;
+        }
+        minedFails.delete(sp.id);
         if (/^ok \(exit 0\)/.test(res) || /^refused, nothing sent\b/.test(res) || (!this.programMode() && RERUN_KINDS.has(sp.kind) && /^may have been sent, the same bytes may be sent again\b/.test(res))) out.delete(sp.id);
         else out.set(sp.id, { reason: `${sp.label}: the audit log says it ended "${res.slice(0, 100)}", so it may have been sent`, at: Date.parse(r.t) });
       }
@@ -642,14 +807,23 @@ class Autopilot {
     if (wallet && !wr.eth_payout) this.refuse(role, 422, "payout_missing", "A wallet run needs ETH_PAYOUT in env.local.sh before it is approved: it decides where the leftover ETH goes.");
     // program mode outside a board run: Bob's own check of Alice's file must have passed, and both roles confirm the line match before they approve (the record is written by the page)
     const program = this.programMode();
-    // Ethereum mainnet (program mode only): the board never runs there, and Bob's approval carries the producer-share statement
+    // Ethereum mainnet (program mode only): the board never runs there, and Bob's approval carries the producer-share statement while lock is ahead
     const mainnet = program && this.mainnetSettings() !== null;
     if (mainnet && (a.boardRun().on || a.boardRun().ambiguous)) this.refuse(role, 422, "board_mainnet", "The board does not run on Ethereum mainnet: there is nothing to approve here.");
+    const coinsIn = this.coinsInAhead(role, run);
+    const restored = this.restoredInfo();
     let share = null;
-    if (mainnet && role === "bob") {
+    let shareSentenceText = null;
+    let shareUnknown = false;
+    if (mainnet && role === "bob" && coinsIn) {
       const sc = this.bobScreen(run, nowMs);
       if (!sc.ok) this.refuse(role, 422, "producer_screen", sc.why);
-      share = sc.share_text;
+      share = sc.known ? sc.share_text : null;
+      shareSentenceText = sc.known ? sc.sentence : null;
+      shareUnknown = !sc.known;
+    }
+    if (this.backupRequiredFor(role, run, { wallet, board, program }) && !RG.isBackupSaved(this.runDir())) {
+      this.refuse(role, 422, "backup_missing", RG.BACKUP_MISSING_TEXT);
     }
     if (program && wallet && !board) {
       if (role === "bob" && !this.bobFileExists()) this.refuse(role, 422, "terms_missing", "Your check of Alice's file has not passed, so there is nothing to approve.");
@@ -662,10 +836,11 @@ class Autopilot {
     const exp = expectedAmount(spend, run.terms);
     if (!exp) this.refuse(role, 422, "amount_unknown", "The terms do not state the amount to confirm.");
     if (!typedMatches(spend, run.terms, typed)) this.refuse(role, 422, "typed", `The typed amount does not match (type ${exp.text}).`);
-    const missing = requiredStatements(role, wallet, board, program, mainnet).filter((k) => statements[k] !== true);
+    const reqStmts = requiredStatements(role, wallet, board, program, mainnet, { coinsIn, restored: !!restored });
+    const missing = reqStmts.filter((k) => statements[k] !== true);
     if (missing.length) {
       this.note(role, "refused: statements");
-      throw bad(422, "a statement was not confirmed", { reasons: missing.map((k) => ({ code: `statement_${k}`, text: `The statement was not confirmed: "${statementText(k, share)}"` })) });
+      throw bad(422, "a statement was not confirmed", { reasons: missing.map((k) => ({ code: `statement_${k}`, text: `The statement was not confirmed: "${statementText(k, shareSentenceText)}"` })) });
     }
     if (role === "alice" && !wallet) {
       const ctx = a.spendContext(spend, run, nowMs);
@@ -674,7 +849,8 @@ class Autopilot {
     const hash = this.termsHash(run);
     if (!hash) this.refuse(role, 422, "terms_unhashable", "The terms or the files they are bound to (env.local.sh, the helpers in bin/) cannot be read now.");
     const existing = this.readFile(role);
-    const inForce = existing.exists && existing.value && existing.value.role === role && existing.value.terms_sha256 === hash && existing.value.v === FILE_VERSION;
+    const expired = !!(program && existing.exists && existing.value && typeof existing.value.last_alive_at === "number" && RG.downtimeExpired(existing.value.last_alive_at, nowMs, coinsIn));
+    const inForce = !expired && existing.exists && existing.value && existing.value.role === role && existing.value.terms_sha256 === hash && existing.value.v === FILE_VERSION;
     if (inForce && (role === "bob" || wallet)) throw bad(409, `the autopilot is already on for ${role === "bob" ? "Bob" : "Alice"}: turn it off first if you want to approve again`);
     const approvedAt = inForce ? existing.value.approved_at : iso(nowMs);
     const l = a.runLock && (a.runLock.lock || a.runLock);
@@ -683,7 +859,8 @@ class Autopilot {
       role,
       terms_sha256: hash,
       approved_at: approvedAt,
-      statements: requiredStatements(role, wallet, board, program, mainnet),
+      ...(program ? { last_alive_at: nowMs, backup_checked: true } : {}),
+      statements: reqStmts,
       ...(share !== null ? { producer_share: share } : {}), // the share the person saw when approving (the audit and the page can show it; not part of the hash)
       funding_statements_at: role === "alice" && !wallet ? iso(nowMs) : null,
       console_pid_start: `${(l && l.pid) || process.pid}@${(l && l.started) || iso(nowMs)}`,
@@ -692,7 +869,7 @@ class Autopilot {
     };
     // the audit line first: when it cannot be written nothing is approved
     try {
-      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${requiredStatements(role, wallet, board, program, mainnet).join(",")}${share !== null ? `; producer share ${share} %` : ""}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
+      a.audit.append({ action: "autopilot", role, phase: "note", result: inForce ? "funding statements given again" : "approval given", detail: `terms=${hash.slice(0, 12)}; statements=${reqStmts.join(",")}${share !== null ? `; producer share ${share} %` : shareUnknown ? "; producer share unknown" : ""}${board ? "; board run" : ""}${wallet ? "; wallet run: payouts " + wr.noid_payout + " / " + wr.eth_payout : ""}` });
     } catch (e) {
       throw bad(500, `the audit log cannot be written (${e.code || e.message}); nothing was approved`);
     }
@@ -743,7 +920,7 @@ class Autopilot {
       const tick = run && run.roles && run.roles.bob ? run.roles.bob.tick || null : null;
       return producerScreen(tick, Math.floor(nowMs / 1000), { ownNodeIsLoopback: !!st && st.noid_rpc2 === null && runsettings.isLoopbackUrl(st.noid_rpc) });
     } catch {
-      return { ok: false, why: "The producer reading could not be made: refusing." };
+      return { ok: false, why: "The producer reading could not be made: refusing." }; // a failure of the page's own reading (not a share rule): the approval waits
     }
   }
 
@@ -895,7 +1072,7 @@ class Autopilot {
 
   /**
    * Why the deposit watch does not apply to this role now, or null when it does: "approval" (not in force, or not a wallet run), "started" (the role's first spend was started: the
-   * balance now shows what is left, not a missing deposit), "phase" (a known phase past the deposit phases), or "unknown" (no run, no tick, a transient unreadable approval): then
+   * balance now shows what is left, not a missing deposit), "coins_in" (the coins are already in a lock while the file says they are not: a restored stale copy), "phase" (a known phase past the deposit phases), or "unknown" (no run, no tick, a transient unreadable approval): then
    * nothing is raised and nothing is cleared.
    */
   depositNotApplicable(role, run) {
@@ -913,6 +1090,8 @@ class Autopilot {
     const tick = run.roles && run.roles[role] ? run.roles[role].tick || null : null;
     const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
     if (phase === null) return "unknown";
+    // a copy restored from a backup made before the funding or the lock: the deposit was spent into it, so the wallet's balance shows what is left, not a missing deposit (rehearsal F4)
+    if (this.restoredCoinsIn(role, tick)) return "coins_in";
     // the same test as the page's `depositNeeded` (Alice: created and no funding marker; Bob: received, funded, funding_final)
     return FS.lineConfirmable(role, phase, funded) ? null : "phase";
   }
@@ -1073,6 +1252,21 @@ class Autopilot {
   }
 
   // ------------------------------------------------------------------ what the page shows
+  /**
+   * Whether this role holds an active approval created before backup gating was introduced
+   * (no `backup_checked: true` marker). Pre-upgrade approved swaps are exempt from the blocking
+   * `backup_missing` gate and show a non-blocking suggestion to save a backup instead.
+   */
+  preUpgradeApproved(role, run) {
+    if (!this.programMode()) return false;
+    if (run) {
+      const ap = this.approvalState(role, run);
+      return !!(ap.in_force && ap.file && ap.file.backup_checked !== true);
+    }
+    const r = this.readFile(role);
+    return !!(r.exists && r.value && r.value.role === role && r.value.backup_checked !== true);
+  }
+
   /** One object per role for the run payload. Never throws. */
   view(run) {
     const out = { alice: null, bob: null };
@@ -1090,21 +1284,60 @@ class Autopilot {
         const ap = run ? this.approvalState(role, run) : { exists: false, in_force: false, terms_changed: false, file: null };
         const exp = run && run.terms ? expectedAmount(spend, run.terms) : null;
         const st = this.state[role];
+        const coinsIn = run ? this.coinsInAhead(role, run) : true;
+        const restored = this.restoredInfo();
+        const roleTick = run && run.roles && run.roles[role] ? run.roles[role].tick || null : null;
+        const tickActReason = roleTick && roleTick.action && typeof roleTick.action.reason === "string" ? roleTick.action.reason : "";
+        const restoreResidual = !!(
+          role === "alice" &&
+          restored &&
+          restored.backup_phase === "lock_final" &&
+          roleTick &&
+          roleTick.phase_after === "lock_final" &&
+          !(roleTick.eth && (roleTick.eth.pending_preimage || roleTick.eth.claimed)) &&
+          !revealMaybePending(roleTick) &&
+          /cutoff|too late to reveal|past reveal/i.test(tickActReason)
+        );
+        const stuckRevealNonceZero = !!(role === "alice" && revealMaybePending(roleTick));
+        const backupSuggested = !!(
+          this.programMode() &&
+          ap.in_force &&
+          ap.file &&
+          ap.file.backup_checked !== true &&
+          this.actions.program &&
+          typeof this.actions.program.saveBackup === "function" &&
+          !RG.isBackupSaved(this.runDir())
+        );
         out[role] = {
           available: true,
           on: !!ap.in_force,
           approved_at: ap.file && ap.file.approved_at ? Math.floor(Date.parse(ap.file.approved_at) / 1000) : null,
           terms_changed: !!(ap.exists && ap.terms_changed),
-          ...(this.programMode() ? { version_changed: !!ap.version_changed, why: ap.in_force ? null : ap.why || null } : {}),
+          ...(this.programMode() ? { version_changed: !!ap.version_changed, downtime_expired: !!ap.downtime_expired, backup_suggested: backupSuggested, why: ap.in_force ? null : ap.why || null } : {}),
           doing: ap.in_force ? st.doing : null,
           waiting_reason: ap.in_force ? st.waiting_reason : null,
           finished_notes: ap.in_force ? this.finishedNotes(role) : [],
-          needs_you: ap.exists ? this.needViews(role, !!ap.in_force) : [],
+          needs_you: ap.exists || this.needs[role].length ? this.needViews(role, !!ap.in_force) : [],
           funding_statements_valid_until: role === "alice" && !wallet && this.fundingStatementsValid(nowMs) ? Math.floor((this.fundingStatements.at_ms + FUNDING_WINDOW_MS) / 1000) : null,
           expected_typed: exp ? exp.text : null,
-          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode(), this.mainnetSettings() !== null).map((id) => ({ id, text: statementText(id, id === "producer_share_ack" && run ? shareOf(this.bobScreen(run, nowMs)) : null) })),
+          statements: requiredStatements(role, wallet, wallet && this.actions.boardRun().on === true, this.programMode(), this.mainnetSettings() !== null, { coinsIn, restored: !!restored }).map((id) => ({ id, text: statementText(id, id === "producer_share_ack" && run ? shareOf(this.bobScreen(run, nowMs)) : null) })),
           ...(role === "bob" && this.programMode() ? { late_claim: this.lateClaim() } : {}),
-          ...(role === "bob" && this.mainnetSettings() !== null && run ? { producer_screen: (({ ok, why, share_text }) => ({ ok, why: why || null, share_text: share_text || null }))(this.bobScreen(run, nowMs)) } : {}),
+          ...(role === "bob" && this.mainnetSettings() !== null && run ? { producer_screen: (({ ok, why, share_text, known, level, warning }) => ({ ok, why: why || null, share_text: share_text || null, known: known === true, level: level || null, warning: warning || null }))(this.bobScreen(run, nowMs)) } : {}),
+          // a restored copy whose own coins are already in: the page asks for no deposit (rehearsal F4); false for every swap that was not restored
+          coins_in: this.programMode() && !!restored && this.restoredCoinsIn(role, roleTick),
+          ...(this.programMode() && restored
+            ? {
+                restored: {
+                  restored_at: restored.restored_at,
+                  backup_phase: restored.backup_phase,
+                  selftest_passed_at: restored.selftest_passed_at || null,
+                  selftest_failed: role === "bob" ? this.restoreSelftest.failed : null,
+                  residual_note: restoreResidual,
+                  stuck_reveal: stuckRevealNonceZero,
+                  home_warnings: Array.isArray(restored.home_warnings) ? restored.home_warnings : [],
+                },
+              }
+            : {}),
           // what the person gets for what they give (the approval names both): Alice gets ETH, Bob gets NOID
           gets_text: run && run.terms ? ((expectedAmount({ unit: role === "alice" ? "ETH" : "NOID" }, run.terms) || {}).text || null) : null,
           board: wallet && this.actions.boardRun().on === true,
@@ -1179,10 +1412,14 @@ class Autopilot {
     try {
       const a = this.actions;
       if (this.pending.length) this.settleJobs();
-      // Bob's late-claim watch reads only, and runs with or without an approval (program mode)
+      // Bob's late-claim watch and restored self-test run with or without an approval (program mode)
       if (this.programMode()) {
         try {
-          if (!this.roleBlockedFor("bob") && this.bobFileExists()) this.watchLateClaim(a.readRunFn(a.cfg.runDirs, Math.floor(this.now() / 1000)), this.now());
+          if (!this.roleBlockedFor("bob") && this.bobFileExists()) {
+            const snap = a.readRunFn(a.cfg.runDirs, Math.floor(this.now() / 1000));
+            this.watchLateClaim(snap, this.now());
+            this.maybeRunRestoreSelftest(snap);
+          }
         } catch {
           /* a look never blocks the step */
         }
@@ -1232,6 +1469,7 @@ class Autopilot {
       st.waiting_reason = ap.why;
       return false;
     }
+    this.touchAlive(role, ap, nowMs);
     const ctxs = new Map();
     for (const id of [...AUTO_ORDER, ...REPLACE_ORDER]) if (SPEND_TABLE[id].role === role) ctxs.set(id, a.spendContext(SPEND_TABLE[id], run, nowMs));
     // a wallet run that is over, with every sweep done or "nothing left": no tick is needed any more, so no watch loop is started for it
@@ -1285,13 +1523,18 @@ class Autopilot {
     const walletRun = a.walletRun().use_swap_wallet === true;
     // a wallet run's recovery close, once it is sent: the swap file must record it (tick --closed-by) when the tool will take it
     if (walletRun && role === "alice" && this.recordCloseStep(role, run, nowMs)) return true;
-    // amendment E: a re-send becoming relevant is for the person
+    // amendment E: a re-send becoming relevant is for the person (restored Alice names the stuck reveal and --replace)
+    const isRestored = !!this.restoredInfo();
     for (const id of REPLACE_ORDER) {
       const c = ctxs.get(id);
       if (!c) continue;
       if (c.relevant && !this.replaceSeen.has(id)) {
         this.replaceSeen.add(id);
-        this.raise(role, id, "stuck", `${SPEND_TABLE[id].label}: a transaction is stuck. The autopilot never re-sends one: re-send it yourself from the box on the swap page, or in a terminal.`);
+        const msg =
+          isRestored && id === "send-reveal-replace"
+            ? RG.STUCK_REVEAL_RESTORE_TEXT
+            : `${SPEND_TABLE[id].label}: a transaction is stuck. The autopilot never re-sends one: re-send it yourself from the box on the swap page, or in a terminal.`;
+        this.raise(role, id, "stuck", msg);
       } else if (!c.relevant) this.replaceSeen.delete(id);
     }
     // a held step the engine says outright not to send, or a held reveal whose cutoff has passed, is not offered to anybody (so it is never the step below):
@@ -1511,7 +1754,28 @@ class Autopilot {
       return;
     }
     if (rec.nothing_sent === true) return void this.countRefusal(role, spend, `the helper refused, exit ${rec.exit_code}`);
+    if (rec.mined_failed === true) return void this.minedFailed(role, spend, rec);
     this.unknownOutcome(role, spend, rec.warning || rec.error || (rec.exit_code === null ? "no exit status" : `exit ${rec.exit_code}`));
+  }
+
+  /**
+   * A send that was mined and FAILED (receipt status 0, read from live.js's own lines by the actions module): nothing moved, only its fee was spent (rehearsal F5b). An Ethereum sweep is
+   * built again ONCE, on the sweep timer, by this build's sweep, which signs the node's own gas estimate and never the old fixed 21,000 (F5); a second failure, or any other step, stops
+   * and says so in plain words.
+   */
+  minedFailed(role, spend, rec) {
+    const tx = typeof rec.tx === "string" ? rec.tx : "unknown";
+    const sweep = rec.outcome === "mined_failed" && /^send-sweep-eth-/.test(spend.id);
+    if (sweep && !this.minedFailRetried.has(spend.id)) {
+      this.minedFailRetried.add(spend.id);
+      this.timedWait.set(spend.id, this.now() + SWEEP_RETRY_MS);
+      this.note(role, `retry: ${spend.id}`, `mined and failed (status 0, transaction ${tx}): nothing moved, only the fee was spent; built again once with a new gas estimate`);
+      this.state[role] = { doing: `${spend.label}: it was mined and failed (nothing moved, only the fee was spent); it is built again once with a new gas estimate`, waiting_reason: null };
+      return;
+    }
+    const text = `${spend.label}: it was mined and FAILED (status 0, transaction ${tx}): nothing moved, only the fee was spent. ${sweep ? "It already failed once after a new gas estimate, so" : "So"} the autopilot does not try it again by itself: look at the transaction and the audit log first.`;
+    const e = this.raise(role, spend.id, "outcome", text, { retrying: false });
+    this.state[role] = { doing: "stopped: needs you", waiting_reason: e.reason };
   }
 
   unknownOutcome(role, spend, why) {

@@ -141,6 +141,11 @@ function stage({ repo, out, binOut, swapCliDir, platform }) {
   mustBeDir(R("desktop", "lib"), "desktop/lib");
   mustBeDir(R("desktop", "secret"), "desktop/secret");
   mustBeDir(R("desktop", "assets"), "desktop/assets");
+  // the icons: the window icon is staged with the assets; the builder reads build/ from the project folder, so a missing one would
+  // otherwise only show as the default icon on the finished program
+  mustBeFile(R("desktop", "assets", "icon.png"), "desktop/assets/icon.png (the window icon)");
+  mustBeFile(R("desktop", "build", "icon.png"), "desktop/build/icon.png (the Mac icon)");
+  mustBeFile(R("desktop", "build", "icon.ico"), "desktop/build/icon.ico (the Windows icon)");
   mustBeFile(R("desktop", "tools", "recovery.js"), "desktop/tools/recovery.js");
   mustBeFile(R("desktop", "runtime", "package.json"), "desktop/runtime/package.json");
   mustBeFile(R("desktop", "runtime", "package-lock.json"), "desktop/runtime/package-lock.json");

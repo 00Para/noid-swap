@@ -10,6 +10,7 @@ const TEXTS = Object.freeze({
   needs_you: "A swap is waiting for you.",
   done: "A swap has finished.",
 });
+const TRAY_TEXT = "No1d Swap is still running in the tray because a swap is in progress. To quit, use Quit in the tray menu.";
 const CRASH_TEXT = "No1d Swap stopped after a second error. Open it again when you can.";
 const RATE_MS = 10 * 60 * 1000;
 const SWAP_ID = /^[0-9a-f]{32}$/;
@@ -51,7 +52,11 @@ function createNotifier({ Notification, now = Date.now, onClick, title = "No1d S
     crashNotice() {
       return show(CRASH_TEXT, null);
     },
+    /** The first close of the window in a session that only hid it: where the program went and how to quit. Fixed text, not rate limited (the caller sends it once). */
+    trayNotice() {
+      return show(TRAY_TEXT, null);
+    },
   };
 }
 
-module.exports = { createNotifier, TEXTS, CRASH_TEXT, RATE_MS };
+module.exports = { createNotifier, TEXTS, CRASH_TEXT, TRAY_TEXT, RATE_MS };

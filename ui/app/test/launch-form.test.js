@@ -16,7 +16,7 @@ const OTHER_NOID = "o125qayvgtmvqnlhqmqwe08dza3acaax5mct3u5h4uen3qtrds3jfset7wlk
 const MY_ETH = "0x" + "9a9A".repeat(10);
 const LOWER_ETH = "0x" + "9a".repeat(20);
 const SETTINGS = { v: 1, noid_rpc: "http://127.0.0.1:9601", noid_rpc2: null, noid_rpc2_remote: false, eth: { sepolia: { rpc: "https://s.example", rpc2: null }, rehearsal: { rpc: "http://127.0.0.1:8545", rpc2: null }, production: { rpc: "https://p.example", rpc2: "https://q.example" } }, eth_rpc2_remote: false, rpc_timeout_s: 60, alert_url: null, noid_payout: MY_NOID, eth_payout: MY_ETH, bob_noid: null, board: { relays: [], lead_blocks: 60, fund_k: null, reserve_wei: null, allow_public: false, allow_local_test: false, min_pow_bits: 0 }, update_check: "ask" };
-const formInfo = () => ({ profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: PIN }, rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null }, production: { chain: 1, max_noid: 2500, max_eth: 0.5, contract: null, mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" } }, roles: ["alice", "bob"] });
+const formInfo = () => ({ profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: PIN }, rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null }, production: { chain: 1, max_noid: 20000, max_eth: 1, contract: null, mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" } }, roles: ["alice", "bob"] });
 const feeOf = (profile, gwei, ageMs = 5000) => ({ base_fee_wei: String(Math.round(gwei * 1e9)), block: 7654321, at: Date.now() - ageMs, profile, age_s: Math.floor(ageMs / 1000), stale: ageMs > 120000 });
 const has = (n, c) => n.className.split(/\s+/).includes(c);
 const plain = (x) => JSON.parse(JSON.stringify(x));
@@ -133,7 +133,7 @@ test("limits screen: a menu item opens it on the list screen, with the caps of t
   assert.equal(textOf(h1).trim(), "Limits and risks");
   assert.equal(page.document.activeElement, h1, "focus goes to the screen's heading");
   const t = norm(textOf(root));
-  for (const w of ["Who holds your coins", "Nobody else.", "Admin keys", "None.", "What can stop a swap", "How you can lose", "Limits per swap", "At most 2,500 NOID and 0.5 ETH per swap. The program refuses more.", "Track record"]) assert.ok(t.includes(w), w);
+  for (const w of ["Who holds your coins", "Nobody else.", "Admin keys", "None.", "What can stop a swap", "How you can lose", "Limits per swap", "At most 20,000 NOID and 1 ETH per swap. The program refuses more.", "Track record"]) assert.ok(t.includes(w), w);
   assert.match(t, /at least about 75 minutes to claim the NOID/);
   assert.equal(root.all((n) => n.tag === "button").length, 1, "one button: back");
   assert.equal(page.byId("pg-bar").querySelector(".pg-swaps-btn").attrs["aria-current"], undefined, "the bar does not claim to be on Your swaps");
@@ -169,8 +169,8 @@ test("numbers: the worked example of the spec for Alice and for Bob, exact in th
   const page = await loadPage({ fetch: F.router({ "GET /api/program": () => ({ status: 200, body: progFor() }) }) });
   const a = LINES(page, { role: "alice", noid: "2000", eth: "0.4" });
   assert.deepEqual(a.rate, ["1 NOID = 0.0002 ETH", "1 ETH = 5,000 NOID"]);
-  assert.equal(a.get, "You get about 0.399738 ETH after network fees.");
-  assert.equal(a.fee, "Network fees, about: 0.000262263 ETH on Ethereum, 0.009 NOID on Parano1d (0.07 % of what you swap). At most 0.001021 ETH at your fee cap of 1 gwei.");
+  assert.equal(a.get, "You get about 0.399734 ETH after network fees.");
+  assert.equal(a.fee, "Network fees, about: 0.000266465 ETH on Ethereum, 0.009 NOID on Parano1d (0.07 % of what you swap). At most 0.0013 ETH at your fee cap of 1 gwei.");
   assert.equal(a.usual, "Usually about 50 minutes once both deposits are in.");
   assert.equal(a.back, "If Bob never locks: your NOID is back in your own address about 6 h 45 min after you press Prepare, less about 0.0206 NOID in fees.");
   assert.equal(a.loud, null);
@@ -200,7 +200,7 @@ test("numbers: no rate, get or fee lines with an empty or zero amount (the times
 test("numbers: a base fee that is not read, or older than two minutes, leaves only the at-most figure; no cap on a test network gives no fee line", async () => {
   const page = await loadPage({ fetch: F.router({ "GET /api/program": () => ({ status: 200, body: progFor() }) }) });
   const none = LINES(page, { role: "alice", noid: "2000", eth: "0.4", node: { eth: { state: "ok", fees: {} } } });
-  assert.equal(none.fee, "Ethereum's fee level is not read yet; at most 0.001021 ETH at your fee cap of 1 gwei.");
+  assert.equal(none.fee, "Ethereum's fee level is not read yet; at most 0.0013 ETH at your fee cap of 1 gwei.");
   assert.equal(none.get, "You get 0.4 ETH, less the Ethereum fees below.");
   const stale = LINES(page, { role: "alice", noid: "2000", eth: "0.4", node: { eth: { state: "ok", fees: { production: feeOf("production", 0.3, 130000) } } } });
   assert.equal(stale.fee, none.fee);
@@ -229,7 +229,7 @@ test("numbers: the loud box rises at 500 basis points and not at 499; the cap bo
   };
   const loudAt = (wei) => LINES(page, { role: "alice", noid: "20", eth: toText(wei) }).loud;
   // the first amount whose share is at least 500 basis points: found by halving, with the same functions the page uses
-  const feeNow = 689324n * 350000000n + 21000n * 1000000000n;
+  const feeNow = 689324n * 350000000n + 25202n * 1000000000n;
   const shareAt = (wei) => NL.share(feeNow.toString(), wei.toString(), "9000", "20000000");
   let lo = 1000000000000n; // too small (a big share)
   let hi = 10n ** 18n;
@@ -262,15 +262,15 @@ test("form: the lines are drawn under the amounts for Alice and for Bob, change 
   assert.deepEqual(rate.children.map((c) => c.textContent), ["1 NOID = 0.0002 ETH", "1 ETH = 5,000 NOID"]);
   assert.ok(rate.children.every((c) => has(c, "fig")), "two spans, no dot between them");
   assert.ok(has(rate, "facts-line"));
-  assert.equal(f.text("ns-get"), "You get about 0.399738 ETH after network fees.");
-  assert.match(f.text("ns-fees"), /^Network fees, about: 0\.000262263 ETH on Ethereum, 0\.009 NOID on Parano1d \(0\.07 % of what you swap\)\. At most 0\.001021 ETH at your fee cap of 1 gwei\.$/);
+  assert.equal(f.text("ns-get"), "You get about 0.399734 ETH after network fees.");
+  assert.match(f.text("ns-fees"), /^Network fees, about: 0\.000266465 ETH on Ethereum, 0\.009 NOID on Parano1d \(0\.07 % of what you swap\)\. At most 0\.0013 ETH at your fee cap of 1 gwei\.$/);
   assert.match(f.text("ns-usual"), /Usually about 50 minutes once both deposits are in\./);
   assert.match(f.text("ns-back"), /If Bob never locks: your NOID is back in your own address about 6 h 45 min after you press Prepare, less about 0\.0206 NOID in fees\./);
   assert.equal(f.g("ns-loud").hidden, true);
   assert.equal(f.g("ns-cap-below").hidden, true);
   // the folds hold the arithmetic and the times' note
   assert.equal(f.g("ns-fees-fold").hidden, false);
-  assert.match(norm(textOf(f.g("ns-fees-fold"))), /How the fees are counted.*Base fee now: 0\.3 gwei \(block 7,654,321, read \d+ s ago\).*Your tip: 0\.05 gwei\. Your fee cap: 1 gwei\..*the reveal \(about 689,324 gas\), the sweep \(about 21,000 gas\).*counted at the fee cap/);
+  assert.match(norm(textOf(f.g("ns-fees-fold"))), /How the fees are counted.*Base fee now: 0\.3 gwei \(block 7,654,321, read \d+ s ago\).*Your tip: 0\.05 gwei\. Your fee cap: 1 gwei\..*the reveal \(about 689,324 gas\), the sweep \(about 25,202 gas\).*counted at the fee cap/);
   assert.match(norm(textOf(f.g("ns-times-fold"))), /How the times are counted.*Parano1d blocks come about every 30 seconds; faster blocks bring it sooner\./);
   await f.pickRole("bob");
   assert.match(f.text("ns-get"), /^You get 1,999\.9942 NOID after the Parano1d fee\.$/);
@@ -315,7 +315,7 @@ test("form: the network line says on Ethereum mainnet, the mainnet tag sits besi
   assert.equal(textOf(f.g("ns-mainnet-tag")).trim(), "Ethereum mainnet: real ETH and real NOID");
   assert.ok(has(f.g("ns-mainnet-tag"), "tag") && has(f.g("ns-mainnet-tag"), "real"));
   assert.equal(f.g("ns-limits").hidden, false);
-  assert.match(norm(textOf(f.g("ns-limits"))), /Limits and risks.*Who holds your coins.*At most 2,500 NOID and 0\.5 ETH per swap/);
+  assert.match(norm(textOf(f.g("ns-limits"))), /Limits and risks.*Who holds your coins.*At most 20,000 NOID and 1 ETH per swap/);
   await f.pickProfile("sepolia");
   assert.equal(f.g("ns-mainnet-tag").hidden, true);
   assert.equal(f.g("ns-limits").hidden, true);

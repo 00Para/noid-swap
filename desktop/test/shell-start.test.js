@@ -380,9 +380,11 @@ test("a click on a notification brings the window back", async () => {
     await e.shell.start();
     e.program().atStakeChanged([A]);
     e.electron.windows[0].close();
+    assert.equal(e.electron.notifications.length, 1, "the first close to the tray says where the program went");
+    assert.match(e.electron.notifications[0].options.body, /still running in the tray.*use Quit in the tray menu/);
     e.program().notify("needs_you", A.swap_id);
-    assert.equal(e.electron.notifications.length, 1);
-    e.electron.notifications[0].emit("click");
+    assert.equal(e.electron.notifications.length, 2);
+    e.electron.notifications[1].emit("click");
     assert.equal(e.electron.windows[0].visible, true);
   } finally {
     e.cleanup();

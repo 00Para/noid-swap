@@ -130,7 +130,16 @@ fn tick_over_loopback_http_matches_the_fixture_and_records_a_replayable_copy() {
         v["noid"].as_object_mut().unwrap().remove("producers");
         // D2: a live loopback node is reported as such (the page reads it); a fixture replay has no URL.
         v["noid"].as_object_mut().unwrap().remove("single_node_loopback");
-        let kept: Vec<Value> = v["notes"].as_array().unwrap().iter().filter(|n| !n.as_str().unwrap().contains("producer concentration")).cloned().collect();
+        let kept: Vec<Value> = v["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| {
+                let text = n.as_str().unwrap();
+                !text.contains("producer concentration") && !text.starts_with("WARNING (T21): ")
+            })
+            .cloned()
+            .collect();
         v["notes"] = Value::Array(kept);
         v
     };

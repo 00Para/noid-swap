@@ -134,6 +134,7 @@
     const item = (label, fn) => list.appendChild(el("li", {}, el("button", { type: "button", class: "btn sm", onclick: async () => { menu.removeAttribute("open"); await fn(); } }, label)));
     item("Settings", () => goTo("settings"));
     item("Practice swap", () => goTo("practice"));
+    item("Restore a swap\u2026", () => goTo("restore"));
     item("Limits and risks", () => {
       limitsOpen = true;
       return h.go("list");
@@ -209,12 +210,13 @@
       el("p", { class: "plain", text: "A swap needs a few things outside this program. Each computer needs them for itself." }),
       // the practice needs none of them: no node, no coins, no network (lib/practice.js)
       el("p", { class: "plain pg-try" }, "Want to see how a swap goes first? Try the practice: no coins, no node, about five minutes. ", el("button", { type: "button", class: "btn sm", id: "pg-practice-guide", onclick: () => (guideGo ? guideGo("practice") : null) }, "Practice swap")),
+      el("p", { class: "plain pg-try" }, "Moving an active swap from another computer? ", el("button", { type: "button", class: "btn sm", id: "pg-restore-guide", onclick: () => (guideGo ? guideGo("restore") : null) }, "I have a backup from another computer")),
       el(
         "ol",
         { id: "pg-guide-list" },
         li("The Parano1d wallet app is open on this computer and in sync. ", nodeChip("Parano1d", noid)),
         li("An Ethereum wallet and its address: on Sepolia (the test network) for a test swap, on Ethereum mainnet for a real one. The ETH you get, or what is left, goes there. Use your own wallet, not an exchange."),
-        li("For a real swap on Ethereum mainnet: real ETH and real NOID, at most 0.5 ETH and 2,500 NOID per swap. Start small. For a test swap: Sepolia test ETH in that wallet. It has no value and is free from a Sepolia faucet; search for \"Sepolia faucet\", as they change often. If you sell NOID, a little is enough: it pays one fee."),
+        li("For a real swap on Ethereum mainnet: real ETH and real NOID, at most 1 ETH and 20,000 NOID per swap. Start small. For a test swap: Sepolia test ETH in that wallet. It has no value and is free from a Sepolia faucet; search for \"Sepolia faucet\", as they change often. If you sell NOID, a little is enough: it pays one fee."),
         li("If you sell NOID: the NOID to swap and a little more for the fee, in the Parano1d wallet app. If you sell ETH: the ETH to swap and a little more for two fees."),
         li("The amounts, agreed with the other person. The one who sells ETH makes the swap first and sends the other an invitation file."),
         li("About an hour with both computers on and awake.")
@@ -364,7 +366,7 @@
 
   // ------------------------------------------------------------------ the numbers of the form (R3, R4: display only)
   const NL = () => (typeof window !== "undefined" && window.NoidLaunch) || null;
-  const NOID_DEC = /^(0|[1-9][0-9]{0,3})(\.[0-9]{1,6})?$/;
+  const NOID_DEC = /^(0|[1-9][0-9]{0,4})(\.[0-9]{1,6})?$/;
   const ETH_DEC = /^(0|[1-9][0-9]{0,1})(\.[0-9]{1,18})?$/;
   /** A decimal text (digits, one dot) in the smallest unit, as a BigInt; null when it is not of the form. */
   function decUnits(text, decimals, re) {
@@ -571,7 +573,7 @@
     const remember = checkInput(F, "remember", true);
     const single = checkInput(F, "single_node_ok", false);
     // the optional settings: the defaults are right for most swaps
-    const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Sepolia and Rehearsal are test networks: the Ethereum side has no value, the NOID is real. Ethereum mainnet: everything is real, at most 2,500 NOID and 0.5 ETH per swap."));
+    const profile = reg("profile", field(F, "profile", "Network", selectInput(F, "profile", NEW_PROFILES, "sepolia"), "Sepolia and Rehearsal are test networks: the Ethereum side has no value, the NOID is real. Ethereum mainnet: everything is real, at most 20,000 NOID and 1 ETH per swap."));
     const version = reg("contract_version", field(F, "contract_version", "Parano1d contract version", selectInput(F, "contract_version", [["1", "1"], ["2", "2"]], "1"), "1 unless you and the other person agreed on 2."));
     const contract = reg("contract", field(F, "contract", "Ethereum contract", textInput(F, "contract", pinOf("sepolia"), "0x…"), pinOf("sepolia") ? PIN_HINT : NO_PIN_HINT, "code"));
     const optBlock = reg("deploy_block", field(F, "deploy_block", "Log start block", textInput(F, "deploy_block", "", ""), "Optional. The first Ethereum block the tool scans for this swap's contract events; empty lets the tool pick a recent one. Never a block after the lock."));
@@ -590,10 +592,12 @@
     const invHint = el("span", { class: "dim hint", id: "ns-inv-hint", text: "Fills the form from the file Bob's program saved. You still check every value." });
     const invButton = el("button", { type: "button", class: "btn", id: "ns-open-invitation", "aria-describedby": "ns-inv-hint", disabled: !H.state.token ? true : null }, "Open Bob's invitation…");
     const invCodeLabel = el("label", { class: "sr-only", for: "ns-inv-code", text: "Bob's invitation code" });
-    const invCodeInput = el("textarea", { id: "ns-inv-code", name: "invitation_code", rows: 1, autocomplete: "off", spellcheck: "false", placeholder: "Or paste Bob's invitation code (no1dinv1:…)", "aria-describedby": "ns-inv-hint" });
+    const invCodeInput = el("textarea", { id: "ns-inv-code", name: "invitation_code", rows: 1, autocomplete: "off", spellcheck: "false", placeholder: "Paste Bob's invitation code here (Ctrl+V, or Cmd+V on a Mac)", "aria-describedby": "ns-inv-hint" });
     const invCodeBtn = el("button", { type: "button", class: "btn sm", id: "ns-paste-invitation", disabled: !H.state.token ? true : null }, "Use code");
     const invCodeRow = el("div", { class: "invite-code-row" }, invCodeLabel, invCodeInput, invCodeBtn);
-    const inviteBox = el("div", { class: "invite-open" }, ic("open"), el("div", { class: "invite-text" }, invNote, invHint), invButton, invCodeRow);
+    // the message of "Use code" sits right under the box, not in the far general line
+    const invCodeMsg = el("p", { class: "attn", id: "ns-inv-code-msg", role: "alert", style: "flex: 1 0 100%; margin: 0;" });
+    const inviteBox = el("div", { class: "invite-open" }, ic("open"), el("div", { class: "invite-text" }, invNote, invHint), invButton, invCodeRow, invCodeMsg);
 
     let curRole = "alice";
     let bobTyped = false; // the person typed in "Bob's Parano1d address" (a fill by the program does not count)
@@ -756,8 +760,10 @@
     };
     const pasteInvitation = async () => {
       const code = val(invCodeInput);
+      invCodeMsg.textContent = "";
       if (!code) {
-        general.textContent = "Paste Bob's invitation code first.";
+        invCodeMsg.textContent = "Paste Bob's invitation code into this box first (Ctrl+V, or Cmd+V on a Mac), then press Use code.";
+        if (typeof invCodeInput.focus === "function") invCodeInput.focus();
         return;
       }
       invCodeBtn.disabled = true;
@@ -767,9 +773,9 @@
         if (r.ok && r.json && r.json.ok === true && r.json.fields && typeof r.json.fields === "object") {
           fillInvitation(r.json.fields);
           invCodeInput.value = "";
-        } else general.textContent = errorText(r);
+        } else invCodeMsg.textContent = errorText(r);
       } catch {
-        general.textContent = "That invitation code could not be read.";
+        invCodeMsg.textContent = "That invitation code could not be read.";
       } finally {
         invCodeBtn.disabled = !H.state.token;
       }
@@ -902,6 +908,35 @@
 
     const factP = (id) => el("p", { class: "facts-line", id, hidden: true });
     const rateP = el("p", { class: "facts-line", id: "ns-rate", hidden: true }, el("span", { class: "fig" }), el("span", { class: "fig" }));
+    // the market reference rate (display only, Ethereum mainnet only): read from the program (which reads the project's site snapshot at most once in ten minutes); it never changes what the form posts
+    const marketBox = el("div", { id: "ns-market", hidden: true });
+    const market = { ref: undefined, at: 0, asking: false };
+    const drawMarket = () => {
+      const prod = profile.control.value === "production";
+      const NM = window.NoidMarket;
+      marketBox.hidden = !prod || !NM || market.ref === undefined;
+      marketBox.textContent = "";
+      if (marketBox.hidden) return;
+      const v = NM.view(market.ref, Date.now(), NM.swapRateOf(val(noid.control), val(eth.control)));
+      marketBox.appendChild(NM.node(el, v));
+    };
+    const askMarket = async () => {
+      if (profile.control.value !== "production" || market.asking || !H.state.token || !window.NoidMarket) return;
+      if (market.ref !== undefined && Date.now() - market.at < 60000) return;
+      market.asking = true;
+      try {
+        const r = await request("GET", "/api/market");
+        // "off" (the update check is set to Never): nothing is drawn; any other answer that is not a good reading is "unavailable"
+        market.ref = r.ok && r.json && r.json.state === "ok" && r.json.ref ? r.json.ref : r.ok && r.json && (r.json.state === "off" || r.json.state === "pending") ? undefined : null;
+        market.at = Date.now();
+      } catch {
+        market.ref = null;
+        market.at = Date.now();
+      } finally {
+        market.asking = false;
+      }
+      drawMarket();
+    };
     const getP = factP("ns-get");
     const feeP = factP("ns-fees");
     const usualP = factP("ns-usual");
@@ -951,6 +986,8 @@
       const mainnet = profile.control.value === "production";
       mainnetTag.hidden = !mainnet;
       if (limitsFold) limitsFold.hidden = !mainnet;
+      drawMarket();
+      askMarket();
     }
     refreshAll = () => {
       drawFacts();
@@ -999,7 +1036,7 @@
       inviteBox,
       role.box,
       el("div", { class: "convert" }, noid.box, el("div", { class: "mid", "aria-hidden": "true" }, el("i")), eth.box),
-      el("div", { class: "ns-facts" }, rateP, getP, feeP, feesFold.node, usualP, backP, timesFold.node),
+      el("div", { class: "ns-facts" }, rateP, marketBox, getP, feeP, feesFold.node, usualP, backP, timesFold.node),
       bobSec,
       ownSec,
       el("label", { class: "ack", for: `${F}-remember` }, remember, el("span", { text: " Use these addresses for my next swaps" })),
@@ -1173,6 +1210,117 @@
     return { node, collect, setErrors, submit };
   }
 
+  // ------------------------------------------------------------------ Restore a swap
+  /**
+   * Guided restore screen: picks a .no1dbackup file via the main process, supports optional Parano1d node
+   * address overrides (especially when the old computer's node address is unreachable), and shows plain-English
+   * errors and next steps. No secrets or recovery codes ever pass through this page.
+   */
+  function restoreForm(prog, h) {
+    const el = H.el;
+    const statusBox = el("div", { id: "pg-restore-status", role: "status", "aria-live": "polite" });
+    const errBox = el("div", { id: "pg-restore-err", role: "alert" });
+    const rpc1 = textInput("restore", "noid_rpc", "", "http://127.0.0.1:9601");
+    const rpc2 = textInput("restore", "noid_rpc2", "", "Optional second Parano1d node URL");
+    const nodeFold = el(
+      "details",
+      { class: "deposit-details fact-fold", id: "pg-restore-nodes" },
+      el("summary", { text: "Parano1d node addresses on this computer (optional)" }),
+      el("p", { class: "plain dim", text: "Leave blank to use the node address stored in the backup. Set it here if this computer runs its Parano1d node on another port or address." }),
+      field("restore", "noid_rpc", "Parano1d node address", rpc1, "On Ethereum mainnet, Bob's node must be a local loopback address (http://127.0.0.1:...).").box,
+      field("restore", "noid_rpc2", "Second Parano1d node (optional)", rpc2, "Leave blank if you use one node.").box
+    );
+
+    const clearOut = () => {
+      while (statusBox.firstChild) statusBox.removeChild(statusBox.firstChild);
+      while (errBox.firstChild) errBox.removeChild(errBox.firstChild);
+    };
+
+    const chooseBtn = el("button", { type: "button", class: "btn primary", id: "pg-restore-choose" }, "Choose backup file\u2026");
+
+    async function runRestore() {
+      clearOut();
+      chooseBtn.disabled = true;
+      statusBox.appendChild(el("p", { class: "plain", text: "Reading backup and checking both chains\u2026" }));
+      const overrides = {};
+      if (val(rpc1)) overrides.noid_rpc = val(rpc1);
+      if (val(rpc2)) overrides.noid_rpc2 = val(rpc2);
+      const body = Object.keys(overrides).length ? { node_overrides: overrides } : {};
+      let r;
+      try {
+        r = await request("POST", "/api/backup/restore", body);
+      } catch {
+        r = { ok: false, status: 0, json: { error: "The program could not be reached. Nothing was written." } };
+      }
+      clearOut();
+      chooseBtn.disabled = false;
+      if (!r.ok || !r.json || r.json.ok !== true) {
+        if (r.json && r.json.code === "cancelled") return;
+        const msg = (r.json && typeof r.json.error === "string" && r.json.error) || "This backup could not be restored.";
+        errBox.appendChild(el("div", { class: "alarm danger" }, ic("alert"), el("span", { class: "lv", text: "Restore stopped" }), el("span", { class: "tx", text: msg })));
+        if (r.json && r.json.code === "node_unreachable") {
+          nodeFold.open = true;
+          chooseBtn.textContent = "Try again";
+        }
+        return;
+      }
+      const res = r.json;
+      const doneLines = [
+        "This swap now runs on this computer. Save a new backup now: the old file stays valid, but this computer has not saved one yet.",
+        "If your old computer starts again, open No1d Swap there and turn this swap's autopilot off.",
+      ];
+      statusBox.appendChild(
+        el(
+          "div",
+          { class: "alarm ok" },
+          ic("check"),
+          el("span", { class: "lv", text: "Restored" }),
+          el("span", { class: "tx" }, ...doneLines.map((t) => el("span", { class: "more", text: t })))
+        )
+      );
+      if (Array.isArray(res.warnings) && res.warnings.length > 0) {
+        for (const w of res.warnings) {
+          statusBox.appendChild(
+            el(
+              "div",
+              { class: "alarm warn", role: "alert" },
+              ic("alert"),
+              el("span", { class: "lv", text: "Warning" }),
+              el("span", { class: "tx", text: String(w) })
+            )
+          );
+        }
+      }
+      const openBtn = el(
+        "button",
+        {
+          type: "button",
+          class: "btn primary",
+          id: "pg-restore-open",
+          onclick: () => (h && typeof h.restored === "function" ? h.restored(res.swap) : null),
+        },
+        "Open this swap"
+      );
+      statusBox.appendChild(el("div", { class: "row" }, openBtn));
+      chooseBtn.hidden = true;
+    }
+
+    chooseBtn.addEventListener("click", runRestore);
+
+    const node = el(
+      "section",
+      { class: "pg-form pg-restore", "aria-labelledby": "pg-h-restore" },
+      el("div", { class: "card-head" }, el("h1", { id: "pg-h-restore", text: "Restore a swap" }), el("button", { type: "button", class: "btn sm", id: "pg-restore-back", onclick: () => (h && h.cancel ? h.cancel() : null) }, "Back to your swaps")),
+      el("p", { class: "plain", text: "Choose the backup file. It ends in .no1dbackup." }),
+      el("p", { class: "plain dim", text: "If this backup came from another computer, No1d Swap will ask for that computer's recovery code in its own private window. Nothing is written until the backup is verified." }),
+      nodeFold,
+      el("div", { class: "row" }, chooseBtn),
+      errBox,
+      statusBox
+    );
+    return { node, runRestore };
+  }
+
   // ------------------------------------------------------------------ the requests of the menu and the board slot
   /** Asks the program to open one of its own windows; nothing comes back that the page shows except the word that it was asked. */
   async function openProgram(what) {
@@ -1183,6 +1331,22 @@
     const r = await request("POST", "/api/board/slot", { role });
     return r.ok && r.json && r.json.ok === true && typeof r.json.swap === "string" ? { ok: true, swap: r.json.swap } : { ok: false, error: errorText(r) };
   }
+  async function saveBackup(swap, autoRefresh) {
+    const r = await request("POST", "/api/backup/save", { swap, keep_updated: autoRefresh === true });
+    return { ok: r.ok, status: r.status, json: r.json && typeof r.json === "object" ? r.json : {} };
+  }
+  async function updateBackup(swap) {
+    const r = await request("POST", "/api/backup/update", { swap });
+    return { ok: r.ok, status: r.status, json: r.json && typeof r.json === "object" ? r.json : {} };
+  }
+  // "Post to the offers board" (lib/offerpost.js): the preview, the confirmed post and the status change; each answers { ok, status, json }
+  const offerCall = async (path, body) => {
+    const r = await request("POST", path, body);
+    return { ok: r.ok, status: r.status, json: r.json && typeof r.json === "object" ? r.json : {} };
+  };
+  const offerPreview = (swap, note, markTaken) => offerCall("/api/offerpost/preview", { swap, note, mark_taken: markTaken === true });
+  const offerPost = (swap, note, markTaken, digest) => offerCall("/api/offerpost/post", { swap, note, mark_taken: markTaken === true, digest });
+  const offerStatus = (swap, status) => offerCall("/api/offerpost/status", { swap, status });
   async function loadSettings() {
     const r = await request("GET", "/api/settings");
     // R3: the payout history comes beside the settings; it is kept here for the new-swap form that is built next (it is never part of the settings, so it is never posted back)
@@ -1209,8 +1373,14 @@
     noticeBox,
     limitsScreen,
     settingsForm,
+    restoreForm,
     openProgram,
     makeSlot,
+    saveBackup,
+    updateBackup,
+    offerPreview,
+    offerPost,
+    offerStatus,
     loadSettings,
     request,
     SETTINGS_FIELDS,

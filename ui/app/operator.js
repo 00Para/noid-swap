@@ -353,6 +353,8 @@
       demo: state.mode === "demo",
       // program mode decides the network itself (run.json and the server's own check: payload.actions.production), so the page does not call a mainnet swap read-only
       program: !!state.program,
+      // a copy restored from a backup (the autopilot view's restore marker, program mode only): the behind-the-chain notice then names the restore, not another machine (run 24 F9)
+      restored: !!(state.program && p.actions && p.actions.autopilot && p.actions.autopilot[state.role] && p.actions.autopilot[state.role].restored),
     };
   }
 
@@ -1227,7 +1229,7 @@
   }
 
   // What this page shows and never shows: in program mode it is the foot of the list and the forms, and inside the "Details" fold on a swap's page.
-  const PROGRAM_BACKUP = "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough.";
+  const PROGRAM_BACKUP = "Save a backup of this swap and keep your recovery code: together they bring the swap back on another computer. The backup file alone is not enough.";
   const PROGRAM_NOTE = "This page shows what the program reads from a swap's run folder and from the chains. It never shows a secret, a key, a passphrase or a recovery code: those are shown and typed only in the program's own windows. Everything that moves coins needs a dry run, the engine's decision and a typed confirmation, and every action is written to the swap's audit log.";
 
   // ------------------------------------------------------------ program mode: screens
@@ -1389,6 +1391,15 @@
         state.pgMsg = { kind: "danger", text: "The practice could not be opened: " + (e.message || e) };
         state.screen = "list";
       }
+    } else if (screen === "restore" && PG.restoreForm) {
+      state.pgForm = PG.restoreForm(state.program, {
+        restored: async (id) => {
+          await load(true);
+          await openSwap(id);
+        },
+        cancel: () => goScreen("list"),
+      });
+      state.screen = "restore";
     } else if (screen === "settings") {
       const st = await PG.loadSettings();
       if (st.ok) {
@@ -1477,7 +1488,7 @@
         clear(root);
         root.appendChild(state.pgForm.node);
       }
-      document.title = state.screen === "new" ? "New swap, No1d Swap" : "Settings, No1d Swap";
+      document.title = state.screen === "new" ? "New swap, No1d Swap" : state.screen === "restore" ? "Restore a swap, No1d Swap" : "Settings, No1d Swap";
       return;
     }
     clear(root);

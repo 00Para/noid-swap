@@ -9,21 +9,33 @@ It is for **two people who have a reason to trust each other**, and for small am
 The repository is called `noid-swap`. It holds the program, the swap tool behind it, the contracts, the protocol design and the
 logs of every real run.
 
+Documentation: https://00para.github.io/noid-swap-docs/
+
+**What's new in 0.2.0:**
+
+- Back up a swap and restore it on another computer (sealed file, new approval, one computer only).
+- The producer screen now warns instead of refusing: Bob sees the share of recent Parano1d blocks one producer made and ticks that he read it. The risk is real and stated under "Limits and risks".
+- Caps per swap on mainnet: 1 ETH and 20,000 NOID.
+- A market reference rate is shown for information only; it never sets the swap's rate.
+- Bob can post his invitation to the public offers board from his card, by his own click.
+- Fixes from two audits, a deadline clock on the swap card, a gas estimate for the Ethereum sweep, new program icons and a link to the documentation site.
+
 ## Limits and risks
 
 The program shows the same card under "Limits and risks". In short:
 
-- **Caps per swap.** On Ethereum mainnet, at most **2,500 NOID and 0.5 ETH**. On the Sepolia test network, at most **20 NOID and
+- **Caps per swap.** On Ethereum mainnet, at most **20,000 NOID and 1 ETH**. On the Sepolia test network, at most **20 NOID and
   0.01 ETH**. The program refuses more. Parano1d has no test network, so the NOID is real money in every swap, also on Sepolia.
 - **Three ways to lose.**
   1. If you sell ETH and your computer is off after Alice takes the ETH: your program has at least about 75 minutes to claim the
      NOID. If it misses that, Alice can take the NOID back and you have lost the ETH.
-  2. If you sell ETH to someone who controls most of Parano1d's mining, they can take both sides. One address mined between 45 %
-     and 63 % of each day's blocks over 20 days (52.7 % of the last day measured), read from the chain's own block headers on
-     2026-11-08. Above half of the hashrate a longer waiting window does not help. Sell ETH only to someone you have a reason to
-     trust. Bob's program reads the current share before each lock: the swap tool refuses above 35 %, and Bob's approval can accept
-     a share up to 65 %, never more. That is a screen, not a defence: it
-     cannot see a miner on several addresses or a share that grows later. Model and numbers:
+  2. If you sell ETH to someone who controls most of Parano1d's mining, they can take both sides. Today (readings of 23 and 25
+     November 2026) one producer made about 76 % to 82 % of recent Parano1d blocks, read from the chain's own block headers; on
+     2026-11-08 it was 45 % to 63 % of each day's blocks over 20 days. Since version 0.2.0 the program does not refuse a swap for this
+     (the owner's decision, the risk is accepted): Bob's program reads the current share before each lock and shows it in plain words, and
+     Bob ticks that he read it. Above half of the blocks a longer waiting window does not help, and Bob can lose his ETH to a miner who
+     is Alice. Sell ETH only to someone you have a reason to trust. Alice is not exposed to this. The share is measured and warned about,
+     never a defence: the screen cannot see a miner on several addresses or a share that grows later. Model and numbers:
      [`docs/miner-concentration.md`](docs/miner-concentration.md); the screen: [`docs/bob-concentration-gate.md`](docs/bob-concentration-gate.md).
   3. The code, and the hash function behind the NOID lock, have not been reviewed by outside experts. A flaw could cost the coins
      of a swap. Keep amounts small.
@@ -38,6 +50,7 @@ The program shows the same card under "Limits and risks". In short:
 
 Installers are on this repository's **Releases** page: a Windows x64 installer (`No1d-Swap-<version>-win-x64.exe`) and a macOS
 Apple Silicon disk image (`No1d-Swap-<version>-mac-arm64.dmg`). Each release also carries `release.json` and `release.json.sig`.
+The documentation site, with a guide to the program, is at https://00para.github.io/noid-swap-docs/.
 
 **Check an installer before you open it.** A signature is a short code that only the holder of a private key can make and anyone
 with the public key can check. The project's one release key signs `release.json`, which lists each installer's SHA-256 (its
@@ -95,6 +108,24 @@ nothing else). It has no owner, no admin key, no pause, no upgrade and no fee. I
 the code on the chain is what [`eth/contracts/HTLCPoseidonV2.sol`](eth/contracts/HTLCPoseidonV2.sol) compiles to), and its code
 hash `0xf510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780bb7043ff3` is compiled into the swap tool, which refuses a
 contract with any other code.
+
+## Back up a swap, and restore it
+
+A swap lives in the computer that runs it. In program mode the swap page has a **Save a backup** button: it writes one sealed file
+for that swap, ending in `.no1dbackup`, to a folder you choose; the program asks for it before the coins go in. It can keep that file up to date by itself while the swap
+moves on, and the page says whether the backup is current. The file opens only with your recovery code, so it can sit on a USB
+stick or in a cloud folder. Keep the recovery code on paper and never next to the file: anyone who holds both can take that swap's
+coins.
+
+On a new computer, or after a fresh install, choose **Restore a swap...** in the application menu, pick the file, type your
+recovery code and let the program read both chains. A restored swap starts with no approval: you approve it again, and the
+approval says that you will run the swap on **one computer only**. Two computers running the same swap could both send the same
+step, and some steps cost a fee twice. If the old computer starts again, turn the swap's autopilot off there.
+
+The new checks hold back only the two steps where coins go in (Alice's funding and Bob's ETH lock). A claim, a refund, a recovery
+or a sweep is never held back by a restore or a missing backup. Bob's lock is also refused when his swap key has already sent a
+transaction that his swap file does not account for, which is the sign that another copy of the swap is running. A backup does not
+run the swap while the computer is off. Details: `ui/app/README.md` and `desktop/README.md`, "Swap backup and restore".
 
 ## Why Parano1d makes this cheap, and why it decides who goes first
 
@@ -198,7 +229,7 @@ Each component's `README.md` is the source of truth for that component.
 
 ## Status and warnings
 
-- **Caps.** 2,500 NOID and 0.5 ETH per swap on Ethereum mainnet; 20 NOID and 0.01 ETH on Sepolia and the rehearsal chain. The caps are
+- **Caps.** 20,000 NOID and 1 ETH per swap on Ethereum mainnet; 20 NOID and 0.01 ETH on Sepolia and the rehearsal chain. The caps are
   enforced in the swap's settings file and again in the swap tool's profile. `eth/scripts/live.js` refuses Ethereum mainnet unless
   `--mainnet` is given with a fee cap and a swap file. Use amounts you can lose.
 - **What opened on 2026-11-20, tested offline only.** Ethereum mainnet in the desktop program (version 0.1.5): the mainnet form,
@@ -228,20 +259,20 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 562 passing, 2 pending on Windows; solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd eth && npm install && npx hardhat test      # 546 passing, 2 pending on Windows without Poseidon2b.test.js (562 with it); solc falls back to the npm solc@0.8.24 package if the download is blocked
 cd btc && npm install && npm test              # 91 passing (node --test)
-node --test "ui/app/test/*.test.js"            # 1780 tests (the operator console and program mode)
-node --test "desktop/test/*.test.js"           # 623 tests (the desktop program, against a fake shell)
+node --test "ui/app/test/*.test.js"            # 1914 tests (the operator console and program mode)
+node --test "desktop/test/*.test.js"           # 664 tests (the desktop program, against a fake shell)
 ```
 
 Rust parts (Linux or WSL2; the vendored code pins Rust 1.96.0 in `vendor/parano1d/rust-toolchain.toml`):
 
 ```sh
-cd parano1d/harness && cargo test                                   # 37 tests (+1 ignored), ~2 min first build
+cd parano1d/harness && cargo test                                   # 38 tests (+1 ignored), ~2 min first build
 cd equiv && cargo test --release                                     # 23 tests; EQUIV_PARITY_N=100000 for the big parity run
 cd equiv/zkvm && cargo test -p equiv-guest-core                      # 3 tests; proving needs rzup, see equiv/README.md
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=~/zkvm-out cargo test --release -p equiv-host   # 14 host tests on real receipts
-cd swap-cli && cargo test --offline                                  # 868 tests (+1 ignored)
+cd swap-cli && cargo test --offline                                  # 923 tests (+1 ignored)
 # the Pruv contract, from the vendor workspace:
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   check parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json

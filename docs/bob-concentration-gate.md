@@ -1,5 +1,13 @@
 # Bob-side concentration gate
 
+> **Note of 2026-11-27 (version 0.2.0, the owner's decision): since 0.2.0 the screen WARNS and does not REFUSE for the share.** Everything below that says the lock is refused
+> or held back because one producer is above 35 % (or above 65 %), or because the headers cannot be read, is history: the share (high or unknown) is now a warning note,
+> `producer_screen` reports it (`state` `concentrated` or `share_unknown`, `share_known`, `warning`), the lock is offered in every case, and Bob's approval in the program
+> carries a statement that he read the warning. **The risk stays**: above half of the blocks no window protects Bob (the Ethereum side) from a miner who is Alice, and nothing
+> in the program makes that smaller. What still refuses, under `production`, is the lying-node check and not a share rule: the second Parano1d node that disagrees or cannot be
+> read for the cross-check, a missing second node (waived only for the person's own loopback node by `--acknowledge-producer-share`, which is otherwise a no-op, kept for
+> compatibility), and a remembered disagreement (`.producer-differs`, `producer_differs_seen`). `--accept-producer-concentration` waives only those.
+
 Status: **built** (2026-11-08) in `swap-cli`: the reader (`swap-cli/src/watch/producers.rs`), the engine screen (`swap-cli/src/producer_gate.rs`, called from `bob_action` at `funding_final` in `swap-cli/src/engine.rs`), the per-profile numbers (`Gates` in `swap-cli/src/params.rs`), the flag `--accept-producer-concentration`, the helper setting `ACCEPT_PRODUCER_CONCENTRATION` and an alert for a removed claim. Tests: `swap-cli/tests/producer_gate.rs` and the unit tests in the same files. Nothing in it touches a chain beyond read-only header calls. The threat, the measurement and the model are in `docs/miner-concentration.md` (threat T21 in `docs/protocol-design.md` section 8); this document does not repeat them. Section 9 records the decisions that shaped the build; section 10 is about Bob's re-send after a reorg (an alert is built, an automatic re-send is not).
 
 ## Bottom line
@@ -332,9 +340,9 @@ An outside static read of the published version raised the points below. What is
 6. **Three or more addresses give no top-two warning: a stated limit.** A party that splits over three or more addresses is invisible to the screen (section 2, "One miner on many addresses"). A top-three warning would be on every day today (the largest three hold 85.9 %) and carries no information.
 7. **The 5-point drift allowance and the 2-sigma margin: rechecked.** For `N` = 2,880, 2 sigma is 1.86 points at the worst case of a share of 0.5, 1.84 near 0.42 and 1.78 near 0.35; the 1.9 in the table is the rounded worst case and the threshold is 35 % either way. The drift allowance of 5 points is smaller than the one-day steps seen in the data (9.5 and 7.8 points once each) and smaller than the 90th percentile (+6.2) and 99th (+16.6) of the growth of a producer's share over the next 738 blocks on sliding windows. The limit is not moved. In the one measured episode a tighter limit did not reduce the share of passing states followed by a stretch above 42 %: their number fell (24, 21, 16, 3 and 0 at 35, 33, 30, 28 and 25 %), but the number of passing states fell with it (231, 210, 87, 18 and 1), so their share was 10 %, 10 %, 18 % and 17 % and reached 0 only where a single state passed; they cluster in the single entry of the dominant address. That is a statement about this episode, not about tighter limits in general, and one episode cannot calibrate a number. The allowance stays a judgement, and it is not a bound: the data shows larger moves.
 
-## 12. Decision of 2026-11-20: a narrow acknowledgement for program-mode production swaps between people who trust each other
+## 12. Decision of 2026-11-20: a narrow acknowledgement (superseded by the note at the top: since 0.2.0 the share part is a no-op) for program-mode production swaps between people who trust each other
 
-The program (desktop mode) opens production swaps with caps (2,500 NOID, 0.5 ETH, chain 1) for people who have a reason to trust each other. At today's share (one address above half of the blocks) the
+The program (desktop mode) opens production swaps with caps (20,000 NOID since 2026-11-27, 1 ETH, chain 1) for people who have a reason to trust each other. At today's share (one address above half of the blocks) the
 screen of section 4 refuses every such lock, and the only waiver, `--accept-producer-concentration`, also lifts the fail-closed checks and the remembered disagreement, which one lying node could use. Decided:
 
 - A new flag `--acknowledge-producer-share <permille>`, accepted wherever the old flag is, with a compiled hard maximum of 650 (a larger value, or 0, is refused at parse time).

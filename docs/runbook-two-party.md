@@ -321,9 +321,9 @@ A node that is behind, or a load-balanced endpoint, can answer `null` for a mine
 **Step 5, Alice reveals** (only when `tick` says `reveal_eth`; the dry run needs no secret):
 ```sh
 cd eth && node scripts/live.js claim --key-file keys/alice.key --contract 0xC --lock-id 0xLOCKID \
-   --chain-id 11155111 --dry-run
+   --chain-id 11155111 --swap ../alice.swap.json --dry-run
 $BIN secret ../alice.swap.json | node scripts/live.js claim --key-file keys/alice.key --contract 0xC \
-   --lock-id 0xLOCKID --chain-id 11155111 --secret-stdin
+   --lock-id 0xLOCKID --chain-id 11155111 --swap ../alice.swap.json --secret-stdin
 ```
 `live.js` itself refuses unless now <= `T_reveal - 1800 s`, the lock exists and is final, and `sha256(secret) == H`.
 `--secret-stdin` must be a pipe; `swap-cli secret` alone prints the secret, so never run it bare. Untested: piping from

@@ -17,13 +17,15 @@ test("Appendix A: passphrase, boardKey, migratedKey, inviteKey and keyCheck repr
   assert.equal(derive.keyCheck(S), "3b25908f21bea838");
   // the history of payout addresses (launch spec 4.2): K(S, "payout-history", "install")
   assert.equal(derive.historyKey(S).toString("hex"), "5c9c917a08988123b632d429696e657f2366b58f47139c880178ee52f2f102c5");
+  // per-swap backup key: K(S, "swap-backup", R)
+  assert.equal(derive.backupKey(S, R).toString("hex"), "e2531f47d865db5e7ee06cbc770a5266097ce3d9f47f22f63418e941c07939f1");
 });
 
 test("the passphrase is 64 lower-case hex characters and each label gives a different key", () => {
   const p = derive.passphrase(S, R);
   assert.match(p, /^[0-9a-f]{64}$/);
-  const keys = new Set([derive.K(S, "swap-passphrase", R), derive.K(S, "board", R), derive.K(S, "migrated-passphrase", R), derive.inviteKey(S), derive.historyKey(S)].map((b) => b.toString("hex")));
-  assert.equal(keys.size, 5);
+  const keys = new Set([derive.K(S, "swap-passphrase", R), derive.K(S, "board", R), derive.K(S, "migrated-passphrase", R), derive.K(S, "swap-backup", R), derive.inviteKey(S), derive.historyKey(S)].map((b) => b.toString("hex")));
+  assert.equal(keys.size, 6);
 });
 
 test("another run id or another secret gives another value; the same input gives the same value", () => {
@@ -56,6 +58,7 @@ test("the derivation is the plain HMAC of the spec (an independent computation w
   assert.equal(derive.passphrase(S, R), mac(`no1d-swap/v1/swap-passphrase/${R}`));
   assert.equal(derive.boardKey(S, R).toString("hex"), mac(`no1d-swap/v1/board/${R}`));
   assert.equal(derive.migratedKey(S, R).toString("hex"), mac(`no1d-swap/v1/migrated-passphrase/${R}`));
+  assert.equal(derive.backupKey(S, R).toString("hex"), mac(`no1d-swap/v1/swap-backup/${R}`));
   assert.equal(derive.inviteKey(S).toString("hex"), mac("no1d-swap/v1/board-invite/install"));
   assert.equal(derive.historyKey(S).toString("hex"), mac("no1d-swap/v1/payout-history/install"));
   assert.equal(derive.keyCheck(S), mac("no1d-swap/v1/key-check").slice(0, 16));

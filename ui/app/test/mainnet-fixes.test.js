@@ -49,8 +49,8 @@ test("L1: a node address counts as this machine's own only when it is written wi
   assert.deepEqual(rs.validate({ ...bob, noid_rpc: "http://127.0.0.1:9601" }), []);
 });
 
-test("L2: Bob's statement names the ceiling the flag waives (65 %), and keeps the rest of the sentence", () => {
-  assert.equal(STATEMENTS.producer_share_ack, "One address mined {SHARE} % of Parano1d's recent blocks; I accept a share up to 65 %. If Alice controls most of the mining she can take both sides. I swap only with someone I have a reason to trust.");
+test("L2: Bob's statement says he read the producer warning and accepts the risk (the share warns, it never refuses)", () => {
+  assert.equal(STATEMENTS.producer_share_ack, "I read the producer warning. {SHARE} If the miner behind Alice holds most of the blocks, no time window protects my ETH and she can take both sides. I accept that risk for this swap.");
 });
 
 test("L3: on mainnet the tip is at most 2 gwei and at most the cap, in the schema and in the form; a test network keeps its own rules", async () => {
@@ -683,9 +683,11 @@ test("L8: Autopilot.turnOn('bob') on a production swap: refused up front when th
     // the statement ids Bob must confirm, and the words with the measured share and the ceiling
     const view = ap.view(swap.runner.readRunFn(swap.runner.cfg.runDirs, nowS())).bob;
     assert.deepEqual(view.statements.map((s) => s.id), ["stay_on", "no_manual_steps", "alice_check_matches", "producer_share_ack"]);
-    assert.match(view.statements[3].text, /^One address mined 52\.8 % of Parano1d's recent blocks; I accept a share up to 65 %\./);
+    assert.match(view.statements[3].text, /^I read the producer warning\. One producer mined 52\.8 % of recent Parano1d blocks\. /);
+    assert.equal(view.producer_screen.level, "high");
+    assert.match(view.producer_screen.warning, /^One producer mined 52\.8 % of recent Parano1d blocks\. A Bob who faces that miner as Alice can lose his ETH: above half of the blocks, no time window protects him\.$/);
     // without the producer statement: refused, the reason names it
-    assert.throws(() => ap.turnOn("bob", "0.001 ETH", { ...BOB_STATEMENTS, producer_share_ack: false }), (e) => e.status === 422 && e.reasons.some((r) => r.code === "statement_producer_share_ack" && /up to 65 %/.test(r.text)));
+    assert.throws(() => ap.turnOn("bob", "0.001 ETH", { ...BOB_STATEMENTS, producer_share_ack: false }), (e) => e.status === 422 && e.reasons.some((r) => r.code === "statement_producer_share_ack" && /read the producer warning/.test(r.text)));
     assert.equal(ap.producerAckPermille(), null, "nothing was approved");
     // with it: approved, the file holds the statement and the share, the audit line names the share
     assert.equal(ap.turnOn("bob", "0.001 ETH", BOB_STATEMENTS).status, 200);
@@ -705,10 +707,8 @@ test("L8: Autopilot.turnOn('bob') on a production swap: refused up front when th
   }
 });
 
-test("L8: Autopilot.turnOn('bob') on a production swap is refused up front (producer_screen) for a share above 65 %, a stale reading and a disagreeing second node; nothing is written", async () => {
+test("L8: Autopilot.turnOn('bob') on a production swap is refused up front (producer_screen) for a disagreeing second node, never for the share; nothing is written", async () => {
   const cases = [
-    ["a share above 65 %", { p: { long: { n: 2880, largest: 1900, largest_id: "x", top_two: 2000, distinct: 2 } } }, /above the 65 %/],
-    ["a stale reading", { p: { read_at: nowS() - 4000 } }, /out of date|stale|old/i],
     ["a second node that disagrees", { p: { second: { state: "differs", height: 9, first: "a", second: "b" } } }, /second node|disagree|differ/i],
   ];
   for (const [name, o, re] of cases) {
@@ -721,6 +721,38 @@ test("L8: Autopilot.turnOn('bob') on a production swap is refused up front (prod
       assert.throws(() => swap.autopilot.turnOn("bob", "0.001 ETH", BOB_STATEMENTS), (e) => e.status === 422 && e.reasons[0].code === "producer_screen" && re.test(e.message), name);
       assert.equal(fs.existsSync(path.join(sw.dir, "autopilot-bob.json")), false, `${name}: no approval file`);
       assert.equal(swap.autopilot.producerAckPermille(), null);
+      await set.stopAll();
+    } finally {
+      await env.cleanup();
+    }
+  }
+});
+
+test("L8: a share of 76 % or an unreadable share is a warning: Bob's approval is allowed after his statement, and the warning is shown", async () => {
+  const cases = [
+    ["a share of 76 %", { p: { long: { n: 2880, largest: 2190, largest_id: "x", top_two: 2500, distinct: 3 }, short: { n: 720, largest: 547, largest_id: "x", top_two: 600, distinct: 3 } } }, "76", /^One producer mined 76\.\d % of recent Parano1d blocks\. A Bob who faces that miner as Alice can lose his ETH: above half of the blocks, no time window protects him\.$/, "high"],
+    ["a stale reading", { p: { read_at: nowS() - 4000 } }, null, /^The share of one producer in recent Parano1d blocks is unknown right now\. /, "unknown"],
+    ["an incomplete reading", { p: { complete: false, long: null, short: null, have: 1400 } }, null, /^The share of one producer in recent Parano1d blocks is unknown right now\. /, "unknown"],
+  ];
+  for (const [name, o, share, warnRe, level] of cases) {
+    const env = makeEnv();
+    try {
+      const sw = bobMainnet(env, o);
+      const set = new SwapSet({ program: env.program, deps: env.deps() });
+      set.scan();
+      const swap = set.get(sw.id);
+      const ap = swap.autopilot;
+      const view = ap.view(swap.runner.readRunFn(swap.runner.cfg.runDirs, nowS())).bob;
+      assert.equal(view.producer_screen.ok, true, name);
+      assert.equal(view.producer_screen.level, level, name);
+      assert.match(view.producer_screen.warning, warnRe, name);
+      assert.match(view.statements[3].text, share ? /^I read the producer warning\. One producer mined 76\.\d % of recent Parano1d blocks\./ : /^I read the producer warning\. The share of one producer in recent Parano1d blocks is unknown right now\./, name);
+      // without the statement: refused; with it: approved and the audit line names what he saw
+      assert.throws(() => ap.turnOn("bob", "0.001 ETH", { ...BOB_STATEMENTS, producer_share_ack: false }), (e) => e.status === 422 && e.reasons.some((r) => r.code === "statement_producer_share_ack"), name);
+      assert.equal(ap.turnOn("bob", "0.001 ETH", BOB_STATEMENTS).status, 200, name);
+      const line = swap.audit.all().find((r) => r.action === "autopilot" && r.result === "approval given");
+      assert.match(line.detail, share ? /producer share 76\.\d %/ : /producer share unknown/, name);
+      assert.equal(ap.producerAckPermille(), 650, name);
       await set.stopAll();
     } finally {
       await env.cleanup();

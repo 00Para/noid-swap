@@ -694,6 +694,13 @@
       box.appendChild(H.el("p", { class: "plain", text: "The deposit address is shown after the swap file is made: it is the address of a wallet the tool made for this swap, and it is shown only once the tool has checked that its own key opens it." }));
       return box;
     }
+    // a copy restored from a backup made before the funding or the lock: the deposit was spent into it, so the balance shows what is left; never ask for it again (rehearsal F4)
+    // the autopilot's view says it (`coins_in`): only for a restored run folder whose tick shows the coins in (lib/autopilot.js restoredCoinsIn)
+    const apv = a && a.autopilot && a.autopilot[role] && typeof a.autopilot[role] === "object" ? a.autopilot[role] : null;
+    if (apv && apv.coins_in === true) {
+      box.appendChild(H.el("p", { class: "plain", text: role === "alice" ? "Your NOID is already in the swap contract: the deposit was spent into the funding before this copy was restored. Do not deposit again." : "Your lock was already sent from this swap's key: the deposit was spent into it before this copy was restored. Do not deposit again." }));
+      return box;
+    }
     if (!s) {
       box.appendChild(H.el("p", { class: "plain", text: "Not read yet. The console reads the deposit about every 40 seconds; no address is shown before it has." }));
       box.appendChild(H.el("div", { class: "row" }, check));
@@ -952,6 +959,9 @@
       // program mode: the line match of the run folder (the two sides' check lines were compared); it pre-ticks the line statement, which is still required
       line_match: !!a.line_match,
       statements: Array.isArray(x.statements) ? x.statements : [],
+      // Bob on mainnet: the producer warning in plain words (the owner's decision of 0.2.0: it warns, it never refuses); "" when there is none to show
+      producer_warning: x.producer_screen && typeof x.producer_screen === "object" && typeof x.producer_screen.warning === "string" ? x.producer_screen.warning : "",
+      producer_level: x.producer_screen && typeof x.producer_screen === "object" && typeof x.producer_screen.level === "string" ? x.producer_screen.level : null,
       needs_you: needs,
       doing: x.doing || null,
       waiting_reason: x.waiting_reason || null,
@@ -1105,7 +1115,7 @@
     const tip = gweiTxt(fees.tip_wei);
     const cap = gweiTxt(fees.cap_wei);
     if (tip || cap) lis.push(`${tip ? `Your tip: ${tip} gwei. ` : ""}${cap ? `Your fee cap: ${cap} gwei.` : ""}`.trim());
-    lis.push("A step costs its gas times the lower of your cap and the base fee plus the tip. The sweep sends the key's balance minus 21,000 gas at your cap, so what is under the cap stays in the key: it counts at the cap. The most you can lose to fees is the gas ceiling of each step at your cap.");
+    lis.push("A step costs its gas times the lower of your cap and the base fee plus the tip. The sweep sends the key's balance minus its gas limit at your cap (the node's estimate plus a margin), so what is under the cap stays in the key: it counts at the cap. The most you can lose to fees is the gas ceiling of each step at your cap.");
     lis.push("Parano1d fees are the figures measured on real swaps (about 0.009 NOID to fund, about 0.0058 NOID to close or sweep).");
     out.push(H.el("details", { class: "deposit-details fact-fold" }, H.el("summary", { text: "How the fees are counted" }), H.el("ul", { class: "fold-list" }, ...lis.map((t) => H.el("li", { text: t })))));
     out.push(H.el("details", { class: "deposit-details fact-fold" }, H.el("summary", { text: "How the times are counted" }), H.el("ul", { class: "fold-list" }, H.el("li", { text: "Parano1d blocks come about every 30 seconds; faster blocks bring it sooner." }), H.el("li", { text: f.role === "alice" ? "Your NOID's time is the deadline plus 20 blocks: 19 for finality and 1 for the sweep." : "Your ETH's time is Alice's last moment to take it, plus Ethereum's finality (about 19 minutes) and one more minute." }))));
@@ -1115,6 +1125,19 @@
     const L = LF();
     return L ? L.groupInt(String(x)) : String(x);
   };
+
+  /**
+   * The market reference rate (display only, Ethereum mainnet): the program's cached reading (`payload.program.market`, from the project's site snapshot) against this swap's own rate. Drawn only when the
+   * program sent a reading; it adds nothing to the approval's bytes, the typed amount or any request.
+   */
+  function marketNode(payload) {
+    const NM = typeof window !== "undefined" ? window.NoidMarket : null;
+    const m = payload && payload.program ? payload.program.market : null;
+    if (!NM || !m || typeof m !== "object" || m.state === "pending" || m.state === "off") return null;
+    const lp = launchOf(payload);
+    const n = lp && lp.rate && typeof lp.rate.eth_in_noid === "string" ? NM.amountNumber(lp.rate.eth_in_noid) : null;
+    return NM.node(H.el, NM.view(m.state === "ok" ? m.ref : null, Date.now(), n));
+  }
 
   /** The rate, "You get" and fee lines of the approval, with the loud-fee and the cap-below boxes above them. `where`: "approval". */
   function feeLines(f, payload) {
@@ -1371,6 +1394,8 @@
       // today's three lines, in a fold (every promise of the longer text is kept)
       box.appendChild(H.el("details", { class: "deposit-details fact-fold how-it-works" }, H.el("summary", { text: "How it works" }), H.el("div", { class: "fold-body" }, ...(AP_INTRO_PROGRAM[f.role] || []).map((l) => H.el("p", { class: "plain", text: l })))));
       for (const n of feeLines(f, payload)) box.appendChild(n);
+      const mk = mainnet ? marketNode(payload) : null;
+      if (mk) box.appendChild(mk);
       const fx = approvalFacts(f, payload, cmpCtx);
       if (fx) box.appendChild(fx);
       // Alice asks Bob, before she approves: his program can say it cannot lock today (mainnet only)
@@ -1469,6 +1494,7 @@
     const typedLabel = H.el("label", { for: "ap-typed", id: "ap-typed-hint", class: "typed-label" }, "To approve, type the amount and unit of your step: ", H.el("strong", { class: "mono", text: f.expected_typed || "?" }));
     if (prog) {
       // the statements first, then the typed amount with the button beside the field
+      if (f.producer_warning) box.appendChild(H.el("p", { class: f.producer_level === "high" || f.producer_level === "unknown" ? "attn producer-warning" : "plain producer-warning", role: "note", text: f.producer_warning }));
       box.appendChild(H.el("div", { class: "stmts" }, ...ticks.map((t) => t.label)));
       box.appendChild(H.el("div", { class: "typed" }, typedLabel, H.el("div", { class: "row" }, input, go)));
     } else {
@@ -2213,7 +2239,7 @@
   // Shown instead of the swap page while the swap has no tick yet. The swap was made by the new-swap form (its terms are in run.json), so there is no install step and no terms
   // step. The program makes the swap's own wallets by itself ("Make"); the person's own steps are Prepare (Alice) and Choose and check Alice's file (Bob). Under it the same
   // boxes as the swap page's first card (programFirstCard), in the order of the work: the file and the check line, the approval, then the deposit.
-  const PROGRAM_BACKUP = "Back up the whole run folder (the swap file and run.json are in it) and keep your recovery code. The swap file alone is not enough.";
+  const PROGRAM_BACKUP = "Save a backup of this swap and keep your recovery code: together they bring the swap back on another computer. The backup file alone is not enough.";
   const PROGRAM_STEPS = {
     alice: [
       { id: "make", action: null, title: "Make this swap's own wallets", auto: true },
@@ -2332,7 +2358,13 @@
   /** The line under a save button: the result of the last press (nothing before the first). */
   function fileNote(kind) {
     const n = noteOf(kind);
-    return n && n.text ? H.el("p", { class: n.error ? "attn" : "plain", role: n.error ? "alert" : "status", text: n.text }) : null;
+    if (!(n && n.text)) return null;
+    const line = H.el("p", { class: n.error ? "attn" : "plain", role: n.error ? "alert" : "status", text: n.text });
+    if (typeof n.code !== "string" || !n.code) return line;
+    // the public invitation code, shown in a wrapping, read-only box to select by hand
+    const ta = H.el("textarea", { class: "invite-code-show", readonly: "true", rows: 4, spellcheck: "false", "aria-label": "Invitation code", style: "width: 100%; font-family: var(--mono); font-size: 12px; word-break: break-all; overflow-wrap: anywhere; resize: none;" });
+    ta.value = n.code;
+    return H.el("div", {}, line, ta);
   }
 
   /** What the page can show of this role's check line: `{ hex, recorded }`. `recorded` only when the program has written check-line.json (the confirm box needs that); else the line of the step's own result, for display. */
@@ -2462,6 +2494,26 @@
     return box;
   }
 
+  /** The old way to copy: a hidden textarea and execCommand("copy"). False when the page cannot. */
+  function legacyCopy(text) {
+    let ok = false;
+    try {
+      const ta = H.el("textarea", { class: "sr-only", "aria-hidden": "true" });
+      ta.value = text;
+      document.body.appendChild(ta);
+      if (typeof ta.select === "function") ta.select();
+      try {
+        ok = typeof document.execCommand === "function" ? document.execCommand("copy") === true : false;
+      } catch {
+        ok = false;
+      }
+      if (typeof ta.remove === "function") ta.remove();
+    } catch {
+      ok = false;
+    }
+    return ok;
+  }
+
   /** Copies Bob's compact public invite code (no1dinv1:...) to the clipboard. */
   async function copyInviteCode() {
     if (!H.state.token) return;
@@ -2469,16 +2521,20 @@
     forceRender();
     const r = await post("/api/invitation/code", {});
     if (r.ok && r.json && typeof r.json.code === "string") {
+      const code = r.json.code;
       let copied = false;
       try {
         if (typeof navigator !== "undefined" && navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-          await navigator.clipboard.writeText(r.json.code);
+          await navigator.clipboard.writeText(code);
           copied = true;
         }
       } catch {
         copied = false;
       }
-      ui.file = { swap: H.state.swap || "", kind: "invitation", busy: false, ok: true, text: copied ? "Copied invitation code. Send it to Alice." : `Invitation code: ${r.json.code}` };
+      if (!copied) copied = legacyCopy(code);
+      ui.file = copied
+        ? { swap: H.state.swap || "", kind: "invitation", busy: false, ok: true, text: "Copied invitation code. Send it to Alice." }
+        : { swap: H.state.swap || "", kind: "invitation", busy: false, ok: true, error: true, text: "Copy failed: select the code and copy it by hand.", code };
       if (copied && H.toast) H.toast("Copied invitation code");
     } else {
       ui.file = { swap: H.state.swap || "", kind: "invitation", busy: false, ok: false, error: true, text: (r.json && r.json.error) || `HTTP ${r.status}` };

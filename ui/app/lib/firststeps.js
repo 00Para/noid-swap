@@ -23,6 +23,7 @@
 const fs = require("fs");
 const path = require("path");
 const { ENDED_PHASES, ALL_SPENDS, walletDepositReasons } = require("./gate");
+const { coinsAlreadyIn } = require("./viewmodel");
 
 const CHECK_FILE = "check-line.json";
 const MATCH_FILE = "line-match.json";
@@ -203,9 +204,13 @@ function isHeightAbort(role, tick) {
  *   sticky          an apply loop was started by this process before (the deposit is spent by the funding: never fall back)
  *   abortSeen       on how many distinct ticks in a row (this one included) the role's tick showed an abort (the caller's tracker: `observeAbort`)
  * In order: 1 an intent is held or recorded; 2 THIS role has acted or the swap ended (Alice: any phase but created; Bob: any phase but received, funded, funding_final);
- * 3 a height abort that cannot turn back seen on two ticks in a row; 4 sticky; 5 the approval is in force and the deposit is seen; 6 read.
+ * 3 a height abort that cannot turn back seen on two ticks in a row; 4 sticky; 5 the approval is in force and the deposit is seen; 6 Alice only: the approval is in force and her
+ * tick shows her own instance at the contract while the file still says `created`, in a run folder that was restored (a copy from a backup made before the funding: the deposit was spent into the
+ * funding, so 5 can never hold; recording moves the file to `funded` first, so no funding is decided); 7 read.
+ * Bob gets no rule 6: his read loop is observe-only, which records the facts (the funding, its finality, and his own lock once the funding is final) by itself, and a full
+ * tick before that could decide a second lock on a degraded read.
  */
-function watchWanted({ role, tick, approvalInForce, depositReasons, sticky, abortSeen } = {}) {
+function watchWanted({ role, tick, approvalInForce, depositReasons, sticky, abortSeen, restored } = {}) {
   const intent = tick && tick.intent && typeof tick.intent === "object" ? tick.intent.status : null;
   if (intent === "held" || intent === "recorded") return "apply";
   const phase = tick && typeof tick.phase_after === "string" ? tick.phase_after : null;
@@ -213,6 +218,7 @@ function watchWanted({ role, tick, approvalInForce, depositReasons, sticky, abor
   if (Number(abortSeen) >= 2 && isHeightAbort(role, tick)) return "apply";
   if (sticky === true) return "apply";
   if (approvalInForce === true && Array.isArray(depositReasons) && depositReasons.length === 0) return "apply";
+  if (approvalInForce === true && restored === true && role === "alice" && coinsAlreadyIn("alice", tick)) return "apply";
   return "read";
 }
 
@@ -253,7 +259,13 @@ function wantedFor(runner, role, run, nowMs) {
       approvalInForce = false;
     }
     const ws = runner.executor && typeof runner.executor.watchStatus === "function" ? runner.executor.watchStatus() : {};
-    return watchWanted({ role, tick, approvalInForce, depositReasons: depositReasonsFor(runner, role, run, nowMs), sticky: ws.applied_once === true, abortSeen: observeAbort(runner, role, tick) });
+    let restored = false;
+    try {
+      restored = !!(runner.autopilot && typeof runner.autopilot.restoredInfo === "function" && runner.autopilot.restoredInfo());
+    } catch {
+      restored = false;
+    }
+    return watchWanted({ role, tick, approvalInForce, restored, depositReasons: depositReasonsFor(runner, role, run, nowMs), sticky: ws.applied_once === true, abortSeen: observeAbort(runner, role, tick) });
   } catch {
     return "read";
   }
@@ -437,4 +449,4 @@ class FirstSteps {
   }
 }
 
-module.exports = { FirstSteps, watchWanted, wantedFor, observeAbort, isHeightAbort, depositReasonsFor, readCheckLine, readLineMatch, confirmLineMatch, lineMatchFor, writeCheckLine, lineConfirmable, CHECK_FILE, MATCH_FILE, READ_PHASE_TEXT, BOB_NOT_ACTED, ABORT_ALICE, ABORT_BOB, ABORT_EITHER };
+module.exports = { FirstSteps, watchWanted, coinsAlreadyIn, wantedFor, observeAbort, isHeightAbort, depositReasonsFor, readCheckLine, readLineMatch, confirmLineMatch, lineMatchFor, writeCheckLine, lineConfirmable, CHECK_FILE, MATCH_FILE, READ_PHASE_TEXT, BOB_NOT_ACTED, ABORT_ALICE, ABORT_BOB, ABORT_EITHER };

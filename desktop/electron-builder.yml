@@ -15,6 +15,9 @@ copyright: Copyright (c) 2026 00
 directories:
   app: stage
   output: dist
+  # The program's icons (build/icon.png for the Mac program, build/icon.ico for Windows). Relative to this folder (the project
+  # folder), not to the app folder: they are not packed into the program, the builder puts them into the executable and the disk image.
+  buildResources: build
 
 # The sources are packed into app.asar (its integrity is checked by a fuse). The children of the program need real
 # files: live.js and its packages (eth/), and the three Rust files poseidon2b.js reads (equiv/), so they stay unpacked
@@ -66,6 +69,7 @@ electronFuses:
 # Windows x64, NSIS, installed for the current user only (no administrator rights), to %LOCALAPPDATA%\Programs\no1d-swap:
 # a one-click install for the current user names its folder after the package name of desktop/package.json, not the product name.
 win:
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:
@@ -73,6 +77,8 @@ win:
   # The program is not signed: no certificate is configured, so none is used (signing is off by default).
 
 nsis:
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
   oneClick: true
   perMachine: false
   allowElevation: false
@@ -89,6 +95,8 @@ nsis:
 # program at start (seen on the first Mac build); with "-" codesign --verify --strict --deep passes and it starts.
 # The disk image itself stays unsigned.
 mac:
+  # A 1024 x 1024 PNG: the builder makes the .icns from it on the Mac build.
+  icon: build/icon.png
   target:
     - target: dmg
       arch:

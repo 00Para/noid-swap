@@ -12,7 +12,7 @@
   else root.NoidLimits = factory(root.NoidLaunch);
 })(typeof self !== "undefined" ? self : this, function (L) {
   const TRACK = Object.freeze({
-    version: "0.1.8",
+    version: "0.2.0",
     as_of: "2026-11-24",
     settled: 1,
     refunded: 0,
@@ -47,7 +47,7 @@
       text: null,
       items: [
         `If you sell ETH and your computer is off after Alice takes the ETH: your program has at least about ${n} minutes to claim the NOID. If it misses that, Alice can take the NOID back and you have lost the ETH.`,
-        "If you sell ETH to someone who controls most of Parano1d's mining: they can take both sides. One address mined between 45 % and 63 % of each day's blocks in the weeks before this release. Sell ETH only to someone you have a reason to trust.",
+        "If you sell ETH to someone who controls most of Parano1d's mining: they can take both sides. One address has mined about three quarters of recent blocks. Sell ETH only to someone you have a reason to trust.",
         "The code, and the hash function behind the NOID lock, have not been reviewed by outside experts. A flaw could cost the coins of a swap. Keep amounts small.",
       ],
     });

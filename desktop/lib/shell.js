@@ -278,6 +278,10 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   const openPractice = () => {
     if (windowCtl) windowCtl.openPractice().catch(() => {});
   };
+  // The menu's "Restore a swap…": the window forward and the page's restore screen opens.
+  const openRestore = () => {
+    if (windowCtl) windowCtl.openRestore().catch(() => {});
+  };
 
   function dispatchStake(list) {
     stakeList = list;
@@ -388,6 +392,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         guard,
         preloadPath: path.join(desktopDir, "preload-secret.js"),
         htmlPath: path.join(desktopDir, "secret", "secret.html"),
+        iconPath: path.join(desktopDir, "assets", "icon.png"),
         // A sheet of a window that is hidden in the tray would not show (on a Mac its parent is not on screen): the parent only while it is visible.
         getParent: () => (windowCtl && !windowCtl.isDestroyed() && windowCtl.window.isVisible() && !windowCtl.window.isMinimized() ? windowCtl.window : null),
       });
@@ -504,6 +509,26 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         const r = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
         return r && !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] || null : null;
       },
+      saveBackupFile: async (defaultName) => {
+        const parent = windowCtl && !windowCtl.isDestroyed() ? windowCtl.window : null;
+        const options = {
+          title: "Save a backup of this swap",
+          defaultPath: typeof defaultName === "string" && defaultName ? defaultName : "no1d-swap.no1dbackup",
+          filters: [{ name: "No1d Swap backup", extensions: ["no1dbackup"] }],
+        };
+        const r = parent ? await dialog.showSaveDialog(parent, options) : await dialog.showSaveDialog(options);
+        return r && !r.canceled && typeof r.filePath === "string" && r.filePath ? r.filePath : null;
+      },
+      chooseBackupFile: async () => {
+        const parent = windowCtl && !windowCtl.isDestroyed() ? windowCtl.window : null;
+        const options = {
+          title: "Choose a swap backup",
+          properties: ["openFile"],
+          filters: [{ name: "No1d Swap backup", extensions: ["no1dbackup"] }],
+        };
+        const r = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+        return r && !r.canceled && Array.isArray(r.filePaths) ? r.filePaths[0] || null : null;
+      },
       openHandlers: {
         help: async () => {
           const h = helpMessage();
@@ -560,8 +585,10 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       guard,
       isPackaged,
       url,
+      iconPath: path.join(desktopDir, "assets", "icon.png"),
       hidden: startHidden || cmd.selfTest,
       shouldHide: () => !stopping && stakeList.some((s) => s && s.active === true),
+      onHiddenToTray: () => notifier.trayNotice(),
     });
 
     if (cmd.selfTest) {
@@ -621,6 +648,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
       onRecoveryCode: () => program.open("recovery-code"),
       onHelp: () => program.open("help"),
       onPractice: openPractice,
+      onRestore: openRestore,
       onCheckUpdate: () => program.open("update-check"),
       onQuit: () => app.quit(),
     });

@@ -134,6 +134,27 @@
     return (tick && tick.eth && tick.eth.lock) || null;
   }
 
+  /**
+   * A copy of gate.js revealMaybePending (this file runs in the page and cannot require gate.js; a test keeps the two equal): the tick shows Alice's swap
+   * key with latest nonce 0 and a send waiting, so a reveal of hers may be pending and the secret may be public.
+   */
+  function revealMaybePendingCopy(tick) {
+    if (!tick || typeof tick !== "object") return false;
+    if (tick.phase_after !== "lock_seen" && tick.phase_after !== "lock_final") return false;
+    const eth = tick.eth || {};
+    const nodePendingAtZero = (obs) => {
+      if (!obs || typeof obs !== "object" || obs.claimed) return false;
+      if (obs.signer_nonce_latest === 0 && obs.signer_nonce_pending === 1) return true;
+      return tick.reveal_maybe_pending === true && obs.signer_nonce_latest === 0 && typeof obs.signer_nonce_pending === "number" && obs.signer_nonce_pending > 0;
+    };
+    if (!nodePendingAtZero(eth)) return false;
+    if (eth.second_error) return false;
+    if (eth.second !== undefined && eth.second !== null) {
+      if (typeof eth.second !== "object" || !nodePendingAtZero(eth.second)) return false;
+    }
+    return true;
+  }
+
   function actionOf(tick) {
     const a = tick && tick.action;
     if (!a || typeof a !== "object") return null;
@@ -323,6 +344,29 @@
     return { main, recovery, extra, on_recovery: onRecovery };
   }
 
+  // ------------------------------------------------------------ coins already in, while the file still says "before" (a restored stale copy)
+  /**
+   * Are this role's own coins already in the swap although the file's phase still says they are not? This happens when a swap is restored from a backup made before the
+   * funding (Alice) or before the lock (Bob): the deposit was spent into the funding or the lock, so the wallet no longer shows it, and the file has not caught up yet.
+   *   Alice: the file is at `created` and the tick's own events show the instance that matches the opening (`noid_instance_seen`, which the engine derives only for an
+   *          instance that fits the opening: amount, contract, terms).
+   *   Bob:   the file is before his lock (received, funded, funding_final) and his swap key, which is fresh per swap and sends nothing before the lock, has sent something
+   *          (a latest or pending nonce above 0 on the primary Ethereum node, and on the second one too when one is configured: one wrong answer is not enough). The engine
+   *          adopts his own lock by itself once Alice's funding is final.
+   * The tick alone does not say the copy was restored: every caller also asks for the restore marker (the autopilot's `restoredCoinsIn`, its view's `coins_in`), so a normal
+   * swap keeps every rule it had (the independent read of 2026-11-26: the downtime rule must not be switched off by this). Fail-closed: anything unreadable is false.
+   */
+  function coinsAlreadyIn(role, tick) {
+    if (!tick || typeof tick !== "object") return false;
+    const phase = typeof tick.phase_after === "string" ? tick.phase_after : null;
+    if (role === "alice") return phase === "created" && Array.isArray(tick.events) && tick.events.some((e) => e && typeof e === "object" && e.event === "noid_instance_seen");
+    if (role !== "bob" || !["received", "funded", "funding_final"].includes(phase)) return false;
+    const sent = (o) => !!o && typeof o === "object" && [o.signer_nonce_latest, o.signer_nonce_pending].some((n) => Number.isSafeInteger(n) && n > 0);
+    const eth = tick.eth && typeof tick.eth === "object" ? tick.eth : null;
+    if (!eth || !sent(eth) || eth.second_error) return false;
+    return eth.second === undefined || eth.second === null ? true : sent(eth.second);
+  }
+
   // ------------------------------------------------------------ what the tick lists at the contract / which network
   /**
    * The instances at the contract root, as the LAST TICK lists them (`noid.instances`, or the single `noid.instance`). `known` is false when the tick
@@ -458,8 +502,14 @@
       case "lock_seen":
       case "lock_final":
       case "locked":
-        headline = "Both legs are committed. If nobody finishes the swap, both sides refund and nobody loses.";
-        row(A, "In the Parano1d contract. Alice has not revealed the secret.", aliceBackAtD);
+        if (ctx.secret_may_be_public === true && (phaseId === "lock_seen" || phaseId === "lock_final")) {
+          // A reveal of Alice's may be waiting to be mined (a restored copy, a dropped send): the secret may be public, so this is not the quiet picture.
+          headline = "A reveal of Alice's may already be on its way, so the secret may be public. Do not treat this swap as one that can simply be left.";
+          row(A, "In the Parano1d contract. Bob can close it to himself with the public secret.", `If Bob does not, Alice takes it back from ${dTxt}${inD}.`);
+        } else {
+          headline = "Both legs are committed. If nobody finishes the swap, both sides refund and nobody loses.";
+          row(A, "In the Parano1d contract. Alice has not revealed the secret.", aliceBackAtD);
+        }
         row(B, "In the Ethereum contract.", bobRefund + (ctx.t_reveal_s_left !== null ? ` That is ${ctx.t_reveal_s_left > 0 ? "in about " + fmtDur(ctx.t_reveal_s_left) : "now possible"}.` : ""));
         break;
       case "reveal_submitted":
@@ -637,7 +687,7 @@
   }
 
   // ------------------------------------------------------------ alarms
-  function alarmsFor(role, tick, loop, tickAge, errText, tickError, terms, deadlines, now, finished, tickWriting) {
+  function alarmsFor(role, tick, loop, tickAge, errText, tickError, terms, deadlines, now, finished, tickWriting, restored) {
     const al = [];
     const add = (level, id, text) => al.push({ level, id, text });
     if (tickError) add("danger", "tick-unreadable", `The last tick file cannot be read: ${tickError}`);
@@ -698,7 +748,9 @@
     const PRE_LOCK = { alice: ["created", "funding_submitted", "funded", "funding_final"], bob: ["received", "funded", "funding_final", "aborted"] };
     const lk = eth.lock;
     if (lk && (lk.claimed === true || lk.refunded === true) && (PRE_LOCK[role] || []).includes(tick.phase_after)) {
-      add("attn", "file-behind-chain", `This role's file is at "${tick.phase_after}", but the Ethereum lock of this swap is already ${lk.claimed ? "claimed" : "refunded"}. ${role === "alice" ? "Alice" : "Bob"} was probably driven from another machine, or this copy is old: what this page shows for this role is not the state of the swap. Look at the machine that ran it.`);
+      // a copy restored here from an older backup (the restore marker, rehearsal run 24 F9): the chains moved on while it was away, and this machine is the one that runs it
+      if (restored === true) add("attn", "file-behind-chain", `This copy was restored from a backup made at "${tick.phase_after}", and the chains have moved on: the Ethereum lock of this swap is already ${lk.claimed ? "claimed" : "refunded"}. The program reads the chains and catches up by itself (after the approval, if it is not given yet); until then this page shows no step. Do not deposit again.`);
+      else add("attn", "file-behind-chain", `This role's file is at "${tick.phase_after}", but the Ethereum lock of this swap is already ${lk.claimed ? "claimed" : "refunded"}. ${role === "alice" ? "Alice" : "Bob"} was probably driven from another machine, or this copy is old: what this page shows for this role is not the state of the swap. Look at the machine that ran it.`);
     }
     for (const e of tick.events || []) {
       const n = e && e.event;
@@ -1096,6 +1148,10 @@
     }
     const leg = (i) => ({ coin: coins[i], state: given[i], words: words[i][0], note: note(words[i][1]) });
     const out = { give: leg(0), get: leg(1), public: false };
+    // a restored stale copy whose own coins are already in (opts.coins_in, the autopilot view's restored coins_in): the leg the person gives is never drawn as "Nothing is locked yet" (rehearsal F2/F4)
+    const coinsIn = !!(opts && opts.coins_in === true);
+    if (coinsIn && r === "alice" && id === "created") out.give = { coin: coins[0], state: "pending", words: "Locked, being recorded", note: "Your NOID is at the swap contract. The program records it from the chain." };
+    if (coinsIn && r === "bob" && (id === "received" || id === "funded" || id === "funding_final")) out.give = { coin: coins[0], state: "sent", words: "Your lock was sent", note: "The program finds it once Alice's funding is final." };
     // Alice's NOID after the swap is over: with the contract read and empty (the same facts that make the swap finished) Bob has taken it
     if (r === "alice" && id === "done" && view.finished === true && !view.leftover && view.coins_at_contract && view.coins_at_contract.known === true && view.coins_at_contract.count === 0) {
       out.give = { coin: coins[0], state: "closed", words: "Taken by Bob", note: null };
@@ -1186,7 +1242,7 @@
     const coins = coinsAtContract(tick);
     // Alice's secret may be public before the phase says so (a dropped reveal goes back to lock_final): structured tick fields only, no text
     const ethTick = (tick && tick.eth) || {};
-    const secretMayBePublic = role === "alice" && (phaseId === "lock_seen" || phaseId === "lock_final") && !!(ethTick.pending_preimage || ethTick.claimed || (ethTick.lock && ethTick.lock.claimed) || (intent && intent.status === "held" && intent.intent && intent.intent.action === "reveal_eth"));
+    const secretMayBePublic = role === "alice" && (phaseId === "lock_seen" || phaseId === "lock_final") && !!(ethTick.pending_preimage || ethTick.claimed || (tick && tick.reveal_maybe_pending === true) || revealMaybePendingCopy(tick) || (ethTick.lock && ethTick.lock.claimed) || (intent && intent.status === "held" && intent.intent && intent.intent.action === "reveal_eth"));
     const abort = abortPanel(role, phaseId, {
       secret_may_be_public: secretMayBePublic,
       d,
@@ -1201,7 +1257,7 @@
     // program mode (input.program) takes the network from run.json: the server refuses a swap whose files name another network (actions.production), and a production run.json is acted on
     const production = input.program === true ? false : isProduction(terms, tick);
 
-    let alarms = alarmsFor(role, tick, loop, tickAge, input.err_text, input.tick_error, terms, dl.rows, now, finished, !!input.tick_writing);
+    let alarms = alarmsFor(role, tick, loop, tickAge, input.err_text, input.tick_error, terms, dl.rows, now, finished, !!input.tick_writing, input.restored === true);
     // Which machine drives which role (machineStatus): the role that runs elsewhere has no file here, and that is not a problem.
     const machines = input.machines || null;
     const nameOf = (r) => (r === "alice" ? "Alice" : "Bob");
@@ -1359,12 +1415,14 @@
     PRODUCTION_TEXT,
     buildView,
     deadlinesFor,
+    revealMaybePendingCopy,
     timelineFor,
     clockFor,
     pictureFor,
     placeMarks,
     labelWidth,
     legsFor,
+    coinsAlreadyIn,
     abortPanel,
     commandsFor,
     alarmsFor,

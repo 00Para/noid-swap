@@ -67,6 +67,14 @@ fn tweak(n: &mut NoidObservation, f: impl FnOnce(&mut ProducerSummary)) {
     f(n.producers.as_mut().expect("a summary"));
 }
 
+/// The second Parano1d node names another block at a sampled height: a lying-node finding (the one refusal of the screen that stays, 0.2.0).
+fn differs(n: &mut NoidObservation) {
+    tweak(n, |p| p.second = SecondCheck::Differs { height: 300_017, first: "3c1d85aa".into(), second: "9a02e4f1".into() });
+}
+
+const DIFFERS_HEADLINE: &str = "the two Parano1d nodes disagree about the producers";
+const DIFFERS_DETAIL: &str = "the block at height 300017 is 3c1d85aa on the first node and 9a02e4f1 on the second";
+
 fn wait_reason(r: &TickReport) -> String {
     match &r.action {
         Action::Wait { reason } => reason.clone(),
@@ -88,45 +96,74 @@ fn no_address(text: &str) {
 }
 
 #[test]
-fn production_a_share_exactly_at_the_limit_passes_and_one_block_over_refuses() {
-    // 35 % of 2,880 is 1,008; of 720 it is 252.
-    for (long, short, locks) in [(1_008, 252, true), (1_009, 252, false), (1_008, 253, false), (1_007, 251, true)] {
+fn production_a_high_share_never_refuses_it_warns_and_the_lock_is_offered() {
+    // 35 % of 2,880 is 1,008; of 720 it is 252. Since 0.2.0 every one of these locks; the ones over the limit warn.
+    for (long, short, over) in [(1_008, 252, false), (1_009, 252, true), (1_008, 253, true), (1_007, 251, false)] {
         let mut s = scenario(ProfileName::Production);
         let r = s.tick_bob_with(|n, _| shape(n, long, short, long * 3 / 2, short * 3 / 2));
-        assert_eq!(r.action.kind() == "lock_eth", locks, "long {long} short {short}: {:?} {:?}", r.action, r.notes);
-        if locks {
-            assert_eq!(s.bob.executor.count("lock_eth"), 1);
-            assert_eq!(note_starting(&r, "producer concentration ok").len(), 1, "{:?}", r.notes);
+        assert_eq!(r.action.kind(), "lock_eth", "long {long} short {short}: {:?} {:?}", r.action, r.notes);
+        assert_eq!(s.bob.executor.count("lock_eth"), 1);
+        if over {
+            assert_eq!(note_starting(&r, "producer concentration ok").len(), 0, "{:?}", r.notes);
+            let w = note_starting(&r, "WARNING: producer concentration too high");
+            assert_eq!(w.len(), 1, "{:?}", r.notes);
+            assert_eq!(note_starting(&r, "WARNING (T21): one producer mined").len(), 1, "{:?}", r.notes);
+            no_address(w[0]);
         } else {
-            assert_eq!(s.bob.executor.count("lock_eth"), 0, "nothing is sent");
-            assert_eq!(s.bob_phase(), "funding_final", "the file waits, it does not abort");
-            let why = wait_reason(&r);
-            assert!(why.starts_with("ALARM: producer concentration too high, not locking (T21): "), "{why}");
-            assert!(r.notes.contains(&why), "the reason is also the note: {:?}", r.notes);
-            no_address(&why);
+            assert_eq!(note_starting(&r, "producer concentration ok").len(), 1, "{:?}", r.notes);
+            assert!(note_starting(&r, "WARNING (T21): one producer mined").is_empty(), "{:?}", r.notes);
         }
     }
 }
 
 #[test]
-fn production_the_refusal_text_is_pinned() {
+fn production_a_share_above_65_percent_still_offers_the_lock_with_the_loud_warning() {
+    // 2,000 of 2,880 is 69.5 % (rounded up); 500 of 720 is 69.5 %: above the 65 % that the old acknowledgement could not cover.
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| shape(n, 2_000, 500, 2_100, 600));
+    assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
+    assert_eq!(s.bob.executor.count("lock_eth"), 1);
+    let w = note_starting(&r, "WARNING (T21): one producer mined 69.5 % of the last 2,880 blocks and 69.5 % of the last 720. That is more than half");
+    assert_eq!(w.len(), 1, "{:?}", r.notes);
+    assert!(w[0].contains("no time window protects Bob") && w[0].contains("the lock is offered and the risk is yours"), "{}", w[0]);
+    no_address(w[0]);
+    assert!(r.notes.iter().all(|n| !n.starts_with("ALARM")), "{:?}", r.notes);
+    // And through the structured report: a warning, the share known, never a refusal.
+    let (noid, _eth, now) = {
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        shape(&mut n, 2_000, 500, 2_100, 600);
+        (n, w.eth_obs(), w.eth_time)
+    };
+    let rep = swap_cli::producer_gate::report(ProfileName::Production.gates(), &noid, now);
+    assert_eq!((rep.state, rep.share_known, rep.share_refuses, rep.waivable_by_acknowledgement), ("concentrated", true, false, true), "{rep:?}");
+    assert!(rep.warning.as_deref().is_some_and(|w| w.contains("more than half")), "{rep:?}");
+}
+
+#[test]
+fn production_the_share_warning_text_is_pinned() {
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| shape(n, 1_009, 253, 1_600, 400));
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
     let id = producer_id(A);
     let agreed_at = s.world.borrow().tip - 3;
     let want = format!(
-        "ALARM: producer concentration too high, not locking (T21): producer {id} mined 35.1 % of the last 2,880 blocks (limit 35 %) and 35.2 % of the last 720 (limit 35 %); the two largest together 55.6 % and 55.6 % (warning above 50 %); the second node gives the same block at height {agreed_at} and the same producers for 64 sampled heights, so this is not one node's view. A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. This is a screen, not a defence. Wait for the share to fall, or pass --accept-producer-concentration to accept the risk"
+        "WARNING: producer concentration too high (T21 screen; under the production profile it only warns and the lock is still offered): producer {id} mined 35.1 % of the last 2,880 blocks (warning above 35 %) and 35.2 % of the last 720 (warning above 35 %); the two largest together 55.6 % and 55.6 % (warning above 50 %); the second node gives the same block at height {agreed_at} and the same producers for 64 sampled heights, so this is not one node's view. A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. Above half of the blocks no time window protects Bob. This is a screen, not a defence"
     );
-    assert_eq!(wait_reason(&r), want);
+    assert!(r.notes.contains(&want), "{:?}", r.notes);
     assert_eq!(id.len(), 8);
+    let mild = "WARNING (T21): one producer mined 35.1 % of the last 2,880 blocks and 35.2 % of the last 720 (warning above 35 %). A miner who is Alice has a better chance of taking both legs. This is a warning only: the lock is offered";
+    assert!(r.notes.contains(&mild.to_string()), "{:?}", r.notes);
     // A different producer in each window is named in each.
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| {
         shape(n, 1_500, 100, 1_600, 300);
         tweak(n, |p| p.short.as_mut().unwrap().largest_id = "0123abcd".into());
     });
-    let why = wait_reason(&r);
-    assert!(why.contains(&format!("producer {id} mined 52.1 % of the last 2,880 blocks (limit 35 %) and producer 0123abcd mined 13.9 % of the last 720 (limit 35 %)")), "{why}");
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
+    let w = note_starting(&r, "WARNING: producer concentration too high");
+    assert_eq!(w.len(), 1, "{:?}", r.notes);
+    assert!(w[0].contains(&format!("producer {id} mined 52.1 % of the last 2,880 blocks (warning above 35 %) and producer 0123abcd mined 13.9 % of the last 720 (warning above 35 %)")), "{}", w[0]);
 }
 
 #[test]
@@ -141,7 +178,7 @@ fn sepolia_and_rehearsal_use_28_percent_and_only_warn() {
             assert_eq!(warn.len(), usize::from(over), "{profile:?} {long}: {:?}", r.notes);
             if over {
                 assert!(warn[0].contains(&format!("under the {} profile it only warns and the lock is still offered", profile.as_str())), "{}", warn[0]);
-                assert!(warn[0].contains("(limit 28 %)") && warn[0].contains("This is a screen, not a defence"), "{}", warn[0]);
+                assert!(warn[0].contains("(warning above 28 %)") && warn[0].contains("This is a screen, not a defence"), "{}", warn[0]);
                 no_address(warn[0]);
             } else {
                 assert_eq!(note_starting(&r, "producer concentration ok").len(), 1, "{:?}", r.notes);
@@ -174,9 +211,10 @@ fn the_top_two_rule_is_a_warning_in_every_profile_never_a_refusal() {
     }
 }
 
-/// Each way the screen cannot be completed: production waits with an ALARM reason, every other profile offers the lock and warns.
+/// Each way the screen cannot be completed. A share that cannot be read (no headers, incomplete, stale) warns and offers the lock in every profile
+/// (0.2.0). A second node that disagrees or cannot be checked still holds the lock under production and only warns elsewhere.
 #[test]
-fn production_fails_closed_and_the_other_profiles_only_warn_when_the_data_cannot_be_trusted() {
+fn an_unreadable_share_warns_in_every_profile_and_a_second_node_problem_still_holds_production() {
     type Mutator = fn(&mut NoidObservation);
     let cases: Vec<(&str, Mutator, &str, &str)> = vec![
         ("no summary", |n| n.producers = None, "producer concentration cannot be checked", "no producer summary was read in this poll"),
@@ -273,6 +311,27 @@ fn production_fails_closed_and_the_other_profiles_only_warn_when_the_data_cannot
         ),
     ];
     for (name, mutate, headline, detail) in cases {
+        let soft = matches!(
+            name,
+            "no summary" | "headers incomplete" | "a header failed" | "other windows" | "tip three blocks ahead of the headers" | "read 121 s ago" | "read time unknown"
+        );
+        if soft {
+            for profile in [ProfileName::Production, ProfileName::Sepolia, ProfileName::Rehearsal] {
+                let mut s = scenario(profile);
+                let r = s.tick_bob_with(|n, _| mutate(n));
+                assert_eq!(r.action.kind(), "lock_eth", "{name} {profile:?}: {:?} {:?}", r.action, r.notes);
+                assert_eq!(s.bob.executor.count("lock_eth"), 1, "{name} {profile:?}");
+                let w = note_starting(&r, "WARNING: ");
+                assert!(w.iter().any(|t| t.contains(headline) && t.contains(detail) && t.contains("only warns and the lock is still offered")), "{name} {profile:?}: {:?}", r.notes);
+                assert!(
+                    r.notes.iter().any(|t| t.starts_with("WARNING (T21): the share of the largest Parano1d producer cannot be read now (unknown)")),
+                    "{name} {profile:?}: the unknown share is stated: {:?}",
+                    r.notes
+                );
+                assert!(r.notes.iter().all(|n| !n.starts_with("ALARM")), "{name} {profile:?}: {:?}", r.notes);
+            }
+            continue;
+        }
         // production: the lock is held back
         let mut s = scenario(ProfileName::Production);
         let r = s.tick_bob_with(|n, _| mutate(n));
@@ -294,17 +353,24 @@ fn production_fails_closed_and_the_other_profiles_only_warn_when_the_data_cannot
 }
 
 #[test]
-fn the_cannot_read_text_is_pinned_and_the_stale_limits_have_their_boundaries() {
+fn the_unknown_share_text_is_pinned_and_the_stale_limits_have_their_boundaries() {
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| {
         tweak_none(n);
     });
-    assert_eq!(
-        wait_reason(&r),
-        "ALARM: producer concentration cannot be checked, not locking (T21): 1,420 of 2,880 headers read so far (the next tick reads on). The gate fails closed: no lock until the last 2,880 headers have been read from the node itself"
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
+    assert!(
+        r.notes.contains(&"WARNING: producer concentration cannot be checked (T21 screen; under the production profile it only warns and the lock is still offered): 1,420 of 2,880 headers read so far (the next tick reads on)".to_string()),
+        "{:?}",
+        r.notes
     );
-    // Two blocks behind and 120 s old still pass; three blocks and 121 s do not.
-    for (behind, age, locks) in [(2, 120, true), (3, 120, false), (2, 121, false), (0, 0, true)] {
+    assert!(
+        r.notes.contains(&"WARNING (T21): the share of the largest Parano1d producer cannot be read now (unknown). A miner who is Alice can take both legs; above half of the blocks no time window protects Bob. The lock is not refused for this".to_string()),
+        "{:?}",
+        r.notes
+    );
+    // Two blocks behind and 120 s old are fresh; three blocks and 121 s are stale. The lock is offered either way, with the stale note on the stale ones.
+    for (behind, age, stale) in [(2, 120, false), (3, 120, true), (2, 121, true), (0, 0, false)] {
         let mut s = scenario(ProfileName::Production);
         let r = s.tick_bob_with(|n, _| {
             let (tip, at) = (n.tip, n.observed_at.unwrap());
@@ -313,7 +379,8 @@ fn the_cannot_read_text_is_pinned_and_the_stale_limits_have_their_boundaries() {
                 p.read_at = Some(at - age);
             })
         });
-        assert_eq!(r.action.kind() == "lock_eth", locks, "behind {behind} age {age}: {:?} {:?}", r.action, r.notes);
+        assert_eq!(r.action.kind(), "lock_eth", "behind {behind} age {age}: {:?} {:?}", r.action, r.notes);
+        assert_eq!(note_starting(&r, "WARNING: producer concentration data is stale").len(), usize::from(stale), "behind {behind} age {age}: {:?}", r.notes);
     }
     // The pinned stale text.
     let mut s = scenario(ProfileName::Production);
@@ -325,9 +392,13 @@ fn the_cannot_read_text_is_pinned_and_the_stale_limits_have_their_boundaries() {
         })
     });
     let tip = s.world.borrow().tip;
-    assert_eq!(
-        wait_reason(&r),
-        format!("ALARM: producer concentration data is stale, not locking (T21): the headers end at height {} but the node's tip is {tip} (limit 2 blocks behind); read 140 s ago (limit 120 s)", tip - 4)
+    assert!(
+        r.notes.contains(&format!(
+            "WARNING: producer concentration data is stale (T21 screen; under the production profile it only warns and the lock is still offered): the headers end at height {} but the node's tip is {tip} (limit 2 blocks behind); read 140 s ago (limit 120 s)",
+            tip - 4
+        )),
+        "{:?}",
+        r.notes
     );
 }
 
@@ -343,15 +414,16 @@ fn tweak_none(n: &mut NoidObservation) {
 
 #[test]
 fn the_override_waives_the_production_refusals_prints_every_tick_and_writes_one_history_entry() {
+    // Since 0.2.0 the share never refuses, so the flag's refusal is a second node that disagrees.
     let mut s = scenario(ProfileName::Production);
     s.world.borrow_mut().accept_producer_concentration = true;
-    let id = producer_id(A);
     // Read-only decisions: the warning is there on every one of them.
-    let (noid, eth, now, agreed_at) = {
+    let (noid, eth, now) = {
         let w = s.world.borrow();
         let mut n = w.noid_obs(None);
         shape(&mut n, 1_500, 400, 1_800, 500);
-        (n, w.eth_obs(), w.eth_time, w.tip - 3)
+        differs(&mut n);
+        (n, w.eth_obs(), w.eth_time)
     };
     for _ in 0..3 {
         let d = decide(&s.bob.file, &noid, &eth, now);
@@ -361,15 +433,18 @@ fn the_override_waives_the_production_refusals_prints_every_tick_and_writes_one_
         assert_eq!(
             warn[0],
             &format!(
-                "WARNING: producer concentration gate OVERRIDDEN by {OVERRIDE_FLAG} (T21): producer {id} mined 52.1 % of the last 2,880 blocks (limit 35 %) and 55.6 % of the last 720 (limit 35 %); the two largest together 62.5 % and 69.5 % (warning above 50 %); the second node gives the same block at height {agreed_at} and the same producers for 64 sampled heights, so this is not one node's view. This is the exposure the gate exists to prevent. Amounts must stay trial-sized"
+                "WARNING: producer concentration gate OVERRIDDEN by {OVERRIDE_FLAG} (T21): the check could not be completed ({DIFFERS_HEADLINE}: {DIFFERS_DETAIL}). This is the exposure the gate exists to prevent. Amounts must stay trial-sized"
             )
         );
         no_address(warn[0]);
         assert_eq!(d.log.len(), 1, "{:?}", d.log);
-        assert!(d.log[0].starts_with(&format!("{OVERRIDE_HISTORY}: largest 52.1 % of 2880 and 55.6 % of 720")), "{:?}", d.log);
+        assert!(d.log[0].starts_with(&format!("{OVERRIDE_HISTORY}: {DIFFERS_HEADLINE}")), "{:?}", d.log);
     }
     // The tick that sends it writes the entry, once.
-    let r = s.tick_bob_with(|n, _| shape(n, 1_500, 400, 1_800, 500));
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 1_500, 400, 1_800, 500);
+        differs(n);
+    });
     assert_eq!(r.action.kind(), "lock_eth");
     let entries = |s: &Scenario| s.bob.file.history.iter().filter(|h| h.event.starts_with(OVERRIDE_HISTORY)).count();
     assert_eq!(entries(&s), 1);
@@ -380,22 +455,31 @@ fn the_override_waives_the_production_refusals_prints_every_tick_and_writes_one_
     assert_eq!(s.bob.executor.count("lock_eth"), 1);
 }
 
+#[test]
+fn the_override_has_nothing_to_waive_for_the_share_and_writes_no_entry_for_it() {
+    // A high share and an unreadable share both offer the lock without the flag, and with the flag print no OVERRIDDEN text and write no history entry.
+    for absent in [false, true] {
+        let mut s = scenario(ProfileName::Production);
+        s.world.borrow_mut().accept_producer_concentration = true;
+        let r = s.tick_bob_with(|n, _| {
+            if absent {
+                n.producers = None;
+            } else {
+                shape(n, 2_000, 700, 2_100, 710);
+            }
+        });
+        assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
+        assert!(note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN").is_empty(), "absent {absent}: {:?}", r.notes);
+        assert!(s.bob.file.history.iter().all(|h| !h.event.starts_with(OVERRIDE_HISTORY)), "absent {absent}: {:?}", s.bob.file.history);
+    }
+}
+
 fn note_starting_vec<'a>(notes: &'a [String], start: &str) -> Vec<&'a String> {
     notes.iter().filter(|n| n.starts_with(start)).collect()
 }
 
 #[test]
-fn the_override_waives_an_incomplete_screen_too_but_never_the_f5_rules() {
-    // Owner decision D4: the production refusals of the screen, the fail-closed ones included.
-    let mut s = scenario(ProfileName::Production);
-    s.world.borrow_mut().accept_producer_concentration = true;
-    s.world.borrow_mut().producers = SimProducers::Absent;
-    let r = s.tick_bob();
-    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
-    let w = note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN");
-    assert_eq!(w.len(), 1, "{:?}", r.notes);
-    assert!(w[0].contains("the check could not be completed (producer concentration cannot be checked: no producer summary was read in this poll"), "{}", w[0]);
-    assert!(s.bob.file.history.iter().any(|h| h.event == format!("{OVERRIDE_HISTORY}: producer concentration cannot be checked")));
+fn the_override_never_waives_the_f5_rules() {
     // The F5 rules are another gate: a second node that cannot be read still holds the lock, flag or not.
     let mut s = scenario(ProfileName::Production);
     s.world.borrow_mut().accept_producer_concentration = true;
@@ -417,11 +501,17 @@ fn without_the_flag_nothing_is_waived_and_no_profile_implies_it() {
     for (profile, enforced) in [(ProfileName::Production, true), (ProfileName::Sepolia, false), (ProfileName::Rehearsal, false)] {
         assert_eq!(profile.gates().producer_gate_enforced, enforced, "{profile:?}");
     }
-    // Absent flag: refused (the world's default is false).
+    // Absent flag (the world's default is false): a high share is offered with a warning; a second node that disagrees is refused.
     let mut s = scenario(ProfileName::Production);
     assert!(!s.world.borrow().accept_producer_concentration);
     let r = s.tick_bob_with(|n, _| shape(n, 2_000, 700, 2_100, 710));
-    assert!(wait_reason(&r).contains("pass --accept-producer-concentration to accept the risk"));
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 2_000, 700, 2_100, 710);
+        differs(n);
+    });
+    assert!(wait_reason(&r).starts_with(&format!("ALARM: {DIFFERS_HEADLINE}, not locking (T21): ")), "{:?}", r.action);
     // The flag has no effect under sepolia: the warning is the ordinary one, no OVERRIDDEN text, no history entry.
     let mut s = scenario(ProfileName::Sepolia);
     s.world.borrow_mut().accept_producer_concentration = true;
@@ -441,7 +531,7 @@ fn while_bob_waits_the_screen_is_said_as_information_and_decides_nothing() {
         // Over the limit while Bob only waits for the funding: a note, the same wait.
         let r = s.tick_bob_with(|n, _| shape(n, 2_000, 700, 2_100, 710));
         assert_eq!(r.action.kind(), "wait", "{r:?}");
-        let n = note_starting(&r, "producer concentration, not yet blocking (the lock is decided when the funding is final; T21): producer concentration too high: ");
+        let n = note_starting(&r, "producer concentration, a warning, it does not block the lock (T21): producer concentration too high: ");
         assert_eq!(n.len(), 1, "{:?}", r.notes);
         assert_eq!(s.bob_phase(), "funded");
         // No summary read (a phase or a command that asks for none): silent.
@@ -505,11 +595,9 @@ fn guard_every_decision_of_a_whole_swap_is_the_same_with_the_screen_healthy_abse
         let base = trace(ProfileName::Production, variant, SimProducers::Healthy, false);
         assert_eq!(base, trace(ProfileName::Production, variant, SimProducers::Absent, true), "{variant:?}: override, no data");
         assert_eq!(base, trace(ProfileName::Production, variant, SimProducers::Healthy, true), "{variant:?}: flag, healthy");
-        // Alice never reads headers: her ticks are the same even where the screen holds Bob back.
+        // Since 0.2.0 an unreadable share does not hold Bob back under production either: the trace without data is the healthy one.
         let blocked = trace(ProfileName::Production, variant, SimProducers::Absent, false);
-        let alice = |t: &[(String, String, String)]| t.iter().filter(|(w, _, _)| w == "alice").take(3).cloned().collect::<Vec<_>>();
-        assert_eq!(alice(&base), alice(&blocked));
-        assert!(blocked.iter().all(|(w, a, _)| !(w == "bob" && a == "lock_eth")), "production fails closed without data: {blocked:?}");
+        assert_eq!(base, blocked, "{variant:?}: no data, the share is unknown and only warns");
     }
 }
 
@@ -1912,11 +2000,15 @@ fn the_profile_numbers_are_the_owners_decisions() {
 fn production_held_back_by_the_screen_still_aborts_when_the_last_lock_height_passes() {
     // The screen only holds the lock back; it never keeps a file waiting past the point where the lock-by rule says to give up.
     let mut s = scenario(ProfileName::Production);
-    let r = s.tick_bob_with(|n, _| shape(n, 1_500, 400, 2_000, 500));
-    assert!(wait_reason(&r).starts_with("ALARM: producer concentration too high"), "{:?}", r.notes);
+    let held = |n: &mut NoidObservation| {
+        shape(n, 1_500, 400, 2_000, 500);
+        differs(n);
+    };
+    let r = s.tick_bob_with(|n, _| held(n));
+    assert!(wait_reason(&r).starts_with(&format!("ALARM: {DIFFERS_HEADLINE}")), "{:?}", r.notes);
     let (d, tip) = (s.public.params.deadline_height, s.world.borrow().tip);
     s.world.borrow_mut().advance_noid(d - 100 - tip);
-    let r = s.tick_bob_with(|n, _| shape(n, 1_500, 400, 2_000, 500));
+    let r = s.tick_bob_with(|n, _| held(n));
     assert_eq!(r.action.kind(), "abort", "{:?} {:?}", r.action, r.notes);
     assert_eq!(s.bob.executor.count("lock_eth"), 0);
 }
@@ -2732,7 +2824,7 @@ fn a_detection_after_a_lock_eth_intent_was_recorded_raises_one_alert_that_names_
 }
 
 #[test]
-fn the_override_waives_the_alert_and_a_concentration_refusal_raises_it_too() {
+fn the_override_waives_the_alert_and_a_high_share_raises_none() {
     // The override: the screen does not refuse, so the pending lock is not held back and no alert is raised; the OVERRIDDEN note says the rest.
     let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
     let mut n2 = n.clone();
@@ -2743,19 +2835,30 @@ fn the_override_waives_the_alert_and_a_concentration_refusal_raises_it_too() {
     assert_eq!(out_notes(&out, "WARNING: producer concentration gate OVERRIDDEN").len(), 1, "{:?}", out.decision.notes);
     assert!(out_wait(&out).contains("reuse the printed parameters"), "the ordinary hold of the ledger");
     assert!(matches!(out.intent, IntentStatus::Held(_)));
-    // A concentration refusal (one address above 35 %), no detection at all: the alert, with its own reason, and no history entry for a detection.
+    // A high share (one address above 35 %, even above 65 %), no detection at all: since 0.2.0 no alert and no latch; the warning is a note and the ledger's own hold stays.
+    for (long, short) in [(1_009, 252), (2_000, 700)] {
+        let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+        shape(&mut n, long, short, 1_500, 380);
+        let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+        assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+        assert!(!out_notes(&out, "WARNING: producer concentration too high").is_empty(), "{:?}", out.decision.notes);
+        assert!(latches(&bob).is_empty());
+        assert!(out_wait(&out).contains("reuse the printed parameters"), "the ordinary hold of the ledger: {}", out_wait(&out));
+        assert!(bob.pending_intent.is_some());
+    }
+    // A second node that disagrees is still a refusal: the alert, with its own reason.
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
-    shape(&mut n, 1_009, 252, 1_500, 380);
+    differs(&mut n);
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
     let alerts = out_notes(&out, "ALERT:");
     assert_eq!(alerts.len(), 1, "{:?}", out.decision.notes);
-    assert!(alerts[0].contains("producer concentration too high") && alerts[0].contains("`swap-cli intent FILE --cancel`"), "{}", alerts[0]);
+    assert!(alerts[0].contains(DIFFERS_HEADLINE) && alerts[0].contains("`swap-cli intent FILE --cancel`"), "{}", alerts[0]);
     assert!(bob.history.iter().all(|h| h.event != swap_cli::producer_marker::HISTORY));
-    assert!(out_wait(&out).contains("do NOT send it") && out_wait(&out).contains("producer concentration too high"));
+    assert!(out_wait(&out).contains("do NOT send it") && out_wait(&out).contains(DIFFERS_HEADLINE));
     assert!(bob.pending_intent.is_some());
     // The same with the override: nothing.
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
-    shape(&mut n, 1_009, 252, 1_500, 380);
+    differs(&mut n);
     n.accept_producer_concentration = true;
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
     assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
@@ -2811,14 +2914,13 @@ fn no_alert_once_the_lock_is_seen_the_intent_is_cancelled_or_nothing_was_read() 
     let (_, e3, now3) = obs_of(&s);
     let out = tick_apply(&mut bob, &n3, &e3, now3, true).unwrap();
     assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
-    // A tick that read neither a summary nor a marker: under production the screen refuses (it cannot be checked), so the pending lock is alerted and
-    // latched like any other refusal (review, 2026-11-10); the warning-only profiles stay quiet.
+    // A tick that read neither a summary nor a marker: since 0.2.0 the share is unknown and only warns, so the pending lock is not alerted and nothing is
+    // latched under any profile.
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
-    let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
     n.producers = None;
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
-    assert_eq!(out_notes(&out, "ALERT:").len(), 1, "{:?}", out.decision.notes);
-    assert_eq!(latches(&bob), vec![format!("producer_alert_lock_pending:{decided_at}:cannot-be-checked")]);
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    assert!(latches(&bob).is_empty());
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Sepolia);
     n.producers = None;
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
@@ -2843,48 +2945,7 @@ fn latches(bob: &SwapFile) -> Vec<String> {
 fn the_latch_is_written_for_every_kind_of_refusal_with_the_intent_and_the_kind_and_each_kind_alerts_once() {
     type Mutator = fn(&mut NoidObservation);
     let cases: Vec<(&str, Mutator, &str)> = vec![
-        ("concentration over the limit", |n| shape(n, 1_009, 252, 1_500, 380), "concentration"),
-        (
-            "headers incomplete",
-            |n| {
-                let at = n.observed_at.unwrap();
-                let mut p = ProducerSummary::synthetic(n.tip, 2_880, 720, at, 300, 450);
-                p.complete = false;
-                p.long = None;
-                p.short = None;
-                p.have = 1_420;
-                n.producers = Some(p);
-            },
-            "cannot-be-checked",
-        ),
-        (
-            "a header failed",
-            |n| {
-                tweak(n, |p| {
-                    p.complete = false;
-                    p.long = None;
-                    p.short = None;
-                    p.error = Some("a header failed".into());
-                })
-            },
-            "cannot-be-checked",
-        ),
-        (
-            "stale headers",
-            |n| {
-                let tip = n.tip;
-                tweak(n, |p| p.header_tip = tip - 3)
-            },
-            "stale",
-        ),
-        (
-            "read 121 s ago",
-            |n| {
-                let at = n.observed_at.unwrap();
-                tweak(n, |p| p.read_at = Some(at - 121))
-            },
-            "stale",
-        ),
+        // (a share over the limit, an unreadable or incomplete summary and stale headers are warnings since 0.2.0: no alert, no latch; see the test after this one)
         ("second node names another block", |n| tweak(n, |p| p.second = SecondCheck::Differs { height: 300_017, first: "3c1d85aa".into(), second: "9a02e4f1".into() }), "disagree"),
         ("second node names another producer", |n| tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 300_017 }), "disagree"),
         ("second node holds other blocks below an anchor", |n| tweak(n, |p| p.second = SecondCheck::SampledDiffers { height: 300_017 }), "disagree"),
@@ -2924,6 +2985,60 @@ fn the_latch_is_written_for_every_kind_of_refusal_with_the_intent_and_the_kind_a
 }
 
 #[test]
+fn a_share_finding_of_any_kind_raises_no_alert_and_writes_no_latch_for_a_pending_lock() {
+    type Mutator = fn(&mut NoidObservation);
+    let cases: Vec<(&str, Mutator)> = vec![
+        ("share over the limit", |n| shape(n, 1_009, 252, 1_500, 380)),
+        ("share above 65 %", |n| shape(n, 2_000, 700, 2_100, 710)),
+        (
+            "headers incomplete",
+            |n| {
+                let at = n.observed_at.unwrap();
+                let mut p = ProducerSummary::synthetic(n.tip, 2_880, 720, at, 300, 450);
+                p.complete = false;
+                p.long = None;
+                p.short = None;
+                p.have = 1_420;
+                n.producers = Some(p);
+            },
+        ),
+        (
+            "a header failed",
+            |n| {
+                tweak(n, |p| {
+                    p.complete = false;
+                    p.long = None;
+                    p.short = None;
+                    p.error = Some("a header failed".into());
+                })
+            },
+        ),
+        (
+            "stale headers",
+            |n| {
+                let tip = n.tip;
+                tweak(n, |p| p.header_tip = tip - 3)
+            },
+        ),
+        (
+            "read 121 s ago",
+            |n| {
+                let at = n.observed_at.unwrap();
+                tweak(n, |p| p.read_at = Some(at - 121))
+            },
+        ),
+    ];
+    for (name, mutate) in cases {
+        let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+        mutate(&mut n);
+        let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+        assert!(out_notes(&out, "ALERT:").is_empty(), "{name}: {:?}", out.decision.notes);
+        assert!(latches(&bob).is_empty(), "{name}");
+        assert!(bob.pending_intent.is_some(), "{name}: the intent stays pending");
+    }
+}
+
+#[test]
 fn a_later_finding_of_another_kind_alerts_again_and_a_transient_one_does_not_use_up_the_real_one() {
     let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
     let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
@@ -2954,7 +3069,7 @@ fn an_override_written_before_a_latch_does_not_count_so_the_flag_writes_a_new_ov
     let overrides = |bob: &SwapFile| -> Vec<usize> { bob.history.iter().enumerate().filter(|(_, h)| h.event.starts_with(OVERRIDE_HISTORY)).map(|(i, _)| i).collect() };
     let last_latch = |bob: &SwapFile| bob.history.iter().rposition(|h| h.event.starts_with(swap_cli::producer_gate::LOCK_LATCH_PREFIX));
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
-    shape(&mut n, 1_009, 252, 1_500, 380);
+    differs(&mut n);
     // The flag is on: the override is written, no latch.
     n.accept_producer_concentration = true;
     tick_apply(&mut bob, &n, &e, now, true).unwrap();
@@ -2993,7 +3108,7 @@ fn a_read_only_tick_with_a_pending_lock_shows_the_current_decision_in_one_note_t
     assert_eq!(ro.history.len(), bob.history.len(), "read-only");
     // A refusing screen: the fresh decision is a wait (not the lock), an ALERT, and the wait says not to send it.
     let mut bad = n.clone();
-    shape(&mut bad, 1_009, 252, 1_500, 380);
+    differs(&mut bad);
     let mut ro = bob.clone();
     let out = tick_apply(&mut ro, &bad, &e, now, false).unwrap();
     assert_eq!(
@@ -3015,7 +3130,7 @@ fn a_latch_is_written_again_when_an_override_came_after_the_last_one_of_its_kind
         bob.history.iter().enumerate().filter(|(_, h)| h.event.starts_with(swap_cli::producer_gate::LOCK_LATCH_PREFIX)).map(|(i, _)| i).collect()
     };
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
-    shape(&mut n, 1_009, 252, 1_500, 380);
+    differs(&mut n);
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
     assert_eq!(out_notes(&out, "ALERT:").len(), 1);
     assert_eq!(latch_at(&bob).len(), 1);
@@ -3073,89 +3188,73 @@ fn the_ack_value_is_refused_at_parse_time_outside_1_to_650() {
 }
 
 #[test]
-fn the_ack_waives_the_share_only_up_to_its_ceiling_in_both_windows() {
-    // 521 permille long, 556 short. A ceiling below either window refuses; at the higher of the two it passes.
-    for (ceiling, passes) in [(650u64, true), (556, true), (555, false), (521, false), (350, false)] {
+fn the_ack_has_nothing_to_waive_for_the_share_any_more_and_a_share_is_never_a_reason_to_refuse() {
+    // Since 0.2.0 the share never refuses: with any ceiling, or none, the lock is offered with the warning, and the acknowledgement does nothing.
+    for ceiling in [Some(650u64), Some(556), Some(555), Some(521), Some(350), None] {
         let mut s = scenario(ProfileName::Production);
         let r = s.tick_bob_with(|n, _| {
             big(n);
-            n.acknowledge_producer_share = Some(ceiling);
+            n.acknowledge_producer_share = ceiling;
         });
-        assert_eq!(r.action.kind() == "lock_eth", passes, "ceiling {ceiling}: {:?} {:?}", r.action, r.notes);
-        if passes {
-            let a = note_starting(&r, "ACKNOWLEDGED: producer share 556 permille <= ceiling ");
-            assert_eq!(a.len(), 1, "{:?}", r.notes);
-            assert!(a[0].starts_with(&format!("ACKNOWLEDGED: producer share 556 permille <= ceiling {ceiling}")), "{}", a[0]);
-            no_address(a[0]);
-            assert!(note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN").is_empty(), "not the override: {:?}", r.notes);
-            assert_eq!(acks(&s), 1);
-            let want = format!("{ACK_HISTORY}: largest 521 permille of 2880 and 556 permille of 720, ceiling {ceiling} permille, at ");
-            assert!(s.bob.file.history.iter().any(|h| h.event.starts_with(&want)));
-            assert!(!s.bob.file.history.iter().any(|h| h.event.starts_with(OVERRIDE_HISTORY)), "the override entry is not written");
-        } else {
-            assert_eq!(acks(&s), 0);
-            assert!(wait_reason(&r).starts_with("ALARM: producer concentration too high"), "{:?}", r.action);
-        }
+        assert_eq!(r.action.kind(), "lock_eth", "ceiling {ceiling:?}: {:?} {:?}", r.action, r.notes);
+        assert!(note_starting(&r, "ACKNOWLEDGED").is_empty(), "the share is not waived by it: {:?}", r.notes);
+        assert!(note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN").is_empty(), "not the override: {:?}", r.notes);
+        assert_eq!(note_starting(&r, "WARNING: producer concentration too high").len(), 1, "{:?}", r.notes);
+        assert_eq!(acks(&s), 0);
+        assert!(!s.bob.file.history.iter().any(|h| h.event.starts_with(OVERRIDE_HISTORY)), "no override entry");
     }
-    // The exact boundary of the hard maximum: 65.0 % passes at 650, one block over does not (2,880 and 720 blocks).
-    for (long, short, passes) in [(1_872u64, 468u64, true), (1_873, 468, false), (1_872, 469, false)] {
+    // The old boundary of the hard maximum: every one of these locks now, above and below 65.0 % (2,880 and 720 blocks).
+    for (long, short) in [(1_872u64, 468u64), (1_873, 468), (1_872, 469), (2_500, 650)] {
         let mut s = scenario(ProfileName::Production);
         let r = s.tick_bob_with(|n, _| {
             shape(n, long, short, long, short);
             n.acknowledge_producer_share = Some(650);
         });
-        assert_eq!(r.action.kind() == "lock_eth", passes, "{long}/{short}: {:?}", r.action);
+        assert_eq!(r.action.kind(), "lock_eth", "{long}/{short}: {:?}", r.action);
     }
 }
 
 #[test]
-fn the_ack_writes_one_history_entry_and_the_override_flag_keeps_its_own_entry() {
+fn the_ack_writes_no_entry_for_a_share_and_the_override_flag_keeps_its_own_entry() {
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| {
         big(n);
         n.acknowledge_producer_share = Some(650);
     });
     assert_eq!(r.action.kind(), "lock_eth");
-    assert_eq!(acks(&s), 1);
-    // The entry is on record: the same observation proposes no further entry, and the unit function still sees the reason.
-    let (noid, eth, now) = {
+    assert_eq!(acks(&s), 0);
+    let (noid, _eth, now) = {
         let w = s.world.borrow();
         let mut n = w.noid_obs(None);
         big(&mut n);
         n.acknowledge_producer_share = Some(650);
         (n, w.eth_obs(), w.eth_time)
     };
-    let d = decide(&s.bob.file, &noid, &eth, now);
-    assert!(d.log.iter().all(|l| !l.starts_with(ACK_HISTORY)), "{:?}", d.log);
-    assert!(ack_history_entry(ProfileName::Production.gates(), &noid, now).is_some());
-    assert_eq!(acks(&s), 1);
-    // Both flags: the override has its own entry and the acknowledgement writes none.
+    assert!(ack_history_entry(ProfileName::Production.gates(), &noid, now).is_none(), "a second node that agrees: the acknowledgement was not used");
+    // Both flags against a second node that disagrees: the override has its own entry and the acknowledgement writes none.
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| {
         big(n);
+        differs(n);
         n.acknowledge_producer_share = Some(650);
         n.accept_producer_concentration = true;
     });
-    assert_eq!(r.action.kind(), "lock_eth");
+    assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
     assert_eq!(acks(&s), 0);
     assert!(s.bob.file.history.iter().any(|h| h.event.starts_with(OVERRIDE_HISTORY)));
 }
 
 #[test]
-fn the_ack_never_waives_what_cannot_be_checked_or_a_disagreement_or_a_remembered_detection() {
+fn the_ack_never_waives_a_second_node_problem_a_disagreement_or_a_remembered_detection() {
     type Make = Box<dyn Fn(&mut NoidObservation)>;
     let cases: Vec<(&str, Make)> = vec![
-        ("no summary", Box::new(|n| n.producers = None)),
-        ("incomplete summary", Box::new(tweak_none)),
-        ("stale headers", Box::new(|n| tweak(n, |p| p.read_at = Some(p.read_at.unwrap() - 1_000)))),
-        ("headers end far below the tip", Box::new(|n| tweak(n, |p| p.header_tip -= 50))),
+        // (no summary, an incomplete one and stale headers are warnings since 0.2.0, see the tests of the unknown share)
         ("second node differs", Box::new(|n| tweak(n, |p| p.second = SecondCheck::Differs { height: 5, first: "aa".into(), second: "bb".into() }))),
         ("second node names another producer", Box::new(|n| tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 5 }))),
         ("second node unreadable", Box::new(|n| tweak(n, |p| p.second = SecondCheck::Unreadable { reason: "down".into() }))),
         ("marker present", Box::new(|n| n.producer_marker = MarkerState::Present { height: 9, at: 1, kind: MarkerKind::Producer })),
         ("marker unreadable", Box::new(|n| n.producer_marker = MarkerState::Unreadable { reason: "x".into() })),
         ("marker remembered in history", Box::new(|n| n.producer_marker = MarkerState::Remembered { at: 1 })),
-        ("share above the value", Box::new(|n| shape(n, 1_900, 480, 2_000, 500))),
     ];
     for (name, make) in cases {
         let mut s = scenario(ProfileName::Production);
@@ -3193,7 +3292,7 @@ fn the_ack_waives_a_missing_second_node_only_when_the_one_node_is_loopback() {
     s.world.borrow_mut().single_node = true;
     let r = s.tick_bob_with(|n, _| single(n, true, (600, 200)));
     assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
-    assert_eq!(note_starting(&r, "ACKNOWLEDGED: producer share 278 permille <= ceiling 650").len(), 1, "{:?}", r.notes);
+    assert_eq!(note_starting(&r, "ACKNOWLEDGED (--acknowledge-producer-share 650): producer share 278 permille").len(), 1, "{:?}", r.notes);
     assert_eq!(acks(&s), 1);
     // Loopback and a share above the limit but within the ceiling: both waivers at once.
     let mut s = scenario(ProfileName::Production);
@@ -3247,10 +3346,10 @@ fn the_ack_changes_nothing_under_sepolia_and_rehearsal_and_the_old_flag_is_uncha
         assert_eq!(note_starting(&r, "WARNING: producer concentration too high").len(), 1, "{:?}", r.notes);
         assert_eq!(acks(&s), 0);
     }
-    // `--accept-producer-concentration` still lifts the fail-closed refusal of the screen too.
+    // `--accept-producer-concentration` still lifts the refusal of a second node that disagrees.
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| {
-        n.producers = None;
+        differs(n);
         n.accept_producer_concentration = true;
     });
     assert_eq!(r.action.kind(), "lock_eth", "{:?}", r.notes);
@@ -3279,7 +3378,8 @@ fn the_structured_report_says_what_the_ack_can_and_cannot_waive() {
         shape(n, 1_500, 400, 1_800, 500);
         n.acknowledge_producer_share = Some(560);
     });
-    assert!(report(g, &n, now).waived_by_acknowledgement);
+    let r = report(g, &n, now);
+    assert!(!r.waived_by_acknowledgement && !r.share_refuses && r.share_known, "the share is never waived and never refuses: {r:?}");
     let (n, now) = now_noid(&|n| {
         shape(n, 1_500, 400, 1_800, 500);
         n.acknowledge_producer_share = Some(500);
@@ -3288,7 +3388,8 @@ fn the_structured_report_says_what_the_ack_can_and_cannot_waive() {
     assert!(r.waivable_by_acknowledgement && !r.waived_by_acknowledgement, "{r:?}");
     let (n, now) = now_noid(&|n| shape(n, 1_900, 480, 2_000, 500));
     let r = report(g, &n, now);
-    assert_eq!((r.state, r.waivable_by_acknowledgement), ("concentrated", false));
+    assert_eq!((r.state, r.waivable_by_acknowledgement), ("concentrated", true), "above the old 65 % ceiling it is still only a warning");
+    assert!(r.warning.as_deref().is_some_and(|w| w.contains("more than half")), "{r:?}");
     let (n, now) = now_noid(&|n| {
         n.second = None;
         tweak(n, |p| p.second = SecondCheck::NotConfigured);
@@ -3310,9 +3411,11 @@ fn the_structured_report_says_what_the_ack_can_and_cannot_waive() {
     assert_eq!((r.state, r.second_node, r.waivable_by_acknowledgement), ("remembered", "remembered", false));
     let (n, now) = now_noid(&|n| n.producers = None);
     let r = report(g, &n, now);
-    assert_eq!((r.state, r.waivable_by_acknowledgement, r.share_permille_long), ("cannot_check", false, None));
+    assert_eq!((r.state, r.waivable_by_acknowledgement, r.share_permille_long, r.share_known), ("share_unknown", true, None, false));
+    assert!(r.warning.as_deref().is_some_and(|w| w.contains("unknown")), "{r:?}");
     let (n, now) = now_noid(&|n| tweak(n, |p| p.read_at = Some(p.read_at.unwrap() - 1_000)));
-    assert_eq!(report(g, &n, now).state, "stale");
+    let r = report(g, &n, now);
+    assert_eq!((r.state, r.share_known, r.waivable_by_acknowledgement), ("share_unknown", false, true));
     // JSON shape (the field names the page reads), and no address.
     let (n, now) = now_noid(&|_| {});
     let v = serde_json::to_value(report(g, &n, now)).unwrap();
@@ -3328,6 +3431,9 @@ fn the_structured_report_says_what_the_ack_can_and_cannot_waive() {
         "hard_max_permille",
         "acknowledged_ceiling_permille",
         "waived_by_acknowledgement",
+        "share_known",
+        "warning",
+        "share_refuses",
     ] {
         assert!(v.get(k).is_some(), "{k}");
     }
@@ -3372,4 +3478,55 @@ fn the_tick_json_carries_producer_screen_and_the_loopback_single_node_is_detecte
     let v2: Value = serde_json::from_str(&out2).unwrap();
     assert!(v2["noid"].get("acknowledge_producer_share").is_none());
     assert_eq!(v2["producer_screen"]["acknowledged_ceiling_permille"], Value::Null);
+}
+
+// ---------------------------------------------------------------- an unknown share never skips the lying-node checks (logic audit M1)
+
+#[test]
+fn production_one_remote_node_with_single_node_ok_and_unreadable_headers_is_refused_for_the_one_node_reason() {
+    // The share cannot be read (the header read failed) and the only Parano1d node is a remote one under --single-node-ok:
+    // the share only warns, but the one-node refusal of the producer check still holds.
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().single_node = true;
+    s.world.borrow_mut().single_node_ok = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| {
+        let at = n.observed_at.unwrap();
+        n.producers = Some(ProducerSummary::failed(n.tip, 2_880, 720, at, "paranoid_getBlockHeader at height 291203 failed: transport: connection refused"));
+    });
+    assert_ne!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(wait_reason(&r).contains("producer check needs a second Parano1d node"), "{}", wait_reason(&r));
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    // Stale headers are the same.
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().single_node = true;
+    s.world.borrow_mut().single_node_ok = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 300, 70, 400, 90);
+        let at = n.observed_at.unwrap();
+        tweak(n, |p| {
+            p.second = SecondCheck::NotConfigured;
+            p.read_at = Some(at - 121);
+        });
+    });
+    assert_ne!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(wait_reason(&r).contains("producer check needs a second Parano1d node"), "{}", wait_reason(&r));
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+}
+
+#[test]
+fn production_a_stale_share_read_with_a_second_node_that_differs_is_refused_for_the_disagreement() {
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 300, 70, 400, 90);
+        let at = n.observed_at.unwrap();
+        tweak(n, |p| {
+            p.read_at = Some(at - 121);
+            p.second = SecondCheck::Differs { height: 300_017, first: "3c1d85aa".into(), second: "9a02e4f1".into() };
+        });
+    });
+    assert_ne!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(wait_reason(&r).contains(DIFFERS_HEADLINE), "{}", wait_reason(&r));
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
 }

@@ -47,8 +47,8 @@ test("/api/run: `launch` from the swap's run.json and the base fee of its own ne
     assert.equal(l.profile, "sepolia");
     assert.equal(l.mainnet, false);
     assert.deepEqual(l.rate, L.rate("10000000", "1000000000000000"));
-    assert.equal(l.fees.happy.eth_now_wei, "262263400000000", "0.35 gwei x 689,324 gas + the sweep at the 1 gwei cap");
-    assert.equal(l.fees.happy.eth_max_wei, "1021000000000000");
+    assert.equal(l.fees.happy.eth_now_wei, "266465400000000", "0.35 gwei x 689,324 gas + the sweep (25,202 gas) at the 1 gwei cap");
+    assert.equal(l.fees.happy.eth_max_wei, "1300000000000000");
     assert.equal(l.fees.happy.noid_micro, "9000");
     assert.equal(l.fees.stopped.noid_micro, "20600");
     assert.equal(typeof l.fees.share_bp, "number");
@@ -75,13 +75,13 @@ test("/api/run: a fee read for another network is never used; a stale fee gives 
     const { api } = await env.start();
     let l = (await api("GET", `/api/run?swap=${a.id}`)).body.program.launch;
     assert.equal(l.fees.happy.eth_now_wei, null, "a mainnet fee does not price a Sepolia swap");
-    assert.equal(l.fees.happy.eth_max_wei, "1021000000000000");
+    assert.equal(l.fees.happy.eth_max_wei, "1300000000000000");
     assert.equal(l.fees.base_fee_age_s, null);
     // the old single fee counts only when it names the profile
     env.node.eth.fee = fee("300000000", "sepolia");
     delete env.node.eth.fees;
     l = (await api("GET", `/api/run?swap=${a.id}`)).body.program.launch;
-    assert.equal(l.fees.happy.eth_now_wei, "262263400000000");
+    assert.equal(l.fees.happy.eth_now_wei, "266465400000000");
     // stale
     env.node.eth.fee = fee("300000000", "sepolia", 130000);
     l = (await api("GET", `/api/run?swap=${a.id}`)).body.program.launch;
@@ -92,7 +92,7 @@ test("/api/run: a fee read for another network is never used; a stale fee gives 
     env.node.eth.fee = fee("300000000", "sepolia");
     l = (await api("GET", `/api/run?swap=${b.id}`)).body.program.launch;
     assert.equal(l.fees.happy.noid_micro, "5800");
-    assert.equal(l.fees.happy.eth_now_wei, (583853n * 350000000n + 21000n * 1000000000n).toString());
+    assert.equal(l.fees.happy.eth_now_wei, (583853n * 350000000n + 25202n * 1000000000n).toString());
     assert.equal(l.get_after_fees, "9.9942");
   } finally {
     await env.cleanup();
@@ -151,9 +151,9 @@ test("/api/run: the settlement of a swap that is not done says state none and no
 
 test("Bob's lock check: ok with the share text, no with the screen's own words, loading with no tick, stale with an old tick; null without a screen", () => {
   const now = 1_800_000_000;
-  const screenOk = { ok: true, share_text: "26.4" };
-  assert.deepEqual(bobCanLock(screenOk, { now: now - 5 }, now), { ok: true, state: "ok", why: null, share_text: "26.4" });
-  assert.deepEqual(bobCanLock({ ok: false, why: "The producer reading is not complete yet." }, { now }, now), { ok: false, state: "no", why: "The producer reading is not complete yet.", share_text: null });
+  const screenOk = { ok: true, share_text: "26.4", known: true, level: "none", warning: "" };
+  assert.deepEqual(bobCanLock(screenOk, { now: now - 5 }, now), { ok: true, state: "ok", why: null, share_text: "26.4", known: true, level: "none", warning: "" });
+  assert.deepEqual(bobCanLock({ ok: false, why: "The producer reading is not complete yet." }, { now }, now), { ok: false, state: "no", why: "The producer reading is not complete yet.", share_text: null, known: false, level: null, warning: "" });
   assert.equal(bobCanLock(screenOk, null, now).state, "loading");
   assert.equal(bobCanLock(screenOk, { now: now - 121 }, now).state, "stale");
   assert.equal(bobCanLock(screenOk, { now: now - 120 }, now).state, "ok");

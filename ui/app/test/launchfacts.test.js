@@ -42,7 +42,7 @@ test("the profile copies agree with the profiles of lib/viewmodel.js (w_a_s); vi
   for (const name of ["production", "sepolia", "rehearsal"]) assert.equal(L.PROFILES[name].w_a_s, VM.PROFILES[name].w_a_s, name);
 });
 
-test("the gas ceilings and the sweep gas equal the four constants of eth/scripts/live.js", () => {
+test("the gas ceilings equal the constants of eth/scripts/live.js; the sweep ceiling is its SWEEP_GAS_CAP and the sweep figure is the gas limit it signs for a plain transfer (estimate 21,001 plus 20 %)", () => {
   const live = read("eth", "scripts", "live.js");
   const num = (re) => {
     const m = re.exec(live);
@@ -52,8 +52,11 @@ test("the gas ceilings and the sweep gas equal the four constants of eth/scripts
   assert.equal(L.GAS.lock.ceiling, num(/LOCK_GAS_RESERVE = \{[^}]*poseidon: ([0-9_]+)n/));
   assert.equal(L.GAS.reveal.ceiling, num(/POSEIDON_CLAIM_GAS_LIMIT = ([0-9_]+)n/));
   assert.equal(L.GAS.refund.ceiling, num(/REFUND_GAS_RESERVE = \{[^}]*poseidon: ([0-9_]+)n/));
-  assert.equal(L.GAS.sweep.ceiling, num(/TRANSFER_GAS = ([0-9_]+)n/));
-  assert.equal(L.GAS.sweep.measured, L.GAS.sweep.ceiling);
+  assert.equal(L.GAS.sweep.ceiling, num(/SWEEP_GAS_CAP = ([0-9_]+)n/));
+  const liveModule = require("../../../eth/scripts/live.js");
+  assert.equal(L.GAS.sweep.ceiling, liveModule.SWEEP_GAS_CAP);
+  assert.equal(L.GAS.sweep.measured, liveModule.sweepGasLimit(21001n));
+  assert.equal(L.GAS.sweep.measured, 25202n);
   for (const g of Object.values(L.GAS)) assert.ok(g.measured <= g.ceiling);
 });
 
@@ -90,32 +93,36 @@ test("fmtNoid and fmtEth group the whole part and keep six significant digits", 
 const GWEI = 10n ** 9n;
 const EX = { baseFeeWei: 300000000n, capWei: GWEI, tipWei: 50000000n };
 
-test("ethFees, Alice on the happy path: reveal 689,324 gas at 0.35 gwei plus the sweep at the cap, to the wei; at most 0.001021 ETH", () => {
+test("ethFees, Alice on the happy path: reveal 689,324 gas at 0.35 gwei plus the sweep (25,202 gas) at the cap, to the wei; at most 0.0013 ETH (ceilings 1,000,000 and 300,000 gas at the cap)", () => {
   const f = L.ethFees({ role: "alice", ...EX, path: "happy" });
-  assert.equal(f.now_wei, (689324n * 350000000n + 21000n * GWEI).toString());
-  assert.equal(f.now_wei, "262263400000000");
-  assert.equal(f.max_wei, ((1000000n + 21000n) * GWEI).toString());
-  assert.equal(f.max_wei, "1021000000000000");
+  assert.equal(f.now_wei, (689324n * 350000000n + 25202n * GWEI).toString());
+  assert.equal(f.now_wei, "266465400000000");
+  assert.equal(f.max_wei, ((1000000n + 300000n) * GWEI).toString());
+  assert.equal(f.max_wei, "1300000000000000");
   assert.deepEqual(f.steps.map((s) => s.id), ["reveal", "sweep"]);
 });
 
 test("ethFees, Bob: lock plus sweep on the happy path; lock, refund and sweep when stopped", () => {
   const h = L.ethFees({ role: "bob", ...EX, path: "happy" });
-  assert.equal(h.now_wei, (583853n * 350000000n + 21000n * GWEI).toString());
+  assert.equal(h.now_wei, (583853n * 350000000n + 25202n * GWEI).toString());
+  assert.equal(h.now_wei, "229550550000000");
   assert.deepEqual(h.steps.map((s) => s.id), ["lock", "sweep"]);
   const s = L.ethFees({ role: "bob", ...EX, path: "stopped" });
   assert.deepEqual(s.steps.map((x) => x.id), ["lock", "refund", "sweep"]);
-  assert.equal(s.now_wei, ((583853n + 158608n) * 350000000n + 21000n * GWEI).toString());
-  assert.equal(s.max_wei, ((700000n + 200000n + 21000n) * GWEI).toString());
+  assert.equal(s.now_wei, ((583853n + 158608n) * 350000000n + 25202n * GWEI).toString());
+  assert.equal(s.now_wei, "285063350000000");
+  assert.equal(s.max_wei, ((700000n + 200000n + 300000n) * GWEI).toString());
+  assert.equal(s.max_wei, "1200000000000000");
   assert.deepEqual(L.ethFees({ role: "alice", ...EX, path: "stopped" }).steps.map((x) => x.id), ["sweep"]);
 });
 
 test("ethFees: the price is capped (base plus tip over the cap counts the cap); an unknown base fee gives no 'now' figure; no cap gives neither", () => {
   const f = L.ethFees({ role: "alice", baseFeeWei: 5n * GWEI, capWei: GWEI, tipWei: 50000000n, path: "happy" });
-  assert.equal(f.now_wei, (689324n * GWEI + 21000n * GWEI).toString());
+  assert.equal(f.now_wei, (689324n * GWEI + 25202n * GWEI).toString());
+  assert.equal(f.now_wei, "714526000000000");
   const u = L.ethFees({ role: "alice", baseFeeWei: null, capWei: GWEI, tipWei: 50000000n, path: "happy" });
   assert.equal(u.now_wei, null);
-  assert.equal(u.max_wei, "1021000000000000");
+  assert.equal(u.max_wei, "1300000000000000");
   const n = L.ethFees({ role: "alice", baseFeeWei: 1n, capWei: null, tipWei: null, path: "happy" });
   assert.equal(n.now_wei, null);
   assert.equal(n.max_wei, null);
@@ -130,14 +137,14 @@ test("noidFees: Alice's funding fee (the status' own figure, else 9,000), stoppe
   assert.equal(L.noidFees({ role: "bob", path: "happy", fundingFeeMicro: null, maxFeeMicro: null }).upto_micro, null);
 });
 
-test("share: the worked example, Alice 0.07 % and Bob 0.06 %; the same fees on run 8's 5 NOID for 0.001 ETH are 26.4 %, which is loud", () => {
-  const a = L.share("262263400000000", 4n * 10n ** 17n, "9000", 2000000000n);
+test("share: the worked example, Alice 0.07 % and Bob 0.06 %; the same fees on run 8's 5 NOID for 0.001 ETH are 26.8 %, which is loud", () => {
+  const a = L.share("266465400000000", 4n * 10n ** 17n, "9000", 2000000000n);
   assert.equal(L.pct(a), "0.07");
-  const bobEth = (583853n * 350000000n + 21000n * GWEI).toString();
+  const bobEth = (583853n * 350000000n + 25202n * GWEI).toString();
   const b = L.share(bobEth, 4n * 10n ** 17n, "5800", 2000000000n);
   assert.equal(L.pct(b), "0.06");
-  const run8 = L.share("262263400000000", 10n ** 15n, "9000", 5000000n);
-  assert.equal(L.pct(run8), "26.4");
+  const run8 = L.share("266465400000000", 10n ** 15n, "9000", 5000000n);
+  assert.equal(L.pct(run8), "26.8");
   assert.ok(run8 >= L.LOUD_BP);
   assert.equal(L.share(null, 1n, "1", 1n), null);
   assert.equal(L.share("1", 0n, "1", 1n), null);
@@ -228,8 +235,8 @@ test("launch: the worked example for Alice and Bob in the shape of spec 5.1", ()
   assert.equal(a.profile, "production");
   assert.equal(a.mainnet, true);
   assert.deepEqual(a.rate, { noid_in_eth: "0.0002", eth_in_noid: "5000", rounded: false });
-  assert.equal(a.fees.happy.eth_now_wei, "262263400000000");
-  assert.equal(a.fees.happy.eth_max_wei, "1021000000000000");
+  assert.equal(a.fees.happy.eth_now_wei, "266465400000000");
+  assert.equal(a.fees.happy.eth_max_wei, "1300000000000000");
   assert.equal(a.fees.happy.noid_micro, "9000");
   assert.equal(a.fees.stopped.noid_micro, "20600");
   assert.equal(L.pct(a.fees.share_bp), "0.07");
@@ -237,7 +244,7 @@ test("launch: the worked example for Alice and Bob in the shape of spec 5.1", ()
   assert.equal(a.fees.refused_now, null);
   assert.equal(a.fees.base_fee_age_s, 30);
   assert.deepEqual(a.times, { usual_min: 50, back_after_s: 24240, bob_online_min: 75 });
-  assert.equal(a.get_after_fees, "0.399738"); // 0.4 ETH less 0.0002622634 ETH, six significant digits
+  assert.equal(a.get_after_fees, "0.399734"); // 0.4 ETH less 0.0002664654 ETH, six significant digits
   const b = L.launch({ ...BASE, role: "bob" });
   assert.equal(b.fees.happy.noid_micro, "5800");
   assert.equal(b.fees.happy.noid_upto_micro, "50000");
@@ -248,11 +255,11 @@ test("launch: the worked example for Alice and Bob in the shape of spec 5.1", ()
 
 test("launch: run 8's amounts make the loud box (at least 500 basis points); a stale or missing base fee leaves only the 'at most' figure", () => {
   const loud = L.launch({ ...BASE, amountMicro: "5000000", amountWei: "1000000000000000" });
-  assert.equal(L.pct(loud.fees.share_bp), "26.4");
+  assert.equal(L.pct(loud.fees.share_bp), "26.8");
   assert.equal(loud.fees.loud, true);
   const stale = L.launch({ ...BASE, nowMs: BASE.baseFee.at + 121 * 1000 });
   assert.equal(stale.fees.happy.eth_now_wei, null);
-  assert.equal(stale.fees.happy.eth_max_wei, "1021000000000000");
+  assert.equal(stale.fees.happy.eth_max_wei, "1300000000000000");
   assert.equal(stale.fees.share_bp, null);
   assert.equal(stale.fees.loud, false);
   assert.equal(stale.fees.base_fee_age_s, 121);
@@ -260,12 +267,12 @@ test("launch: run 8's amounts make the loud box (at least 500 basis points); a s
   const none = L.launch({ ...BASE, baseFee: null });
   assert.equal(none.fees.happy.eth_now_wei, null);
   assert.equal(none.fees.base_fee_age_s, null);
-  assert.equal(L.launch({ ...BASE, nowMs: BASE.baseFee.at + 120 * 1000 }).fees.happy.eth_now_wei, "262263400000000", "120 s is not yet stale");
+  assert.equal(L.launch({ ...BASE, nowMs: BASE.baseFee.at + 120 * 1000 }).fees.happy.eth_now_wei, "266465400000000", "120 s is not yet stale");
 });
 
 test("launch: the loud box at 499 and 500 basis points, and the cap-below-the-rule field", () => {
-  // the NOID leg is made so large that its fee is a negligible share: only the Ethereum fee of Alice's happy path (262,263,400,000,000 wei) counts
-  const fee = 262263400000000n;
+  // the NOID leg is made so large that its fee is a negligible share: only the Ethereum fee of Alice's happy path (266,465,400,000,000 wei) counts
+  const fee = 266465400000000n;
   const huge = String(10n ** 18n);
   const withShare = (bp) => L.launch({ ...BASE, amountMicro: huge, amountWei: String((fee * 10000n) / BigInt(bp)) });
   const at499 = withShare(499);

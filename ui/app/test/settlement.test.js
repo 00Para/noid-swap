@@ -12,7 +12,6 @@ const H1 = "0x" + "a1".repeat(32);
 const H2 = "0x" + "b2".repeat(32);
 const H3 = "0x" + "c3".repeat(32);
 const TXID = (c) => c.repeat(64);
-const GWEI = 10n ** 9n;
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), "no1d-settle-"));
 const until = async (f, what) => {
@@ -42,7 +41,7 @@ function aliceDir() {
 const recordsAlice = () => [start("send-fund", "2026-11-20T10:00:00Z"), end("send-reveal", H1, "2026-11-20T10:40:00Z"), end("send-sweep-eth-alice", H2, "2026-11-20T10:50:00Z"), { t: "2026-11-20T10:49:30Z", action: "settlement", phase: "note", result: "settled at 2026-11-20T10:49:00Z" }];
 const marker = (names) => (n) => (names.includes(n) ? "2026-11-20T10:50:00Z" : null);
 
-test("Alice: the fee sum is the reveal's receipt fee plus the sweep at 21,000 gas times the cap, plus the funding's NOID fee; a dry run's report is not counted", async () => {
+test("Alice: the fee sum is the reveal's receipt fee plus the sweep's own receipt fee (gas used times the price paid), plus the funding's NOID fee; a dry run's report is not counted", async () => {
   const dir = aliceDir();
   const receipts = { [H1]: { fee_wei: (689324n * 350000000n).toString() }, [H2]: { fee_wei: (21000n * 300000000n).toString() } };
   const calls = [];
@@ -56,7 +55,7 @@ test("Alice: the fee sum is the reveal's receipt fee plus the sweep at 21,000 ga
   v = st.view(input);
   assert.equal(v.state, "ready");
   assert.equal(v.complete, true);
-  assert.equal(v.fees.eth_wei, (689324n * 350000000n + 21000n * GWEI).toString(), "the sweep counts at the cap, not at the receipt's price");
+  assert.equal(v.fees.eth_wei, (689324n * 350000000n + 21000n * 300000000n).toString(), "the sweep counts at its receipt fee like every other transaction, not at a fixed gas times the cap");
   assert.equal(v.fees.noid_micro, "9000");
   assert.ok(v.fees.share_bp > 0);
   assert.equal(v.time_min, 49);
@@ -107,7 +106,7 @@ test("L6 (fix round 2): each receipt's fee is kept in settlement.json beside the
   const v = second.view(input);
   assert.deepEqual(again, []);
   assert.equal(v.state, "ready");
-  assert.equal(v.fees.eth_wei, (241256400000000n + 21000n * GWEI).toString());
+  assert.equal(v.fees.eth_wei, (241256400000000n + 6300000000000n).toString());
   // a hash that is not kept is asked for, and kept next to the others
   const third = S.createSettlement({ readReceipt: async (rpc, h) => (again.push(h), { fee_wei: "5" }) });
   const recs = [...recordsAlice(), end("send-reveal-replace", H3, "2026-11-20T10:45:00Z")];
@@ -213,7 +212,7 @@ test("Bob: complete at done; his fees are the lock and the sweep receipts and th
   await until(() => [...st.receipts.values()].every((e) => e.state === "ok"), "receipts");
   const v = st.view(input);
   assert.equal(v.fees.noid_micro, "5800", "one close, counted once");
-  assert.equal(v.fees.eth_wei, (5000n + 21000n * GWEI).toString());
+  assert.equal(v.fees.eth_wei, (5000n + 700n).toString());
 });
 
 test("the NOID fee is unknown (so the fees are null) when no sent report has one yet, or one has none", () => {

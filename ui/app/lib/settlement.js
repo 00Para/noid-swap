@@ -8,8 +8,8 @@
  *     view(i)         i = { dir, role, settings, audit, run, marker(name), walletStatus }   -> the object of `program.settlement` in /api/run
  *     settledNote(i)  the audit text to write once when the swap reached `done`, or null (already written, or not done): "settled at ISO" or "settled at: time not known"
  *
- * The Ethereum fee of each of the role's own transactions is gasUsed x effectiveGasPrice from its receipt; a sweep counts at 21,000 gas x the fee cap (the part under the cap stays in the swap
- * key: the honest cost to the person). The NOID fee is the `fee_micronoid` of the report files of the funding, the recovery and the sweep (Alice) or of the claim (Bob). A figure that is not
+ * The Ethereum fee of each of the role's own transactions is gasUsed x effectiveGasPrice from its receipt; a sweep counts the same way (its gas limit is the node's
+ * estimate plus a margin since 2026-11-26, so a fixed 21,000 x cap no longer describes it; the small part of the limit that was not used stays in the swap key). The NOID fee is the `fee_micronoid` of the report files of the funding, the recovery and the sweep (Alice) or of the claim (Bob). A figure that is not
  * known is not shown: `fees` is null until every part is known, and `receipts_pending` says how many are still being read. A time is never guessed.
  * Each receipt's fee is kept after its first read in `settlement.json` in the swap's folder (written beside and renamed over, owner-only; read before the node is asked again), so a restart does not
  * send the swap's transaction hashes to the endpoint again. The node is asked without following a redirect, and its answer is read at most 64 KiB.
@@ -281,10 +281,9 @@ function createSettlement(o = {}) {
       const rpc = s && s.eth_rpc;
       let pending = 0;
       let ethFee = 0n;
-      const cap = s && typeof s.gas_price_gwei === "string" ? L.gweiToWei(s.gas_price_gwei) : null;
       for (const t of txs) {
         const e = ask(rpc, t.hash, i.dir);
-        if (e.state === "ok") ethFee += t.sweep && cap !== null ? 21000n * cap : e.fee;
+        if (e.state === "ok") ethFee += e.fee;
         else {
           pending++;
           if (e.state === "fail") out.receipts_failed = true;

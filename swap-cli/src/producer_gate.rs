@@ -1,16 +1,19 @@
 //! Bob's producer-concentration screen (threat T21, `docs/bob-concentration-gate.md`): what the engine makes of a
-//! [`ProducerSummary`] before Bob locks his Ethereum leg.
+//! `ProducerSummary` before Bob locks his Ethereum leg.
 //!
 //! Plain words. The watcher (`watch::producers`) counts who produced the recent blocks. This module decides what the counts mean
 //! and writes the notes:
 //!
-//! - **R1, hard under `production`:** one address produced more than the profile's limit (35 % production, 28 % sepolia and
-//!   rehearsal) of the last 2,880 blocks or of the last 720. The comparison is on integers, `count * 1000 > limit * window`, so a
-//!   share exactly at the limit passes.
-//! - **Cannot be checked, hard under `production`:** the summary is missing, incomplete or built for other windows, a header could
-//!   not be read, the chain of headers does not link, the data is stale, or the second Parano1d node disagrees or could not be read.
-//!   The screen fails closed.
-//! - **A remembered detection, hard under `production`:** an earlier tick saw evidence that cannot come from two honest nodes, either two
+//! SINCE 0.2.0 (the owner's decision) THE SHARE NEVER REFUSES. The screen measures and warns; the risk stays and is stated plainly.
+//!
+//! - **The share, a warning in every profile:** one address produced more than the profile's warning limit (35 % production, 28 % sepolia and
+//!   rehearsal) of the last 2,880 blocks or of the last 720: a milder warning; above 50 % a loud one (no time window protects Bob from a
+//!   majority miner who is Alice). The comparison is on integers, `count * 1000 > limit * window`. The lock is offered either way.
+//! - **A share that cannot be read** (the summary is missing, incomplete or built for other windows, a header could not be read, the chain
+//!   of headers does not link, the data is stale): reported as unknown, with a warning, never a refusal.
+//! - **Hard under `production` (a lying-node check, not a share rule):** the second Parano1d node disagrees or could not be read for
+//!   the cross-check, or the second node is missing.
+//! - **A remembered detection, hard under `production` (lying-node check):** an earlier tick saw evidence that cannot come from two honest nodes, either two
 //!   different producers named for a block with equal hashes, or a different hash at a sampled height below an anchor block that the second
 //!   node named again after the sample, and wrote the marker `<swap file>.producer-differs` and, with `tick --apply`, the history entry
 //!   `producer_differs_seen` (`crate::producer_marker`); while the marker exists (or cannot be read), or the history holds the entry, the screen
@@ -33,8 +36,8 @@ use crate::watch::NoidObservation;
 pub const OVERRIDE_FLAG: &str = "--accept-producer-concentration";
 /// History entry written once when the override waives a refusal and the lock is offered.
 pub const OVERRIDE_HISTORY: &str = "producer_concentration_overridden";
-/// D2 (2026-11-20): the narrow acknowledgement. Waives, under `production` only, "one address above the limit" up to the given ceiling and "no second
-/// Parano1d node" for a loopback node; nothing else.
+/// D2 (2026-11-20): the narrow acknowledgement. Waives, under `production` only, "no second Parano1d node" for a loopback node; nothing else. Since 0.2.0 the
+/// share part is a no-op (the share never refuses); the flag and its value are still accepted for compatibility with existing programs and swap files.
 pub const ACK_FLAG: &str = "--acknowledge-producer-share";
 /// The compiled hard maximum of the ceiling, in permille (65 %). A larger value is refused at parse time.
 pub const ACK_HARD_MAX_PERMILLE: u64 = 650;
@@ -63,8 +66,10 @@ fn ways_on() -> String {
 pub enum Finding {
     /// Every check holds.
     Pass,
-    /// R1: one address is above the limit in at least one window. `detail` is the sentence about the shares.
+    /// One address is above the warning limit in at least one window. `detail` is the sentence about the shares. A warning only since 0.2.0.
     Concentrated { detail: String },
+    /// The share could not be read (no headers, incomplete, stale). A warning only since 0.2.0: the lock is offered.
+    Unknown { headline: &'static str, detail: String },
     /// The check could not be completed or the data is not trustworthy.
     Unverifiable { headline: &'static str, detail: String },
 }
@@ -116,8 +121,8 @@ fn over(count: u64, n: u64, limit_permille: u64) -> bool {
 
 fn shares_sentence(g: &Gates, long: &WindowShare, short: &WindowShare) -> String {
     let limit = limit_pct(g.producer_limit_permille);
-    let a = format!("{} % of the last {} blocks (limit {limit} %)", pct(long.largest, long.n), group(long.n));
-    let b = format!("{} % of the last {} (limit {limit} %)", pct(short.largest, short.n), group(short.n));
+    let a = format!("{} % of the last {} blocks (warning above {limit} %)", pct(long.largest, long.n), group(long.n));
+    let b = format!("{} % of the last {} (warning above {limit} %)", pct(short.largest, short.n), group(short.n));
     let two = format!(
         "the two largest together {} % and {} % (warning above {} %)",
         pct(long.top_two, long.n),
@@ -141,10 +146,69 @@ pub fn ack_waives_single_node(g: &Gates, noid: &NoidObservation) -> bool {
     g.producer_gate_enforced && noid.acknowledge_producer_share.is_some() && noid.single_node_loopback
 }
 
+/// Can the share be read from this observation? `Ok` with the summary and its two windows, or `Err` with the reason it is unknown (a missing, other-window,
+/// errored, incomplete or stale summary). Unknown is a warning only (0.2.0); it must never skip the lying-node checks, which `evaluate_with` runs first.
+fn share_readable<'a>(
+    g: &Gates,
+    noid: &'a NoidObservation,
+    now: u64,
+) -> Result<(&'a ProducerSummary, &'a WindowShare, &'a WindowShare), (&'static str, String)> {
+    let Some(s) = noid.producers.as_ref() else {
+        return Err((HEADLINE_CANNOT, "no producer summary was read in this poll (the headers were not asked for, or the read did not run)".into()));
+    };
+    if s.window_long != g.producer_window_long || s.window_short != g.producer_window_short {
+        return Err((HEADLINE_CANNOT, format!(
+            "the summary was computed for windows of {} and {} blocks, the profile wants {} and {}",
+            group(s.window_long),
+            group(s.window_short),
+            group(g.producer_window_long),
+            group(g.producer_window_short)
+        )));
+    }
+    if let Some(e) = &s.error {
+        return Err((HEADLINE_CANNOT, e.clone()));
+    }
+    let (Some(long), Some(short)) = (&s.long, &s.short) else {
+        return Err((HEADLINE_CANNOT, format!(
+            "{} of {} headers read so far (the next tick reads on)",
+            group(s.have),
+            group(g.producer_window_long)
+        )));
+    };
+    if !s.complete || long.n != g.producer_window_long || short.n != g.producer_window_short {
+        return Err((HEADLINE_CANNOT, format!(
+            "{} of {} headers read so far (the next tick reads on)",
+            group(s.have),
+            group(g.producer_window_long)
+        )));
+    }
+    // Stale: the headers end too far below the node's tip, or the read is too old.
+    let mut stale: Vec<String> = Vec::new();
+    if noid.tip > s.header_tip + MAX_NOID_TIP_DIFF {
+        stale.push(format!(
+            "the headers end at height {} but the node's tip is {} (limit {MAX_NOID_TIP_DIFF} blocks behind)",
+            s.header_tip, noid.tip
+        ));
+    }
+    match s.read_at {
+        None => stale.push("the time of the read is unknown".into()),
+        Some(t) if t.abs_diff(now) > MAX_OBSERVATION_AGE_S => {
+            stale.push(format!("read {} s ago (limit {MAX_OBSERVATION_AGE_S} s)", t.abs_diff(now)));
+        }
+        Some(_) => {}
+    }
+    if !stale.is_empty() {
+        return Err((HEADLINE_STALE, stale.join("; ")));
+    }
+    Ok((s, long, short))
+}
+
 /// [`evaluate`], with the loopback-node waiver given. `false` shows what the screen says on its own.
 fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopback: bool) -> Screen {
     let screen = |finding: Finding| Screen { finding, ok_note: None, top_two_warning: None };
     let cannot = |detail: String| screen(Finding::Unverifiable { headline: HEADLINE_CANNOT, detail });
+    // Since 0.2.0 (the owner's decision): a share that cannot be read is reported as unknown with a warning, never a refusal.
+    let unknown = |headline: &'static str, detail: String| screen(Finding::Unknown { headline, detail });
     // A remembered detection (`crate::producer_marker`) holds for the rest of the swap, whatever this tick's own reading says.
     match &noid.producer_marker {
         MarkerState::Absent => {}
@@ -190,61 +254,19 @@ fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopb
             });
         }
     }
-    let Some(s) = noid.producers.as_ref() else {
-        return cannot("no producer summary was read in this poll (the headers were not asked for, or the read did not run)".into());
-    };
-    if s.window_long != g.producer_window_long || s.window_short != g.producer_window_short {
-        return cannot(format!(
-            "the summary was computed for windows of {} and {} blocks, the profile wants {} and {}",
-            group(s.window_long),
-            group(s.window_short),
-            group(g.producer_window_long),
-            group(g.producer_window_short)
-        ));
-    }
-    if let Some(e) = &s.error {
-        return cannot(e.clone());
-    }
-    let (Some(long), Some(short)) = (&s.long, &s.short) else {
-        return cannot(format!(
-            "{} of {} headers read so far (the next tick reads on)",
-            group(s.have),
-            group(g.producer_window_long)
-        ));
-    };
-    if !s.complete || long.n != g.producer_window_long || short.n != g.producer_window_short {
-        return cannot(format!(
-            "{} of {} headers read so far (the next tick reads on)",
-            group(s.have),
-            group(g.producer_window_long)
-        ));
-    }
-    // Stale: the headers end too far below the node's tip, or the read is too old.
-    let mut stale: Vec<String> = Vec::new();
-    if noid.tip > s.header_tip + MAX_NOID_TIP_DIFF {
-        stale.push(format!(
-            "the headers end at height {} but the node's tip is {} (limit {MAX_NOID_TIP_DIFF} blocks behind)",
-            s.header_tip, noid.tip
-        ));
-    }
-    match s.read_at {
-        None => stale.push("the time of the read is unknown".into()),
-        Some(t) if t.abs_diff(now) > MAX_OBSERVATION_AGE_S => {
-            stale.push(format!("read {} s ago (limit {MAX_OBSERVATION_AGE_S} s)", t.abs_diff(now)));
-        }
-        Some(_) => {}
-    }
-    if !stale.is_empty() {
-        return screen(Finding::Unverifiable { headline: HEADLINE_STALE, detail: stale.join("; ") });
-    }
+    let readable = share_readable(g, noid, now);
     // The second Parano1d node: when one is configured it must agree on the block at the anchor height.
     // Set only when the second node was read and agreed: the over-limit note says so too.
     let mut second_agreed: Option<String> = None;
+    // Without a summary the second node's cross-check cannot be read; an incomplete summary's "not checked" is part of the unknown share, not a refusal.
+    let none_second = SecondCheck::NotConfigured;
+    let second_ref = noid.producers.as_ref().map_or(&none_second, |s| &s.second);
+    let summary_incomplete = noid.producers.as_ref().is_none_or(|s| !s.complete);
     let second_line = if noid.second_error.is_some() {
         // A configured second node that could not be read at all holds `lock_eth` through the F5 rule, with F5's own reason, whatever this screen says.
         "the second node could not be read, F5 holds the lock".to_string()
-    } else if noid.second.is_some() || !matches!(s.second, SecondCheck::NotConfigured) {
-        match &s.second {
+    } else if noid.second.is_some() || !matches!(second_ref, SecondCheck::NotConfigured) {
+        match second_ref {
             // A record without a sample (made before the sample existed) is not a producer cross-check.
             SecondCheck::Agrees { sampled: 0, .. } => {
                 return cannot("the second Parano1d node's producer cross-check recorded no sampled heights".into());
@@ -283,9 +305,11 @@ fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopb
                     ),
                 });
             }
+            SecondCheck::Unreadable { .. } if summary_incomplete => "the second node's cross-check waits for complete headers".to_string(),
             SecondCheck::Unreadable { reason } => {
                 return cannot(format!("the second Parano1d node could not be read for the producer cross-check ({reason})"));
             }
+            SecondCheck::NotConfigured if summary_incomplete => "the second node's cross-check waits for a producer read".to_string(),
             SecondCheck::NotConfigured => {
                 return cannot("a second Parano1d node is configured but the producer cross-check did not run".into());
             }
@@ -306,6 +330,11 @@ fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopb
         "single node, the producer cross-check is not possible (F5 holds the lock; under production this check needs the second node too, whatever --single-node-ok says)".to_string()
     } else {
         "single node, the producer cross-check is not possible".to_string()
+    };
+    // The lying-node checks above are done; only now does an unreadable share count (as a warning, never a refusal).
+    let (s, long, short) = match readable {
+        Ok(x) => x,
+        Err((headline, detail)) => return unknown(headline, detail),
     };
     let mut result = screen(Finding::Pass);
     // Top two: a warning only, in every profile.
@@ -332,7 +361,7 @@ fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopb
     let age = s.read_at.map_or_else(String::new, |t| format!(", read {} s ago", now.saturating_sub(t)));
     let from = s.source.as_ref().map_or_else(String::new, |l| format!(" from {l}"));
     result.ok_note = Some(format!(
-        "producer concentration ok (T21 screen, not a defence): largest producer {} % of the last {} blocks and {} % of the last {} (limit {} %); two largest together {} % and {} % (warning above {} %); headers to height {}{age}{from}; {second_line}",
+        "producer concentration ok (T21 screen, not a defence): largest producer {} % of the last {} blocks and {} % of the last {} (warning above {} %); two largest together {} % and {} % (warning above {} %); headers to height {}{age}{from}; {second_line}",
         pct(long.largest, long.n),
         group(long.n),
         pct(short.largest, short.n),
@@ -349,58 +378,83 @@ fn evaluate_with(g: &Gates, noid: &NoidObservation, now: u64, waive_single_loopb
 /// What the screen means for `lock_eth`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LockGate {
-    /// `Some(reason)`: `lock_eth` is not offered (the reason is also the ALARM note).
+    /// `Some(reason)`: `lock_eth` is not offered (the reason is also the ALARM note). Never set for the share (since 0.2.0).
     pub wait: Option<String>,
 }
 
-const RISK_SENTENCE: &str = "A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. This is a screen, not a defence";
+const RISK_SENTENCE: &str = "A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. Above half of the blocks no time window protects Bob. This is a screen, not a defence";
+
+/// The share, plainly: the warning for one reading of the summary, or `None` when the share is known and at or under the warning limit.
+/// Above 50 % in either window the loud one; above the profile's limit the milder one; unreadable: the unknown one.
+pub fn share_warning(g: &Gates, noid: &NoidObservation, unknown: bool) -> Option<String> {
+    let measured_now = if unknown { None } else { measured(noid) };
+    let Some((l, sh, ln, sn)) = measured_now else {
+        return Some("WARNING (T21): the share of the largest Parano1d producer cannot be read now (unknown). A miner who is Alice can take both legs; above half of the blocks no time window protects Bob. The lock is not refused for this".into());
+    };
+    let top = l.max(sh);
+    let both = format!("{} % of the last {} blocks and {} % of the last {}", pct_of(l), group(ln), pct_of(sh), group(sn));
+    if top > 500 {
+        Some(format!(
+            "WARNING (T21): one producer mined {both}. That is more than half: a miner who is Alice can take both legs, and above half of the blocks no time window protects Bob (his ETH can be lost). This is a warning only: the lock is offered and the risk is yours"
+        ))
+    } else if top > g.producer_limit_permille {
+        Some(format!(
+            "WARNING (T21): one producer mined {both} (warning above {} %). A miner who is Alice has a better chance of taking both legs. This is a warning only: the lock is offered",
+            limit_pct(g.producer_limit_permille)
+        ))
+    } else {
+        None
+    }
+}
+
+/// A share in permille (already rounded up) as a percent with one decimal.
+fn pct_of(permille: u64) -> String {
+    format!("{}.{}", permille / 10, permille % 10)
+}
+
+/// Is this finding one of the soft ones (a share finding that only warns, in every profile)?
+fn is_soft(f: &Finding) -> bool {
+    matches!(f, Finding::Pass | Finding::Concentrated { .. } | Finding::Unknown { .. })
+}
 
 /// The notes and the decision at the point where `bob_action` would offer `lock_eth`.
 ///
-/// Enforced (production): a failing screen is an ALARM note and a wait, unless the operator passed `--accept-producer-concentration`, which turns
-/// it into an `OVERRIDDEN` warning and no wait. Not enforced (sepolia, rehearsal): a warning note and no wait.
+/// The share (known, high or unknown) is a warning note and never a wait, in every profile (0.2.0). Enforced (production): a failing lying-node check is
+/// an ALARM note and a wait, unless the operator passed `--accept-producer-concentration`, which turns it into an `OVERRIDDEN` warning and no wait.
+/// Not enforced (sepolia, rehearsal): a warning note and no wait.
 pub fn lock_gate(g: &Gates, noid: &NoidObservation, now: u64, notes: &mut Vec<String>) -> LockGate {
     let screen = evaluate(g, noid, now);
     notes.extend(screen.top_two_warning.clone());
     let profile = g.name.as_str();
-    match &screen.finding {
-        Finding::Pass => {
-            notes.extend(screen.ok_note);
-            if !noid.accept_producer_concentration && ack_used(g, noid, &screen.finding) {
-                notes.push(acknowledged_note(noid, noid.acknowledge_producer_share.unwrap_or(0)));
-            }
-            LockGate { wait: None }
+    if is_soft(&screen.finding) {
+        match &screen.finding {
+            Finding::Pass => notes.extend(screen.ok_note.clone()),
+            Finding::Concentrated { detail } => notes.push(format!(
+                "WARNING: producer concentration too high (T21 screen; under the {profile} profile it only warns and the lock is still offered): {detail}. {RISK_SENTENCE}"
+            )),
+            Finding::Unknown { headline, detail } => notes.push(format!(
+                "WARNING: {headline} (T21 screen; under the {profile} profile it only warns and the lock is still offered): {detail}"
+            )),
+            _ => {}
         }
-        finding => {
-            let (headline, detail, tail) = describe(g, finding);
-            if !g.producer_gate_enforced {
-                notes.push(format!(
-                    "WARNING: {headline} (T21 screen; under the {profile} profile it only warns and the lock is still offered): {detail}{}",
-                    if matches!(finding, Finding::Concentrated { .. }) { format!(". {RISK_SENTENCE}") } else { String::new() }
-                ));
-                return LockGate { wait: None };
-            }
-            if noid.accept_producer_concentration {
-                notes.push(overridden_note(finding));
-                return LockGate { wait: None };
-            }
-            // D2: the share is above the limit but within the acknowledged ceiling in both windows; nothing else is waived.
-            if let (Finding::Concentrated { .. }, Some(c)) = (finding, noid.acknowledge_producer_share) {
-                if share_within(noid, c) {
-                    notes.push(acknowledged_note(noid, c));
-                    return LockGate { wait: None };
-                }
-            }
-            let text = match finding {
-                Finding::Concentrated { .. } => format!(
-                    "ALARM: producer concentration too high, not locking (T21): {detail}. {RISK_SENTENCE}. Wait for the share to fall, or pass {OVERRIDE_FLAG} to accept the risk"
-                ),
-                _ => format!("ALARM: {headline}, not locking (T21): {detail}{tail}"),
-            };
-            notes.push(text.clone());
-            LockGate { wait: Some(text) }
+        notes.extend(share_warning(g, noid, matches!(screen.finding, Finding::Unknown { .. })));
+        if !noid.accept_producer_concentration && ack_used(g, noid, &screen.finding) {
+            notes.push(acknowledged_note(noid, noid.acknowledge_producer_share.unwrap_or(0)));
         }
+        return LockGate { wait: None };
     }
+    let (headline, detail, tail) = describe(g, &screen.finding);
+    if !g.producer_gate_enforced {
+        notes.push(format!("WARNING: {headline} (T21 screen; under the {profile} profile it only warns and the lock is still offered): {detail}"));
+        return LockGate { wait: None };
+    }
+    if noid.accept_producer_concentration {
+        notes.push(overridden_note(&screen.finding));
+        return LockGate { wait: None };
+    }
+    let text = format!("ALARM: {headline}, not locking (T21): {detail}{tail}");
+    notes.push(text.clone());
+    LockGate { wait: Some(text) }
 }
 
 /// `count / n` in permille, rounded UP (so a printed share is at or below a ceiling exactly when the integer comparison passes).
@@ -419,16 +473,9 @@ fn measured(noid: &NoidObservation) -> Option<(u64, u64, u64, u64)> {
     Some((permille_up(l.largest, l.n), permille_up(sh.largest, sh.n), l.n, sh.n))
 }
 
-/// Both windows' largest share is at most `ceiling` permille (integer comparison, like the limit).
-fn share_within(noid: &NoidObservation, ceiling: u64) -> bool {
-    let Some(s) = noid.producers.as_ref() else { return false };
-    let (Some(l), Some(sh)) = (s.long.as_ref(), s.short.as_ref()) else { return false };
-    !over(l.largest, l.n, ceiling) && !over(sh.largest, sh.n, ceiling)
-}
-
 /// Is the acknowledgement the reason a lock is offered on a passing screen: the second-node waiver was used (one loopback node, no cross-check)?
 fn ack_used(g: &Gates, noid: &NoidObservation, finding: &Finding) -> bool {
-    matches!(finding, Finding::Pass)
+    matches!(finding, Finding::Pass | Finding::Concentrated { .. })
         && ack_waives_single_node(g, noid)
         && noid.second.is_none()
         && noid.second_error.is_none()
@@ -438,7 +485,7 @@ fn ack_used(g: &Gates, noid: &NoidObservation, finding: &Finding) -> bool {
 fn acknowledged_note(noid: &NoidObservation, ceiling: u64) -> String {
     let (l, s, ln, sn) = measured(noid).unwrap_or((0, 0, 0, 0));
     format!(
-        "ACKNOWLEDGED: producer share {} permille <= ceiling {ceiling} ({ACK_FLAG}): {l} permille of the last {} blocks and {s} permille of the last {}{}. A miner who is Alice can take both legs; Bob accepted this risk for this swap. This is a screen, not a defence",
+        "ACKNOWLEDGED ({ACK_FLAG} {ceiling}): producer share {} permille ({l} permille of the last {} blocks and {s} permille of the last {}){}. A miner who is Alice can take both legs; Bob accepted this risk for this swap. This is a screen, not a defence",
         l.max(s),
         group(ln),
         group(sn),
@@ -450,6 +497,7 @@ fn describe(g: &Gates, finding: &Finding) -> (&'static str, String, String) {
     match finding {
         Finding::Pass => ("", String::new(), String::new()),
         Finding::Concentrated { detail } => ("producer concentration too high", detail.clone(), String::new()),
+        Finding::Unknown { headline, detail } => (headline, detail.clone(), String::new()),
         Finding::Unverifiable { headline, detail } => {
             let tail = if *headline == HEADLINE_CANNOT {
                 format!(
@@ -470,6 +518,7 @@ fn overridden_note(finding: &Finding) -> String {
     let what = match finding {
         Finding::Pass => String::new(),
         Finding::Concentrated { detail } => detail.clone(),
+        Finding::Unknown { headline, detail } => format!("the share could not be read ({headline}: {detail})"),
         Finding::Unverifiable { headline, detail } => format!("the check could not be completed ({headline}: {detail})"),
     };
     format!(
@@ -523,8 +572,8 @@ pub fn pending_lock_finding(g: &Gates, noid: &NoidObservation, now: u64) -> Opti
         return None;
     }
     let (headline, kind) = match evaluate(g, noid, now).finding {
-        Finding::Pass => return None,
-        Finding::Concentrated { .. } => ("producer concentration too high", "concentration"),
+        // The share never refuses (0.2.0): nothing to alert about.
+        Finding::Pass | Finding::Concentrated { .. } | Finding::Unknown { .. } => return None,
         Finding::Unverifiable { headline, .. } => (headline, kind_of(headline)),
     };
     Some(PendingLockFinding { hard, headline, kind })
@@ -567,6 +616,11 @@ pub fn waiting_notes(g: &Gates, noid: &NoidObservation, now: u64) -> Vec<String>
     let mut out: Vec<String> = screen.top_two_warning.clone().into_iter().collect();
     match &screen.finding {
         Finding::Pass => out.extend(screen.ok_note),
+        Finding::Concentrated { .. } | Finding::Unknown { .. } => {
+            let (headline, detail, _) = describe(g, &screen.finding);
+            out.push(format!("producer concentration, a warning, it does not block the lock (T21): {headline}: {detail}"));
+            out.extend(share_warning(g, noid, matches!(screen.finding, Finding::Unknown { .. })));
+        }
         finding => {
             let (headline, detail, _) = describe(g, finding);
             out.push(format!("producer concentration, not yet blocking (the lock is decided when the funding is final; T21): {headline}: {detail}"));
@@ -582,19 +636,9 @@ pub fn override_history_entry(g: &Gates, noid: &NoidObservation, now: u64) -> Op
         return None;
     }
     let screen = evaluate(g, noid, now);
-    let s: Option<&ProducerSummary> = noid.producers.as_ref();
     match screen.finding {
-        Finding::Pass => None,
-        Finding::Concentrated { .. } => {
-            let (l, sh) = (s?.long.as_ref()?, s?.short.as_ref()?);
-            Some(format!(
-                "{OVERRIDE_HISTORY}: largest {} % of {} and {} % of {}",
-                pct(l.largest, l.n),
-                l.n,
-                pct(sh.largest, sh.n),
-                sh.n
-            ))
-        }
+        // The share never refuses (0.2.0), so the override has nothing to waive there.
+        Finding::Pass | Finding::Concentrated { .. } | Finding::Unknown { .. } => None,
         Finding::Unverifiable { headline, .. } => Some(format!("{OVERRIDE_HISTORY}: {headline}")),
     }
 }
@@ -608,9 +652,8 @@ pub fn ack_history_entry(g: &Gates, noid: &NoidObservation, now: u64) -> Option<
     let c = noid.acknowledge_producer_share?;
     let screen = evaluate(g, noid, now);
     let used = match &screen.finding {
-        Finding::Concentrated { .. } => share_within(noid, c),
-        Finding::Pass => ack_used(g, noid, &screen.finding),
-        Finding::Unverifiable { .. } => false,
+        Finding::Pass | Finding::Concentrated { .. } => ack_used(g, noid, &screen.finding),
+        Finding::Unknown { .. } | Finding::Unverifiable { .. } => false,
     };
     if !used {
         return None;
@@ -622,8 +665,16 @@ pub fn ack_history_entry(g: &Gates, noid: &NoidObservation, now: u64) -> Option<
 /// The structured form of the screen for the page (`producer_screen` in the tick JSON).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ProducerScreenReport {
-    /// `pass`, `concentrated`, `cannot_check`, `stale`, `disagrees`, `one_node`, `remembered`.
+    /// `pass`, `concentrated` (a share above the warning limit: a warning), `share_unknown` (the share cannot be read: a warning), `cannot_check`,
+    /// `stale`, `disagrees`, `one_node`, `remembered`. Only the last five (the lying-node and second-node checks) can refuse the lock.
     pub state: &'static str,
+    /// The share was measured in both windows.
+    pub share_known: bool,
+    /// The plain warning about the share (above 50 %: the loud one; above the warning limit: the milder one; unknown: the unknown one), `None` when
+    /// the share is known and at or under the warning limit. Never a refusal.
+    pub warning: Option<String>,
+    /// The share never refuses (0.2.0): always `false` for the share. Kept so that a page can state it.
+    pub share_refuses: bool,
     /// The profile enforces the screen (`production`).
     pub enforced: bool,
     pub share_permille_long: Option<u64>,
@@ -632,8 +683,8 @@ pub struct ProducerScreenReport {
     /// `ok`, `missing`, `disagrees`, `remembered`, `unreadable`.
     pub second_node: &'static str,
     pub single_node_loopback: bool,
-    /// `true`: the screen passes, or (production) fails only for a reason `--acknowledge-producer-share` at its compiled maximum can waive. Always `true` under
-    /// the profiles that do not enforce.
+    /// `true`: the screen does not refuse, or (production) refuses only for a reason `--acknowledge-producer-share` can waive (one loopback node and no second
+    /// node). Always `true` under the profiles that do not enforce, and for every share finding.
     pub waivable_by_acknowledgement: bool,
     pub hard_max_permille: u64,
     /// The value of `--acknowledge-producer-share` on this tick, if given.
@@ -658,6 +709,7 @@ pub fn report(g: &Gates, noid: &NoidObservation, now: u64) -> ProducerScreenRepo
         }
     };
     let state = match &raw.finding {
+        Finding::Unknown { .. } => "share_unknown",
         Finding::Pass if g.producer_gate_enforced && second_node == "unreadable" => "cannot_check",
         Finding::Pass if g.producer_gate_enforced && second_node == "missing" => "one_node",
         Finding::Pass => "pass",
@@ -675,19 +727,15 @@ pub fn report(g: &Gates, noid: &NoidObservation, now: u64) -> ProducerScreenRepo
         None => (None, None),
     };
     let second_ok = second_node == "ok" || (second_node == "missing" && noid.single_node_loopback);
-    let waivable = !g.producer_gate_enforced
-        || state == "pass"
-        || (matches!(state, "concentrated" | "one_node") && second_ok && share_within(noid, ACK_HARD_MAX_PERMILLE));
+    let waivable = !g.producer_gate_enforced || matches!(state, "pass" | "concentrated" | "share_unknown") || (state == "one_node" && second_ok);
     let c = noid.acknowledge_producer_share;
-    let waived = g.producer_gate_enforced
-        && state != "pass"
-        && waivable
-        && c.is_some_and(|c| {
-            // One-node with the share under the limit needs no ceiling; a share over the limit needs it within the ceiling.
-            !(long.zip(short).is_some_and(|(l, s)| l.max(s) > g.producer_limit_permille) && !share_within(noid, c))
-        });
+    // Only the missing second node of a loopback node is waived by the flag now; the share is never a reason to refuse.
+    let waived = g.producer_gate_enforced && state == "one_node" && waivable && c.is_some();
     ProducerScreenReport {
         state,
+        share_known: long.is_some() && short.is_some() && !matches!(raw.finding, Finding::Unknown { .. }),
+        warning: share_warning(g, noid, matches!(raw.finding, Finding::Unknown { .. })),
+        share_refuses: false,
         enforced: g.producer_gate_enforced,
         share_permille_long: long,
         share_permille_short: short,

@@ -40,6 +40,9 @@ const newSwapNotice = require("./newswapnotice");
 const payoutHistory = require("./payouthistory");
 const { createSettlement } = require("./settlement");
 const { unstarted, candidate } = require("./unstarted");
+const { createBackupManager } = require("./backupmgr");
+const { createRestorer, readRestoredMarker, writeRestoredMarker } = require("./restore");
+const { createDefaultReadChainTick } = require("./restorechain");
 
 const ID_RE = /^[0-9a-f]{32}$/;
 const PRACTICE_PREFIX = "practice-"; // the id of a practice swap (lib/practice.js): the real routes and this set never take one
@@ -47,7 +50,7 @@ const BLOCK_S = 30;
 const UNSTARTED_GRACE_S = 600; // R23-3: how long a swap that ended before it started stays "active" after the program first saw it end (a deposit may still be in a mempool)
 const SNAPSHOT_MS = 2500;
 const SCAN_STALE_MS = 5000;
-const NOID_DEC = /^(0|[1-9]\d{0,3})(\.\d{1,6})?$/; // up to four whole digits: the mainnet cap is 2,500 NOID
+const NOID_DEC = /^(0|[1-9]\d{0,4})(\.\d{1,6})?$/; // up to five whole digits: the mainnet cap is 20,000 NOID
 const ETH_DEC = /^(0|[1-9]\d{0,1})(\.\d{1,18})?$/;
 const GWEI_DEC = /^(0|[1-9]\d{0,3})(\.\d{1,9})?$/;
 const WHOLE = /^[1-9]\d{0,15}$/;
@@ -139,6 +142,8 @@ class SwapSet {
     this.onAtStake = typeof program.atStakeChanged === "function" ? (l) => program.atStakeChanged(l) : null;
     this.stopped = false;
     this.settlement = createSettlement({ now: this.now, readReceipt: deps.readReceipt });
+    this.backupMgr = createBackupManager({ program, now: this.now, homeDir: deps.homeDir });
+    this.restorer = createRestorer({ program, swapSet: this, verifySwap: deps.verifySwap, readChainTick: typeof deps.readChainTick === "function" ? deps.readChainTick : createDefaultReadChainTick(program, { now: this.now, ...(deps.chainTickOpts || {}) }) || undefined, homeDir: deps.homeDir, now: this.now });
   }
 
   // ------------------------------------------------------------------------------------------------ program facts
@@ -701,6 +706,59 @@ class SwapSet {
     }
   }
 
+  isEndedAndSwept(swap, tick) {
+    if (!swap || !swap.runner || !tick || typeof tick.phase_after !== "string") return false;
+    const role = swap.settingsSource ? swap.settingsSource.role() : null;
+    if (role !== "alice" && role !== "bob") return false;
+    if (!(ENDED_PHASES[role] || []).includes(tick.phase_after)) return false;
+    const ethSwept = !!swap.runner.walletMarker(`wallet-swept-eth-${role}.marker`);
+    const noidSwept = role === "bob" || !!swap.runner.walletMarker("wallet-swept-noid.marker");
+    return ethSwept && noidSwept;
+  }
+
+  backupStatus(swap, role, run, tick) {
+    try {
+      const tk = tick || (run && run.roles && role && run.roles[role] ? run.roles[role].tick || null : null);
+      return this.backupMgr.statusOf(swap, { tick: tk, endedAndSwept: this.isEndedAndSwept(swap, tk) });
+    } catch {
+      return null;
+    }
+  }
+
+  async saveBackup(swap, opts = {}) {
+    const run = swap && swap.runner ? this.runOf(swap) : null;
+    const role = swap && swap.settingsSource ? swap.settingsSource.role() : null;
+    const tick = run && run.roles && role && run.roles[role] ? run.roles[role].tick || null : null;
+    return this.backupMgr.save(swap, { ...opts, tick });
+  }
+
+  async updateBackup(swap) {
+    const run = swap && swap.runner ? this.runOf(swap) : null;
+    const role = swap && swap.settingsSource ? swap.settingsSource.role() : null;
+    const tick = run && run.roles && role && run.roles[role] ? run.roles[role].tick || null : null;
+    return this.backupMgr.update(swap, { tick });
+  }
+
+  async restoreBackup(opts = {}) {
+    return this.restorer.restore(opts);
+  }
+
+  /** Populates `first_read` in restored.json on the first good tick with both chain tips. */
+  noteRestoredFirstRead(swap, tick) {
+    if (!swap || !tick) return;
+    const rec = readRestoredMarker(swap.dir);
+    if (!rec || rec.first_read) return;
+    const noidTip = tick.noid && Number.isSafeInteger(tick.noid.tip) ? tick.noid.tip : null;
+    const ethBlock = tick.eth && Number.isSafeInteger(tick.eth.latest_block) ? tick.eth.latest_block : null;
+    if (noidTip !== null && ethBlock !== null) {
+      try {
+        writeRestoredMarker(swap.dir, { ...rec, first_read: { noid_tip: noidTip, eth_block: ethBlock, at: new Date(this.now()).toISOString() } });
+      } catch {
+        /* try again on next tick */
+      }
+    }
+  }
+
   /** One pass for every swap (the server's 3 s timer). Never throws. */
   tick() {
     if (this.stopped) return;
@@ -718,6 +776,19 @@ class SwapSet {
         if (swap.board) swap.board.step();
         swap.autopilot.step();
         swap.executor.supervise().catch(() => {});
+        // Fire-and-forget async single-flight backup refresh (never awaited, never blocks the 3 s timer)
+        const bTick = (() => {
+          try {
+            const r = this.runOf(swap);
+            const role = swap.settingsSource ? swap.settingsSource.role() : null;
+            return r && r.roles && role && r.roles[role] ? r.roles[role].tick || null : null;
+          } catch {
+            return null;
+          }
+        })();
+        const pRefresh = this.backupMgr.maybeRefresh(swap, { tick: bTick, endedAndSwept: this.isEndedAndSwept(swap, bTick) });
+        if (pRefresh && typeof pRefresh.catch === "function") pRefresh.catch(() => {});
+        this.noteRestoredFirstRead(swap, bTick);
       } catch (e) {
         swap.lastError = String((e && e.code) || "error").slice(0, 24);
       } finally {
@@ -1095,4 +1166,14 @@ class SwapSet {
   }
 }
 
-module.exports = { SwapSet, DeniedLock, versionTuple, cmpVersion, IN_CONTRACT, ID_RE, FORM_FIELDS };
+/**
+ * The network of the top bar's chip, from the list of swap summaries: "mainnet" as soon as one OPEN swap is a mainnet swap (real funds), else "test". Open = active, or not
+ * read yet (being set up: no tick) and not over for the list. A mainnet swap that is done, aborted or never started does not light it (rehearsal run 24 F10: a stopped mainnet
+ * folder lit "Ethereum mainnet: real funds" over a test swap with 0 active). The swap's own page keeps its own mainnet tag.
+ */
+function barNetwork(list) {
+  const open = (x) => x && x.network === "mainnet" && (x.active === true || (x.phase === null && x.unstarted !== true));
+  return Array.isArray(list) && list.some(open) ? "mainnet" : "test";
+}
+
+module.exports = { SwapSet, DeniedLock, versionTuple, cmpVersion, IN_CONTRACT, ID_RE, FORM_FIELDS, barNetwork };

@@ -2,7 +2,7 @@
 
 The shell of the desktop program (piece 4, step 4.7). It runs the console server in its main process, shows it in one hardened
 window, keeps the machine awake while coins are in a contract, comes back after a crash, and starts at login while a swap is
-active. This version works on the test networks and, within fixed limits per swap (0.5 ETH and 2,500 NOID), on Ethereum mainnet, where the coins are real.
+active. This version works on the test networks and, within fixed limits per swap (1 ETH and 20,000 NOID), on Ethereum mainnet, where the coins are real.
 
 All logic lives in plain modules under `lib/` that take the Electron module (or the parts they need) as an argument and are tested
 with `node --test` against a fake `electron` (`test/fake-electron.js`). **Only `main.js` and `preload-secret.js` may
@@ -28,7 +28,8 @@ decides if it needs the package).
 | `main.js` | entry point; hands `electron` to `lib/shell.js` |
 | `preload-secret.js` | preload of the secret window only: `window.no1dSecret = { onShow, submit, cancel }` |
 | `secret/` | the secret window's page (`secret.html`, `secret.js`, `secret.css`): the only place a secret is shown or typed |
-| `assets/` | tray icons (`tray.png`, `trayTemplate.png`, `trayTemplate@2x.png`); the stage step must copy this folder |
+| `assets/` | the window icon (`icon.png`) and the tray icons (`tray.png`, `trayTemplate.png`, `trayTemplate@2x.png`); the stage step must copy this folder |
+| `build/` | the program icons the builder reads from the project folder, not packed into the program: `icon.ico` (Windows program, installer and uninstaller) and `icon.png` (1024 x 1024, the Mac icon); `scripts/stage.js` stops when any of the three icon files is missing |
 | `lib/shell.js` | the start-up order (below), switch refusals, wiring |
 | `lib/program.js` | builds the `program` object (build spec I1) from the pieces |
 | `lib/window.js`, `lib/hardening.js` | the main window (and its `openSettings`) and the policy guard of every webContents |
@@ -305,6 +306,14 @@ swap imported from the terminal console). After that, every `swap-cli` command f
 commands are in `swap-cli/README.md` (sections "The NOID swap wallet" and "The Ethereum swap key"). Close the shell when you are done: the
 passphrase is in its environment.
 
+If you have a `.no1dbackup` file instead of the run folder, open it into a new folder first (`backup-open` refuses an existing output folder and
+reads the recovery code from standard input only, writes every file with mode `0600` after verifying its SHA-256, writes `vault-check.json`, and writes the `restored.json` marker with `first_read` null, so a folder moved into `runs/` runs under the restore gates like a restored swap does: the one-computer statement, the funding pause until the first good tick, the 2x refusal and Bob's self-test):
+
+```sh
+node "$REPO/desktop/tools/recovery.js" backup-open /path/to/swap.no1dbackup /path/to/opened-run
+export SWAP_PASSPHRASE="$(node "$REPO/desktop/tools/recovery.js" passphrase /path/to/opened-run)"
+```
+
 The second half can be checked with `openssl` (the code is still turned into the secret by `recovery.js`), for a folder the program made
 (no `passphrase.sealed`); this form gives the public test vector of the build specification:
 
@@ -434,3 +443,22 @@ The application menu has "Practice swap" beside Help (`buildApplicationMenu` tak
 item named "Practice swap" with a fixed script (`OPEN_PRACTICE_SCRIPT` in `lib/window.js`, the same way as `OPEN_SETTINGS_SCRIPT`: only while the page is the program's own, no argument, `false` when the item is
 not there). The practice itself is the console's (`ui/app/README.md`, "The practice swap"): the shell requires nothing of it and the Help text says it needs no node, no coins, no network and no key store.
 Tests: `test/practice-menu.test.js` (6).
+
+## Swap backup and restore, desktop side
+
+The application menu adds "Restore a swap…" after Practice swap (`buildApplicationMenu` takes `onRestore`, wired by `shell.js` to `windowCtl.openRestore()` using fixed script `OPEN_RESTORE_SCRIPT`). Sealed `.no1dbackup` files use the `swap-backup` key derivation label (`no1d-swap/v1/swap-backup/<runId>`) and `sealed.js` AES-256-GCM envelope; backup writes are asynchronous and atomic (temp + rename, outside the data directory, refusing links and hard links). Restoring a backup from another installation validates the decrypted backup offline before adopting the typed recovery code (`vault.openBackup`), and the secret window asks for the code (`backup-code`) and confirms adoption (`backup-adopt`) in its own private window.
+Tests: `test/backupfile.test.js`, `test/vault-backup.test.js`, `test/program-backup.test.js`, `test/restore-menu.test.js`, `test/recovery-tool.test.js`.
+
+## Program icons (0.2.0)
+
+The main window and the secret window take the window icon (`assets/icon.png`) through an `iconPath` option (`createMainWindow`, `createSecretUi`; the shell passes it). The tray icons are the new mark, not the old diamond. `electron-builder.yml` names `build/` as its resources and sets the Windows program, installer and uninstaller icon to `build/icon.ico` and the Mac icon to `build/icon.png`. Tests: `test/icons.test.js`, and the stage test for the missing-icon stop.
+
+## Closing to the tray (run 24, F8)
+
+Closing the window while a swap is active hides it to the tray on purpose (the quit guard keeps the program running so the autopilot can act). That was silent, so a person who meant to quit saw the program stay. `createMainWindow` now takes `onHiddenToTray`, called the first time in a session that a close only hides; the shell passes `notifier.trayNotice()`, one fixed notification: "No1d Swap is still running in the tray because a swap is in progress. To quit, use Quit in the tray menu." The tray's Quit and the application menu's Quit both call `app.quit()`, which goes through the existing quit guard (its text when a swap is in flight) and `will-quit` ends the process; no leftover process was found. The guard is unchanged. Tests: `test/window.test.js`, `test/notify.test.js`.
+
+## Words of the second audit round (2026-11-27)
+
+- Opening a backup on an installation that already has swaps under another recovery code (finished ones count too) is refused with words that name no impossible step: restore in a fresh user account on this computer, on another computer, or with the recovery tool (`lib/vault.js`, `secret/secret.js`; F-15).
+- The Help paragraph "If a swap cannot end" names Ethereum mainnet beside Sepolia for the check before `intent --cancel` (F-27).
+

@@ -186,7 +186,8 @@ function build(kind, j, ctx) {
     if (Array.isArray(j.foreignLocksSameHashlock)) add("Locks by other senders under this hashlock", "0", j.foreignLocksSameHashlock.length, j.foreignLocksSameHashlock.length === 0);
   } else if (kind === "reveal_eth") {
     add("Signer (Alice's Ethereum address)", eth.alice_receiver, j.from, eq(j.from, eth.alice_receiver));
-    add("Lock id", ep.lock_id, j.lockId, ep.lock_id !== undefined && eq(j.lockId, ep.lock_id));
+    const wantLockId = ep.lock_id !== undefined ? ep.lock_id : ctx.replace && tick && tick.eth && tick.eth.lock ? tick.eth.lock.lock_id : undefined;
+    add("Lock id", wantLockId, j.lockId, wantLockId !== undefined && eq(j.lockId, wantLockId));
     add("Receiver of the ETH (Alice)", eth.alice_receiver, j.receiver, eq(j.receiver, eth.alice_receiver));
     add("Amount claimed (wei)", eth.amount_wei, j.amountWei, eq(j.amountWei, eth.amount_wei));
     if ((j.lockKind || "sha256") === "sha256") add("Hashlock H of the lock", terms && terms.hashlock, j.hashlock, eq(j.hashlock, terms && terms.hashlock));
@@ -217,6 +218,7 @@ function build(kind, j, ctx) {
     const rp = j.replace && typeof j.replace === "object" ? j.replace : null;
     add("Replacement plan present", "a replace section", rp ? "present" : "absent", !!rp);
     if (replaceTx) add("Replaces transaction", replaceTx, rp && rp.replacesTx, !!rp && eq(rp.replacesTx, replaceTx));
+    else if (rp && rp.nonceZeroFreshKey === true) add("Replaces pending send at nonce 0", "nonce 0", rp.nonce, rp.nonce === 0);
     else if (rp) info("Replaces transaction (found by the helper)", rp.replacesTx);
     if (rp) info("Replacement fee (gwei): max / tip", `${rp.newMaxFeeGwei} / ${rp.newTipGwei}`);
   } else if (j.replace) {

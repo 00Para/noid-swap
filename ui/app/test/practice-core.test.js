@@ -321,12 +321,12 @@ test("the worst case and the stay-online time are the program's own figures: nev
 
 test("the practice's producer statement carries the real card's warning for a share above half", () => {
   const card = fs.readFileSync(path.join(__dirname, "..", "stagecard.js"), "utf8");
-  const tail = "someone who controls most of the mining can take both sides of a swap. Swap only with someone you have a reason to trust.";
+  const tail = "someone who controls most of the mining can take both sides of a swap, and no time window protects you from that. Swap only with someone you have a reason to trust.";
   assert.ok(card.includes(tail), "the real card's warning is still in stagecard.js");
   const producer = T.STATEMENTS.bob.find((s) => s.id === "producer");
   assert.ok(producer.text.includes(tail), producer.text);
   assert.match(producer.text, /above 50 %/);
-  assert.match(producer.text, /up to 65 %/);
+  assert.match(producer.text, /does not refuse/);
 });
 
 // ------------------------------------------------------------------ the seal: the require graph

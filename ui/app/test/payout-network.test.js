@@ -13,7 +13,7 @@ const PIN = "0x48Ce4D6cf3c175737532017e82B9261b51F8E5eF";
 const MY_ETH = "0x" + "9a9A".repeat(10);
 const MAIN_ETH = "0x" + "5b5B".repeat(10);
 const SETTINGS = { ...programsettings.defaults(), noid_payout: "o1lqvrmvsyl7mkt3cptkz3c965ujt5ce6mjawxwwxe7mgn36mjzt8sn69xw2", eth_payout: MY_ETH };
-const formInfo = () => ({ profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: PIN }, rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null }, production: { chain: 1, max_noid: 2500, max_eth: 0.5, contract: null, mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" } }, roles: ["alice", "bob"] });
+const formInfo = () => ({ profiles: { sepolia: { chain: 11155111, max_noid: 20, max_eth: 0.01, contract: PIN }, rehearsal: { chain: 31337, max_noid: 20, max_eth: 0.01, contract: null }, production: { chain: 1, max_noid: 20000, max_eth: 1, contract: null, mainnet: true, fee_cap_gwei: "1", tip_gwei: "0.05" } }, roles: ["alice", "bob"] });
 const norm = (t) => t.replace(/\s+/g, " ").trim();
 const HINT = /Enter your Ethereum mainnet address\. The one saved in Settings was used on a test network, or its network is not known\./;
 

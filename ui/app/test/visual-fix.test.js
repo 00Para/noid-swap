@@ -105,8 +105,8 @@ test("a share above 50 % adds one sentence in the warning style; at or below it 
   const hi = await at("52.7");
   const warn = hi.byId("pg-card").all((n) => has(n, "lock-half"))[0];
   assert.ok(warn && has(warn, "attn"));
-  assert.equal(squash(textOf(warn)), "That is more than half: someone who controls most of the mining can take both sides of a swap. Swap only with someone you have a reason to trust.");
-  assert.match(card(hi), /Your program can lock on this swap now\. One address mined 52\.7 %/, "the calm line is still there");
+  assert.equal(squash(textOf(warn)), "That is more than half: someone who controls most of the mining can take both sides of a swap, and no time window protects you from that. Swap only with someone you have a reason to trust.");
+  assert.match(card(hi), /Your program can lock on this swap now\. One producer mined 52\.7 % of recent Parano1d blocks\./, "the calm line is still there");
   for (const s of ["50", "26.4", null]) assert.equal((await at(s)).byId("pg-card").all((n) => has(n, "lock-half")).length, 0, String(s));
 });
 

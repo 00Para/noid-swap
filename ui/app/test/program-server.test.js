@@ -362,7 +362,7 @@ test("POST /api/newswap: a good form makes a swap and answers its id; errors ans
     assert.equal(r.status, 422);
     assert.equal(r.body.ok, false);
     assert.ok(r.body.errors.profile);
-    r = await api("POST", "/api/newswap", { fields: { ...form, profile: "production", noid_amount: "2501" } });
+    r = await api("POST", "/api/newswap", { fields: { ...form, profile: "production", noid_amount: "20001" } });
     assert.equal(r.status, 422, "over the mainnet cap");
     assert.ok(r.body.errors.noid_amount);
     r = await api("POST", "/api/newswap", { fields: form });

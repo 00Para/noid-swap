@@ -121,7 +121,7 @@ function resolve(id, x = {}) {
       return { name: "reveal", call: (s, c) => s.reveal(c, { dryRun: id === "dry-reveal" }) };
     case "dry-reveal-replace":
     case "send-reveal-replace":
-      return { name: "reveal", call: (s, c) => s.reveal(c, { dryRun: id === "dry-reveal-replace", replace: x.tx }) };
+      return { name: "reveal", call: (s, c) => s.reveal(c, { dryRun: id === "dry-reveal-replace", replace: x.tx || true }) };
     case "dry-claim":
     case "send-claim":
       return { name: "claim", call: (s, c) => s.claim(c, { submit: id === "send-claim" }) };
@@ -471,7 +471,8 @@ function createStepExecutor({ program, swap, steps, now, watchOpts } = {}) {
     }
     if (id === RECORD_CLOSE_ID && !((x.role === "alice" || x.role === "bob") && typeof x.txid === "string" && /^[0-9a-f]{64}$/.test(x.txid))) return { code: null, refused: true, why: "no valid transaction id", stdout: "", stderr: "", files: [], step: mapped.name };
     if (id === "join" && (typeof x.bundlePath !== "string" || !x.bundlePath)) return { code: null, refused: true, why: "no file chosen", stdout: "", stderr: "", files: [], step: mapped.name };
-    if (/^(?:dry|send)-reveal-replace$|^(?:dry|send)-refund-eth-replace$/.test(id) && !(typeof x.tx === "string" && /^0x[0-9a-f]{64}$/.test(x.tx))) return { code: null, refused: true, why: "no pending transaction hash", stdout: "", stderr: "", files: [], step: mapped.name };
+    if (/^(?:dry|send)-refund-eth-replace$/.test(id) && !(typeof x.tx === "string" && /^0x[0-9a-f]{64}$/.test(x.tx))) return { code: null, refused: true, why: "no pending transaction hash", stdout: "", stderr: "", files: [], step: mapped.name };
+    if (/^(?:dry|send)-reveal-replace$/.test(id) && x.nonceZero !== true && !(typeof x.tx === "string" && /^0x[0-9a-f]{64}$/.test(x.tx))) return { code: null, refused: true, why: "no pending transaction hash", stdout: "", stderr: "", files: [], step: mapped.name };
     // a step that sends nothing gets a signal and is stopped after the entry's own time limit; a sender is never abandoned
     let ac = null;
     let timer = null;
