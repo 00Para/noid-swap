@@ -2,9 +2,8 @@
 # attach the programs as build artifacts, so that nobody has to trust a program built on a private machine.
 # What this builds and how to check a download: docs/building.md.
 #
-# NOT VERIFIED: this workflow has never run. The native Windows build of swap-cli has never been made
-# (it was only built inside WSL, and natively on macOS for one role). The first run is the first test of
-# both, and of the comparison with upstream. Guesses are marked "GUESS" below.
+# Ran three times (docs/building.md): run 3 was the first in which every job passed, the native Windows
+# build and its tests included.
 #
 # No secrets are used. The chain's source (vendor/parano1d) is part of this repository and the build uses it as
 # it is; a separate step clones upstream at one fixed commit and checks that the two trees are identical. The zkVM
@@ -46,11 +45,10 @@ jobs:
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
             exe: swap-cli.exe
-            # The swap-cli TEST step on Windows may fail without failing the job, for this reason only: the dev-dependency
-            # on the chain's noid_chain crate pulls in libmdbx (a C library built with bindgen), and neither the
-            # tests of swap-cli nor that crate have ever been built or run natively on Windows. Make the step
-            # strict (set this to false) once a run shows it passing. The BUILD step and the console's tests are always strict.
-            tests_may_fail: true
+            # Strict since run 3, the first run in which every swap-cli test passed on Windows. Until then this step could
+            # fail without failing the job (the tests and libmdbx, the C library the chain's noid_chain crate builds with
+            # bindgen, had never run natively on Windows). The BUILD step and the console's tests were always strict.
+            tests_may_fail: false
           - os: macos-latest
             platform: macos-aarch64
             target: aarch64-apple-darwin
@@ -84,7 +82,7 @@ jobs:
       # The chain's source ships in this repository (vendor/parano1d) and the build uses it as it is. This step
       # proves that it is the upstream source at the fixed commit: it clones upstream into a folder OUTSIDE the
       # workspace and compares every file's bytes. A file on one side only, or one different byte, fails the job.
-      # The upstream .git folder and research/ directory are left out of the comparison. This step has never run.
+      # The upstream .git folder and research/ directory are left out of the comparison. It passed in every job that reached it (runs 1 to 3).
       - name: Check that vendor/parano1d is the chain's source at the fixed commit
         run: |
           # The commit and the repository named here are the ones the helper script names.
@@ -135,7 +133,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev cmake pkg-config
 
-      # GUESS: the macOS runner has Xcode's compiler; cmake and llvm (for libclang) are installed with brew if missing.
+      # Seen to hold in the runs: the macOS runner has Xcode's compiler; cmake and llvm (for libclang) are installed with brew if missing.
       - name: Native dependencies (macOS)
         if: matrix.os == 'macos-latest'
         run: |
@@ -143,7 +141,7 @@ jobs:
           brew list llvm >/dev/null 2>&1 || brew install llvm
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
 
-      # GUESS: the Windows runner has Visual Studio Build Tools, CMake and LLVM preinstalled, and LLVM lives in
+      # Seen to hold in the runs: the Windows runner has Visual Studio Build Tools, CMake and LLVM preinstalled, and LLVM lives in
       # C:\Program Files\LLVM. If libclang.dll is missing it is installed with choco.
       - name: Native dependencies (Windows)
         if: matrix.os == 'windows-latest'
@@ -166,9 +164,9 @@ jobs:
         working-directory: swap-cli
         run: cargo build --release --locked
 
-      # Strict on Linux and macOS. On Windows it may fail without failing the job (matrix.tests_may_fail,
-      # see the reason in the matrix). Tests that use `sh`, symlinks, file modes or directory sync are
-      # compiled only on Unix (cfg(unix)), so they do not run on Windows at all (docs/building.md lists them).
+      # Strict on every system (matrix.tests_may_fail is false everywhere since run 3; it stays as a switch). Tests that
+      # use `sh`, symlinks, file modes or directory sync are compiled only on Unix (cfg(unix)), so they do not run on
+      # Windows at all (docs/building.md lists them).
       - name: Test swap-cli
         id: test
         continue-on-error: ${{ matrix.tests_may_fail }}

@@ -102,7 +102,7 @@ No swap between two separate people has run yet. The amounts are trial amounts.
 | `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | 848 tests (+1 ignored); drove every run in the table. Since 2026-11-17 it also has a NOID wallet and an Ethereum key of its own for each swap (`wallet`, `ethkey`): tested offline, see "Status and warnings" |
 | `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 to 20 (on a Mac in native mode for Bob's side in runs 9 to 14); the wallet and board helpers added on 2026-11-17 are tested against stub tools only; the shell layer's self-test is 780 cases |
 | `scripts/` | `setup.sh` / `setup.ps1` (build and test everything), `fetch-vendor.sh` | — |
-| `ui/` | The operator console (`ui/app`: a read-only view, an actions mode behind a gate, the autopilot, wallet runs, the offer board and its screens) | 644 console tests, tested offline; not run on a public network |
+| `ui/` | The operator console (`ui/app`: a read-only view, an actions mode behind a gate, the autopilot, wallet runs, the offer board and its screens) | 997 console tests (the steps that replace the shell helpers included), tested offline; not run on a public network |
 | `vendor/parano1d` | Unmodified copy of the Parano1d source at commit `d29b801` (Apache-2.0, see `THIRD-PARTY-NOTICES.md`) | read-only |
 | `PROJECT.md`, `TASKS.md` | Project memory and backlog | — |
 
@@ -123,7 +123,7 @@ Each component's `README.md` is the source of truth for that component.
   component READMEs. The one exception: a one-person run on 2026-11-17 (run 22, `docs/live-run-22.md`), in which the funding, the recovery and the sweep built by the tool's own
   NOID wallet were accepted and mined on Parano1d mainnet. The board is a private test board by invitation until an outside review;
   the autopilot and the board refuse a production run; the board's messaging keys are stored unsealed until the installer moves secrets to the operating system's key
-  store; there is no native Windows build of `swap-cli` yet (it runs under WSL).
+  store; the hosted build makes a native Windows `swap-cli` that passes its offline tests (`docs/building.md`), but it has not been run against a node (the live runs used WSL).
 - **Hard rules** (details in `SECURITY.md`): never fund the example params; never use Parano1d's stock
   `refundable_payment` template for a swap; one fresh secret per swap, sealed, never on a command line;
   `max_fee` at least 5,800 μNOID; the NOID claim must be *final* before the deadline.

@@ -5,10 +5,10 @@ GitHub's own machines, runs the offline tests, prints the sha256 of each program
 artifacts. The point is that you can get a program whose build you can read, instead of trusting one built on a private
 machine.
 
-**Status: the workflow ran twice (run 1 at the public commit `111f72d`, run 2 at `fed3c64`).** Run 2 built and tested the
-program on Linux and macOS and passed the Ethereum tests; on Windows it built the program but stopped at the console's
-tests. What each run showed is below; the fixes are in the workflow and the tests since. Read "Not verified" before relying
-on it.
+**Status: the workflow ran three times (run 1 at the public commit `111f72d`, run 2 at `fed3c64`, run 3 at `cbb1bf5`).**
+Run 3 was the first in which every job passed: the program was built, its tests and the console's tests passed and it was
+uploaded on Windows, macOS and Linux, and the Ethereum tests passed. Since then the Windows test step is strict like the
+others. What each run showed is below. Read "Not verified" before relying on it.
 
 ## What the workflow does
 
@@ -46,10 +46,9 @@ Each job does this, in order:
 A fourth job runs the Ethereum side's tests (`npm ci`, `npx hardhat test` in `eth`) on Linux only. It takes about nine
 minutes.
 
-On Windows the `swap-cli` test step is allowed to fail without failing the job, because those tests had never been run
-there. The build step and the console's tests are never allowed to fail. Once a run shows the Windows `swap-cli` tests
-passing, the flag `tests_may_fail` in the file must be set to `false`. `BUILD-INFO.txt` records the real test result either
-way.
+Every step is strict on every system. Until run 3 the Windows `swap-cli` test step was allowed to fail without failing the
+job, because those tests had never been run there; run 3 showed them passing, and the flag `tests_may_fail` in the file is
+now `false` for Windows too. `BUILD-INFO.txt` records the test result.
 
 Sixteen console tests need a Windows host: they set the console up for helpers inside WSL and read real folders that the
 console sees as `C:\...` and the helpers as `/mnt/c/...`. On Linux and macOS they are skipped with that reason
@@ -120,6 +119,17 @@ GitHub's machines and the toolchain they download. A program you build yourself 
   pass to a helper as a plain path; the tests now make their folders under the long form of that path. The console step is
   strict, so the job failed and the Windows program of run 2 was not uploaded.
 
+## Run 3
+
+- **Every job passed**, the first run to do so. On Windows the `swap-cli` tests passed (47 minutes), with the prover
+  stand-in as a `.cmd` file; so did the console's tests, with their folders under the long form of the temp path. The
+  step that names failing tests did not run (nothing failed), and the run's only annotation is GitHub's notice that the
+  three pinned actions are built for Node 20 and were run on Node 24.
+- Linux and macOS built and tested again; the Ethereum tests passed on Linux.
+- The three programs were uploaded. A downloaded program is checked against the sha256 printed in its job (see "Check a
+  downloaded program"); the digest GitHub lists for each artifact is that of the zip archive, not of the program.
+- After this run the Windows test step was made strict (`tests_may_fail: false`).
+
 ## What is not built
 
 - The zkVM prover and its proofs (`equiv/`). The proof-free lock kind (`poseidon`) needs neither a proof nor a receipt, so
@@ -131,10 +141,9 @@ GitHub's machines and the toolchain they download. A program you build yourself 
 
 ## Not verified
 
-- **The native Windows program has never been run.** It was built (run 1); nothing more. Its `swap-cli` tests fail on
-  Windows for reasons not yet seen (see Run 1).
-- **The native Windows tests.** The dev-dependency on the chain's `noid_chain` crate pulls in libmdbx, a C library built
-  with bindgen. It has not been built on Windows here.
+- **The native Windows program has not been run against a node or a chain.** It was built (runs 1 to 3) and its offline
+  tests pass on Windows (run 3); nothing more. The tests that need `sh`, symlinks, file modes or a folder sync do not run
+  there (see the table below).
 - The three actions (checkout, setup-node, upload-artifact) are pinned to full commit ids, looked up on 2026-11-17; that
   each id is the release its comment names was not checked a second way.
 
