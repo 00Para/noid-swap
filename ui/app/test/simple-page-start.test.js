@@ -162,22 +162,28 @@ test("Prepare and Bob's file step keep their buttons: Prepare posts the table id
 
 // ---------------------------------------------------------------- the first card
 
-test("the first card of Alice, in the order of the work: the file for Bob, the check line and its box, the read-phase line, the approval, the deposit", async () => {
+test("the first card of Alice: the stage card holds the approval, and today's page keeps the rest in the order of the work (the file for Bob, the check line and its box, the read-phase line, the deposit)", async () => {
   const page = await openSwap(F.SWAP_A, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW }, status: covered("alice") }));
+  const card = squash(page.text("pg-card"));
+  assert.match(card, /Approve this swap/);
+  assert.match(card, /Run this swap for me/);
   const t = squash(page.text("next-action"));
+  assert.doesNotMatch(t, /Run this swap for me/, "the approval is drawn once: on the card");
   const at = (s) => {
     const i = t.indexOf(s);
     assert.ok(i >= 0, `missing: ${s}`);
     return i;
   };
-  const order = [at("Give Bob your swap file"), at("Compare the check lines"), at("The program reads both chains every 30 seconds"), at("Run this swap for me"), at("NOID to deposit")];
+  const order = [at("Give Bob your swap file"), at("Compare the check lines"), at("The program reads both chains every 30 seconds"), at("NOID to deposit")];
   assert.deepEqual(order, [...order].sort((x, y) => x - y), t);
 });
 
-test("the first card of Bob: his check line and its box come before the approval, and the deposit comes last", async () => {
+test("the first card of Bob: the stage card holds the approval; today's page keeps his check line and its box before the deposit", async () => {
   const page = await openSwap(F.SWAP_B, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW }, status: covered("bob") }));
+  assert.match(squash(page.text("pg-card")), /Run this swap for me/);
   const t = squash(page.text("next-action"));
-  const order = ["Compare the check lines", "Run this swap for me", "ETH to deposit"].map((s) => t.indexOf(s));
+  assert.doesNotMatch(t, /Run this swap for me/, "the approval is drawn once: on the card");
+  const order = ["Compare the check lines", "ETH to deposit"].map((s) => t.indexOf(s));
   assert.ok(order.every((i) => i >= 0), t);
   assert.deepEqual(order, [...order].sort((x, y) => x - y));
   assert.doesNotMatch(t, /Give Bob your swap file/, "Bob has no file to give");
@@ -197,12 +203,14 @@ test("the read-phase line shows while the watch is reading only, and not for a r
   assert.ok(squash(start.text("start")).includes(SAY));
 });
 
-test("the start screen draws the first card's boxes after the strip: the file, the check line, the approval once the lines are confirmed, the deposit", async () => {
+test("the start screen draws the first card's boxes after the strip: the file, the check line, the deposit; the approval, once the lines are confirmed, is on the stage card", async () => {
   const page = await openSwap(F.SWAP_A, (r) => startPayload(r, { line_match: { hex: HEX, at: NOW }, status: covered("alice") }));
   assert.match(squash(page.text("next-action")), /The swap is made done/);
   const t = squash(page.text("start"));
-  for (const w of ["Give Bob your swap file", GROUPED, "Confirmed at", "Run this swap for me", "NOID to deposit", "ETH to deposit"]) assert.ok(t.includes(w), w);
-  assert.ok(t.indexOf("Give Bob your swap file") < t.indexOf("Run this swap for me") && t.indexOf("Run this swap for me") < t.indexOf("NOID to deposit"));
+  for (const w of ["Give Bob your swap file", GROUPED, "Confirmed at", "NOID to deposit", "ETH to deposit"]) assert.ok(t.includes(w), w);
+  assert.ok(t.indexOf("Give Bob your swap file") < t.indexOf("NOID to deposit"));
+  assert.ok(!t.includes("Run this swap for me"), "the approval is drawn once: on the card");
+  assert.match(squash(page.text("pg-card")), /Approve this swap.*Run this swap for me/);
 });
 
 test("a board run keeps today's card: none of the new boxes, and the old deposit words", async () => {
@@ -220,33 +228,33 @@ test("a board run keeps today's card: none of the new boxes, and the old deposit
 
 test("the check line is the same 16 digits in four groups of four from the program's record and from the step's own result, and the same groups on both sides", async () => {
   const fromRecord = await openSwap(F.SWAP_A, (r) => cardPayload(r));
-  assert.ok(squash(fromRecord.text("next-action")).includes(`Your check line ${GROUPED}`));
-  const line = fromRecord.byId("next-action").all((n) => n.className.includes("bundle-check"))[0];
+  assert.ok(squash(fromRecord.text("pg-card")).includes(`Your check line ${GROUPED}`));
+  const line = fromRecord.byId("pg-card").all((n) => n.className.includes("bundle-check"))[0];
   assert.match(line.className, /grouped/);
   assert.equal(line.tag, "p");
   // from the job record only (display; the confirm box needs the program's own record)
   const job = F.job("prepare", { stdout: `bundle copied to /x/alice.bundle.json -- bundle check: ${HEX} ok` });
   const fromJob = await openSwap(F.SWAP_A, (r) => cardPayload(r, { check_line: null, run: { jobs: [F.job("setup"), F.job("wallet-setup-alice"), job] } }));
-  assert.ok(squash(fromJob.text("next-action")).includes(`Your check line ${GROUPED}`));
+  assert.ok(squash(fromJob.text("pg-card")).includes(`Your check line ${GROUPED}`));
   const bobJob = F.job("join", { stdout: `bundle check: ${HEX} ok` });
   const bob = await openSwap(F.SWAP_B, (r) => cardPayload(r, { check_line: null, run: { jobs: [F.job("setup"), F.job("wallet-setup-bob"), bobJob] } }));
-  assert.ok(squash(bob.text("next-action")).includes(`Your check line ${GROUPED}`));
+  assert.ok(squash(bob.text("pg-card")).includes(`Your check line ${GROUPED}`));
   const bobRec = await openSwap(F.SWAP_B, (r) => cardPayload(r));
-  assert.ok(squash(bobRec.text("next-action")).includes(`Your check line ${GROUPED}`));
+  assert.ok(squash(bobRec.text("pg-card")).includes(`Your check line ${GROUPED}`));
   // the words of each side, exactly
-  assert.ok(squash(fromRecord.text("next-action")).includes("Read it to Bob over a call or another channel, and let him read his to you. All 16 digits must be the same. If they differ, or his program refused your file, stop: do not approve and do not deposit."));
-  assert.ok(squash(bobRec.text("next-action")).includes("Read it to Alice over a call or another channel, and let her read hers to you. All 16 digits must be the same. If they differ, stop: do not approve and do not deposit."));
+  assert.ok(squash(fromRecord.text("pg-card")).includes("Read it to Bob over a call or another channel, and let him read his to you. All 16 digits must be the same. If they differ, or his program refused your file, stop: do not approve and do not deposit."));
+  assert.ok(squash(bobRec.text("pg-card")).includes("Read it to Alice over a call or another channel, and let her read hers to you. All 16 digits must be the same. If they differ, stop: do not approve and do not deposit."));
 });
 
 test("without the program's check-line record there is no confirm box (display only); with no digits at all the page says so and offers nothing", async () => {
   const job = F.job("prepare", { stdout: `bundle copied to /x/alice.bundle.json -- bundle check: ${HEX} ok` });
   const shown = await openSwap(F.SWAP_A, (r) => cardPayload(r, { check_line: null, run: { jobs: [F.job("setup"), F.job("wallet-setup-alice"), job] } }));
-  assert.equal(shown.byId("next-action").all((n) => n.attrs.id === "cl-match").length, 0);
-  assert.equal(btnWith(shown.byId("next-action"), "Confirm"), null);
+  assert.equal(shown.byId("pg-card").all((n) => n.attrs.id === "cl-match").length, 0);
+  assert.equal(btnWith(shown.byId("pg-card"), "Confirm"), null);
   const none = await openSwap(F.SWAP_A, (r) => cardPayload(r, { check_line: null }));
-  assert.ok(squash(none.text("next-action")).includes("The check line could not be read from the step's result. Do not go on until you have read the step's output in the run controls."));
-  assert.equal(none.byId("next-action").all((n) => n.attrs.id === "cl-match").length, 0);
-  assert.equal(btnWith(none.byId("next-action"), "Confirm"), null);
+  assert.ok(squash(none.text("pg-card")).includes("The check line could not be read from the step's result. Do not go on until you have read the step's output in the run controls."));
+  assert.equal(none.byId("pg-card").all((n) => n.attrs.id === "cl-match").length, 0);
+  assert.equal(btnWith(none.byId("pg-card"), "Confirm"), null);
 });
 
 test("Confirm stays off until the box is ticked, posts the digits shown, and the confirmed line then replaces the box; no approval box before it", async () => {
@@ -258,8 +266,8 @@ test("Confirm stays off until the box is ticked, posts the digits shown, and the
       return { status: 200, body: { ok: true, line_match: confirmed } };
     },
   });
-  const root = () => page.byId("next-action");
-  assert.doesNotMatch(squash(page.text("next-action")), /Run this swap for me/, "no approval box before the lines are confirmed");
+  const root = () => page.byId("pg-card");
+  assert.doesNotMatch(squash(page.text("pg-card")), /Run this swap for me/, "no approval box before the lines are confirmed");
   const cb = root().all((n) => n.attrs.id === "cl-match")[0];
   assert.ok(cb);
   assert.ok(root().all((n) => n.tag === "label" && n.attrs.for === "cl-match" && squash(textOf(n)) === "Bob read me his line and all 16 digits match")[0], "a real label with the exact words");
@@ -275,32 +283,32 @@ test("Confirm stays off until the box is ticked, posts the digits shown, and the
   assert.deepEqual(page.posted[0], ["/api/checkline/confirm", { matches: true, hex: HEX, swap: F.SWAP_A }]);
   assert.equal(root().all((n) => n.attrs.id === "cl-match").length, 0, "the confirmed line replaces the box");
   assert.match(squash(page.text("next-action")), /Confirmed at \d\d:\d\d: the lines match\./);
-  assert.match(squash(page.text("next-action")), /Run this swap for me/, "the approval box shows after it");
+  assert.match(squash(page.text("pg-card")), /Run this swap for me/, "the approval box shows after it");
   // Bob's words
   const bob = await openSwap(F.SWAP_B, (r) => cardPayload(r));
-  assert.ok(bob.byId("next-action").all((n) => n.tag === "label" && n.attrs.for === "cl-match" && squash(textOf(n)) === "Alice read me her line and all 16 digits match")[0]);
+  assert.ok(bob.byId("pg-card").all((n) => n.tag === "label" && n.attrs.for === "cl-match" && squash(textOf(n)) === "Alice read me her line and all 16 digits match")[0]);
 });
 
 test("a refusal of the confirm route is shown in its own words and nothing is confirmed", async () => {
   const page = await openSwap(F.SWAP_B, (r) => cardPayload(r), { "POST /api/checkline/confirm": () => ({ status: 409, body: { error: "The check line on the page is not this swap's line any more. Read it again." } }) });
-  const cb = page.byId("next-action").all((n) => n.attrs.id === "cl-match")[0];
+  const cb = page.byId("pg-card").all((n) => n.attrs.id === "cl-match")[0];
   cb.checked = true;
   await cb.fire("change");
-  await btnWith(page.byId("next-action"), "Confirm").click();
+  await btnWith(page.byId("pg-card"), "Confirm").click();
   await page.flush();
-  assert.match(squash(page.text("next-action")), /The check line on the page is not this swap's line any more\. Read it again\./);
-  assert.doesNotMatch(squash(page.text("next-action")), /Confirmed at/);
+  assert.match(squash(page.text("pg-card")), /The check line on the page is not this swap's line any more\. Read it again\./);
+  assert.doesNotMatch(squash(page.text("pg-card")), /Confirmed at/);
 });
 
 test("the approval's line statement is pre-ticked from the record, and still required; before the record there is no approval box at all", async () => {
   const none = await openSwap(F.SWAP_B, (r) => cardPayload(r));
-  assert.equal(none.byId("next-action").all((n) => n.attrs.id === "ap-typed").length, 0);
+  assert.equal(none.byId("pg-card").all((n) => n.attrs.id === "ap-typed").length, 0);
   for (const [id, role, st] of [[F.SWAP_A, "alice", "bob_check_matches"], [F.SWAP_B, "bob", "alice_check_matches"]]) {
     const page = await openSwap(id, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW } }));
-    const ticks = page.byId("next-action").all((n) => n.tag === "input" && n.attrs.type === "checkbox" && String(n.attrs.id).startsWith("ap-stmt-"));
+    const ticks = page.byId("pg-card").all((n) => n.tag === "input" && n.attrs.type === "checkbox" && String(n.attrs.id).startsWith("ap-stmt-"));
     assert.deepEqual(ticks.map((c) => c.attrs.id), ["ap-stmt-stay_on", "ap-stmt-no_manual_steps", `ap-stmt-${st}`], role);
     assert.deepEqual(ticks.map((c) => c.checked), [false, false, true], role);
-    const go = btnWith(page.byId("next-action"), "Turn on…");
+    const go = btnWith(page.byId("pg-card"), "Turn on…");
     assert.equal(go.disabled, true, "still required: the amount and the other statements are open");
   }
 });
@@ -310,12 +318,12 @@ test("the approval's line statement is pre-ticked from the record, and still req
 test("the approval box starts with what the person gives and gets, in coin colours, above the deposit; the confirm dialog starts with the same line", async () => {
   for (const [id, role, give, get] of [[F.SWAP_A, "alice", "5 NOID", "0.001 ETH"], [F.SWAP_B, "bob", "0.001 ETH", "5 NOID"]]) {
     const page = await openSwap(id, (r) => cardPayload(r, { line_match: { hex: HEX, at: NOW }, status: covered(role) }));
-    const box = page.byId("next-action").all((n) => n.className.includes("autopilot-box"))[0];
+    const box = page.byId("pg-card").all((n) => n.className.includes("autopilot-box"))[0];
     const line = box.all((n) => n.tag === "p" && squash(textOf(n)).startsWith("You give"))[0];
     assert.equal(line.textContent, `You give ${give}. You get ${get}.`, role);
     const coins = line.all((n) => n.tag === "span").map((n) => [squash(textOf(n)), n.className]);
     assert.deepEqual(coins, role === "alice" ? [["5 NOID", "c-noid"], ["0.001 ETH", "c-eth"]] : [["0.001 ETH", "c-eth"], ["5 NOID", "c-noid"]]);
-    const t = squash(page.text("next-action"));
+    const t = squash(page.text("pg-card") + " " + page.text("next-action"));
     assert.ok(t.indexOf("You give") < t.indexOf("to deposit"), "above the deposit box");
     // the dialog
     const input = box.all((n) => n.attrs.id === "ap-typed")[0];
@@ -411,9 +419,9 @@ test("the lock dialog's statement is pre-ticked when the line match exists (and 
 test("Alice's box 'Give Bob your swap file': the exact words, the button posts to the save route with the swap id, saved and cancelled and refused say their words, and no path is shown", async () => {
   let answer = { status: 200, body: { ok: true, saved: true } };
   const page = await openSwap(F.SWAP_A, (r) => cardPayload(r), { "POST /api/bundle/save": (u, b) => { page.posted.push(["/api/bundle/save", b]); return answer; } });
-  const t = () => squash(page.text("next-action"));
+  const t = () => squash(page.text("pg-card"));
   assert.ok(t().includes("Bob needs this file to check your swap. It holds no secret. Save a copy and send it to him as a file, not as pasted text."));
-  const save = () => btnWith(page.byId("next-action"), "Save a copy for Bob…");
+  const save = () => btnWith(page.byId("pg-card"), "Save a copy for Bob…");
   await save().click();
   await page.flush();
   assert.deepEqual(page.posted[0], ["/api/bundle/save", { swap: F.SWAP_A }]);

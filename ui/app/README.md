@@ -987,3 +987,65 @@ Left (low):
   applied (rule 4, by design).
 - A settings `bob_noid` saved under the earlier label "Bob's Parano1d address (optional)" may hold the other person's address; it now prefills Bob's
   own "where the NOID you buy goes" (the Bob form prefilled from it before too). Nothing has been released with the old label.
+
+## One card per stage (2026-11-19)
+
+Bottom line: in program mode the swap page is one card with a progress line, one headline, one status line and at most one action. Today's page, whole,
+is in a closed "Details" fold under it. Folding is drawing only: no request, server check, dry run, latch, audit line or coin path changed. The terminal
+console and a board run keep their pages; a production run and a run without actions get no card either.
+
+**What the card shows (`stagecard.js`, `window.NoidStage`).** Six stages in the progress line: Set up, Check, Approve, Deposit, Swap, Done. Alice's
+card says, in turn: setting up; "Prepare the swap when Bob is ready" (the 25 minutes) with the Prepare button; "Send Bob your file, then compare check
+lines" with the file for Bob and the check-line box; "Approve this swap" with the approval box; "Deposit 5.009 NOID and 0.001 ETH" with two rows (the
+figure with Copy amount, the address with its copy button, seen or not yet) and her clock; "Deposit received"; "Waiting for Bob to lock his ETH"; "Bob
+locked. Collecting your ETH"; and at the end "Swap complete", "The swap did not go through" or "This swap did not start". Bob's card is the same in his
+words: his invitation (and Alice's file, both buttons kept), "Compare check lines with Alice", the approval, "Deposit 0.0012 ETH", "Waiting for
+Alice's funding", "Your ETH is locked", "Collecting your NOID" and the same ends. The times in the status lines come from the view model's own deadline
+rows ("about 14:32"); the card counts nothing anew. `plan(input)` is data only (no DOM, tested without a browser); `draw(plan, payload)` builds the elements.
+
+**What is in Details.** Today's page as it was: its header (legs, capsules, profile), the alarms, the due strip with the engine's reason, notes and clock,
+the timeline, the picture, "Plain words", the deadlines, "If the swap stops now", the receipts, the loop history, the run controls and the audit log.
+Also the full deposit box (the exact figures, the leftovers line, "Read N s ago", the re-read button) and the approval box while it is on. When the
+approval is off, the manual send boxes stay in Details (the expert path); only a step left at the end (a sweep, a recovery) with no approval in force is
+drawn on the card, once.
+
+**The boxes the card draws are the page's own.** The check-line box (with its handover), the approval box and the deposit rows come from the builders
+that already exist (`checkLineBlock` and `handoverBlock`, `autopilotBlock`, `depositCompact`), so the statements, the typed amount and the gates do not
+move. A box on the card is not drawn a second time in Details (it carries element ids, which must be on the page once): `plan().claims` names them and
+`programFirstCard(view, payload, claims)` skips them.
+
+**Safety boxes, always open above the headline** (never folded): the page's banners (key lost, the run folder's lock, a step still running with "quitting
+now counts as may have been sent"), the autopilot's needs-you entries and "terms changed: approve again" (the approval box itself), the engine's loud
+notes (ALERT, ALARM, ANOMALY) and danger alarms, a held step ("do not send it", and a decided step that must not be sent twice), and the newest send's
+result when it has a warning, a refusal, a timeout or exit code 1 (with the advice), and the engine's lock-by or funding-window note when the view model
+gives it the level "warn" ("is short"). The read-only alarm and the way back are in the swap bar, outside Details. The deposit's "do not deposit" words (no
+clean status) stay in the deposit box. A coin that holds something but not enough has an alert line under its row on the card: "Short: this key holds 0.0011 ETH
+of 0.0019 ETH; send 0.0008 ETH more."; when Bob's funding is final, or Alice's funding window is running, the status says the step waits only for this
+deposit, with the engine's own note. While the approval is on, the autopilot's "Waiting for: …" is on the status line.
+
+**Something needs a look.** When the card cannot place the swap it never shows a calm stage: it says "Something needs a look", gives the plain reasons,
+marks no stage, offers no action and opens Details (once per set of reasons; a person who closes it is not overridden). Reasons: a swap that cannot be
+read, a phase the page does not know, a lost swap, a reading that is stale or missing, two nodes that disagree or lag, a held step the engine does not
+offer, an engine alarm, no approval in force after the lock or funding, an approval the program cannot offer, a deadline that has passed while the step
+is still open (the reveal cutoff, the last moment to start the reveal, the claim target), the engine's lock-by or funding-window note at the level "danger" ("has
+passed", "is closed"), and an aborted Bob whose lock is still open. A failed first step opens Details too. A lapsed approval in flight keeps the progress
+line on Swap and shows the deadline of the step. If the card cannot be drawn, nothing is claimed and Details draws every box.
+
+**The deposit once it is seen.** In Details the box becomes one line ("Deposit received: 5.009 NOID and 0.001 ETH.", chip "seen") and the full box sits in
+a closed fold "Deposit details". A status that is no longer clean, or a coin that is short, draws the full box again in Details, and the card shows the stage "Deposit" with the short alert
+(a headline "Wait before you deposit" when there is no clean status). The exact lines read "Exact amount
+needed: 5,009,000 micro-NOID (the swap's 5 NOID and 0.009 NOID for the funding fee). This wallet holds … micro-NOID now."; the digits are grouped by one
+helper (`groupAtoms`); Copy amount still copies the plain unit figure. The figures the join helper prints in "Your terms" are shown as it printed them.
+
+**The width fix.** `.spend-box`, `.wallet-funding` and `.confirm-body` are one `minmax(0, 1fr)` column and their paragraphs break anywhere, so a 62-character
+address no longer widens the box or the approval dialog (`test/simple-stagecard.test.js` checks the rule).
+
+Known low points, left as they are: a refused send with nothing sent shows as a red "last step" box on the card until another send replaces it (and a timed-out
+step that later settled keeps its "may still have sent" line); the deadline warnings (`closing-*`), `tick-err`, `loop-exit` and the engine's caution notes are
+in Details only, as the plan said; the working copy of `index.html` has CRLF line endings, which `.gitattributes` turns into LF on commit. For Alice waiting at `funding_final`, Bob's "lock-by … has passed" note is a look whose only reason is the engine's raw words about Bob's lock-by; one plain line ("Bob did not lock in time: your NOID comes back after about HH:MM") would say what it means for her. Also: a board run has no card (the board's own screens lead it); Bob's two first buttons (invitation, Alice's file) are both on the card, because
+the page cannot tell whether the invitation was sent; the card reads the facts of the last reading, so for a moment after a step the headline can lag
+the chain by one reading; the page is not looked at in a real window yet.
+
+Tests: `test/simple-stagecard.test.js` (each stage per role, each safety box, never a calm stage on data it cannot place, the deposit collapse and its
+exceptions, the wording and the grouped digits, the CSS rule); `test/simple-split.test.js` pins the script order, and the program-page tests load
+`stagecard.js` like the page does.

@@ -269,7 +269,7 @@ async function pageOffers(role, phase, o = {}) {
     if (o.marker) p.actions.wallet.funded_marker = "2026-11-17T10:00:00Z";
     return p;
   });
-  const n = page.byId("next-action").all((x) => x.attrs.id === "cl-match").length + page.byId("start").all((x) => x.attrs.id === "cl-match").length;
+  const n = ["pg-card", "next-action", "start"].map((id) => page.byId(id).all((x) => x.attrs.id === "cl-match").length).reduce((x, y) => x + y, 0);
   return n > 0;
 }
 

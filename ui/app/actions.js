@@ -455,13 +455,49 @@
     }
   }
 
+  /** An atomic figure (micro-NOID, wei) with thousands separators, "5,009,000": the page's one helper for them. Anything that is not a whole number is returned as it is. */
+  function groupAtoms(x) {
+    // only a whole decimal number is grouped: "", " ", "0x10" and true are returned as they are (an empty field must not read as 0)
+    if (!/^[0-9]+$/.test(String(x))) return String(x);
+    try {
+      return BigInt(x).toLocaleString("en-US");
+    } catch {
+      return String(x);
+    }
+  }
+
+  /** Wei as ETH in plain units, exact (no rounding): "0.0011". null for anything that is not a whole number. */
+  function ethExact(wei) {
+    try {
+      const v = BigInt(wei);
+      if (v < 0n) return null;
+      return trimFrac(v / 10n ** 18n, String(v % 10n ** 18n).padStart(18, "0"));
+    } catch {
+      return null;
+    }
+  }
+
+  /** The always-visible line under a deposit row that holds something but not enough: what it holds, what is needed, what is still to send. null when nothing is short or nothing arrived. */
+  function shortLine(coin, held, need) {
+    try {
+      const h = BigInt(held);
+      const n = BigInt(need);
+      if (h <= 0n || h >= n) return null;
+      const f = coin === "NOID" ? (x) => noidFigure(x) : (x) => ethExact(x);
+      const holder = coin === "NOID" ? "wallet" : "key";
+      return H.el("p", { class: "attn", role: "alert", text: `Short: this ${holder} holds ${f(h)} ${coin} of ${f(n)} ${coin}; send ${f(n - h)} ${coin} more.` });
+    } catch {
+      return null;
+    }
+  }
+
   /** One deposit line in plain units: what to send (with a button that copies the figure alone), where to, and the exact figures beneath. */
   function depositRowPlain(coin, address, figure, exact, seen) {
     const cls = coin === "NOID" ? "noid" : "eth";
     const row = H.el("div", { class: "deposit-row" }, H.el("div", { class: "label", text: `${coin} to deposit` }));
     row.appendChild(H.el("div", { class: "row" }, "Send at least", H.el("span", { class: `leg ${cls}` }, H.el("span", { class: "amt", text: figure }), H.el("span", { class: "unit", text: coin })), H.copyButton(figure, `the ${coin} amount`, "Copy amount")));
     row.appendChild(H.el("div", { class: "row" }, "to this address", H.copyButton(address, `the ${coin} deposit address`, address)));
-    row.appendChild(H.el("p", { class: "dim", text: exact }));
+    if (exact) row.appendChild(H.el("p", { class: "dim", text: exact }));
     row.appendChild(H.el("div", { class: "row" }, seen ? H.chip("ok", "seen") : H.chip("attn", "not yet")));
     return row;
   }
@@ -519,15 +555,23 @@
     if (role === "alice" && s.noid && plain && noidFigure(s.noid.need_micronoid) !== null) {
       const n = s.noid;
       const amt = noidFigure(n.amount_micronoid);
-      box.appendChild(depositRowPlain("NOID", n.address, noidFigure(n.need_micronoid), `At least exactly ${n.need_micronoid} micro-NOID: the swap's ${amt !== null ? amt + " NOID" : n.amount_micronoid + " micro-NOID"} and the funding's fee. The wallet holds ${n.plain_micronoid} micro-NOID now.`, n.covers === true));
+      let feeFigure = null;
+      try {
+        feeFigure = noidFigure(BigInt(n.need_micronoid) - BigInt(n.amount_micronoid));
+      } catch {
+        feeFigure = null;
+      }
+      const parts = amt !== null && feeFigure !== null ? `the swap's ${amt} NOID and ${feeFigure} NOID for the funding fee` : `the swap's ${amt !== null ? amt + " NOID" : groupAtoms(n.amount_micronoid) + " micro-NOID"} and the funding's fee`;
+      box.appendChild(depositRowPlain("NOID", n.address, noidFigure(n.need_micronoid), `Exact amount needed: ${groupAtoms(n.need_micronoid)} micro-NOID (${parts}). This wallet holds ${groupAtoms(n.plain_micronoid)} micro-NOID now.`, n.covers === true));
     } else if (role === "alice" && s.noid) {
       const n = s.noid;
       box.appendChild(depositRow("NOID", n.address, `${n.need_micronoid} micro-NOID`, noidWords(n.need_micronoid), n.covers === true, `the swap's amount (${noidWords(n.amount_micronoid) || n.amount_micronoid + " micro-NOID"}) and the funding's fee reserve. The wallet holds ${n.plain_micronoid} micro-NOID of plain coins now.`));
     }
     if (s.eth && plain && ethFigure(s.eth.required_wei) !== null) {
       const e = s.eth;
-      const short = e.covered === true ? "" : `, short by ${e.shortfall_wei} wei`;
-      const exact = role === "alice" ? `At least exactly ${e.required_wei} wei: the fee of the reveal, paid from this swap's own key. The ETH you get arrives there too, and goes to your own address at the end. The key holds ${e.balance_wei} wei now${short}.` : `At least exactly ${e.required_wei} wei: the ${ethWords(e.amount_wei) || e.amount_wei + " wei"} and the fees of the lock and of a refund. The key holds ${e.balance_wei} wei now${short}.`;
+      const short = e.covered === true ? "" : `, short by ${groupAtoms(e.shortfall_wei)} wei`;
+      const need = `Exact amount needed: ${groupAtoms(e.required_wei)} wei (${ethWords(e.required_wei) || groupAtoms(e.required_wei) + " wei"})`;
+      const exact = role === "alice" ? `${need}, for the fee of the reveal. The ETH you get arrives here too and goes to your own address at the end. This key holds ${groupAtoms(e.balance_wei)} wei now${short}.` : `${need}: the ${ethWords(e.amount_wei) || groupAtoms(e.amount_wei) + " wei"} you lock and the fees of the lock and of a refund. This key holds ${groupAtoms(e.balance_wei)} wei now${short}.`;
       box.appendChild(depositRowPlain("ETH", e.address, ethFigure(e.required_wei), exact, e.covered === true));
     } else if (s.eth) {
       const e = s.eth;
@@ -552,6 +596,59 @@
     const s = w && w.roles && w.roles[role] && w.roles[role].status;
     if (!s || !s.ok || !s.show || !s.eth || s.eth.covered !== true) return false;
     return role === "bob" || !!(s.noid && s.noid.covers === true);
+  }
+
+  /** What the deposit of a role comes to in plain units, for a headline: "5.009 NOID and 0.001 ETH" (Alice), "0.0012 ETH" (Bob), or null when the clean status does not give the figures. */
+  function depositWords(a, role) {
+    const w = walletOf(a);
+    const s = w && w.roles && w.roles[role] && w.roles[role].status;
+    if (!s || !s.ok || !s.show || !s.eth) return null;
+    const eth = ethFigure(s.eth.required_wei);
+    if (eth === null) return null;
+    if (role === "bob") return `${eth} ETH`;
+    const noid = s.noid ? noidFigure(s.noid.need_micronoid) : null;
+    return noid === null ? null : `${noid} NOID and ${eth} ETH`;
+  }
+
+  /**
+   * The deposit part of the first card (program mode). While the deposit is not seen: the full box. Once it is seen: one line ("Deposit received: ...", chip "seen") and the full
+   * box in a closed fold "Deposit details". A status that is not clean, or a coin that is short, is "not seen", so the full box (its "do not deposit" and "short by" words) is drawn then.
+   */
+  function depositOrReceived(payload, role) {
+    const a = payload && payload.actions;
+    if (!depositSeen(a, role)) return depositBlock(payload, role, { plain: true });
+    const words = depositWords(a, role);
+    const wrap = H.el("div", { class: "deposit-received" });
+    wrap.appendChild(H.el("div", { class: "row" }, H.el("span", { class: "plain", text: words ? `Deposit received: ${words}.` : "Deposit received." }), H.chip("ok", "seen")));
+    wrap.appendChild(H.el("details", { class: "deposit-details" }, H.el("summary", { text: "Deposit details" }), depositBlock(payload, role, { plain: true })));
+    return wrap;
+  }
+
+  /**
+   * The deposit of the stage card while it is still to be made: the two rows (the figure with Copy amount, the address with its copy button, seen or not yet), Alice's clock (or
+   * Bob's line) and the advice about exchanges; the exact figures, the leftovers line and the re-read button stay in the full box (Details). When the status is missing or not clean
+   * (no address is shown then, and the "do not deposit" words must stay) the full box is returned.
+   */
+  function depositCompact(payload, role) {
+    const a = payload && payload.actions;
+    const w = walletOf(a);
+    const r = w && w.roles && w.roles[role];
+    const s = r && r.status;
+    const figs = s && s.ok && s.show && s.eth && ethFigure(s.eth.required_wei) !== null && (role === "bob" || (s.noid && noidFigure(s.noid.need_micronoid) !== null));
+    if (!figs) return depositBlock(payload, role, { plain: true });
+    const box = H.el("section", { class: "spend-box deposit-box deposit-compact", "aria-label": "The deposit" });
+    if (role === "alice") {
+      box.appendChild(depositRowPlain("NOID", s.noid.address, noidFigure(s.noid.need_micronoid), null, s.noid.covers === true));
+      const sn = s.noid.covers === true ? null : shortLine("NOID", s.noid.plain_micronoid, s.noid.need_micronoid);
+      if (sn) box.appendChild(sn);
+    }
+    box.appendChild(depositRowPlain("ETH", s.eth.address, ethFigure(s.eth.required_wei), null, s.eth.covered === true));
+    const se = s.eth.covered === true ? null : shortLine("ETH", s.eth.balance_wei, s.eth.required_wei);
+    if (se) box.appendChild(se);
+    if (role === "alice") box.appendChild(depositClock(payload));
+    box.appendChild(H.el("p", { class: "dim", text: "Send from a wallet you control, not from an exchange: an exchange withdrawal can arrive late. The exact figures and the re-read button are in Details." }));
+    if (!H.state.token) box.appendChild(keyNote());
+    return box;
   }
 
   /** Alice's funding in a wallet run: the order (Bob's check, the deposit, then the autopilot or the Send box), no object file, no "I have funded" box. */
@@ -1758,6 +1855,21 @@
     return box;
   }
 
+  /** A button of the stage card that saves one of the two files (the swap file for Bob, the invitation for Alice): the program's own dialog opens. */
+  function cardFileButton(kind, label, primary) {
+    const busy = !!(noteOf(kind) && noteOf(kind).busy);
+    return btn(label, () => saveFile(kind), { primary: !!primary, big: !!primary, disabled: !H.state.token || busy, title: H.state.token ? null : KEY_LOST });
+  }
+
+  /** A button of the stage card that starts a table action (the same rule as every other button decides whether it is disabled). Returns { el, why }. */
+  function cardActionButton(a, id, label, primary) {
+    const entry = (a.table || []).find((e) => e.id === id);
+    const why = actionWhy(a, id);
+    return { el: btn(label, () => startAction(id), { primary: !!primary, big: !!primary, disabled: !!why, title: why || (entry ? `${entry.note}
+
+${entry.command || ""}` : "") }), why };
+  }
+
   const READ_PHASE_SAY = "The program reads both chains every 30 seconds and records nothing yet. It starts acting once you have approved and your deposit is seen.";
 
   /**
@@ -1765,26 +1877,29 @@
    * check lines are confirmed, or while it is in force), the deposit while it is needed, the funding once it is recorded, then the engine's send boxes. One element, or null when
    * the card is not this one (the terminal console, a board run): the caller then draws today's boxes.
    */
-  function programFirstCard(view, payload) {
+  function programFirstCard(view, payload, claims) {
     const a = payload && payload.actions;
+    // the stage card (stagecard.js) draws some of these boxes itself, once: it names them in `claims`, and they are not drawn a second time here (the check line's tick, the approval's
+    // inputs and the typed amount have element ids, which must be on the page once)
+    const claimed = claims && typeof claims === "object" ? claims : {};
     if (!isProgram() || !a || !a.enabled || a.production || !view || !view.role || isBoardRun(payload, view.role)) return null;
     const wrap = H.el("div", { class: "wallet-funding first-card" });
     const add = (n) => {
       if (n) wrap.appendChild(n);
     };
-    add(handoverBlock(view, payload));
+    if (!claimed.handover) add(handoverBlock(view, payload));
     if (a.watch && a.watch.mode === "read") add(H.el("p", { class: "plain", text: READ_PHASE_SAY }));
     const x = a.autopilot && a.autopilot[view.role];
-    if (x && (a.line_match || x.on === true || x.terms_changed === true || (Array.isArray(x.needs_you) && x.needs_you.length))) add(autopilotBlock(view, payload));
+    if (!claimed.autopilot && x && (a.line_match || x.on === true || x.terms_changed === true || (Array.isArray(x.needs_you) && x.needs_you.length))) add(autopilotBlock(view, payload));
     // the deposit comes after the comparison of the check lines: only once the line match exists or the approval is in force
-    if (depositNeeded(view, a) && haveSwapFile(payload, view.role) && (a.line_match || (x && x.on === true))) add(depositBlock(payload, view.role, { plain: true }));
+    if (depositNeeded(view, a) && haveSwapFile(payload, view.role) && (a.line_match || (x && x.on === true))) add(depositOrReceived(payload, view.role));
     if (view.role === "alice" && fundingRecorded(a)) add(fundingBlock(view, payload));
-    add(spendBlock(view, payload));
+    if (!claimed.spend) add(spendBlock(view, payload));
     return wrap.children.length ? wrap : null;
   }
 
   /** Draws the first screen of a swap: the strip into #next-action, the rest into #start. The caller has emptied the other sections. */
-  function renderProgramStart(payload, role) {
+  function renderProgramStart(payload, role, claims) {
     const a = payload.actions;
     const f = programStartFacts(payload, role);
     const steps = programSteps(f);
@@ -1845,7 +1960,7 @@
 
     // the boxes of the swap page's first card, in the same order (the file and the check line, the approval, the deposit); a board run keeps its own boxes
     const view = { role, phase: { id: role === "alice" ? "created" : "received" } };
-    const card = board ? null : programFirstCard(view, payload);
+    const card = board ? null : programFirstCard(view, payload, claims);
     if (card) start.appendChild(H.el("section", { class: "block", "aria-label": "What to do next" }, card));
     const w = walletOf(a);
     if (board && w && w.roles && w.roles[role] && w.roles[role].swap_file) start.appendChild(H.el("section", { class: "block", "aria-labelledby": "h-deposit" }, H.el("div", { class: "card-head" }, H.el("h2", { id: "h-deposit", text: "Your deposit" })), depositBlock(payload, role)));
@@ -2158,6 +2273,7 @@
     fundingBlock,
     banners,
     tick,
+    card: { isBoardRun, checkLineOf, depositCompact, depositWords, depositSeen, fundingRecorded, haveSwapFile, noteOf, fileNote, fileButton: cardFileButton, actionButton: cardActionButton, groupAtoms, noidFigure, ethFigure, hhmm, CODE1_IDS, CODE1_ADVICE, SPEND_ORDER, PROGRAM_SAY, hungWarning, pendingLock, message: () => ui.msg },
     program: { isProgram, startKind: programStartKind, startFacts: programStartFacts, steps: programSteps, renderStart: renderProgramStart, hungWarning, TERMINAL_ONLY, PROGRAM_STEPS, PROGRAM_BACKUP, CODE1_ADVICE, firstCard: programFirstCard },
     programFirstCard,
     handoverBlock,

@@ -245,7 +245,7 @@ async function loadPage(opts = {}) {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "actions.js", "program.js", "lib/boardview.js", "board.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
+  for (const f of ["lib/phases.js", "lib/enginetext.js", "lib/viewmodel.js", "actions.js", "program.js", "stagecard.js", "lib/boardview.js", "board.js", "operator.js"]) vm.runInContext(fs.readFileSync(path.join(APP, f), "utf8"), sandbox, { filename: f });
   const flush = async (n = 30) => {
     for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
   };

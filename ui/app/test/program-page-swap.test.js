@@ -69,7 +69,9 @@ test("Alice's first screen: a clean wallet step moves the next step to Prepare; 
 
   const prepared = await openSwap(F.SWAP_A, (r) => F.runPayload(r, { jobs: [...jobs, F.job("prepare", { stdout: "bundle copied to /x/alice.bundle.json -- bundle check: 0123456789abcdef ok" })], bundle_file: { name: "alice.bundle.json" }, wallet: { roles: { alice: { swap_file: true, addresses_file: true, status: null }, bob: {} } } }));
   assert.match(squash(prepared.text("next-action")), /The swap is made done/);
-  const box = squash(prepared.text("start"));
+  // the swap file is made and the lines are not compared yet: the stage card holds the file for Bob and the check line (today's page below it keeps the rest)
+  const box = squash(prepared.text("pg-card"));
+  assert.match(box, /Send Bob your file, then compare check lines/);
   assert.match(box, /Give Bob your swap file/);
   assert.match(box, /Your check line 0123 4567 89ab cdef/, "from the step's own result: four groups of four");
   assert.doesNotMatch(box, /bundle check: 0123456789abcdef ok/);
@@ -92,12 +94,12 @@ test("Bob after a clean check: the printed terms and his check line in groups of
   const jobs = [F.job("setup"), F.job("wallet-setup-bob"), F.job("join", { stdout: lines.join("\n") })];
   const page = await openSwap(F.SWAP_B, (r) => F.runPayload(r, { jobs, wallet: { roles: { alice: {}, bob: { swap_file: true, addresses_file: true, status: null } } } }));
   assert.match(squash(page.text("next-action")), /The swap is made done/);
-  const t = squash(page.text("start"));
+  const t = squash(page.text("start") + " " + page.text("pg-card"));
   assert.match(t, /Alice's file accepted/);
   assert.match(t, /Your check line 0123 4567 89ab cdef/);
   assert.match(t, /the NOID amount 5000000 micro-NOID \(5 NOID\)/);
   assert.match(t, /Read it to Alice over a call or another channel/);
-  assert.equal(page.byId("start").all((n) => n.attrs.id === "cl-match").length, 0);
+  assert.equal(page.byId("start").all((n) => n.attrs.id === "cl-match").length + page.byId("pg-card").all((n) => n.attrs.id === "cl-match").length, 0);
 });
 
 test("the swap page with a tick: today's view, the run controls in the program's words (no WSL, no env.local, no install), only this swap's role tick, and a head without a run number", async () => {

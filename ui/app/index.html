@@ -34,6 +34,7 @@
   <main id="main" class="wrap">
     <div id="pg-root" class="pg" hidden></div>
     <div id="bd-root" class="bd" hidden></div>
+    <section id="pg-card" class="sc-card" tabindex="-1" aria-label="This swap, step by step" hidden></section>
     <div id="op-view">
     <section id="alarms" class="alarms" aria-label="Alarms" aria-live="polite"></section>
     <p id="board-line" class="margin-line" aria-live="polite" hidden></p>
@@ -50,6 +51,10 @@
     <details id="explain" class="fold" aria-labelledby="h-explain"></details>
     <details id="history" class="fold" aria-labelledby="h-history"></details>
     </div>
+    <details id="pg-details" class="fold pg-details" hidden>
+      <summary id="pg-details-sum">Details</summary>
+      <div id="pg-details-body" class="pg-details-body"></div>
+    </details>
   </main>
 
   <footer class="foot">
@@ -68,6 +73,7 @@
   <script src="/viewmodel.js"></script>
   <script src="/actions.js"></script>
   <script src="/program.js"></script>
+  <script src="/stagecard.js"></script>
   <script src="/boardview.js"></script>
   <script src="/board.js"></script>
   <script src="/operator.js"></script>

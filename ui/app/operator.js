@@ -33,6 +33,10 @@
     pgForm: null, // the form of the new-swap or settings screen, built once per visit
     pgMsg: null, // a line above the list: { kind, text }
     barSig: "",
+    cardClaims: null, // program mode: the boxes the stage card draws itself (stagecard.js), so the page below does not draw them a second time
+    cardLook: "", // program mode: the reasons the card showed last time it said "needs a look" (Details opens when they change)
+    detailsFilled: false, // program mode: the swap page has been moved into the "Details" fold
+    cardWas: false, // program mode: whether the card was drawn on the last render
   };
 
   // ------------------------------------------------------------ DOM helpers
@@ -407,7 +411,7 @@
     if (actionsOn) {
       // the autopilot's box leads the card: it says whether the console does the steps itself, and what stopped it
       // program mode outside a board run: one builder set in the order of the work (the file and the check line, the approval, the deposit, then the send boxes)
-      const pc = window.NoidActions.programFirstCard ? window.NoidActions.programFirstCard(view, state.payload) : null;
+      const pc = window.NoidActions.programFirstCard ? window.NoidActions.programFirstCard(view, state.payload, state.cardClaims) : null;
       if (pc) doBox.appendChild(pc);
       else {
         const apb = window.NoidActions.autopilotBlock(view, state.payload);
@@ -1002,7 +1006,7 @@
     state.view = null;
     for (const id of ["swap-head", "timeline", "picture", "explain", "deadlines", "abort", "receipts", "history"]) clear($(id));
     addBanners(clear($("alarms")));
-    window.NoidActions.program.renderStart(state.payload, state.role);
+    window.NoidActions.program.renderStart(state.payload, state.role, state.cardClaims);
     window.NoidActions.renderPanel(state.payload, { folded: true });
     document.title = "Your swap, No1d Swap";
   }
@@ -1155,7 +1159,11 @@
     $("pg-swapbar").hidden = !swapScreen;
     $("swap-head").hidden = !swapScreen;
     $("files").hidden = true;
+    const pgd = $("pg-details");
+    if (pgd) pgd.hidden = !swapScreen;
     if (!swapScreen) {
+      $("pg-card").hidden = true;
+      state.cardWas = false;
       $("op-view").hidden = true;
       $("bd-root").hidden = true;
       $("board-line").hidden = true;
@@ -1167,8 +1175,87 @@
     renderSwapBar();
     renderBoardLine();
     const boardShown = renderBoardScreens();
+    // the card of the stage first (it says which boxes it draws), then today's page, which goes into the "Details" fold
+    let plan = stagePlan();
+    // the card is drawn first: a box is claimed (left out of Details) only when the card really has it. If drawing throws, nothing is claimed and Details draws every box.
+    let node = null;
+    if (plan && plan.drawn && window.NoidStage) {
+      try {
+        node = window.NoidStage.draw(plan, state.payload);
+      } catch {
+        node = el("p", { class: "attn", role: "alert", text: "The card of this swap could not be drawn. Details is open below." });
+        plan = { ...plan, claims: {}, forceOpen: true, lookSig: "draw-failed" };
+      }
+    }
+    state.cardClaims = plan && plan.drawn ? plan.claims : null;
     renderOperatorPage();
+    renderStageCard(plan, node);
     if (boardShown && window.NoidBoard.title) document.title = window.NoidBoard.title();
+  }
+
+  // ------------------------------------------------------------ program mode: the stage card and the "Details" fold
+  /** The plan of the stage card (stagecard.js) for the swap on show; null when the script did not load (today's page then shows as it is). */
+  function stagePlan() {
+    const S = window.NoidStage;
+    if (!S) return null;
+    let view = null;
+    const p = state.payload;
+    if (p && !state.error && p.readable !== false && state.role) {
+      try {
+        view = V.buildView(viewInput());
+      } catch {
+        view = null;
+      }
+    }
+    try {
+      return S.plan({ payload: state.error ? null : p, role: state.role, view, error: state.error, now: nowS() });
+    } catch (e) {
+      // a card that cannot be planned must not hide the page: say so and open Details
+      return { drawn: true, kind: "look", forceOpen: true, headline: "Something needs a look", status: "The program could not work out this swap's step. Details is open below.", reasons: [String((e && e.message) || e)], stage: -1, action: { kind: "none" }, safety: { loud: [], alarms: [], held: null, heldIntent: null, job: null, autopilot: false }, claims: {}, lookSig: "plan-failed", view: null, role: state.role };
+    }
+  }
+
+  /** Today's swap page (its header and its sections) goes into one closed "Details" fold under the card, once; it is open and without a summary when there is no card. */
+  function ensureDetails() {
+    // the fold is in index.html (hidden, empty: the terminal console never shows it); the swap page's header and sections are moved into it once
+    const d = $("pg-details");
+    const body = $("pg-details-body");
+    if (!state.detailsFilled) {
+      body.appendChild($("swap-head"));
+      body.appendChild($("op-view"));
+      state.detailsFilled = true;
+    }
+    return d;
+  }
+
+  function renderStageCard(plan, node) {
+    const card = $("pg-card");
+    const det = ensureDetails();
+    const sum = $("pg-details-sum");
+    const drawn = !!(plan && plan.drawn && window.NoidStage);
+    clear(card);
+    card.hidden = !drawn;
+    if (!drawn) {
+      // no card for this swap (a production run, a board run, no actions): today's page as it was, with no fold
+      det.open = true;
+      det.classList.add("flat");
+      if (sum) sum.hidden = true;
+      state.cardWas = false;
+      state.cardLook = "";
+      return;
+    }
+    det.classList.remove("flat");
+    if (sum) sum.hidden = false;
+    if (!state.cardWas) {
+      det.open = false;
+      state.cardLook = "";
+    }
+    state.cardWas = true;
+    if (node) card.appendChild(node);
+    // a card that says "needs a look" (or that a step failed) opens Details when its reasons change, and leaves it as the person set it otherwise
+    const sig = plan.forceOpen ? plan.lookSig || "open" : "";
+    if (sig && sig !== state.cardLook) det.open = true;
+    state.cardLook = sig;
   }
 
   // ------------------------------------------------------------ main render
@@ -1308,6 +1395,10 @@
     if (state.program) {
       document.body.classList.add("program");
       window.NoidProgram.init({ el, chip, copyButton, state, phaseLabel });
+      // the card of one swap, one stage at a time (stagecard.js): its helpers are the page's own
+      if (window.NoidStage) window.NoidStage.init({ el, chip, short, state, nowS });
+      const skip = document.getElementById("skip-link");
+      if (skip) skip.setAttribute("href", "#pg-card");
     } else {
       // the terminal console's chain-polling page is another page: its link carries the key too. Only on the terminal console's own
       // http address: on the program's scheme the key never goes into the page (not even when /api/program failed at start)

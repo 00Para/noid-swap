@@ -558,3 +558,38 @@ textarea { background: var(--bg); color: var(--text); border: 1px solid var(--ru
   .pg-row-chips { grid-column: 1; justify-content: flex-start; }
   .pg-tools { margin-left: 0; }
 }
+
+/* ---- the width of the boxes: a grid track is `auto` unless told otherwise, so the longest unbreakable word (a 62-character address) set the width of the whole column ---- */
+.spend-box, .wallet-funding, .confirm-body { grid-template-columns: minmax(0, 1fr); }
+.spend-box p, .confirm-body p { overflow-wrap: anywhere; }
+
+/* ---- the card of one swap, one stage at a time (stagecard.js), and the "Details" fold under it ---- */
+.sc-card { margin-top: var(--s5); min-width: 0; }
+.sc-in { display: grid; gap: var(--s4); min-width: 0; padding: var(--s5); background: var(--panel); border: 1px solid var(--rule); border-left: 6px solid var(--due); border-radius: 0 var(--r-panel) var(--r-panel) 0; }
+.sc-in.look { border-left-color: var(--alarm); }
+.sc-in > * { min-width: 0; margin: 0; }
+@media (min-width: 980px) { .sc-in { padding: var(--s6); } }
+.sc-safety { display: grid; gap: var(--s3); }
+.sc-safety .alarm .tx { display: grid; gap: var(--s2); }
+.sc-line { display: block; }
+.sc-progress { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--s2); }
+.sc-progress li { padding-top: var(--s2); border-top: 2px solid var(--rule-2); font: 400 12.5px var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+.sc-progress li.done { border-top-color: var(--safe); color: var(--safe); }
+.sc-progress li.now { border-top-color: var(--due); color: var(--due); font-weight: 600; }
+@media (max-width: 560px) { .sc-progress { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: var(--s3); } }
+.sc-head { font-size: 28px; line-height: 1.12; letter-spacing: -.02em; text-wrap: balance; }
+@media (min-width: 980px) { .sc-head { font-size: 36px; } }
+.sc-status { color: var(--quiet); font-size: 15px; max-width: 62ch; overflow-wrap: anywhere; }
+.sc-status.look { color: var(--text); }
+.sc-reasons { display: grid; gap: var(--s2); }
+.sc-reasons li { padding-left: 14px; position: relative; color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
+.sc-reasons li::before { content: "–"; position: absolute; left: 0; color: var(--ghost); }
+.sc-act { display: grid; gap: var(--s3); min-width: 0; }
+.sc-act > .row .btn.primary, .sc-act > .btn.primary { min-height: 48px; font-size: 15px; padding: 0 var(--s5); }
+.sc-act .why { margin: 0; font-size: 13px; }
+.sc-act .deposit-received { display: grid; gap: var(--s2); }
+.deposit-details > summary { color: var(--quiet); font-size: 13px; min-height: 28px; }
+.deposit-details > :not(summary) { margin-top: var(--s2); }
+.pg-details > summary { font-size: 14px; font-weight: 600; color: var(--text); }
+.pg-details.flat { margin-top: 0; border-top: 0; padding-top: 0; }
+.pg-details-body > #swap-head { margin-top: var(--s4); }

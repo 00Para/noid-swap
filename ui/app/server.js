@@ -69,6 +69,7 @@ const STATIC = {
   "/enginetext.js": ["lib/enginetext.js", "text/javascript; charset=utf-8"],
   "/actions.js": ["actions.js", "text/javascript; charset=utf-8"],
   "/program.js": ["program.js", "text/javascript; charset=utf-8"],
+  "/stagecard.js": ["stagecard.js", "text/javascript; charset=utf-8"],
   // the offer board's screens (P3.7): the page code, its DOM-free logic and its stylesheet (the tokens are operator.css's)
   "/board.js": ["board.js", "text/javascript; charset=utf-8"],
   "/boardview.js": ["lib/boardview.js", "text/javascript; charset=utf-8"],

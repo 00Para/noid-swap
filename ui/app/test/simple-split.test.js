@@ -22,10 +22,10 @@ function runScripts(files) {
   return sandbox;
 }
 
-test("index.html loads program.js right after actions.js, before the board and operator scripts", () => {
+test("index.html loads program.js right after actions.js, then stagecard.js, before the board and operator scripts", () => {
   const html = read("index.html");
   const srcs = [...html.matchAll(/<script\s+src="([^"]+)"\s*><\/script>/g)].map((m) => m[1]);
-  assert.deepEqual(srcs, ["/phases.js", "/enginetext.js", "/viewmodel.js", "/actions.js", "/program.js", "/boardview.js", "/board.js", "/operator.js"]);
+  assert.deepEqual(srcs, ["/phases.js", "/enginetext.js", "/viewmodel.js", "/actions.js", "/program.js", "/stagecard.js", "/boardview.js", "/board.js", "/operator.js"]);
   assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)[^>]*>[^<]/i, "no inline script");
 });
 

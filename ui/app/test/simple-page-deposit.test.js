@@ -78,7 +78,7 @@ test("Alice's NOID row: the figure in NOID exactly (trailing zeros removed), the
   assert.deepEqual(c.map((x) => x.text), ["Copy amount", ALICE]);
   assert.equal(c[0].copy, "5.006", "the figure alone, no unit");
   assert.equal(c[1].copy, ALICE);
-  assert.ok(t.includes("At least exactly 5006000 micro-NOID: the swap's 5 NOID and the funding's fee. The wallet holds 5100000 micro-NOID now."));
+  assert.ok(t.includes("Exact amount needed: 5,006,000 micro-NOID (the swap's 5 NOID and 0.006 NOID for the funding fee). This wallet holds 5,100,000 micro-NOID now."));
   assert.match(t, /seen/);
   // whole NOID and a sub-NOID figure
   assert.deepEqual(amt(all(plainBox("alice", { alice: status("alice", { need: 5000000 }) }), (n) => cls(n, "deposit-row"))[0]), ["5"]);
@@ -92,9 +92,9 @@ test("Alice's ETH row: the figure is the wei rounded UP to six decimals; the exa
   const t = squash(textOf(eth));
   assert.match(t, /^ETH to deposit Send at least 0\.001 ETH Copy amount to this address /);
   assert.ok(all(eth, (n) => cls(n, "leg") && cls(n, "eth")).length === 1);
-  assert.ok(t.includes("At least exactly 1000000000000000 wei: the fee of the reveal, paid from this swap's own key. The ETH you get arrives there too, and goes to your own address at the end. The key holds 5000000000000000 wei now."));
+  assert.ok(t.includes("Exact amount needed: 1,000,000,000,000,000 wei (0.001 ETH), for the fee of the reveal. The ETH you get arrives here too and goes to your own address at the end. This key holds 5,000,000,000,000,000 wei now."));
   const short = squash(textOf(all(plainBox("alice", { alice: status("alice", { covered: false }) }), (n) => cls(n, "deposit-row"))[1]));
-  assert.match(short, /The key holds 5000000000000000 wei now, short by 900000000000000 wei\./);
+  assert.match(short, /This key holds 5,000,000,000,000,000 wei now, short by 900,000,000,000,000 wei\./);
   assert.match(short, /not yet/);
   assert.equal(copies(eth)[0].copy, "0.001");
 });
@@ -118,7 +118,7 @@ test("the ETH figure never lies below the wei figure: 1, 10^12 - 1, 10^12, 10^12
   const box = plainBox("alice", { alice: status("alice", { required: "1000000037125000" }) });
   const eth = all(box, (n) => cls(n, "deposit-row"))[1];
   assert.deepEqual(amt(eth), ["0.001001"]);
-  assert.match(squash(textOf(eth)), /At least exactly 1000000037125000 wei/);
+  assert.match(squash(textOf(eth)), /Exact amount needed: 1,000,000,037,125,000 wei/);
 });
 
 test("Bob's ETH row: the figure, the exact line with the amount and the fees of the lock and of a refund, and the line that the lock is sent once his deposit is seen", () => {
@@ -127,13 +127,13 @@ test("Bob's ETH row: the figure, the exact line with the amount and the fees of 
   assert.equal(rows.length, 1);
   const t = squash(textOf(box));
   assert.match(t, /ETH to deposit Send at least 0\.002 ETH Copy amount to this address/);
-  assert.ok(t.includes("At least exactly 2000000000000000 wei: the 0.001 ETH and the fees of the lock and of a refund. The key holds 5000000000000000 wei now."));
+  assert.ok(t.includes("Exact amount needed: 2,000,000,000,000,000 wei (0.002 ETH): the 0.001 ETH you lock and the fees of the lock and of a refund. This key holds 5,000,000,000,000,000 wei now."));
   assert.ok(t.includes("Deposit now: your lock is sent as soon as Alice's funding is final, and only once your deposit is seen."));
   assert.doesNotMatch(t, /NOID to deposit|The time left|Deposit before about/);
   const c = copies(rows[0]);
   assert.equal(c[0].copy, "0.002");
   assert.equal(c[1].copy, EB);
-  assert.ok(squash(textOf(plainBox("bob", { bob: status("bob", { covered: false }) }))).includes("now, short by 900000000000000 wei."));
+  assert.ok(squash(textOf(plainBox("bob", { bob: status("bob", { covered: false }) }))).includes("now, short by 900,000,000,000,000 wei."));
 });
 
 test("both roles: the exchange line, and 'Read N s ago'; an unclean or missing status still shows no address", () => {

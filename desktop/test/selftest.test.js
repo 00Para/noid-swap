@@ -182,6 +182,8 @@ test("the page probe: scripts that did not run, a POST refused for its Origin, a
   // the probe is one expression that sends no token and names no other address
   assert.ok(!/token=|x-swap-token|no1d:\/\/|https?:/.test(PAGE_PROBE));
   assert.match(PAGE_PROBE, /fetch\("\/api\/program\/open"/);
+  // both page scripts of program mode must have run: the shell (program.js) and the stage card (stagecard.js)
+  assert.match(PAGE_PROBE, /window\.NoidProgram[\s\S]*window\.NoidStage/);
 });
 
 test("the secret window's probe: a page that did not load, a script, stylesheet or bridge missing, a probe that throws and no probe at all fail the self-test with words", async () => {
