@@ -222,6 +222,17 @@ test("start-up test: sha256 check first, the self-test, the fuses, the installed
   assert.equal(pkgName, "no1d-swap");
   assert.ok(steps[idx(/Install silently \(Windows\)/)].run.includes(`Join-Path $env:LOCALAPPDATA "Programs\\${pkgName}"`));
   assert.ok(!/"Programs\\No1d Swap"/.test(text), "no step looks for the program in Programs\\No1d Swap");
+  // the self-test may take up to 240 s on a fresh machine; when it does not finish, its output and its last stage line are shown first
+  // (build run 10: "did not finish within 90 seconds", with nothing printed)
+  const winSelf = steps[idx(/Start the installed program with --self-test \(Windows\)/)].run;
+  assert.match(winSelf, /AddSeconds\(240\)/);
+  assert.ok(winSelf.indexOf("Get-Content $out") < winSelf.indexOf("did not finish within 240 seconds"), "Windows: the output is printed before the timeout's error");
+  assert.match(winSelf, /Where-Object \{ \$_ -like "self-test: \*" \}/);
+  const macSelf = steps[idx(/Start the app with --self-test \(macOS\)/)].run;
+  assert.match(macSelf, /seq 1 240/);
+  const macTimeout = macSelf.slice(macSelf.indexOf('if kill -0 "$pid"'));
+  assert.ok(macTimeout.indexOf('cat "$out"') < macTimeout.indexOf("did not finish within 240 seconds"), "macOS: the output is printed before the timeout's error");
+  assert.ok(!/within 90 seconds/.test(text));
   // every Windows step turns a thrown error into an annotation, and none ends on a bare exit 1
   for (const s of win) {
     assert.match(s.run, /trap \{ Write-Host "::error::\$\(\$_\.Exception\.Message\)"; break \}/, s.name);

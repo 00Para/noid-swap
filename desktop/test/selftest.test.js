@@ -240,7 +240,7 @@ test("holdMsFrom: a whole number of seconds from 1 to 30, anything else is no ho
   for (const bad of [undefined, null, "", "0", "00", "31", "99", "-5", "1.5", "abc", "10s", " 10", "100"]) assert.equal(holdMsFrom(bad), 0, String(bad));
 });
 
-test("the hold keeps everything up while it waits: the program stops only after it, and the line is printed after the stop", async () => {
+test("the hold keeps everything up while it waits: the program stops only after it; the line is printed before the stop, so a stop that hangs cannot hide it", async () => {
   const order = [];
   let code = null;
   await runSelfTest({
@@ -254,7 +254,7 @@ test("the hold keeps everything up while it waits: the program stops only after 
     exit: (c) => ((code = c), order.push("exit")),
     holdMs: 60,
   });
-  assert.deepEqual(order, ["check", "stop", "cleanup", "print", "exit"]);
+  assert.deepEqual(order, ["check", "print", "stop", "cleanup", "exit"]);
   assert.equal(code, 0);
   const t0 = Date.now();
   await runSelfTest({
@@ -269,6 +269,97 @@ test("the hold keeps everything up while it waits: the program stops only after 
     holdMs: 60,
   });
   assert.equal(order[order.length - 1], "stop after true");
+});
+
+test("a stop that never ends: the line is already printed, and the program exits after stopMs anyway", async () => {
+  const order = [];
+  let code = null;
+  const t0 = Date.now();
+  await runSelfTest({
+    whenLoaded: async () => {},
+    webContents: goodPage(),
+    request: async () => 401,
+    nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
+    stop: () => new Promise(() => {}),
+    cleanup: () => order.push("cleanup"),
+    print: (l) => order.push(JSON.parse(l).selftest),
+    exit: (c) => ((code = c), order.push("exit")),
+    stopMs: 40,
+  });
+  assert.deepEqual(order, ["ok", "cleanup", "exit"]);
+  assert.equal(code, 0);
+  assert.ok(Date.now() - t0 >= 35, "it waited for the stop as long as allowed");
+});
+
+test("the progress lines name each step in order; a progress function that throws changes nothing", async () => {
+  const steps = [];
+  await runSelfTest({
+    whenLoaded: async () => {},
+    webContents: goodPage(),
+    request: async () => 401,
+    nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
+    stop: async () => {},
+    cleanup: () => {},
+    print: () => {},
+    exit: () => {},
+    holdMs: 5,
+    progress: (s) => steps.push(s),
+  });
+  assert.deepEqual(steps, ["checks begin", "page loaded", "request without the token answered", "page probe answered", "node check answered", "hold over", "result printed", "stopped"]);
+  let code = null;
+  const lines = [];
+  await runSelfTest({
+    whenLoaded: async () => {},
+    webContents: goodPage(),
+    request: async () => 401,
+    nodeCheck: { checkOnce: async () => ({ noid: { state: "not_running" } }) },
+    stop: async () => {},
+    cleanup: () => {},
+    print: (l) => lines.push(l),
+    exit: (c) => (code = c),
+    progress: () => {
+      throw new Error("stderr is closed");
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(lines[0]).selftest, "ok");
+});
+
+test("the shell in the self-test: each stage and step goes to stderr with the time; a start-up failure prints its reason as the line and opens no dialog", async () => {
+  const e = makeEnv({ argv: ["x.exe", "--self-test"] });
+  try {
+    await e.shell.start();
+    assert.equal(e.electron.app.exitCode, 0);
+    const err = e.stderr.join("");
+    for (const s of ["self-test: stage cmdline at 1.3 s", "self-test: stage setPath at", "self-test: stage ready at", "self-test: checks begin at", "self-test: page loaded at", "self-test: result printed at", "self-test: stopped at"]) {
+      assert.ok(err.includes(s), s);
+    }
+    assert.equal(e.stdout.length, 1, "stdout holds only the line");
+  } finally {
+    e.cleanup();
+  }
+  // a start-up failure in the self-test (the data folder's guard refuses): the reason is the line, no dialog waits for a click
+  const f = makeEnv({ argv: ["x.exe", "--self-test"], guardFails: true });
+  try {
+    await f.shell.start().catch(() => {});
+    assert.equal(f.electron.app.exitCode, 1);
+    const j = JSON.parse(f.stdout.join("").trim());
+    assert.equal(j.selftest, "failed");
+    assert.match(j.why, /data folder is not private to you: another account can read this folder/);
+    assert.ok(!f.electron.calls.some((c) => c.name === "showErrorBox"), "no dialog in the self-test");
+  } finally {
+    f.cleanup();
+  }
+  // a normal start keeps the dialog, and writes no stage line
+  const n = makeEnv({ guardFails: true });
+  try {
+    await n.shell.start().catch(() => {});
+    assert.ok(n.electron.calls.some((c) => c.name === "showErrorBox"));
+    assert.equal(n.stderr.join(""), "");
+    assert.equal(n.stdout.join(""), "");
+  } finally {
+    n.cleanup();
+  }
 });
 
 test("NO1D_SELFTEST_HOLD_SECONDS is read from the program's environment by the self-test", async () => {

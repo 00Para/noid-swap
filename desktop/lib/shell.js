@@ -155,7 +155,28 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   const desktopDir = path.join(rootDir, "desktop");
   const mod = (name) => modules[name] || LAZY[name]();
   const trace = [];
-  const t = (s) => trace.push(s);
+  // In the self-test every stage is also written to stderr with the seconds since the process started: the hosted start-up job shows
+  // where a slow or stuck start spends its time. Nothing else of the program writes these lines.
+  let selfTestMode = false;
+  const stderrLine = (line) => {
+    try {
+      (proc.stderr || process.stderr).write(`${line}\n`);
+    } catch {
+      /* nothing more to do */
+    }
+  };
+  const uptime = () => {
+    try {
+      return (typeof proc.uptime === "function" ? proc.uptime() : process.uptime()).toFixed(1);
+    } catch {
+      return "?";
+    }
+  };
+  const stage = (s) => stderrLine(`self-test: ${s} at ${uptime()} s`);
+  const t = (s) => {
+    trace.push(s);
+    if (selfTestMode) stage(`stage ${s}`);
+  };
 
   let windowCtl = null;
   let secretUi = null;
@@ -188,10 +209,20 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   }
 
   function fail(text) {
-    try {
-      dialog.showErrorBox(PRODUCT, text);
-    } catch {
-      /* no dialog available: the exit code still says it */
+    if (selfTestMode) {
+      // The self-test runs where no one can click (the hosted start-up job): a dialog would keep it waiting until the job gives up. The reason
+      // goes into its one line instead. The texts are fixed sentences of this file and name no secret.
+      try {
+        (proc.stdout || process.stdout).write(`${JSON.stringify({ selftest: "failed", why: text })}\n`);
+      } catch {
+        /* the exit code still says it */
+      }
+    } else {
+      try {
+        dialog.showErrorBox(PRODUCT, text);
+      } catch {
+        /* no dialog available: the exit code still says it */
+      }
     }
     app.exit(1);
     throw new Abort(text);
@@ -217,6 +248,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
     // A login start passes --hidden on Windows (the login item's argument); a Mac login item cannot pass one, so the system's own answer is read
     // there, after ready (below): before it, the launch event that carries the answer may not have been handled yet.
     let startHidden = cmd.hidden;
+    selfTestMode = cmd.selfTest === true;
 
     t("cmdline");
     if (cmd.refused) fail(`${PRODUCT} does not start with a switch of its own kind (${cmd.refused}). Only --hidden and --self-test are read; start it again without the other one.`);
@@ -473,6 +505,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
         cleanup: cleanupTemp,
         print: (line) => (proc.stdout || process.stdout).write(`${line}\n`),
         exit: (code) => app.exit(code),
+        progress: stage,
       });
       return { state: "selftest" };
     }

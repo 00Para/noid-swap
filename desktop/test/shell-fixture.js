@@ -16,6 +16,7 @@ function makeEnv(opts = {}) {
   const rec = []; // ordered log of what the fake modules and the fake process were asked
   const electron = createFakeElectron(opts.electron || {});
   const stdout = [];
+  const stderr = [];
   const proc = new EventEmitter();
   Object.assign(proc, {
     platform: opts.platform || "win32",
@@ -23,6 +24,8 @@ function makeEnv(opts = {}) {
     execPath: opts.platform === "darwin" ? "/Applications/No1d Swap.app/Contents/MacOS/No1d Swap" : "C:\\Program Files\\No1d Swap\\No1d Swap.exe",
     resourcesPath: opts.resourcesPath || path.join(root, "resources"),
     stdout: { write: (s) => stdout.push(String(s)) },
+    stderr: { write: (s) => stderr.push(String(s)) },
+    uptime: () => 1.25,
   });
 
   let programSeen = null;
@@ -168,6 +171,7 @@ function makeEnv(opts = {}) {
     electron,
     proc,
     stdout,
+    stderr,
     shell,
     modules,
     program: () => programSeen,

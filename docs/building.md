@@ -258,6 +258,12 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   (`no1d-swap`); electron-builder takes the product name only for an assisted or a per-machine install. The step now looks in
   `Programs\no1d-swap`, and every Windows step of the start-up job turns a thrown error into an annotation, so the next failure
   can be read without a login.
+- Run 10 (`8ae3a77`) installed the program; its self-test did not finish within the step's 90 seconds and printed nothing. Two
+  ways could give that: a start-up failure under `--self-test` opened a dialog that no one clicks on a hosted machine, and the
+  line was printed only after the program had stopped, so a stop that hangs hid it. Now a start-up failure in the self-test is
+  printed as its `failed` line with no dialog, every stage is written to stderr with its time, the line comes before the stop and
+  the stop is bounded (`desktop/README.md`, "Self-test"). The step waits 240 seconds and, when the program does not finish, shows
+  its output and names the last stage it reached in the annotation, on both systems.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the

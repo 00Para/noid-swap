@@ -666,7 +666,9 @@ jobs:
           $env:NO1D_SELFTEST_HOLD_SECONDS = "15"
           $p = Start-Process -FilePath $env:EXE -ArgumentList "--self-test" -RedirectStandardOutput $out -RedirectStandardError $err -PassThru -NoNewWindow
           $null = $p.Handle
-          $deadline = (Get-Date).AddSeconds(90)
+          # The self-test has its own limits (60 s for its checks, the 15 s hold, 10 s for its stop); the rest is the start of a fresh
+          # program on a fresh machine, which a first run can make slow. 240 s leaves room for that and still ends a program that hangs.
+          $deadline = (Get-Date).AddSeconds(240)
           $samples = 0
           $listening = @()
           while (-not $p.HasExited -and (Get-Date) -lt $deadline) {
@@ -677,11 +679,18 @@ jobs:
             }
             Start-Sleep -Milliseconds 500
           }
-          if (-not $p.HasExited) { $p.Kill($true); throw "the self-test did not finish within 90 seconds" }
-          $code = $p.ExitCode
+          $timedOut = -not $p.HasExited
+          if ($timedOut) { $p.Kill($true); $null = $p.WaitForExit(10000) }
+          $code = if ($timedOut) { "none" } else { $p.ExitCode }
           Write-Host "exit code: $code"
           Write-Host "--- stdout"; Get-Content $out -ErrorAction SilentlyContinue
-          Write-Host "--- stderr (first 40 lines)"; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -First 40
+          Write-Host "--- stderr (first 60 lines)"; Get-Content $err -ErrorAction SilentlyContinue | Select-Object -First 60
+          if ($timedOut) {
+            # The program's own stage lines (self-test: ... at N s) say where it stopped; the annotation carries the last one and its line.
+            $last = Get-Content $err -ErrorAction SilentlyContinue | Where-Object { $_ -like "self-test: *" } | Select-Object -Last 1
+            $first = Get-Content $out -ErrorAction SilentlyContinue | Select-Object -First 1
+            throw "the self-test did not finish within 240 seconds (last stage: $(if ($last) { $last } else { 'none printed' }); line: $(if ($first) { $first } else { 'none' }))"
+          }
           node desktop/scripts/startup-check.js selftest --file $out --exit-code $code
           if ($LASTEXITCODE -ne 0) { throw "the self-test is not as required (exit code $code): $((Get-Content $out -ErrorAction SilentlyContinue | Select-Object -First 1))" }
           Write-Host "listening sockets looked at $samples times"
@@ -775,7 +784,7 @@ jobs:
           pid=$!
           samples=0
           listening=""
-          for _ in $(seq 1 90); do
+          for _ in $(seq 1 240); do
             kill -0 "$pid" 2>/dev/null || break
             pids="$pid"
             # pgrep exits 1 when the program has no child yet, which is an answer here, not a failure
@@ -787,14 +796,17 @@ jobs:
           done
           if kill -0 "$pid" 2>/dev/null; then
             kill -9 "$pid"
-            echo "::error::the self-test did not finish within 90 seconds"
+            echo "--- stdout"; cat "$out"
+            echo "--- stderr (first 60 lines)"; head -n 60 "$err"
+            last="$(awk '/^self-test: /{l=$0} END{print l}' "$err")"
+            echo "::error::the self-test did not finish within 240 seconds (last stage: ${last:-none printed}; line: $(head -n 1 "$out"))"
             exit 1
           fi
           code=0
           wait "$pid" || code=$?
           echo "exit code: $code"
           echo "--- stdout"; cat "$out"
-          echo "--- stderr (first 40 lines)"; head -n 40 "$err"
+          echo "--- stderr (first 60 lines)"; head -n 60 "$err"
           node desktop/scripts/startup-check.js selftest --file "$out" --exit-code "$code"
           echo "listening sockets looked at $samples times"
           if [ -n "$listening" ]; then

@@ -14,6 +14,8 @@
  */
 
 const TIMEOUT_MS = 60000;
+/** How long the stop after the checks may take before the program exits anyway (the line is already printed). */
+const STOP_MS = 10000;
 const HOLD_MAX_SECONDS = 30;
 
 /** The hold, in milliseconds, from the environment's text: a whole number of seconds from 1 to 30, anything else is no hold. */
@@ -106,8 +108,18 @@ async function requestStatus(adapter, pathName) {
  * @param {(code:number) => void} o.exit
  * @param {number} [o.timeoutMs]
  * @param {number} [o.holdMs]                    stay up this long after the checks, before stopping (see the top of this file)
+ * @param {(what:string) => void} [o.progress]   told each step as it is reached (the shell writes it to stderr with the time)
+ * @param {number} [o.stopMs]
  */
-async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, cleanup, print, exit, timeoutMs = TIMEOUT_MS, holdMs = 0 }) {
+async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, cleanup, print, exit, timeoutMs = TIMEOUT_MS, holdMs = 0, progress = () => {}, stopMs = STOP_MS }) {
+  const step = (what) => {
+    try {
+      progress(what);
+    } catch {
+      /* a progress line is never a failure */
+    }
+  };
+  step("checks begin");
   let timer;
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new Error("timed out")), timeoutMs);
@@ -119,16 +131,21 @@ async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, 
     const report = await Promise.race([
       (async () => {
         await whenLoaded();
+        step("page loaded");
         const prefs = webContents.getLastWebPreferences();
         if (!prefsOk(prefs)) throw new Error("the window preferences are not the expected ones");
         const noToken = await request("/api/program");
         if (noToken !== 401) throw new Error("an /api request without the token was not refused with 401");
+        step("request without the token answered");
         if (!webContents || typeof webContents.executeJavaScript !== "function") throw new Error("the page could not be asked to run its probe");
         const probe = await webContents.executeJavaScript(PAGE_PROBE, true);
         const why = pageProbeProblem(probe);
         if (why) throw new Error(why);
+        step("page probe answered");
         const status = await nodeCheck.checkOnce();
+        step("node check answered");
         if (holdMs > 0) await new Promise((r) => setTimeout(r, holdMs));
+        if (holdMs > 0) step("hold over");
         return { selftest: "ok", node: status.noid.state, page: "loaded", prefs: pickPrefs(prefs), no_token: noToken, page_script: true, page_post: probe.post.status };
       })(),
       deadline,
@@ -140,19 +157,31 @@ async function runSelfTest({ whenLoaded, webContents, request, nodeCheck, stop, 
   } finally {
     clearTimeout(timer);
   }
+  // The line first: a stop that hangs must not hide the result. The stop then gets at most stopMs before the program exits anyway.
+  print(line);
+  step("result printed");
+  let stopTimer;
   try {
-    await stop();
+    await Promise.race([
+      stop(),
+      new Promise((resolve) => {
+        stopTimer = setTimeout(resolve, stopMs);
+        if (stopTimer && typeof stopTimer.unref === "function") stopTimer.unref();
+      }),
+    ]);
   } catch {
-    /* the line below still tells the result */
+    /* the line above already tells the result */
+  } finally {
+    clearTimeout(stopTimer);
   }
   try {
     cleanup();
   } catch {
     /* a leftover temporary folder is not a failure of the program */
   }
-  print(line);
+  step("stopped");
   exit(code);
   return { code, line };
 }
 
-module.exports = { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, PAGE_PROBE, EXPECTED_PREFS, TIMEOUT_MS, HOLD_MAX_SECONDS };
+module.exports = { runSelfTest, createSelfTestVault, requestStatus, holdMsFrom, pickPrefs, prefsOk, pageProbeProblem, PAGE_PROBE, EXPECTED_PREFS, TIMEOUT_MS, STOP_MS, HOLD_MAX_SECONDS };

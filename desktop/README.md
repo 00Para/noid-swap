@@ -99,6 +99,12 @@ preferences, runs one node check and prints one JSON line:
 Exit 0 within 60 s; on any failure it prints `{"selftest":"failed","why":"..."}` and exits 1. The temporary folder is removed.
 On Windows the program is a GUI-subsystem binary: capture its stdout through a pipe or a redirect.
 
+A start-up failure under `--self-test` (a refused data folder, a second instance, a missing file) prints its reason as that same
+`failed` line instead of opening a dialog, which no one could click on a hosted machine. Every start-up stage and every step of the
+checks is written to stderr as `self-test: <stage> at <seconds since start> s`; nothing else writes those lines and a normal start
+writes none. The line is printed before the program stops, and the stop gets at most 10 s (`STOP_MS`) before the program exits anyway,
+so a stop that hangs cannot hide the result.
+
 ## Tests
 
 ```sh
