@@ -24,6 +24,11 @@ const SYSTEM_SID = "S-1-5-18";
 const ADMINS_SID = "S-1-5-32-544";
 const CREATOR_OWNER_SID = "S-1-3-0";
 const ALIASES = { SY: SYSTEM_SID, BA: ADMINS_SID, CO: CREATOR_OWNER_SID };
+// "LA" is how a security descriptor string names this machine's built-in Administrator account (the local account whose SID ends in -500),
+// whatever SID whoami prints for it. That account can never be removed from Administrators, so it is accepted wherever Administrators are: it
+// lets no one in that Administrators did not already cover. (Build run 13: the hosted Windows machine runs as that account, its own folder
+// showed "LA" where whoami gave the full SID, and the check refused the folder it had just made private.)
+const BUILTIN_ADMIN_ACCOUNT = "LA";
 const CACHE_MS = 10000;
 const EXEC_TIMEOUT_MS = 20000;
 
@@ -124,9 +129,9 @@ const sidOf = (t) => {
 };
 
 /**
- * Is this security descriptor owner-only for `userSid`? The DACL must be present; every allow ACE must name SYSTEM, Administrators or the user's SID (CREATOR
- * OWNER only with the inherit-only flag); deny ACEs are fine; object, conditional and any other ACE kind refuses; the owner must be the user or
- * Administrators. With `requireProtected` (the data folder itself) the DACL must also be protected from inheritance.
+ * Is this security descriptor owner-only for `userSid`? The DACL must be present; every allow ACE must name SYSTEM, Administrators, the built-in
+ * Administrator account ("LA", always a member of Administrators) or the user's SID (CREATOR OWNER only with the inherit-only flag); deny ACEs are fine;
+ * object, conditional and any other ACE kind refuses; the owner must be the user, Administrators or the built-in Administrator account. With `requireProtected` (the data folder itself) the DACL must also be protected from inheritance.
  */
 function sddlOwnerOnly(sddl, userSid, { requireProtected = false } = {}) {
   if (typeof sddl !== "string" || !sddl.trim()) return fail("the folder's access list could not be read");
@@ -136,7 +141,7 @@ function sddlOwnerOnly(sddl, userSid, { requireProtected = false } = {}) {
   if (!parts) return fail("the folder's access list is not in a form this program understands");
   if (parts.O === undefined) return fail("the folder has no owner");
   const owner = sidOf(parts.O);
-  if (owner !== me && owner !== ADMINS_SID) return fail("the folder is owned by someone other than you or Administrators");
+  if (owner !== me && owner !== ADMINS_SID && owner !== BUILTIN_ADMIN_ACCOUNT) return fail("the folder is owned by someone other than you or Administrators");
   if (parts.D === undefined || /NO_ACCESS_CONTROL/.test(parts.D)) return fail("the folder has no access list: everyone can open it");
   const dacl = daclParts(parts.D);
   if (!dacl) return fail("the folder's access list is not in a form this program understands");
@@ -151,7 +156,7 @@ function sddlOwnerOnly(sddl, userSid, { requireProtected = false } = {}) {
     if (f[3] !== "" || f[4] !== "") return fail("the folder's access list has an entry of a kind this program refuses");
     if (type === "D") continue;
     const trustee = sidOf(f[5]);
-    if (trustee === SYSTEM_SID || trustee === ADMINS_SID || trustee === me) continue;
+    if (trustee === SYSTEM_SID || trustee === ADMINS_SID || trustee === BUILTIN_ADMIN_ACCOUNT || trustee === me) continue;
     if (trustee === CREATOR_OWNER_SID) {
       const flags = f[1].toUpperCase().match(/../g) || [];
       if (flags.includes("IO")) continue;
@@ -280,7 +285,9 @@ function checkOwnerOnly(dir, opts = {}) {
       } catch (e) {
         return { ...fail("the user's identity could not be read"), detail: execDetail(e) };
       }
-      return sddlOwnerOnly(sddl, sid, { requireProtected: !!opts.requireProtected });
+      const r = sddlOwnerOnly(sddl, sid, { requireProtected: !!opts.requireProtected });
+      // a refusal carries the descriptor itself as its detail, for the self-test's line only (it names SIDs, never shown by the program)
+      return r.ok ? r : { ...r, detail: `descriptor ${sddl.replace(/\s+/g, "").slice(0, 400)}` };
     }
     if (platform === "darwin") {
       if (typeof dir !== "string" || !path.posix.isAbsolute(dir)) return fail("the folder is not an absolute path");

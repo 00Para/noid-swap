@@ -197,7 +197,7 @@ function createShell({ electron, argv, version, proc = process, modules = {}, de
   };
   // The folder steps' own reason for a failed system command (winacl's `detail`), added to the line in the self-test only: a normal start shows
   // the fixed sentence alone.
-  const selfTestDetail = (x) => (selfTestMode && x && typeof x.detail === "string" && x.detail ? ` (detail: ${x.detail.slice(0, 200)})` : "");
+  const selfTestDetail = (x) => (selfTestMode && x && typeof x.detail === "string" && x.detail ? ` (detail: ${x.detail.slice(0, 450)})` : "");
   const unexpected = (e) => {
     stage("unexpected error");
     printLine(JSON.stringify({ selftest: "failed", why: `an unexpected error ended the start: ${errorWords(e)}` }));

@@ -116,7 +116,9 @@ command's error; a normal start shows the fixed sentence alone.
 
 The access list of a folder is read through PowerShell with one .NET call (`[System.IO.Directory]::GetAccessControl`), not with
 `Get-Acl`: that command's module is found by looking through every module folder PowerShell knows, which on a machine with many
-modules took longer than the 20 s limit (build run 12).
+modules took longer than the 20 s limit (build run 12). The decision accepts, besides the user, SYSTEM and Administrators, the built-in
+Administrator account, which a descriptor string names "LA" (build run 13: the hosted machine runs as that account); it is always a member of
+Administrators. A refused folder gives its descriptor as the self-test's detail.
 
 ## Tests
 

@@ -39,6 +39,9 @@ const TABLE = {
   "empty-dacl": [true, true],
   "audit-in-dacl": [false, false],
   garbage: [false, false],
+  // the built-in Administrator account ("LA") is always a member of Administrators: as owner or entry it is accepted; the Guest account ("LG") is not
+  "builtin-administrator-account": [true, true],
+  "guest-account": [false, false],
 };
 
 test("every fixture is in the table and every table entry has its fixture (the list of cases is the spec's and more)", () => {
@@ -211,6 +214,16 @@ test("a failed system command carries a short detail for the self-test (a timeou
   assert.throws(() => acl.makeOwnerOnlyDir(dir, { platform: "win32", env: WINENV, exec: slowAfterIcacls, fs: fsFake }), (e) => /could not be read/.test(e.message) && e.detail === "timed out after 20 s");
   const noIcacls = (file) => who(file) || (() => { throw Object.assign(new Error("x"), { status: 5, stderr: "Access is denied." }); })();
   assert.throws(() => acl.makeOwnerOnlyDir(dir, { platform: "win32", env: WINENV, exec: noIcacls, fs: fsFake }), (e) => e.message === "the folder could not be made owner-only" && e.detail === "exit 5: Access is denied.");
+});
+
+test("a refused folder carries its descriptor as the detail (for the self-test only); an accepted one carries none", () => {
+  const dir = "C:\\Users\\me\\AppData\\Local\\No1d Swap";
+  const open = (file) => (file.endsWith("whoami.exe") ? `"X\\me","${USER}"` : `${fixture("inherited-users")}\r\n`);
+  const r = acl.checkOwnerOnly(dir, { platform: "win32", env: WINENV, exec: open, fs: dirStat });
+  assert.equal(r.ok, false);
+  assert.equal(r.detail, `descriptor ${fixture("inherited-users")}`.slice(0, 410));
+  const fine = (file) => (file.endsWith("whoami.exe") ? `"X\\me","${USER}"` : fixture("builtin-administrator-account"));
+  assert.deepEqual(acl.checkOwnerOnly(dir, { platform: "win32", env: WINENV, exec: fine, fs: dirStat, requireProtected: true }), { ok: true, why: null });
 });
 
 test("windowsUserSid reads the SID from whoami's csv and refuses anything else", () => {

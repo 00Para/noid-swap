@@ -279,6 +279,13 @@ lock it made as the artifact `desktop-lock-<platform>`. Commit that file (either
   command in the folder steps now adds a short detail (a timeout, or the exit code and the first line of its error) to the
   self-test's line, never to a normal start's dialog. The same slow read would have hit a user's machine with many modules at
   every start.
+- Run 13 (`b4880da`): the read worked, and the decision refused the folder the program had just made private: "the folder is open
+  to someone other than you, SYSTEM and Administrators". A security descriptor string names this machine's built-in Administrator
+  account (the local account whose SID ends in -500) "LA", whatever SID `whoami` prints for it, and the hosted Windows machine runs
+  as that account; the check compared "LA" with the full SID. "LA" is now accepted as owner and as an entry, like Administrators:
+  that account can never be removed from Administrators, so this lets no one in that Administrators did not already cover. A
+  refused folder now gives its descriptor as the self-test's detail. The same refusal would have stopped anyone who runs the
+  program as the built-in Administrator account.
 - The two desktop jobs (above) have not run to the end. Only a hosted run can show: that `electron-builder` 26.18.0 accepts
   `electron-builder.yml` (the `electronFuses` keys, `publish: null`); that the packed tree matches the manifest; that the fuses are
   flipped as asked and the asar integrity check passes; that the contracts compile to the recorded code hashes on every system; that the
