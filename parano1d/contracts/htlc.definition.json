@@ -1,0 +1,35 @@
+{
+  "definition": {
+    "claim_authority": "o1lqvrmvsyl7mkt3cptkz3c965ujt5ce6mjawxwwxe7mgn36mjzt8sn69xw2",
+    "claim_can_close": true,
+    "claim_can_continue": false,
+    "claim_recipient": "o1lfu7m7m0tn0xu9j7n7jvf858426mvjahp3nax37lcvzzex8vghhqj59wx0",
+    "deadline_height": 300000,
+    "max_fee_micronoid": 20000,
+    "max_payout_micronoid": 0,
+    "min_retained_micronoid": 0,
+    "program": [
+      {
+        "destination": "state0",
+        "immediate": "0",
+        "left": "terminal",
+        "opcode": "assert_equal",
+        "predicate": {
+          "inverted": false,
+          "source": "always"
+        },
+        "right": "one"
+      }
+    ],
+    "recovery_authority": "o18l7zu84nmlg8mgpm54um4dlpdetgwkfnv22zfd5peyx3ufc5ht7sevjnun",
+    "recovery_can_close": true,
+    "recovery_can_continue": false,
+    "recovery_recipient": "o18l7zu84nmlg8mgpm54um4dlpdetgwkfnv22zfd5peyx3ufc5ht7sevjnun",
+    "state": [
+      "0",
+      "0"
+    ],
+    "unrestricted_payout_recipient": false
+  },
+  "kind": "custom_program"
+}

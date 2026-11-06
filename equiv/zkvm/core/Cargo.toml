@@ -1,0 +1,9 @@
+[package]
+name = "equiv-guest-core"
+version = "0.1.0"
+edition = "2021"
+description = "The exact computation the zkVM guest performs, as a pure no_std function (host-testable)"
+license = "Apache-2.0"
+
+[dependencies]
+equiv-portable = { path = "../../portable" }

@@ -1,0 +1,103 @@
+{
+  "description": "RECORDED from http://127.0.0.1:9601 at unix time 1793798606 (2026-11-04T13:23:26.000Z), chain height 280517. Every answer below is the node's real reply to the request pinned beside it (read-only calls; nothing was sent to a chain).",
+  "calls": [
+    {
+      "method": "paranoid_blockCount",
+      "params": [],
+      "result": 280517
+    },
+    {
+      "method": "paranoid_getEpochAnchor",
+      "params": [],
+      "result": "5339dc8eeeb085b5b86a1d22adf5550fd6c4c834a6ed401ae7a4621506943ae1"
+    },
+    {
+      "method": "paranoid_estimateFeeDetailed",
+      "params": [
+        1,
+        1
+      ],
+      "result": {
+        "active_slot_count": 106549,
+        "breakdown": {
+          "base": 5000,
+          "burned": 0,
+          "input": 100,
+          "io": 800,
+          "miner_claimable": 5800,
+          "output": 700,
+          "paid_total": 5800,
+          "relay_floor": 5000,
+          "relay_total": 5800,
+          "required_total": 5800,
+          "state_growth": 0
+        },
+        "fee_micronoid": 5800,
+        "log_slots": 24,
+        "n_inputs": 1,
+        "n_outputs": 1,
+        "net_new_slots": 0
+      }
+    },
+    {
+      "method": "paranoid_getMempoolStats",
+      "params": [],
+      "result": {
+        "capacity": 1024,
+        "fee_floor": 5000,
+        "intent_bytes": 180907,
+        "max_intent_bytes": 402653184,
+        "size": 2
+      }
+    },
+    {
+      "method": "paranoid_getObjectInstances",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e1eb85b354cca6d9ae411c9e9656347fd57a15cd91d1037a948b3a3cd4a5deed3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafdb596040000000000fa79edfb6f5cde6e165e9fa4c49e87aab5b64bb70c67d347dfc3042c98ec45ee3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafd50c3000000000000000000000000000000000000000000000a",
+        0,
+        16
+      ],
+      "result": {
+        "address": "o1s5afmla479qwvfrkcjxxg0utkrf824tm6npjfh4nyqc6lmpyzj5qdaxqsw",
+        "height": 280517,
+        "next_slot": null,
+        "slots": [],
+        "tip_hash": "06516a8f461879e738b42445981e6a3a5901ebca2677fa201dbcfd031e586493"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolInfo",
+      "params": [],
+      "result": {
+        "fee_floor": 5000,
+        "size": 2,
+        "txs": [
+          {
+            "admitted_height": 280516,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "b72d3827fcbf34083452b3f566f8641ecc53090c93863f9fbdd8ef52dbd42ff8"
+          },
+          {
+            "admitted_height": 280517,
+            "fee_micronoid": 6600,
+            "fee_rate": 1650,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 2,
+            "n_outputs": 2,
+            "page_count": 3,
+            "requires_b255_miner": false,
+            "tx_hash": "38b32c71320abc6baab58965396b95600e37fda33d54cb9022cb6247c31b2a42"
+          }
+        ]
+      }
+    }
+  ]
+}

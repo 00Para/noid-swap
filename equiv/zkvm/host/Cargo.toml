@@ -1,0 +1,23 @@
+[package]
+name = "equiv-host"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "equiv-prove"
+path = "src/main.rs"
+
+[features]
+# default: prove through the `r0vm` binary installed by rzup. `prove` links the prover in-process
+# (slow to compile; its build script downloads recursion circuits from S3).
+default = []
+prove = ["risc0-zkvm/prove"]
+
+[dependencies]
+equiv-methods = { path = "../methods" }
+equiv-portable = { path = "../../portable" }
+# `disable-dev-mode` (REVIEW-3 G1): a build that can never accept a dev-mode (fake) receipt, whatever the environment says.
+risc0-zkvm = { version = "3", default-features = false, features = ["client", "disable-dev-mode"] }
+bincode = "1.3"
+bech32 = "0.11"
+hex = "0.4"

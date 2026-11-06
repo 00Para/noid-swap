@@ -1,0 +1,13 @@
+[package]
+name = "equiv-portable"
+version = "0.1.0"
+edition = "2021"
+description = "Dependency-free, no_std Poseidon2b/ADDRFIX_/Derive/SHA-256 for the NOID<->BTC/ETH equivalence proof guest"
+license = "Apache-2.0"
+
+[dependencies]
+# intentionally empty: this crate runs inside a zkVM guest
+
+[features]
+default = []
+std = []

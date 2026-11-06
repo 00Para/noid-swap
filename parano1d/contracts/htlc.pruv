@@ -1,0 +1,43 @@
+// Parano1d-side leg of an atomic swap: a hash-time-locked contract.
+//
+// The "hashlock" is the claim authority itself: hashlock_authority = Addr(s)
+// for a secret s that only the NOID seller (Alice) knows. Authorizing a claim
+// is a zero-knowledge proof of knowledge of s, so s is never published on
+// Parano1d. The payout is separately pinned to `receiver` (Bob) by the
+// committed policy, so learning s lets nobody redirect the funds.
+//
+//   height <  timeout_height : only a holder of s can close; output 0 must
+//                              pay `receiver`.
+//   height >= timeout_height : only `sender` can close; output 0 must pay
+//                              `sender`.
+//
+// Only closing calls are permitted (no continuing calls, no payout output),
+// and `unrestricted_payout_recipient` is false. ABI 3 has no hash opcode and
+// no call argument, so nothing about the hash is checked by the program.
+contract HashTimeLock {
+    param hashlock_authority: address;   // Addr(s)
+    param receiver: address;             // Bob
+    param sender: address;               // Alice
+    param timeout_height: u64;
+    param max_fee: u64;                  // micro-NOID cap on any call's fee
+    policy {
+        claim_authority = hashlock_authority;
+        recovery_authority = sender;
+        claim_recipient = receiver;
+        recovery_recipient = sender;
+        deadline_height = timeout_height;
+        max_fee_micronoid = max_fee;
+        max_payout_micronoid = 0;
+        min_retained_micronoid = 0;
+        claim_can_continue = false;
+        claim_can_close = true;
+        recovery_can_continue = false;
+        recovery_can_close = true;
+        unrestricted_payout_recipient = false;
+    }
+    call { require terminal; }   // redundant with the modes; belt-and-braces
+
+    // Every successful execution of the program is a closing call: the
+    // contract can never produce a successor.
+    ensures terminal;
+}

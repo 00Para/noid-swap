@@ -1,0 +1,78 @@
+{
+  "description": "SYNTHESIZED from the vendored type definitions (vendor/parano1d/noid_rpc/src/types.rs, object_types.rs); no node was contacted. The opening hex and root are the real ones built by swap_cli::swapfile::example_public(seq_bytes(0x33), Raw) with h_create 300000 (deadline 300725); everything else (heights, hashes, fees) is invented but shaped like the real answers. Malformed: everything is well-formed except getObjectInstances, whose `slots` is a string instead of a list. The watcher must fail with RpcError::Decode naming paranoid_getObjectInstances.",
+  "calls": [
+    {
+      "method": "paranoid_blockCount",
+      "params": [],
+      "result": 300100
+    },
+    {
+      "method": "paranoid_getEpochAnchor",
+      "params": [],
+      "result": "484a5297d36a889310afee7ffa2c52a7ebdb94631b43a534d6ffbbb0d4d0987d"
+    },
+    {
+      "method": "paranoid_estimateFeeDetailed",
+      "params": [
+        1,
+        1
+      ],
+      "result": {
+        "n_inputs": 1,
+        "n_outputs": 1,
+        "net_new_slots": 0,
+        "active_slot_count": 41873,
+        "log_slots": 24,
+        "fee_micronoid": 5800,
+        "breakdown": {
+          "base": 5000,
+          "input": 100,
+          "output": 700,
+          "io": 800,
+          "state_growth": 0,
+          "required_total": 5800,
+          "relay_floor": 5800,
+          "relay_total": 5800,
+          "paid_total": 5800,
+          "burned": 5800,
+          "miner_claimable": 0
+        }
+      }
+    },
+    {
+      "method": "paranoid_getMempoolStats",
+      "params": [],
+      "result": {
+        "size": 0,
+        "capacity": 5000,
+        "intent_bytes": 0,
+        "max_intent_bytes": 268435456,
+        "fee_floor": 5800
+      }
+    },
+    {
+      "method": "paranoid_getObjectInstances",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e1eb85b354cca6d9ae411c9e9656347fd57a15cd91d1037a948b3a3cd4a5deed3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafdb596040000000000fa79edfb6f5cde6e165e9fa4c49e87aab5b64bb70c67d347dfc3042c98ec45ee3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafd50c3000000000000000000000000000000000000000000000a",
+        0,
+        16
+      ],
+      "result": {
+        "address": "o1s5afmla479qwvfrkcjxxg0utkrf824tm6npjfh4nyqc6lmpyzj5qdaxqsw",
+        "height": 300100,
+        "tip_hash": "da02ed844cd9e4c812b945ad475caeb4afdb0c9936f4bfccdcb30d269db10783",
+        "slots": "not-a-list",
+        "next_slot": null
+      }
+    },
+    {
+      "method": "paranoid_getMempoolInfo",
+      "params": [],
+      "result": {
+        "size": 0,
+        "fee_floor": 5800,
+        "txs": []
+      }
+    }
+  ]
+}

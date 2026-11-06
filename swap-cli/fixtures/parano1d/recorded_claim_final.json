@@ -1,0 +1,704 @@
+{
+  "description": "RECORDED from http://127.0.0.1:9601 at unix time 1793803514, chain height 280676. LIVE RUN 1 (first real swap, 2026-11-04, owner's Parano1d v2.1.0 node, mainnet; contract instance slot 9,750,400, creation id 736,337, 10,000,000 uNOID, funding tx 267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780 included at height 280,638). State: claim final, instance gone (tick at exactly 280,676 = 280,659 + 17. This tick did not track a txid, so it has no getTx call; the mempool holds 22 unrelated entries (contract_opening_hex null). Every answer below is the node's real reply to the request pinned beside it (read-only calls; nothing was sent to a chain).",
+  "calls": [
+    {
+      "method": "paranoid_blockCount",
+      "params": [],
+      "result": 280676
+    },
+    {
+      "method": "paranoid_getEpochAnchor",
+      "params": [],
+      "result": "28931e56442916500aa93d58394a7d024aee9afeae746d32bd176b8099d7a02d"
+    },
+    {
+      "method": "paranoid_estimateFeeDetailed",
+      "params": [
+        1,
+        1
+      ],
+      "result": {
+        "active_slot_count": 106114,
+        "breakdown": {
+          "base": 5000,
+          "burned": 0,
+          "input": 100,
+          "io": 800,
+          "miner_claimable": 5800,
+          "output": 700,
+          "paid_total": 5800,
+          "relay_floor": 5000,
+          "relay_total": 5800,
+          "required_total": 5800,
+          "state_growth": 0
+        },
+        "fee_micronoid": 5800,
+        "log_slots": 24,
+        "n_inputs": 1,
+        "n_outputs": 1,
+        "net_new_slots": 0
+      }
+    },
+    {
+      "method": "paranoid_getMempoolStats",
+      "params": [],
+      "result": {
+        "capacity": 1024,
+        "fee_floor": 5000,
+        "intent_bytes": 1976979,
+        "max_intent_bytes": 402653184,
+        "size": 22
+      }
+    },
+    {
+      "method": "paranoid_getObjectInstances",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+        0,
+        16
+      ],
+      "result": {
+        "address": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+        "height": 280676,
+        "next_slot": null,
+        "slots": [],
+        "tip_hash": "b2fd85336d1e7c6f1b5165a939bc1d56eef8f669e8eda0e424266e1401ac5e34"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolInfo",
+      "params": [],
+      "result": {
+        "fee_floor": 5000,
+        "size": 22,
+        "txs": [
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "10cab8e5b8cfc63b60fd8c4bfa4223d9e48fb04300421d28b7a75a58e8830d77"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "4f205382da7fdea6283f6f395a59df938af798b0b1ee830889622a540639c0e0"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "843d4f7937655acfbfe0087243e0cf3406e972190bbeaca83e9e7dfde88e2672"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "c6385940959b0fb03501ec0c505e2a9904b9bd4812997dfcab4e2e0efccf619b"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "0b8dfe7f5ac82d19f9db8e7daa1c954e5f378abdcfa9716e295aa4196daa9367"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "baa9cafeca9acc9b90ce6d5d4dd2e18f37c829a5122f7a14954cd3ac2f65c837"
+          },
+          {
+            "admitted_height": 280674,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "a184f0ef4d457bde39cb67ad4662544ea95f44a98e14c79196b085acd0b8732d"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "43e9f6ada988689032b7540e3d9ca1e68442a0a6c2dc738228501c5c19e42b96"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "59a46f4099fafe54b89c946897a933c4293e7df9e216175c753662e5a419ecb9"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "7510e0128956e739c9ef1eaa443cc631c46b6bfb302e335358212e330fcd9d10"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "41d4300d0a35a5aeb26a4f0e0ba5d73e3471457e7b7e625b563a1eaac1c2507a"
+          },
+          {
+            "admitted_height": 280674,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "c21568df227f03501bf77e3e5d696c6e85c456eae1c7f4276e9424bc35943d91"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "bfb635d6f76b9ae896c47c8a50c894c6deaa45d0caf3a986a4c27120f5e01b1a"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 6600,
+            "fee_rate": 1650,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 2,
+            "n_outputs": 2,
+            "page_count": 3,
+            "requires_b255_miner": false,
+            "tx_hash": "a0629b25256e816d2faed80382a7ed014de06b16f81dde384b45ce2780ec20c3"
+          },
+          {
+            "admitted_height": 280674,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "a8c4a0a4030ad9658ba843b2432cda3d733a60ae3a3ecfd2a4ba915a23c18a1b"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "6708b844ce7f6158febd4a97934366f5e835e1c876aededc6d0e6cc7a44575c9"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "6db061a7ebd7f5e068ea8c3770b69acfbccf3183e4d721db581ce767b08e8f04"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "91bdb43e464ef2fe696402a52bf4fd62a00798dd19573774248ddf74231dd399"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "7bb649c2a2abbd464026ebcb26bf7c827f4f6688afa7322790b90d9d37b96bc8"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "dc6deee5e79e3faefa4471c70835bca6a7fc5a444e8c80a176499ed881a6ce30"
+          },
+          {
+            "admitted_height": 280674,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "c5a21735cdcd1d05026a563f116ea0174b941df01c264193166f7f3d4c12c050"
+          },
+          {
+            "admitted_height": 280675,
+            "fee_micronoid": 9900,
+            "fee_rate": 1414,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "e6771805fdb55af0a605f1871a4e215238c7752f83ffae88aeb0934cd288d629"
+          }
+        ]
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "10cab8e5b8cfc63b60fd8c4bfa4223d9e48fb04300421d28b7a75a58e8830d77"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "10cab8e5b8cfc63b60fd8c4bfa4223d9e48fb04300421d28b7a75a58e8830d77"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "4f205382da7fdea6283f6f395a59df938af798b0b1ee830889622a540639c0e0"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "4f205382da7fdea6283f6f395a59df938af798b0b1ee830889622a540639c0e0"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "843d4f7937655acfbfe0087243e0cf3406e972190bbeaca83e9e7dfde88e2672"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "843d4f7937655acfbfe0087243e0cf3406e972190bbeaca83e9e7dfde88e2672"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "c6385940959b0fb03501ec0c505e2a9904b9bd4812997dfcab4e2e0efccf619b"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "c6385940959b0fb03501ec0c505e2a9904b9bd4812997dfcab4e2e0efccf619b"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "0b8dfe7f5ac82d19f9db8e7daa1c954e5f378abdcfa9716e295aa4196daa9367"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "0b8dfe7f5ac82d19f9db8e7daa1c954e5f378abdcfa9716e295aa4196daa9367"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "baa9cafeca9acc9b90ce6d5d4dd2e18f37c829a5122f7a14954cd3ac2f65c837"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "baa9cafeca9acc9b90ce6d5d4dd2e18f37c829a5122f7a14954cd3ac2f65c837"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "a184f0ef4d457bde39cb67ad4662544ea95f44a98e14c79196b085acd0b8732d"
+      ],
+      "result": {
+        "admitted_height": 280674,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "a184f0ef4d457bde39cb67ad4662544ea95f44a98e14c79196b085acd0b8732d"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "43e9f6ada988689032b7540e3d9ca1e68442a0a6c2dc738228501c5c19e42b96"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "43e9f6ada988689032b7540e3d9ca1e68442a0a6c2dc738228501c5c19e42b96"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "59a46f4099fafe54b89c946897a933c4293e7df9e216175c753662e5a419ecb9"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "59a46f4099fafe54b89c946897a933c4293e7df9e216175c753662e5a419ecb9"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "7510e0128956e739c9ef1eaa443cc631c46b6bfb302e335358212e330fcd9d10"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "7510e0128956e739c9ef1eaa443cc631c46b6bfb302e335358212e330fcd9d10"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "41d4300d0a35a5aeb26a4f0e0ba5d73e3471457e7b7e625b563a1eaac1c2507a"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "41d4300d0a35a5aeb26a4f0e0ba5d73e3471457e7b7e625b563a1eaac1c2507a"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "c21568df227f03501bf77e3e5d696c6e85c456eae1c7f4276e9424bc35943d91"
+      ],
+      "result": {
+        "admitted_height": 280674,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "c21568df227f03501bf77e3e5d696c6e85c456eae1c7f4276e9424bc35943d91"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "bfb635d6f76b9ae896c47c8a50c894c6deaa45d0caf3a986a4c27120f5e01b1a"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "bfb635d6f76b9ae896c47c8a50c894c6deaa45d0caf3a986a4c27120f5e01b1a"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "a8c4a0a4030ad9658ba843b2432cda3d733a60ae3a3ecfd2a4ba915a23c18a1b"
+      ],
+      "result": {
+        "admitted_height": 280674,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "a8c4a0a4030ad9658ba843b2432cda3d733a60ae3a3ecfd2a4ba915a23c18a1b"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "6708b844ce7f6158febd4a97934366f5e835e1c876aededc6d0e6cc7a44575c9"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "6708b844ce7f6158febd4a97934366f5e835e1c876aededc6d0e6cc7a44575c9"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "91bdb43e464ef2fe696402a52bf4fd62a00798dd19573774248ddf74231dd399"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "91bdb43e464ef2fe696402a52bf4fd62a00798dd19573774248ddf74231dd399"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "7bb649c2a2abbd464026ebcb26bf7c827f4f6688afa7322790b90d9d37b96bc8"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "7bb649c2a2abbd464026ebcb26bf7c827f4f6688afa7322790b90d9d37b96bc8"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "c5a21735cdcd1d05026a563f116ea0174b941df01c264193166f7f3d4c12c050"
+      ],
+      "result": {
+        "admitted_height": 280674,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "c5a21735cdcd1d05026a563f116ea0174b941df01c264193166f7f3d4c12c050"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "e6771805fdb55af0a605f1871a4e215238c7752f83ffae88aeb0934cd288d629"
+      ],
+      "result": {
+        "admitted_height": 280675,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9900,
+        "fee_rate": 1414,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "e6771805fdb55af0a605f1871a4e215238c7752f83ffae88aeb0934cd288d629"
+      }
+    }
+  ]
+}

@@ -1,0 +1,331 @@
+{
+  "description": "RECORDED from http://127.0.0.1:9601 (the owner's Parano1d v2.1.0 node, mainnet) at unix time 1793798641 (2026-11-04T13:24:01.000Z), chain height 280517. Read-only calls, replies verbatim, including the error replies. The opening is the one idle.json was recorded for; its slot 0 is empty, the txid is unknown to the node.",
+  "calls": [
+    {
+      "method": "paranoid_blockCount",
+      "params": [],
+      "result": 280517
+    },
+    {
+      "method": "paranoid_getChainInfo",
+      "params": [],
+      "result": {
+        "height": 280517,
+        "best_hash": "06516a8f461879e738b42445981e6a3a5901ebca2677fa201dbcfd031e586493",
+        "difficulty_target": "e306978a1caef1f6ff01ca89d9171a9df4c355ed9f491bf34c78090000000000",
+        "active_slot_count": 106549,
+        "log_slots": 24,
+        "circulating_supply_micronoid": "11628865405000"
+      }
+    },
+    {
+      "method": "paranoid_getContractProtocol",
+      "params": [],
+      "result": {
+        "tip_height": 280517,
+        "activation_height": 210537,
+        "active_at_next_block": true,
+        "runtime_available": true,
+        "next_block_time_seconds": 30,
+        "abi_version": 3,
+        "instructions": 16,
+        "persistent_registers": 2,
+        "classes": [
+          {
+            "class": "small",
+            "pages": 63,
+            "live_inputs": 504,
+            "contract_calls": 63
+          },
+          {
+            "class": "large",
+            "pages": 206,
+            "live_inputs": 504,
+            "contract_calls": 63
+          },
+          {
+            "class": "native",
+            "pages": 63,
+            "live_inputs": 504,
+            "contract_calls": 63
+          }
+        ]
+      }
+    },
+    {
+      "method": "paranoid_getSlotHints",
+      "params": [
+        1
+      ],
+      "result": [
+        614170
+      ]
+    },
+    {
+      "method": "paranoid_getObjectStatus",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e1eb85b354cca6d9ae411c9e9656347fd57a15cd91d1037a948b3a3cd4a5deed3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafdb596040000000000fa79edfb6f5cde6e165e9fa4c49e87aab5b64bb70c67d347dfc3042c98ec45ee3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafd50c3000000000000000000000000000000000000000000000a",
+        0
+      ],
+      "result": {
+        "object": {
+          "abi_version": 3,
+          "state": [
+            "0",
+            "0"
+          ],
+          "address": "o1s5afmla479qwvfrkcjxxg0utkrf824tm6npjfh4nyqc6lmpyzj5qdaxqsw",
+          "opening_hex": "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000e1eb85b354cca6d9ae411c9e9656347fd57a15cd91d1037a948b3a3cd4a5deed3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafdb596040000000000fa79edfb6f5cde6e165e9fa4c49e87aab5b64bb70c67d347dfc3042c98ec45ee3ffc2e1eb3dfd07da03ba579bab7e16e56875933629424b681c90d1e2714bafd50c3000000000000000000000000000000000000000000000a",
+          "code_id": "5d2f0afe89db1e06c90bc78bff1e3082b1bcad54662757a6916924d2244d3efe",
+          "state_hex": "00000000000000000000000000000000",
+          "program": [
+            {
+              "opcode": "assert_equal",
+              "destination": "state0",
+              "left": "terminal",
+              "right": "one",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            },
+            {
+              "opcode": "keep",
+              "destination": "state0",
+              "left": "state0",
+              "right": "state0",
+              "predicate": {
+                "source": "always",
+                "inverted": false
+              },
+              "immediate": "0"
+            }
+          ],
+          "claim_authority": "o1u84ctv65ejndntjprj0fv4350l2h59wdj8gsx7553vare499mmksk6kf5s",
+          "recovery_authority": "o18l7zu84nmlg8mgpm54um4dlpdetgwkfnv22zfd5peyx3ufc5ht7sevjnun",
+          "claim_recipient": "o1lfu7m7m0tn0xu9j7n7jvf858426mvjahp3nax37lcvzzex8vghhqj59wx0",
+          "recovery_recipient": "o18l7zu84nmlg8mgpm54um4dlpdetgwkfnv22zfd5peyx3ufc5ht7sevjnun",
+          "deadline_height": 300725,
+          "max_fee_micronoid": 50000,
+          "max_payout_micronoid": 0,
+          "min_retained_micronoid": 0,
+          "claim_can_continue": false,
+          "claim_can_close": true,
+          "recovery_can_continue": false,
+          "recovery_can_close": true,
+          "unrestricted_payout_recipient": false
+        },
+        "slot": {
+          "slot_index": 0,
+          "value": 0,
+          "creation_id": 0,
+          "owner": "",
+          "empty": true
+        },
+        "matches_opening": false,
+        "tip_height": 280517,
+        "next_call_height": 280518,
+        "active_authority": "o1u84ctv65ejndntjprj0fv4350l2h59wdj8gsx7553vare499mmksk6kf5s"
+      }
+    },
+    {
+      "method": "paranoid_getTx",
+      "params": [
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "result": null
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "result": null
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "zz"
+      ],
+      "error": {
+        "code": -32000,
+        "message": "invalid txhash: expected 64-char hex"
+      }
+    },
+    {
+      "method": "paranoid_getObjectInstances",
+      "params": [
+        "00",
+        0,
+        16
+      ],
+      "error": {
+        "code": -32000,
+        "message": "contract: Encoding"
+      }
+    },
+    {
+      "method": "paranoid_noSuchMethod",
+      "params": [],
+      "error": {
+        "code": -32601,
+        "message": "Method not found"
+      }
+    }
+  ]
+}

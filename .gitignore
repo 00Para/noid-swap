@@ -1,0 +1,39 @@
+# Build artifacts (all three Rust workspaces + the shared sandbox target dir)
+target/
+equiv/zkvm/target/
+
+# Node
+node_modules/
+eth/artifacts/
+eth/cache/
+
+# Local
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+
+# Swap state and proofs: a swap file carries the sealed secret, a receipt is a per-swap proof,
+# the lock file is the engine's exclusive-access marker. None of them belongs in the repository.
+*.swap.json
+*.swap.json.lock
+*.receipt
+passphrase.txt
+
+# NOTE: vendor/ is intentionally NOT ignored — vendor/parano1d is vendored source (shallow clone at
+# d29b801, Apache-2.0, see THIRD-PARTY-NOTICES.md). Its own .git metadata is not tracked.
+
+# Ethereum private keys for live runs (eth/scripts/live.js keygen): never commit
+eth/keys/
+
+# Bitcoin signet private keys for live runs (btc/scripts/live.js keygen): never commit
+btc/keys/
+
+# Any other key file written by the live scripts
+*.key
+
+# Live-run material that must never be committed
+passphrase*
+env.local.sh
+*.wif

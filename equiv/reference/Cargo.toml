@@ -1,0 +1,24 @@
+[package]
+name = "equiv-ref"
+version = "0.1.0"
+edition = "2021"
+description = "Reference implementation (backed by the vendor Parano1d crates) of the NOID<->BTC/ETH equivalence statement"
+license = "Apache-2.0"
+
+[lib]
+name = "equiv_ref"
+path = "src/lib.rs"
+
+[[bin]]
+name = "equiv-ref"
+path = "src/main.rs"
+
+[dependencies]
+noid_poseidon2b = { path = "../../vendor/parano1d/noid_poseidon2b" }
+noid_core       = { path = "../../vendor/parano1d/noid_core" }
+equiv-portable  = { path = "../portable" }
+sha2            = "0.10"
+hex             = "0.4"
+
+[dev-dependencies]
+rand = "0.8"

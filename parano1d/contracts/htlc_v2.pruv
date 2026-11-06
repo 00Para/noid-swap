@@ -1,0 +1,58 @@
+// HashTimeLock v2 (fixed fee): the Parano1d-side leg of an atomic swap.
+//
+// Same lock as htlc.pruv (v1) - the hashlock is the claim authority itself:
+// hashlock_authority = Addr(s) for a secret s that only the NOID seller (Alice)
+// knows; the payout is pinned to `receiver` (Bob) by the committed policy - plus
+// ONE extra rule: every close must pay exactly `max_fee` as its fee.
+//
+//   height <  timeout_height : only a holder of s can close; output 0 must
+//                              pay `receiver`; fee must equal max_fee.
+//   height >= timeout_height : only `sender` can close; output 0 must pay
+//                              `sender`; fee must equal max_fee.
+//
+// Why: in v1 a close may pay any fee in [network minimum, max_fee]. Anyone who
+// knows s (Alice, from the start) can broadcast a minimum-fee close that still
+// pays Bob. The mempool is first-seen per input slot with no replace-by-fee, so
+// Bob's better-paying close is rejected as a slot conflict and the cheap one can
+// sit unconfirmed under load. With v2 there is no cheaper valid close: every
+// valid close, by anyone, pays max_fee (the policy ceiling already rejects
+// fee > max_fee, the program rejects fee < max_fee).
+//
+// `max_fee` is a compile-time parameter, so `fee == max_fee` is an
+// assert_equal of the `fee` context operand against an immediate; the fee
+// ceiling is committed in the policy AND embedded as that immediate (the
+// program cannot read the policy ceiling, only the same parameter value).
+//
+// Only closing calls are permitted (no continuing calls, no payout output),
+// and `unrestricted_payout_recipient` is false. ABI 3 has no hash opcode and
+// no call argument, so nothing about the hash is checked by the program.
+contract HashTimeLockV2 {
+    param hashlock_authority: address;   // Addr(s)
+    param receiver: address;             // Bob
+    param sender: address;               // Alice
+    param timeout_height: u64;
+    param max_fee: u64;                  // micro-NOID: ceiling AND the exact fee of every close
+    policy {
+        claim_authority = hashlock_authority;
+        recovery_authority = sender;
+        claim_recipient = receiver;
+        recovery_recipient = sender;
+        deadline_height = timeout_height;
+        max_fee_micronoid = max_fee;
+        max_payout_micronoid = 0;
+        min_retained_micronoid = 0;
+        claim_can_continue = false;
+        claim_can_close = true;
+        recovery_can_continue = false;
+        recovery_can_close = true;
+        unrestricted_payout_recipient = false;
+    }
+    call {
+        require terminal;           // instruction 0: assert_equal terminal, one
+        require fee == max_fee;     // instruction 1: assert_equal fee, immediate(max_fee)
+    }
+
+    // Every successful execution is a closing call that paid exactly max_fee.
+    ensures terminal;
+    ensures fee == max_fee;
+}

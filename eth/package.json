@@ -1,0 +1,22 @@
+{
+  "name": "noid-swap-eth",
+  "license": "MIT",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Ethereum side of a NOID<->ETH SHA-256 HTLC atomic swap",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "secret": "node scripts/secret.js",
+    "poseidon:gen": "node scripts/poseidon/gen.js",
+    "poseidon:check": "node scripts/poseidon/gen.js --check"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.29.1",
+    "solc": "0.8.24"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1"
+  }
+}

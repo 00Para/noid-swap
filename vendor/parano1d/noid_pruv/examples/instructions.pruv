@@ -1,0 +1,48 @@
+contract InstructionCheck {
+    param spending_key: address;
+    param recovery_key: address;
+    param recipient: address;
+    param recover_at: u64;
+    param budget: u64;
+    param max_fee: u64;
+    param max_payment: u64;
+
+    state balance: u64 = budget;
+    state calls: u64 = 0;
+
+    policy {
+        claim_authority = spending_key;
+        recovery_authority = recovery_key;
+        claim_recipient = recipient;
+        recovery_recipient = recovery_key;
+        deadline_height = recover_at;
+        max_fee_micronoid = max_fee;
+        max_payout_micronoid = max_payment;
+        min_retained_micronoid = 0;
+        claim_can_continue = true;
+        claim_can_close = false;
+        recovery_can_continue = false;
+        recovery_can_close = true;
+        unrestricted_payout_recipient = false;
+    }
+
+    call {
+        when !terminal {
+            balance = input_amount;
+            balance += fee;
+            balance -= payout;
+            balance = min(balance, retained);
+            balance = max(balance, 1);
+            require balance == retained;
+            require payout <= balance;
+            when payout < retained {
+                calls += 1;
+            }
+            when calls == 1 {
+                calls += 1;
+            }
+        }
+    }
+
+    ensures calls >= old(calls);
+}

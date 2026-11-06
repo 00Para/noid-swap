@@ -1,0 +1,527 @@
+# Q2 negative test N2 (docs/q2-history-step.md section 7.2.1), 2026-11-04. TEST-ONLY patch for a scratch
+# copy of vendor/parano1d/noid_recursive at d29b801; never applied in-tree. Adds two #[cfg(test)] modules
+# and one #[cfg(test)] hook that changes a prover-supplied value, never a constraint. See parano1d/README.md.
+diff --git a/noid_recursive/src/acceptance/block_slots.rs b/noid_recursive/src/acceptance/block_slots.rs
+--- a/noid_recursive/src/acceptance/block_slots.rs
++++ b/noid_recursive/src/acceptance/block_slots.rs
+@@ -1510,9 +1510,16 @@
+                     .map(|contract| contract.refund_recipient.map(flat_of))
+                     .unwrap_or([F128::ZERO; 2])
+                     .map(|value| LinExpr::from_wire(b.alloc_f128(value)));
+-                let old_object_root_w = built
+-                    .contract_old_object_root
+-                    .map(|value| LinExpr::from_wire(b.alloc_f128(value)));
++                // Q2/N2 scratch hook (test builds only): a malicious prover may put ANY
++                // value in this witness wire. This changes a witness value, never a row.
++                #[cfg(test)]
++                let old_root_value = q2_n2_control::FORGED_OLD_ROOT
++                    .with(|cell| cell.get())
++                    .unwrap_or(built.contract_old_object_root);
++                #[cfg(not(test))]
++                let old_root_value = built.contract_old_object_root;
++                let old_object_root_w =
++                    old_root_value.map(|value| LinExpr::from_wire(b.alloc_f128(value)));
+                 for lane in 0..2 {
+                     let body_old = &t.leaves[noid_tx::body_hash::TX8X2_LEAF_INPUT_OWNER][lane];
+                     let gated = mul(b, &live_w, &old_object_root_w[lane].add(body_old));
+@@ -4301,3 +4308,200 @@
+         }
+     }
+ }
++
++/// Q2 / N2 control (noid-swap scratch copy; not upstream code).
++/// Component R1CS = spine_region_data_from_wires + views + policy + partition +
++/// execution for one HTLC close. Shows what the main equations alone decide.
++#[cfg(test)]
++pub(in crate::acceptance) mod q2_n2_control {
++    use super::*;
++    use crate::acceptance::history_step::v2::V2Config;
++    use noid_chain::consensus::forks::{ForkSchedule, V2Activation};
++    use noid_poseidon2b::primitives::Address;
++    use noid_tx::{
++        experimental_object::{
++            integer_program::EMPTY_PROGRAM, transaction_contexts, ObjectOpening, ObjectRules,
++        },
++        output_bitmap_bit, TxBody, TxInput, TxOutput, TxPage, PAGED_SPEND_CONTRACT_BIT,
++        PAGED_SPEND_END_BIT, PAGED_SPEND_START_BIT, PAGED_SPEND_TERMINAL_BIT,
++    };
++
++    thread_local! {
++        pub(in crate::acceptance) static FORGED_OLD_ROOT: std::cell::Cell<Option<[F128; 2]>> =
++            const { std::cell::Cell::new(None) };
++    }
++
++    const HEIGHT: u64 = 299;
++    const DEADLINE: u64 = 300;
++
++    fn htlc(claim_recipient: Address) -> ObjectOpening {
++        ObjectOpening {
++            program: EMPTY_PROGRAM,
++            state: Block128(0),
++            claim_authority: Address([0xA5; 32]),
++            recovery_authority: Address([0xA1; 32]),
++            deadline: DEADLINE,
++            claim_recipient,
++            recovery_recipient: Address([0xA1; 32]),
++            rules: ObjectRules {
++                max_fee: 50_000,
++                min_retained: 0,
++                max_payout: 0,
++                modes: 10,
++            },
++        }
++    }
++
++    fn close_body(funded_root: Address, pay_to: Address) -> TxBody {
++        let mut inputs = [TxInput::dummy(); 8];
++        inputs[0] = TxInput {
++            slot_index: 1,
++            amount: 1_000_000,
++            creation_id: 3,
++        };
++        TxBody {
++            epoch_anchor: [5; 32],
++            fee: 6_000,
++            input_owner: funded_root,
++            inputs,
++            outputs: [
++                TxOutput {
++                    slot_index: 2,
++                    amount: 994_000,
++                    owner: pay_to,
++                },
++                TxOutput::dummy(),
++            ],
++            validity_bitmap: 1
++                | output_bitmap_bit(0)
++                | PAGED_SPEND_START_BIT
++                | PAGED_SPEND_END_BIT
++                | PAGED_SPEND_CONTRACT_BIT
++                | PAGED_SPEND_TERMINAL_BIT,
++            is_coinbase: false,
++        }
++    }
++
++    /// Returns (satisfied, structural digest).
++    fn run(funded: &ObjectOpening, claimed: &ObjectOpening, pay_to: Address) -> (bool, [u8; 32]) {
++        let pages = 25;
++        let capacity = 16;
++        let config = V2Config::with_limits(
++            23,
++            pages,
++            pages * 8,
++            capacity,
++            ForkSchedule::new(Some(5), V2Activation::new(10, 30)).unwrap(),
++        )
++        .unwrap();
++        let mut bodies = vec![noid_gkr::ghost_tx::ghost_tx_body(); pages + 1];
++        let body = close_body(funded.root(), pay_to);
++        let next = claimed.execute(&body, HEIGHT).unwrap();
++        bodies[1] = body.clone();
++        let contracts = vec![V2ContractComponentInput {
++            body_index: 1,
++            live: true,
++            program: claimed.program,
++            current: claimed.state,
++            contexts: transaction_contexts(&body),
++            next,
++            controller: claimed.claim_authority.as_fields(),
++            refund_authority: claimed.recovery_authority.as_fields(),
++            terminal: true,
++            deadline: claimed.deadline,
++            claim_recipient: claimed.claim_recipient.as_fields(),
++            refund_recipient: claimed.recovery_recipient.as_fields(),
++            rules: claimed.rules,
++        }];
++        let natives = bodies
++            .iter()
++            .map(noid_gkr::spine_statement::spine_inputs_from_body)
++            .collect::<Vec<_>>();
++        let hashes = vec![[Block128(0); 2]; natives.len()];
++        let mut b = FieldR1csBuilder::new();
++        let prefix = LinExpr::from_wire(b.alloc_bool(false));
++        let spines = natives
++            .iter()
++            .map(|n| SpineInputsTrace::alloc(&mut b, n))
++            .collect::<Vec<_>>();
++        let hash_wires = hashes
++            .iter()
++            .map(|pair| pair.map(|value| alloc_block(&mut b, value)))
++            .collect::<Vec<_>>();
++        let raw = spine_region_data_from_wires(
++            &mut b,
++            &natives,
++            &hashes,
++            &spines,
++            &hash_wires,
++            &contracts,
++            1,
++            BlockRelationProfile::ScheduledV2(config),
++        );
++        let views = select_v2_contract_views(&mut b, &raw, &prefix, capacity);
++        let height = alloc_block(&mut b, Block128(HEIGHT as u128));
++        let height: [Wire; 64] = range_check_bits(&mut b, &height, 64).try_into().unwrap();
++        let mut surfaces = Vec::new();
++        for index in 0..capacity {
++            let live = alloc_block(&mut b, Block128(u128::from(index == 0)));
++            surfaces.push(bind_user_action_surface_for_profile(
++                &mut b,
++                &spines[1 + index],
++                &live,
++                true,
++            ));
++        }
++        let policy = bind_v2_contract_policy(&mut b, &views, &height);
++        bind_v2_contract_partition(&mut b, &surfaces, &views, true);
++        bind_v2_contract_execution(&mut b, &spines[1..], &surfaces, &views, &policy, false);
++        let (matrix, witness) = b.build();
++        (
++            matrix.satisfies(&witness),
++            matrix.structural_statement_digest(),
++        )
++    }
++
++    #[test]
++    fn q2_n2_control_main_equations_alone() {
++        let bob = Address([0xB0; 32]);
++        let mallory = Address([0x3A; 32]);
++        let honest = htlc(bob);
++        let lying = htlc(mallory);
++        let native_ok = honest.check_call(
++            &TxPage { body: close_body(honest.root(), bob) },
++            HEIGHT,
++        );
++        let native_route_a = honest.check_call(
++            &TxPage { body: close_body(honest.root(), mallory) },
++            HEIGHT,
++        );
++        let native_lying = lying.check_call(
++            &TxPage { body: close_body(honest.root(), mallory) },
++            HEIGHT,
++        );
++        println!("Q2-N2 control native check_call: honest={native_ok:?} routeA={native_route_a:?} lying={native_lying:?}");
++
++        let (ok_honest, digest) = run(&honest, &honest, bob);
++        println!("Q2-N2 control 1 honest opening, pays Bob: satisfied={ok_honest}");
++        let (ok_route_a, d_a) = run(&honest, &honest, mallory);
++        println!("Q2-N2 control 2 honest opening, pays Mallory (route A): satisfied={ok_route_a}");
++        let (ok_lying, d_l) = run(&honest, &lying, mallory);
++        println!("Q2-N2 control 3 lying opening (claim_recipient=Mallory), old-root wire computed honestly, pays Mallory: satisfied={ok_lying}");
++        let forged_root = honest.root().as_fields().map(flat_of);
++        FORGED_OLD_ROOT.with(|cell| cell.set(Some(forged_root)));
++        let (ok_forged, d_f) = run(&honest, &lying, mallory);
++        FORGED_OLD_ROOT.with(|cell| cell.set(None));
++        println!("Q2-N2 control 4 lying opening + old-root wire forced to the funded root, pays Mallory: satisfied={ok_forged}");
++        let same = digest == d_a && digest == d_l && digest == d_f;
++        println!("Q2-N2 control all four matrices identical (structural digest): {same}");
++
++        assert!(native_ok.is_ok());
++        assert!(ok_honest);
++        assert!(!ok_route_a);
++        assert!(!ok_lying);
++        // The main equations alone accept the forgery: the binding must come from
++        // the Meta-A sponge table and its sidecar (walk_a q2_n2 test).
++        assert!(ok_forged);
++        assert!(same);
++    }
++}
+diff --git a/noid_recursive/src/region_sidecar/walk_a.rs b/noid_recursive/src/region_sidecar/walk_a.rs
+--- a/noid_recursive/src/region_sidecar/walk_a.rs
++++ b/noid_recursive/src/region_sidecar/walk_a.rs
+@@ -2665,4 +2665,296 @@
+         );
+         let _ = CAPSULE_LEAF_SYMBOLS;
+     }
++
++    /// Q2 / N2 (noid-swap scratch copy; not upstream code): a forged contract
++    /// opening cannot reach the funded root through the object Meta-A table.
++    mod q2_n2 {
++        use super::super::*;
++        use super::*;
++        use noid_core::Block128;
++        use noid_ivc_core::deep_chain::spine::{
++            build_spine_instance_columns_with_contract, SpineContractInstanceFlat,
++            SPINE_CONTRACT_OLD_OBJECT_BASE, SPINE_CONTRACT_POLICY_BASE,
++        };
++        use noid_poseidon2b::primitives::Address;
++        use noid_tx::experimental_object::{
++            integer_program::EMPTY_PROGRAM, ObjectOpening, ObjectRules,
++        };
++
++        fn fl(v: Block128) -> F128 {
++            flat_of_tower_u128(v.0)
++        }
++
++        fn htlc(claim_recipient: Address) -> ObjectOpening {
++            ObjectOpening {
++                program: EMPTY_PROGRAM,
++                state: Block128(0),
++                claim_authority: Address([0xA5; 32]),
++                recovery_authority: Address([0xA1; 32]),
++                deadline: 300,
++                claim_recipient,
++                recovery_recipient: Address([0xA1; 32]),
++                rules: ObjectRules {
++                    max_fee: 50_000,
++                    min_retained: 0,
++                    max_payout: 0,
++                    modes: 10,
++                },
++            }
++        }
++
++        fn flat(o: &ObjectOpening) -> SpineContractInstanceFlat {
++            SpineContractInstanceFlat {
++                program: o.program.map(|pair| pair.map(fl)),
++                current: fl(o.state),
++                next: fl(o.state),
++                controller: o.claim_authority.as_fields().map(fl),
++                refund_authority: o.recovery_authority.as_fields().map(fl),
++                deadline: fl(Block128::from(o.deadline as u128)),
++                claim_recipient: o.claim_recipient.as_fields().map(fl),
++                refund_recipient: o.recovery_recipient.as_fields().map(fl),
++                rules: o.rules.fields().map(fl),
++            }
++        }
++
++        /// Same layout as `meta_fixture_profile(true, true, true)` but with a
++        /// real contract opening. Returns the fixture and the wrap base row.
++        fn object_fixture(contract: &SpineContractInstanceFlat) -> (Fixture, usize) {
++            let descriptor = WalkARegionDescriptor::ObjectMeta {
++                tx_log: 0,
++                exact_state_region_log: Some(1),
++                spine_cap_log: Some(0),
++            };
++            let protocol = canonical_protocol(descriptor).unwrap();
++            let w = 1usize << protocol.w_log;
++            let (ghost_s0, ghost_out) = run_perm([F128::ZERO; 4]);
++            let mut committed = vec![vec![F128::ZERO; w]; WALK_A_META_COMMITTED_COLUMNS];
++            let mut s0: [Vec<F128>; 4] = std::array::from_fn(|lane| vec![ghost_s0[lane]; w]);
++            let mut s_out: [Vec<F128>; 4] =
++                std::array::from_fn(|lane| vec![ghost_out[lane]; w]);
++            for lane in 0..4 {
++                committed[META_C0 + lane].fill(ghost_out[lane]);
++            }
++            let (columns, _) = build_sponge_leaf_columns(
++                &[(F128::new(17, 1), F128::new(19, 2), F128::new(23, 3))],
++                1,
++            );
++            for lane in 0..2 {
++                committed[META_IN0 + lane][..SPONGE_LEAF_SLOTS].copy_from_slice(&columns.in_[lane]);
++            }
++            for lane in 0..4 {
++                committed[META_C0 + lane][..SPONGE_LEAF_SLOTS].copy_from_slice(&columns.c[lane]);
++                s0[lane][..SPONGE_LEAF_SLOTS].copy_from_slice(&columns.s0[lane]);
++                s_out[lane][..SPONGE_LEAF_SLOTS].copy_from_slice(&columns.s_out[lane]);
++            }
++            let instance = SpineInstanceFlat {
++                leaves: std::array::from_fn(|leaf| {
++                    [
++                        F128::new((2 * leaf + 1) as u64, 0xA5),
++                        F128::new((2 * leaf + 2) as u64, 0x5A),
++                    ]
++                }),
++            };
++            let columns = build_spine_instance_columns_with_contract(&instance, Some(contract));
++            let wrap_slots = SPINE_V2_WRAP_SLOTS;
++            let base = protocol.spine_region_base.unwrap();
++            let wrap = base + SPINE_TREE_SLOTS;
++            for lane in 0..2 {
++                committed[META_KID0 + lane][base..base + SPINE_TREE_SLOTS]
++                    .copy_from_slice(&columns.tree_kid[lane]);
++                committed[META_IN0 + lane][wrap..wrap + wrap_slots]
++                    .copy_from_slice(&columns.wrap_in[lane]);
++            }
++            for lane in 0..4 {
++                committed[META_C0 + lane][base..base + SPINE_TREE_SLOTS]
++                    .copy_from_slice(&columns.tree_c[lane]);
++                committed[META_C0 + lane][wrap..wrap + wrap_slots]
++                    .copy_from_slice(&columns.wrap_c[lane]);
++                s0[lane][base..base + SPINE_TREE_SLOTS].copy_from_slice(&columns.tree_s0[lane]);
++                s0[lane][wrap..wrap + wrap_slots].copy_from_slice(&columns.wrap_s0[lane]);
++                s_out[lane][base..base + SPINE_TREE_SLOTS]
++                    .copy_from_slice(&columns.tree_s_out[lane]);
++                s_out[lane][wrap..wrap + wrap_slots].copy_from_slice(&columns.wrap_s_out[lane]);
++            }
++            (
++                Fixture {
++                    descriptor,
++                    committed,
++                    s0,
++                    s_out,
++                },
++                wrap,
++            )
++        }
++
++        fn panic_text(payload: Box<dyn std::any::Any + Send>) -> String {
++            payload
++                .downcast_ref::<String>()
++                .cloned()
++                .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
++                .unwrap_or_else(|| "non-string panic".to_owned())
++        }
++
++        /// Commitment-bound path (as `field_trace_case`, object VK): the
++        /// committed columns are the outer witness, the sidecar is proven in
++        /// the post-commit callback and its claims are discharged by the PCS.
++        fn prove_and_verify(fixture: &Fixture) -> Result<(), String> {
++            let mut builder = FieldR1csBuilder::new();
++            let column_len = 1usize << fixture.w_log();
++            while builder.num_wires() % column_len != 0 {
++                builder.alloc_f128(F128::ZERO);
++            }
++            let base = builder.num_wires() / column_len;
++            for column in &fixture.committed {
++                for value in column {
++                    builder.alloc_f128(*value);
++                }
++            }
++            let slices: [WitnessSlice; WALK_A_META_COMMITTED_COLUMNS] =
++                std::array::from_fn(|column| WitnessSlice {
++                    log2_len: fixture.w_log(),
++                    index: base + column,
++                });
++            let (r1cs, z) = builder.build();
++            let params = params(r1cs.m);
++            let vk = WalkARegionVk::new_object_meta([0xC2; 32], 0, Some(1), Some(0), slices)
++                .map_err(|e| format!("vk: {e:?}"))?;
++            let plan = WalkARegionProverPlan::new(&vk, &fixture.s0, &fixture.s_out)
++                .map_err(|e| format!("plan: {e:?}"))?;
++            let spec = PublicIoSpec {
++                io_slice: WitnessSlice {
++                    log2_len: 0,
++                    index: 0,
++                },
++                io_len: 1,
++                claims: Vec::new(),
++            };
++            let io = vec![F128::ONE];
++            let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let mut prover = FsLaneChallenger::new(FIELD_DOMAIN);
++                prove_field_with_public_io_and_post_commit_context(
++                    &r1cs,
++                    &z,
++                    &params,
++                    &spec,
++                    &io,
++                    &TRACE_CLASS_DIGEST,
++                    &mut prover,
++                    |context| {
++                        let witness = context.witness();
++                        let (sidecar, claims) = plan
++                            .prove(witness, context)
++                            .expect("walk-A sidecar prover returned Err");
++                        context.append_claims(claims);
++                        sidecar
++                    },
++                )
++            }));
++            let (field_proof, sidecar, commitment, _) =
++                proved.map_err(|p| format!("PROVER PANICKED: {}", panic_text(p)))?;
++            let shape = FieldShape::of(&r1cs);
++            let mut verifier = FsLaneChallenger::new(FIELD_DOMAIN);
++            verify_field_deferred_matrix_with_post_commit_context(
++                &shape,
++                &r1cs.statement_digest(),
++                &commitment,
++                &field_proof,
++                &spec,
++                &io,
++                &TRACE_CLASS_DIGEST,
++                &sidecar,
++                &mut verifier,
++                |proof, context| {
++                    let claims =
++                        verify_walk_a_region_sidecar(&vk, context.total_vars(), proof, context)
++                            .map_err(|_| VerifyError::Auxiliary)?;
++                    context.append_claims(claims);
++                    Ok(())
++                },
++            )
++            .map(|_| ())
++            .map_err(|e| format!("VERIFIER REJECTED: {e:?}"))
++        }
++
++        #[test]
++        fn q2_n2_forged_opening_cannot_reach_funded_root() {
++            let bob = Address([0xB0; 32]);
++            let mallory = Address([0x3A; 32]);
++            let honest = htlc(bob);
++            let lying = htlc(mallory);
++            let root_lanes = honest.root().as_fields().map(fl);
++            let lying_root_lanes = lying.root().as_fields().map(fl);
++            let bob_lanes = bob.as_fields().map(fl);
++            let mallory_lanes = mallory.as_fields().map(fl);
++            assert_ne!(root_lanes, lying_root_lanes);
++
++            let fresh = |o: &ObjectOpening| object_fixture(&flat(o));
++            let (honest_fx, wrap) = fresh(&honest);
++            let old = wrap + SPINE_CONTRACT_OLD_OBJECT_BASE + 1;
++            let r3 = wrap + SPINE_CONTRACT_POLICY_BASE + 3;
++            let r4 = wrap + SPINE_CONTRACT_POLICY_BASE + 4;
++            println!("Q2-N2 rows: wrap={wrap} old_root_row={old} claim_rcpt_rows={r3},{r4}");
++            // Table reproduces the native ObjectOpening::root() and holds the recipient.
++            for lane in 0..2 {
++                assert_eq!(honest_fx.committed[META_C0 + lane][old], root_lanes[lane]);
++            }
++            assert_eq!(honest_fx.committed[META_IN0 + 1][r3], bob_lanes[0]);
++            assert_eq!(honest_fx.committed[META_IN0][r4], bob_lanes[1]);
++            let (lying_check, _) = fresh(&lying);
++            for lane in 0..2 {
++                assert_eq!(lying_check.committed[META_C0 + lane][old], lying_root_lanes[lane]);
++            }
++            println!("Q2-N2 sanity: old-root cell == ObjectOpening::root() for both openings");
++
++            let mut results = Vec::new();
++
++            // (a) honest Bob opening.
++            let a = prove_and_verify(&honest_fx);
++            println!("Q2-N2 (a) honest opening (Bob): {a:?}");
++            results.push(("a", a.is_ok()));
++
++            // (b1) Mallory policy rows, old-root output cells overwritten with the funded root.
++            let (mut b1, _) = fresh(&lying);
++            for lane in 0..2 {
++                b1.committed[META_C0 + lane][old] = root_lanes[lane];
++            }
++            let r = prove_and_verify(&b1);
++            println!("Q2-N2 (b1) Mallory policy + committed old-root cells := funded root: {r:?}");
++            results.push(("b1", r.is_ok()));
++
++            // (b2) as b1, and the prover's internal permutation-output trace lies too.
++            let (mut b2, _) = fresh(&lying);
++            for lane in 0..2 {
++                b2.committed[META_C0 + lane][old] = root_lanes[lane];
++                b2.s_out[lane][old] = root_lanes[lane];
++            }
++            let r = prove_and_verify(&b2);
++            println!("Q2-N2 (b2) b1 + internal s_out cells := funded root: {r:?}");
++            results.push(("b2", r.is_ok()));
++
++            // (c1) Bob policy rows, the two claim-recipient input cells := Mallory.
++            let (mut c1, _) = fresh(&honest);
++            c1.committed[META_IN0 + 1][r3] = mallory_lanes[0];
++            c1.committed[META_IN0][r4] = mallory_lanes[1];
++            let r = prove_and_verify(&c1);
++            println!("Q2-N2 (c1) funded-root table, claim-recipient input cells := Mallory: {r:?}");
++            results.push(("c1", r.is_ok()));
++
++            // (c2) as c1, and the internal permutation inputs absorb Mallory consistently.
++            let (mut c2, _) = fresh(&honest);
++            c2.committed[META_IN0 + 1][r3] = mallory_lanes[0];
++            c2.committed[META_IN0][r4] = mallory_lanes[1];
++            c2.s0[1][r3] = c2.s0[1][r3] + bob_lanes[0] + mallory_lanes[0];
++            c2.s0[0][r4] = c2.s0[0][r4] + bob_lanes[1] + mallory_lanes[1];
++            let r = prove_and_verify(&c2);
++            println!("Q2-N2 (c2) c1 + internal s0 absorbs Mallory: {r:?}");
++            results.push(("c2", r.is_ok()));
++
++            println!("Q2-N2 summary (case, accepted): {results:?}");
++            assert!(results[0].1, "honest case must verify");
++            for (case, accepted) in &results[1..] {
++                assert!(!accepted, "forged case {case} was ACCEPTED");
++            }
++        }
++    }
+ }

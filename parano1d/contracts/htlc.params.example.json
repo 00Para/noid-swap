@@ -1,0 +1,7 @@
+{
+  "hashlock_authority": "o1lqvrmvsyl7mkt3cptkz3c965ujt5ce6mjawxwwxe7mgn36mjzt8sn69xw2",
+  "receiver": "o1lfu7m7m0tn0xu9j7n7jvf858426mvjahp3nax37lcvzzex8vghhqj59wx0",
+  "sender": "o18l7zu84nmlg8mgpm54um4dlpdetgwkfnv22zfd5peyx3ufc5ht7sevjnun",
+  "timeout_height": "300000",
+  "max_fee": "20000"
+}

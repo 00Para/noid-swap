@@ -1,0 +1,469 @@
+{
+  "description": "RECORDED from http://127.0.0.1:9601 at unix time 1793803052, chain height 280657. LIVE RUN 1 (first real swap, 2026-11-04, owner's Parano1d v2.1.0 node, mainnet; contract instance slot 9,750,400, creation id 736,337, 10,000,000 uNOID, funding tx 267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780 included at height 280,638). State: our claim, txid d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324, is in the node's mempool (tick at 280,657, seconds after the claim command was submitted for call height 280,658; admitted_height 280,657, fee 5,800). getTx of that txid is null. The tick tracked that txid, so the file holds getTx and the mempool-entry scan carries its contract_opening_hex. Every answer below is the node's real reply to the request pinned beside it (read-only calls; nothing was sent to a chain).",
+  "calls": [
+    {
+      "method": "paranoid_blockCount",
+      "params": [],
+      "result": 280657
+    },
+    {
+      "method": "paranoid_getEpochAnchor",
+      "params": [],
+      "result": "28931e56442916500aa93d58394a7d024aee9afeae746d32bd176b8099d7a02d"
+    },
+    {
+      "method": "paranoid_estimateFeeDetailed",
+      "params": [
+        1,
+        1
+      ],
+      "result": {
+        "active_slot_count": 106247,
+        "breakdown": {
+          "base": 5000,
+          "burned": 0,
+          "input": 100,
+          "io": 800,
+          "miner_claimable": 5800,
+          "output": 700,
+          "paid_total": 5800,
+          "relay_floor": 5000,
+          "relay_total": 5800,
+          "required_total": 5800,
+          "state_growth": 0
+        },
+        "fee_micronoid": 5800,
+        "log_slots": 24,
+        "n_inputs": 1,
+        "n_outputs": 1,
+        "net_new_slots": 0
+      }
+    },
+    {
+      "method": "paranoid_getMempoolStats",
+      "params": [],
+      "result": {
+        "capacity": 1024,
+        "fee_floor": 5000,
+        "intent_bytes": 725551,
+        "max_intent_bytes": 402653184,
+        "size": 8
+      }
+    },
+    {
+      "method": "paranoid_getObjectInstances",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+        0,
+        16
+      ],
+      "result": {
+        "address": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+        "height": 280657,
+        "next_slot": null,
+        "slots": [
+          {
+            "creation_id": 736337,
+            "empty": false,
+            "owner": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+            "slot_index": 9750400,
+            "value": 10000000
+          }
+        ],
+        "tip_hash": "7ea77b36bca121493926104791a6200b1f895874956a85c3b85fd21a3b89e4e0"
+      }
+    },
+    {
+      "method": "paranoid_getObjectStatus",
+      "params": [
+        "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+        9750400
+      ],
+      "result": {
+        "active_authority": "o1myesz750uxepkx3hfekln7pp7h0f7prn2lu5taswn940g3mws0yqedcswg",
+        "matches_opening": true,
+        "next_call_height": 280658,
+        "object": {
+          "abi_version": 3,
+          "address": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+          "claim_authority": "o1myesz750uxepkx3hfekln7pp7h0f7prn2lu5taswn940g3mws0yqedcswg",
+          "claim_can_close": true,
+          "claim_can_continue": false,
+          "claim_recipient": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+          "code_id": "5d2f0afe89db1e06c90bc78bff1e3082b1bcad54662757a6916924d2244d3efe",
+          "deadline_height": 281286,
+          "max_fee_micronoid": 50000,
+          "max_payout_micronoid": 0,
+          "min_retained_micronoid": 0,
+          "opening_hex": "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+          "program": [
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "terminal",
+              "opcode": "assert_equal",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "one"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            },
+            {
+              "destination": "state0",
+              "immediate": "0",
+              "left": "state0",
+              "opcode": "keep",
+              "predicate": {
+                "inverted": false,
+                "source": "always"
+              },
+              "right": "state0"
+            }
+          ],
+          "recovery_authority": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+          "recovery_can_close": true,
+          "recovery_can_continue": false,
+          "recovery_recipient": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+          "state": [
+            "0",
+            "0"
+          ],
+          "state_hex": "00000000000000000000000000000000",
+          "unrestricted_payout_recipient": false
+        },
+        "slot": {
+          "creation_id": 736337,
+          "empty": false,
+          "owner": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+          "slot_index": 9750400,
+          "value": 10000000
+        },
+        "tip_height": 280657
+      }
+    },
+    {
+      "method": "paranoid_getMempoolInfo",
+      "params": [],
+      "result": {
+        "fee_floor": 5000,
+        "size": 8,
+        "txs": [
+          {
+            "admitted_height": 280657,
+            "fee_micronoid": 5800,
+            "fee_rate": 2900,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 1,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324"
+          },
+          {
+            "admitted_height": 280657,
+            "fee_micronoid": 8500,
+            "fee_rate": 369,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 21,
+            "n_outputs": 2,
+            "page_count": 3,
+            "requires_b255_miner": false,
+            "tx_hash": "8045fe1a80ade6088de2ecb1f082f4b2031bd473f838779d260dd52458fcfe71"
+          },
+          {
+            "admitted_height": 280656,
+            "fee_micronoid": 9000,
+            "fee_rate": 1285,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "27b625fcb169f19fcc9b1b3d71f367cc923e75116aa1757964efc5f1fc2a7cf1"
+          },
+          {
+            "admitted_height": 280656,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "93cb09130c9faebe6a0b86610f983d0f78bf5313b76448080de360659b1b8a4d"
+          },
+          {
+            "admitted_height": 280656,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "39cf1c2d83164284161fcdaed5eb413be09b2844f225791d55aa492630b53328"
+          },
+          {
+            "admitted_height": 280656,
+            "fee_micronoid": 6600,
+            "fee_rate": 1650,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 2,
+            "n_outputs": 2,
+            "page_count": 1,
+            "requires_b255_miner": false,
+            "tx_hash": "f4cf52198ae4eb7471382cff2d93da420ac3ae678521852db8f2767147839584"
+          },
+          {
+            "admitted_height": 280657,
+            "fee_micronoid": 0,
+            "fee_rate": 0,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 1,
+            "n_outputs": 0,
+            "page_count": 0,
+            "requires_b255_miner": false,
+            "tx_hash": "1847186d20a28199a82e8c49e50cdf3da7653ccf48a5f7dff8e284776869ac15"
+          },
+          {
+            "admitted_height": 280656,
+            "fee_micronoid": 21100,
+            "fee_rate": 141,
+            "has_authorization": true,
+            "minimum_proof_class": "B63",
+            "n_inputs": 147,
+            "n_outputs": 2,
+            "page_count": 19,
+            "requires_b255_miner": false,
+            "tx_hash": "50f5e64463640c2b90bcb76a57590a35e24aa4bd93a5ca44eb8295a868f769e1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324"
+      ],
+      "result": {
+        "admitted_height": 280657,
+        "contract_opening_hex": "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+        "fee_micronoid": 5800,
+        "fee_rate": 2900,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 1,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "27b625fcb169f19fcc9b1b3d71f367cc923e75116aa1757964efc5f1fc2a7cf1"
+      ],
+      "result": {
+        "admitted_height": 280656,
+        "contract_opening_hex": null,
+        "fee_micronoid": 9000,
+        "fee_rate": 1285,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 1,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "27b625fcb169f19fcc9b1b3d71f367cc923e75116aa1757964efc5f1fc2a7cf1"
+      }
+    },
+    {
+      "method": "paranoid_getMempoolEntry",
+      "params": [
+        "f4cf52198ae4eb7471382cff2d93da420ac3ae678521852db8f2767147839584"
+      ],
+      "result": {
+        "admitted_height": 280656,
+        "contract_opening_hex": null,
+        "fee_micronoid": 6600,
+        "fee_rate": 1650,
+        "has_authorization": true,
+        "minimum_proof_class": "B63",
+        "n_inputs": 2,
+        "n_outputs": 2,
+        "page_count": 1,
+        "requires_b255_miner": false,
+        "tx_hash": "f4cf52198ae4eb7471382cff2d93da420ac3ae678521852db8f2767147839584"
+      }
+    },
+    {
+      "method": "paranoid_getTx",
+      "params": [
+        "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324"
+      ],
+      "result": null
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+# RISC Zero proof of the NOID<->BTC/ETH equivalence statement.
+#
+# `methods/guest` is built for the RISC-V zkVM target by `risc0-build` (see methods/build.rs)
+# and is deliberately NOT a member of this workspace (it has its own `[workspace]`).
+# `core` is a plain no_std library and is fully testable on the host with stable Rust.
+[workspace]
+members = ["core", "methods", "host"]
+resolver = "2"
