@@ -438,6 +438,13 @@ pub struct NoidObservation {
     pub confirmed_tx: Option<ConfirmedTx>,
     /// Whether the tracked txid is still in the mempool (`getMempoolEntry` non-null).
     pub tracked_tx_pending: Option<bool>,
+    /// CHAOS F-15: is a funding transaction for our contract root waiting in the node's mempool? `None` = the node cannot say. A
+    /// real Parano1d node does not: a mempool entry exposes the opening only for a CALL on an existing instance, never for a funding
+    /// (`getMempoolEntry.contract_opening_hex`), so the watcher always leaves this `None` and `intent --cancel` of a `fund_noid`
+    /// needs the operator's word that the wallet shows nothing pending (`--i-checked-the-wallet`). A simulator or a future node that
+    /// can answer sets `Some(true)` / `Some(false)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding_pending: Option<bool>,
     /// REVIEW-2 F5: `getBlockHeader(tip).timestamp` (Unix seconds): the CHAIN's age, not the poll's. `None` = the node has
     /// no such method (or the call failed); the engine then keeps the old rule and says so in a note.
     #[serde(default)]

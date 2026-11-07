@@ -30,7 +30,7 @@ use swap_cli::client::raw::RawClaimExecutor;
 use swap_cli::client::{IntentSubmitter, RpcSubmitter};
 use swap_cli::contract_params::{alice_commands, check_object_file, contract_params};
 use swap_cli::engine::{
-    cancel_intent, check_external_close_phase, decide, expected_lock_id, external_close_event, normalize_txid, tick_apply, Action, IntentStatus, Runner,
+    cancel_intent_checked, check_external_close_phase, decide, expected_lock_id, external_close_event, normalize_txid, tick_apply, Action, IntentStatus, Runner,
     INTENT_KINDS,
 };
 use swap_cli::equiv::{verify_receipt, ProcessRunner, VerifyRequest};
@@ -82,7 +82,9 @@ const USAGE: &str = "usage:
                 (--eth-from-block: given once on a live non-local chain; `tick --apply` / `claim --submit` store it in the file, later commands reuse it (REVIEW-3 F7))
   swap-cli intent FILE [--show]                  (the spending action `tick --apply` froze: lock id, amounts, T_reveal ...)
   swap-cli intent FILE --cancel (--noid-fixture FILE | --noid-rpc URL) (--eth-fixture FILE | --eth-rpc URL) [...tick flags]
-                (drop an intent that was never sent; refused if the chain already shows its effect)
+                [--i-checked-the-wallet]
+                (drop an intent that was never sent; refused if the chain already shows its effect. A fund_noid intent needs --i-checked-the-wallet:
+                 the node cannot list a funding in its mempool, so you vouch that the wallet shows none pending (CHAOS F-15))
   swap-cli claim FILE (--noid-rpc URL | --noid-fixture FILE) (--eth-rpc URL | --eth-fixture FILE)
                  [--submit] [--submit-rpc URL]... [--intent-out FILE] [--now UNIX] [--pending-tx 0x..]...
                  [--record-noid FILE] [--record-eth FILE] [--eth-from-block N]
@@ -95,10 +97,10 @@ const USAGE: &str = "usage:
   Plain http:// is accepted only to 127.0.0.1, localhost or [::1]; any other host needs https:// with --transport curl, or --allow-plain-http.
   A second, independent node: give --noid-rpc (or --noid-fixture) twice, and/or --eth-rpc (or --eth-fixture) twice (REVIEW-2 F5). Bob's lock needs
   the two Parano1d nodes to agree (same instance, tips within 2 blocks); Alice's reveal needs the two Ethereum nodes to agree (same lock, finalized
-  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3). An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5).";
+  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3). An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 7] = ["apply", "submit", "fast-kdf", "cancel", "show", "single-node-ok", "allow-plain-http"];
+const BOOL_FLAGS: [&str; 8] = ["apply", "submit", "fast-kdf", "cancel", "show", "single-node-ok", "allow-plain-http", "i-checked-the-wallet"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -585,12 +587,12 @@ fn intent(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     if !flags.contains_key("cancel") {
         let file = SwapFile::load(&path).map_err(|e| e.to_string())?;
         let log: Vec<_> = file.history.iter().filter(|h| h.event.starts_with("intent_")).collect();
-        return print_json(&serde_json::json!({"pending_intent": file.pending_intent, "intent_history": log}));
+        return print_json(&serde_json::json!({"pending_intent": file.pending_intent, "cancelled_intents": file.cancelled_intents, "intent_history": log}));
     }
     let _lock = lock_swap_file(&path)?;
     let mut file = SwapFile::load(&path).map_err(|e| e.to_string())?;
     let obs = observe(&file, flags)?;
-    let cancelled = cancel_intent(&mut file, &obs.noid, &obs.eth, obs.now)?;
+    let cancelled = cancel_intent_checked(&mut file, &obs.noid, &obs.eth, obs.now, flags.contains_key("i-checked-the-wallet"))?;
     file.save(&path).map_err(|e| e.to_string())?;
     print_json(&serde_json::json!({"cancelled": cancelled, "pending_intent": file.pending_intent, "sources": obs.sources}))
 }

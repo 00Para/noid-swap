@@ -195,10 +195,23 @@ impl Phase {
         }
     }
 
+    /// Nothing more can ever be offered from this phase, whatever the chains do. `done` is NOT terminal (CHAOS F-16): from `done`
+    /// Alice can still be offered `refund_noid` (Bob never claimed) and Bob `refund_eth` (Alice's claim never landed). Use
+    /// [`Phase::is_settled`] for "the swap's own protocol is over".
     pub fn is_terminal(&self) -> bool {
         match self {
             Phase::Alice(p) => p.is_terminal(),
             Phase::Bob(p) => p.is_terminal(),
+        }
+    }
+
+    /// The swap's own protocol is over: terminal, or `done`. A `done` file may still hold a leftover leg (an unrefunded NOID
+    /// instance, an open ETH lock) that a later tick can refund, so a caller that stops ticking at `is_settled` must also check
+    /// the chain (the action of a `done` file says plain `done: ...` when nothing is left).
+    pub fn is_settled(&self) -> bool {
+        match self {
+            Phase::Alice(p) => p.is_settled(),
+            Phase::Bob(p) => p.is_settled(),
         }
     }
 
@@ -216,7 +229,11 @@ impl Phase {
 
 impl AlicePhase {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, AlicePhase::Done { .. } | AlicePhase::Refunded { .. } | AlicePhase::Lost { .. } | AlicePhase::Aborted { .. })
+        matches!(self, AlicePhase::Refunded { .. } | AlicePhase::Lost { .. } | AlicePhase::Aborted { .. })
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.is_terminal() || matches!(self, AlicePhase::Done { .. })
     }
 
     pub fn instance(&self) -> Option<&NoidInstance> {
@@ -250,7 +267,11 @@ impl AlicePhase {
 
 impl BobPhase {
     pub fn is_terminal(&self) -> bool {
-        matches!(self, BobPhase::Done { .. } | BobPhase::Refunded { .. } | BobPhase::Aborted { .. })
+        matches!(self, BobPhase::Refunded { .. } | BobPhase::Aborted { .. })
+    }
+
+    pub fn is_settled(&self) -> bool {
+        self.is_terminal() || matches!(self, BobPhase::Done { .. })
     }
 
     pub fn instance(&self) -> Option<&NoidInstance> {
@@ -340,6 +361,22 @@ pub enum Event {
     /// M2.5b, Alice: her reveal lost to Bob's refund and the NOID instance is gone too. `refund_block` is the ETH block
     /// of the final refund; `reason` names both facts.
     BothLegsLost { refund_block: u64, reason: String },
+    /// CHAOS F-9, Alice: the claim recorded as mined at `block_number` is no longer on the chain (a reorg dropped it before it was
+    /// final). She is back to waiting for her reveal (`reveal_submitted`, since `at`): it may be back in the mempool, dropped or
+    /// reverted; nothing about it is assumed.
+    EthClaimReorged { block_number: u64, at: u64 },
+    /// CHAOS F-5: a submitted Ethereum transaction is no longer pending (the signer's pending nonce equals its latest nonce), is not
+    /// mined, and a grace period has passed: it was dropped or replaced. The phase goes back to the one that offers the action again.
+    EthLockDropped,
+    EthRevealDropped,
+    EthRefundDropped,
+    /// CHAOS F-3: the instance recorded as just seen is not at the contract any more (a reorg took the funding back, or it came back
+    /// as another incarnation). The finality count starts over when it is seen again.
+    NoidInstanceGone,
+    /// CHAOS F-17, Alice, log-only: the recorded instance was still at the contract in a poll in which Bob's claim could no longer be
+    /// included (`tip + 1 >= D`). From then on its disappearance can only be a RECOVERY close (hers), never Bob's claim, so it is never
+    /// `lost`. Written once.
+    NoidInstanceAliveAtD,
     // Action outcomes
     FundingSubmitted { txid: Option<String> },
     LockSubmitted {
@@ -410,6 +447,8 @@ fn alice(p: &AlicePhase, e: &Event) -> Option<AlicePhase> {
     use Event as E;
     Some(match (p, e) {
         (A::Created, E::Abort { reason }) => A::Aborted { reason: reason.clone() },
+        // CHAOS F-3: the instance left the chain before it was final; the finality count starts over when it is seen again.
+        (A::Funded { .. }, E::NoidInstanceGone) => A::FundingSubmitted { txid: None },
         (A::Created, E::FundingSubmitted { txid }) => A::FundingSubmitted { txid: txid.clone() },
         // The instance may be seen directly (funding done out of band or after a restart).
         (A::Created | A::FundingSubmitted { .. }, E::NoidInstanceSeen { instance, tip }) => {
@@ -433,6 +472,19 @@ fn alice(p: &AlicePhase, e: &Event) -> Option<AlicePhase> {
         // A claim mined by someone else with our preimage counts the same (funds go to Alice anyway).
         (A::LockFinal { instance, lock } | A::RevealSubmitted { instance, lock, .. }, E::EthClaimMined { block_number }) => {
             A::Revealed { instance: instance.clone(), lock: lock.clone(), block_number: *block_number }
+        }
+        // CHAOS F-9: the claim was re-included at another block (a reorg): the finality count starts over.
+        (A::Revealed { instance, lock, .. }, E::EthClaimMined { block_number }) => {
+            A::Revealed { instance: instance.clone(), lock: lock.clone(), block_number: *block_number }
+        }
+        // CHAOS F-9: the mined claim left the chain before it was final. Back to waiting for it (it may be pending again, dropped
+        // or reverted); `reveal_submitted` keeps all of those paths (lost reveal, dropped transaction) open.
+        (A::Revealed { instance, lock, .. }, E::EthClaimReorged { at, .. }) => {
+            A::RevealSubmitted { instance: instance.clone(), lock: lock.clone(), tx_hash: None, submitted_at: *at }
+        }
+        // CHAOS F-5: the reveal transaction is gone and not mined: the reveal is offered again while (I2) allows.
+        (A::RevealSubmitted { instance, lock, .. }, E::EthRevealDropped) => {
+            A::LockFinal { instance: instance.clone(), lock: lock.clone() }
         }
         (A::Revealed { instance, lock, block_number }, E::EthClaimFinal) => {
             A::Done { lock: lock.clone(), block_number: *block_number, instance: Some(instance.clone()) }
@@ -490,13 +542,19 @@ fn alice(p: &AlicePhase, e: &Event) -> Option<AlicePhase> {
             | A::Done { instance: Some(instance), .. },
             E::NoidClosedExternally { txid, height },
         ) => A::RefundIncluded { instance: instance.clone(), txid: txid.clone(), height: *height },
-        // M2.5b: the reveal never landed, Bob's refund is final and the NOID instance is closed: nothing is left.
-        (A::RevealSubmitted { instance, lock, .. }, E::BothLegsLost { refund_block, reason }) => A::Lost {
+        // M2.5b: the reveal never landed, Bob's refund is final and the NOID instance is closed: nothing is left. CHAOS F-12: also
+        // from `lock_final`, where the CLI path stays after the operator sent the reveal (the engine requires a recorded reveal).
+        (A::RevealSubmitted { instance, lock, .. } | A::LockFinal { instance, lock }, E::BothLegsLost { refund_block, reason }) => A::Lost {
             lock: lock.clone(),
             instance: instance.clone(),
             refund_block: *refund_block,
             reason: reason.clone(),
         },
+        // CHAOS F-17: log-only, once.
+        (
+            A::FundingFinal { .. } | A::LockSeen { .. } | A::LockFinal { .. } | A::RevealSubmitted { .. } | A::Revealed { .. } | A::Done { .. },
+            E::NoidInstanceAliveAtD,
+        ) => p.clone(),
         // Log-only fact: Bob's ETH lock was refunded. Alice's phase does not move
         // (she still waits for D and never reveals); the engine emits it once.
         (
@@ -514,9 +572,11 @@ fn bob(p: &BobPhase, e: &Event) -> Option<BobPhase> {
         // Before locking: Bob simply walks away. After the secret is seen: the
         // claim branch closed on him (he lost); the phase records why.
         (
-            B::Received | B::Funded { .. } | B::FundingFinal { .. } | B::SecretSeen { .. } | B::ClaimSubmitted { .. },
+            B::Received | B::Funded { .. } | B::FundingFinal { .. } | B::SecretSeen { .. } | B::ClaimSubmitted { .. } | B::LockSubmitted { .. },
             E::Abort { reason },
         ) => B::Aborted { reason: reason.clone() },
+        // CHAOS F-3: the instance left the chain before it was final; the finality count starts over when it is seen again.
+        (B::Funded { .. }, E::NoidInstanceGone) => B::Received,
         (B::Received, E::NoidInstanceSeen { instance, tip }) => {
             B::Funded { instance: instance.clone(), seen_at_tip: *tip }
         }
@@ -535,6 +595,15 @@ fn bob(p: &BobPhase, e: &Event) -> Option<BobPhase> {
         (B::LockSubmitted { instance, .. } | B::FundingFinal { instance, .. }, E::EthLockSeen { lock }) => {
             B::Locked { instance: instance.clone(), lock: lock.clone() }
         }
+        // CHAOS F-5: the lock transaction is gone and not mined. Logged only: the phase stays `lock_submitted`, and the engine re-sends the
+        // SAME lock (same `T_reveal`, hence the same lock id, so a duplicate that lands anyway reverts) while (I1) and `M_A` still hold.
+        (B::LockSubmitted { .. }, E::EthLockDropped) => p.clone(),
+        // The re-send: same terms, a fresh submission time and hash.
+        (B::LockSubmitted { instance, t_reveal: t0, .. }, E::LockSubmitted { t_reveal, amount_wei, tx_hash, at }) if t0 == t_reveal => {
+            B::LockSubmitted { instance: instance.clone(), t_reveal: *t_reveal, amount_wei: *amount_wei, tx_hash: *tx_hash, submitted_at: *at }
+        }
+        // CHAOS F-5: the refund transaction is gone and not mined: `refund_eth` is offered again.
+        (B::RefundSubmitted { instance, lock, .. }, E::EthRefundDropped) => B::Locked { instance: instance.clone(), lock: lock.clone() },
         // A secret seen while Bob's refund is still unconfirmed counts too: if Alice's
         // claim was mined first his refund reverted, and the NOID is his to take.
         (
@@ -663,7 +732,7 @@ fn bob(p: &BobPhase, e: &Event) -> Option<BobPhase> {
         // goes on in its own phase); the engine keys on these history entries to offer it once.
         (
             B::SecretSeen { .. } | B::ClaimSubmitted { .. } | B::ClaimIncluded { .. } | B::Done { .. },
-            E::EthRefundSubmitted { .. } | E::EthRefundMined { .. },
+            E::EthRefundSubmitted { .. } | E::EthRefundMined { .. } | E::EthRefundDropped,
         ) => p.clone(),
         _ => return None,
     })
@@ -705,7 +774,8 @@ mod tests {
             p = transition(&p, &e).unwrap();
         }
         assert_eq!(p, Phase::Alice(AlicePhase::Done { lock: lock(), block_number: 120, instance: Some(inst()) }));
-        assert!(p.is_terminal());
+        // CHAOS F-16: `done` is settled, not terminal: a refund of the leftover NOID can still follow.
+        assert!(p.is_settled() && !p.is_terminal());
         assert_eq!(p.name(), "done");
     }
 
@@ -762,7 +832,7 @@ mod tests {
         p = transition(&p, &Event::NoidTxIncluded { txid: "c2".into(), height: 61 }).unwrap();
         p = transition(&p, &Event::NoidTxFinal { tip: 78 }).unwrap();
         assert_eq!(p, Phase::Bob(BobPhase::Done { txid: "c2".into(), height: 61, lock: Some(lock()) }));
-        assert!(p.is_terminal());
+        assert!(p.is_settled() && !p.is_terminal());
     }
 
     #[test]
@@ -818,7 +888,8 @@ mod tests {
         p = transition(&p, &Event::EthLockSeen { lock: lock() }).unwrap();
         p = transition(&p, &Event::EthLockFinal).unwrap();
         let lost = Event::BothLegsLost { refund_block: 150, reason: "both".into() };
-        assert!(transition(&p, &lost).is_err(), "no reveal sent yet");
+        // CHAOS F-12: the CLI path never records a reveal, so `lock_final` may lose both legs (the engine asks for evidence of a reveal).
+        assert!(transition(&p, &lost).is_ok(), "lock_final: the CLI path");
         p = transition(&p, &Event::RevealSubmitted { tx_hash: Some([9; 32]), at: 5 }).unwrap();
         let gone = transition(&p, &lost).unwrap();
         assert_eq!(

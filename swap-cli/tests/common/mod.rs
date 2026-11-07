@@ -49,6 +49,8 @@ pub struct World {
     pub hashlock: [u8; 32],
     pub instance: Option<NoidInstance>,
     pub funding_pending: Option<u64>,
+    /// Incarnation counter of the simulated instance (1 for the first funding, one more at every re-inclusion).
+    pub creation_seq: u64,
     pub mempool: Vec<SimTx>,
     pub confirmed: HashMap<String, u64>,
     /// Every close the simulator included, with the instance it spent (so a rollback can put it back).
@@ -114,6 +116,8 @@ pub struct World {
     pub refunded: Option<EthRefunded>,
     /// REVIEW-3 F7: the node's log index lags: a mined claim is visible only in the `getLock` record (no `Claimed` log).
     pub claim_log_lag: bool,
+    /// REVIEW-4 R4-7: the same for Bob's refund: visible only in the `getLock` record (flag set, block = the poll's head, no tx hash).
+    pub refund_log_lag: bool,
     pub claim_pending: Option<PendingPreimage>,
     pub refund_pending: bool,
     /// `(address, wei)` once the lock was closed.
@@ -132,6 +136,7 @@ impl World {
             hashlock: public.hashlock,
             instance: None,
             funding_pending: None,
+            creation_seq: 0,
             mempool: Vec::new(),
             confirmed: HashMap::new(),
             included: HashMap::new(),
@@ -172,6 +177,7 @@ impl World {
             lock_count: 0,
             claimed: None,
             claim_log_lag: false,
+            refund_log_lag: false,
             refunded: None,
             claim_pending: None,
             refund_pending: false,
@@ -248,6 +254,8 @@ impl World {
                 self.confirmed.get(t).map(|h| swap_cli::watch::ConfirmedTx { txid: t.to_string(), height: *h })
             }),
             tracked_tx_pending: tracked.map(|t| self.mempool.iter().any(|m| m.txid == t)),
+            // CHAOS F-15: the simulator can tell (a real node cannot: see `NoidObservation::funding_pending`).
+            funding_pending: Some(self.funding_pending.is_some()),
             tip_time: self.tip_time_lag.map(|l| self.eth_time.saturating_sub(l)),
             second: None,
             second_error: None,
@@ -301,8 +309,12 @@ impl World {
             } else {
                 self.claimed.clone()
             },
-            refunded: self.refunded.clone(),
-            claim_state_from_record: self.claim_log_lag && self.claimed.is_some(),
+            refunded: if self.refund_log_lag {
+                self.refunded.as_ref().map(|r| EthRefunded { block_number: self.eth_block, tx_hash: [0; 32], ..r.clone() })
+            } else {
+                self.refunded.clone()
+            },
+            claim_state_from_record: (self.claim_log_lag && self.claimed.is_some()) || (self.refund_log_lag && self.refunded.is_some()),
             pending_preimage: self.claim_pending.clone(),
             // REVIEW-3 F3: the signer's nonce; a send the operator made that is not mined yet (lock, reveal, refund) is
             // one transaction in the node's mempool, so `pending` is one above `latest`.
@@ -321,7 +333,9 @@ impl World {
             self.tip += 1;
             let h = self.tip;
             if let Some(amount) = self.funding_pending.take() {
-                self.instance = Some(NoidInstance { slot_index: 7, creation_id: 1, amount_micronoid: amount });
+                // A (re-)minted funding gets a fresh incarnation, as the chain's allocation counter would give it.
+                self.creation_seq += 1;
+                self.instance = Some(NoidInstance { slot_index: 7, creation_id: self.creation_seq, amount_micronoid: amount });
                 self.log.push(format!("noid {h}: funded"));
             }
             if !self.freeze_inclusion && self.instance.is_some() {

@@ -8,7 +8,8 @@
 #   - `live.js lock/claim/refund` take --swap FILE: they fill and check every term and the recorded intent
 #   - --eth-code-hash and --pinned-image-id are not needed any more (compiled into the binary)
 #   - under the `sepolia` profile Bob's lock and Alice's reveal need a SECOND node for each chain
-#     (NOID_RPC2 / ETH_RPC2 below) or --single-node-ok, which the helpers pass when no second node is set
+#     (NOID_RPC2 / ETH_RPC2 below) or --single-node-ok, which the helpers pass when a second node is missing and
+#     WARN about on every call (REVIEW-4 R4-8): a run with a stranger needs BOTH second nodes
 #   - --eth-from-block is given once; `tick --apply` stores it in the swap file
 RUN=${RUN:-4}
 L="${L:-$HOME/live-run-$RUN}"                      # swap files, passphrase, records, logs (WSL ext4, mode 700)
@@ -46,6 +47,7 @@ swap_file() { case "$1" in alice) echo "$ALICE_FILE";; bob) echo "$BOB_FILE";; *
 load_passphrase() { [ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (run setup.sh)" >&2; return 2; }; export SWAP_PASSPHRASE="$(cat "$L/passphrase.txt")"; }
 # Node flags for swap-cli: one or two endpoints per chain; --single-node-ok only when no second node is configured.
 node_flags() {
+  single_node_warning   # REVIEW-4 R4-8: said on EVERY call (every tick, every claim), not once in setup
   local f=(--transport curl --noid-rpc "$NOID_RPC" --eth-rpc "$ETH_RPC" --rpc-timeout "$RPC_TIMEOUT")
   if [ -n "$NOID_RPC2" ]; then f+=(--noid-rpc "$NOID_RPC2"); fi
   if [ -n "$ETH_RPC2" ]; then f+=(--eth-rpc "$ETH_RPC2"); fi
@@ -57,4 +59,4 @@ from_block_flags() { if [ -s "$L/eth-deploy-block.txt" ]; then echo "--eth-from-
 # A WSL path as Windows node sees it (\\wsl.localhost\...): live.js --swap FILE needs it.
 win_path() { wslpath -w "$1"; }
 require_parties() { for v in ALICE_NOID BOB_NOID ALICE_ETH BOB_ETH CONTRACT; do [ -n "${!v}" ] || { echo "$v is not set: put the four party addresses and CONTRACT in $L/env.local.sh" >&2; return 2; }; done; }
-single_node_warning() { if [ -z "$NOID_RPC2" ] || [ -z "$ETH_RPC2" ]; then echo "WARNING: one node per chain (--single-node-ok): the F5 cross-check is off; set NOID_RPC2/ETH_RPC2 in $L/env.local.sh for a stranger" >&2; fi; }
+single_node_warning() { if [ -z "$NOID_RPC2" ] || [ -z "$ETH_RPC2" ]; then echo "WARNING: one node per chain (--single-node-ok): the F5 cross-checks are OFF (no second Parano1d node for the lock, no second Ethereum node for the reveal or the secret). Fine against a counterparty you control; a swap with a STRANGER needs BOTH NOID_RPC2 and ETH_RPC2 in $L/env.local.sh" >&2; fi; }

@@ -17,7 +17,7 @@
 //! carries the NAME of its profile ([`ProfileName`]) in its public section, so
 //! both parties' files and the bundle commit to the same numbers:
 //!
-//! - `production`: the section 9.1 values (`W_A` 7,200 s, `D_offset` 725 ...).
+//! - `production`: the section 9.1 values (`W_A` 7,200 s, `D_offset` 735 ...).
 //!   The default. A file that says nothing about a profile is `production`.
 //! - `rehearsal`: the SAME formulas with smaller budgets, so the "nobody shows
 //!   up" paths can be rehearsed in about an hour, and with hard caps on the
@@ -53,19 +53,21 @@
 //! | `B_epoch` budget | 144 | 0 | accepts the rotation risk, in a rehearsal only |
 //! | `B_fee` | 60 | 10 | a local node has no relay pressure |
 //! | `B_final` | 18 | 18 | Parano1d finality is a chain fact, never shortened |
-//! | `B_safety` | 20 | 5 | restarts only; also pays the T6 guard (4 blocks) |
-//! | `B_post` | 242 | 33 = 0 + 10 + 18 + 5 | |
-//! | `RHS(I1)` | 619 = 377 + 242 | 68 = ceil(700/20) + 33 = 35 + 33 | |
+//! | `B_safety` | 30 | 5 | production: one adversarial reorg of Bob's close (17 blocks) plus restarts and the T6 guard (4 blocks), `docs/formal/README.md` section 7; rehearsal: restarts only |
+//! | `B_post` | 252 | 33 = 0 + 10 + 18 + 5 | |
+//! | `RHS(I1)` | 629 = 377 + 252 | 68 = ceil(700/20) + 33 = 35 + 33 | |
 //! | `B_fund` | 10 | 5 | |
 //! | `B_bob` | 60 | 20 | |
 //! | `margin` | 18 | 9 | rounding-up of `D_offset`, not an output of the formula |
-//! | `D_offset` | 725 = 10+18+60+619+18 | 120 = 5+18+20+68+9 | one hour at 30 s/block |
+//! | `D_offset` | 735 = 10+18+60+629+18 | 120 = 5+18+20+68+9 | one hour at 30 s/block |
 //! | `W_A_min` | 5,400 s | 480 s | 0.8 x `W_A`; leaves Alice at least 180 s at the minimum |
 //! | `M_A` | 1,800 s | 300 s | must exceed `eth_finality_s` (1,140 s vs 0 s) |
 //! | `eth_finality_s` | 1,140 s (19 min) | 0 s | Hardhat mines and finalizes at once |
+//! | `DE` (Ethereum inclusion delay) | 120 s | 60 s | mainnet blocks are 12 s apart: ten blocks; the local chain mines on demand and the runbook mines after every send |
+//! | `RA` (Alice's rebroadcast time) | 120 s | 60 s | two polls (notice a dropped claim, resend it) |
 //!
-//! Lock-by heights follow: full window `D - 68` (production `D - 619`), minimum window
-//! `D - (ceil(580/20) + 33) = D - 62` (production `D - 529`).
+//! Lock-by heights follow: full window `D - 68` (production `D - 629`), minimum window
+//! `D - (ceil(580/20) + 33) = D - 62` (production `D - 539`).
 //!
 //! ## How the sepolia numbers are derived
 //!
@@ -91,6 +93,7 @@
 //! | `W_A_min` | 480 s | 3,360 s | 0.8 x `W_A`; `W_A_min - M_A` = 1,560 s >= 1,140 + 120 = 1,260 s |
 //! | `M_A` | 300 s | 1,800 s | production value; live.js's default `--margin-s` |
 //! | `eth_finality_s` | 0 s | 1,140 s | Sepolia finalizes in about 13 min |
+//! | `DE`, `RA` | 60 s, 60 s | 120 s, 120 s | public chain, 12 s blocks (as production); M_A 1,800 >= 1,140 + 240 + 120 = 1,500 and W_A_min 3,360 >= 120 + 1,140 + 120 + 1,800 = 3,180 |
 //!
 //! Lock-by heights: full window `D - 251`, minimum window `D - (ceil(3,520/20) + 33) = D - 209`. A full
 //! "Alice never reveals" cycle takes about `300 + 17` = 317 blocks (about 2 h 40); a happy path still
@@ -292,6 +295,17 @@ pub struct Gates {
     pub p_auth_budget_s: u64,
     /// Time for an Ethereum lock/claim to become final on the chain this profile runs on.
     pub eth_finality_s: u64,
+    /// Ethereum inclusion-delay budget `DE` (seconds): how long a correctly priced transaction may take to be mined after it is sent
+    /// (formal model, `docs/formal/README.md` section 7). Mainnet and Sepolia blocks are 12 s apart, so 120 s is ten blocks; the local
+    /// chain mines on demand and the runbook mines after every send, so 60 s.
+    pub de_s: u64,
+    /// Alice's rebroadcast time `RA` (seconds): from her claim being dropped from a block to her next attempt being sent (one poll to
+    /// notice, one to resend). 120 s on the public chains (two polls of 60 s); 60 s on the local chain.
+    pub ra_s: u64,
+    /// REVIEW-4 R4-11: how long a submitted Ethereum transaction (lock, reveal, refund) may stay unseen before the engine looks at it as
+    /// possibly dropped (together with the nonce rule, never the clock alone). 600 s (fifty blocks) on the public chains; 120 s on the
+    /// local chain, which mines on demand and whose whole reveal window is 600 s.
+    pub tx_grace_s: u64,
     /// Budget for one epoch-anchor rotation (blocks). The CHAIN's epoch length is [`B_EPOCH`].
     pub b_epoch_budget: u64,
     pub b_fee: u64,
@@ -324,14 +338,17 @@ pub const PRODUCTION: Gates = Gates {
     delta_detect_s: 300,
     p_auth_budget_s: 20,
     eth_finality_s: 1_140,
+    de_s: 120,
+    ra_s: 120,
+    tx_grace_s: 600,
     b_epoch_budget: 144,
     b_fee: 60,
     b_final: 18,
-    b_safety: 20,
+    b_safety: 30,
     b_fund: 10,
     b_bob: 60,
     margin: 18,
-    d_offset: 725,
+    d_offset: 735,
     max_noid_micro: None,
     max_eth_wei: None,
     eth_chain_ids: None,
@@ -347,6 +364,9 @@ pub const REHEARSAL: Gates = Gates {
     delta_detect_s: 60,
     p_auth_budget_s: 20,
     eth_finality_s: 0,
+    de_s: 60,
+    ra_s: 60,
+    tx_grace_s: 120,
     b_epoch_budget: 0,
     b_fee: 10,
     b_final: 18,
@@ -371,6 +391,9 @@ pub const SEPOLIA: Gates = Gates {
     delta_detect_s: 120,
     p_auth_budget_s: 20,
     eth_finality_s: 1_140,
+    de_s: 120,
+    ra_s: 120,
+    tx_grace_s: 600,
     b_epoch_budget: 0,
     b_fee: 10,
     b_final: 18,
@@ -414,7 +437,7 @@ pub const W_A_MIN_S: u64 = PRODUCTION.w_a_min_s;
 pub const B_FUND: u64 = PRODUCTION.b_fund;
 /// Bob must lock within this many blocks after Alice's funding is final, production.
 pub const B_BOB: u64 = PRODUCTION.b_bob;
-/// ETH pair: `D = H_create + 725` (about 6 h at 30 s/block), production.
+/// ETH pair: `D = H_create + 735` (about 6 h at 30 s/block), production.
 pub const ETH_D_OFFSET: u64 = PRODUCTION.d_offset;
 /// Hard rule: Bob's claim must be included at `h <= D - 1`; target `h <= D - 18`.
 pub const CLAIM_TARGET_MARGIN: u64 = B_FINAL;
@@ -588,12 +611,12 @@ impl Gates {
         Ok(span.div_ceil(self.tau_fast_s) + self.b_post())
     }
 
-    /// The blocks (I1) demands for a window `w_a_s`: 619 for the full production window.
+    /// The blocks (I1) demands for a window `w_a_s`: 629 for the full production window.
     pub const fn rhs_i1_eth_for_window(&self, w_a_s: u64) -> u64 {
         (w_a_s + self.delta_detect_s + 2 * self.p_auth_budget_s).div_ceil(self.tau_fast_s) + self.b_post()
     }
 
-    /// Bob's lock-by height for the full window: `D - RHS(I1)(W_A)` (`D - 619` in production).
+    /// Bob's lock-by height for the full window: `D - RHS(I1)(W_A)` (`D - 629` in production).
     pub fn bob_lock_by(&self, d: u64) -> u64 {
         d.saturating_sub(self.rhs_i1_eth_for_window(self.w_a_s))
     }
@@ -739,6 +762,9 @@ impl Gates {
     /// 3. (I2) `M_A > eth_finality`: a claim broadcast at the cutoff is final before `T_reveal`.
     /// 4. (I2)+(I3) `W_A_min - M_A >= eth_finality + Delta_detect`: even at the minimum window Alice has
     ///    time to see Bob's lock become final and to act before her cutoff.
+    /// 4a. (formal model, `docs/formal/README.md` section 7) `M_A >= eth_finality + 2*DE + RA` and
+    ///    `W_A_min >= DE + eth_finality + RA + M_A`, with `DE` (Ethereum inclusion delay) and `RA` (Alice's rebroadcast
+    ///    time) per profile: one Ethereum reorg of Alice's claim can still be answered before `T_reveal`.
     /// 5. `D_offset = B_fund + B_final + B_bob + RHS(I1)(W_A) + margin` (section 4.2, "Alice picks D").
     ///    Then a Bob who locks as late as `B_bob` blocks after funding finality still satisfies (I1) with
     ///    `margin` blocks to spare, and the lock-by height is after Alice's funding is final.
@@ -764,6 +790,30 @@ impl Gates {
                 "(I2)/(I3) W_A_min - M_A = {alice_time} s is less than eth_finality + Delta_detect = {} s",
                 self.eth_finality_s + self.delta_detect_s
             ));
+        }
+        // Formal model (docs/formal/README.md section 7, finding 2): one Ethereum reorg of Alice's claim needs
+        // `M_A >= FE + 2*DE + RA` (claim mined at the cutoff plus DE, dropped just before final, rebroadcast after RA, mined again
+        // within DE, still before T_reveal) and `W_A_min >= DE + FE + RA + M_A`.
+        let reorg_margin = self.eth_finality_s + 2 * self.de_s + self.ra_s;
+        if self.m_a_s < reorg_margin {
+            return bad(format!(
+                "(I2) M_A {} s < eth_finality {} + 2*DE {} + RA {} = {reorg_margin} s: one Ethereum reorg of Alice's claim could not be re-sent in time",
+                self.m_a_s,
+                self.eth_finality_s,
+                2 * self.de_s,
+                self.ra_s
+            ));
+        }
+        let min_window = self.de_s + self.eth_finality_s + self.ra_s + self.m_a_s;
+        if self.w_a_min_s < min_window {
+            return bad(format!(
+                "(I3) W_A_min {} s < DE {} + eth_finality {} + RA {} + M_A {} = {min_window} s: Alice has no time to see the lock final and still survive one claim reorg",
+                self.w_a_min_s, self.de_s, self.eth_finality_s, self.ra_s, self.m_a_s
+            ));
+        }
+        // REVIEW-4 R4-11: the drop grace is at least two rebroadcast times (one poll to see the transaction, one to send again).
+        if self.tx_grace_s < 2 * self.ra_s {
+            return bad(format!("tx_grace {} s < 2*RA {} s: a submitted transaction would be called dropped before two polls could see it", self.tx_grace_s, 2 * self.ra_s));
         }
         let derived = self.d_offset_derived();
         if self.d_offset != derived {
@@ -918,9 +968,9 @@ mod tests {
 
     #[test]
     fn section_9_1_constants() {
-        assert_eq!(B_POST, 242);
-        assert_eq!(P.rhs_i1_eth_for_window(W_A_S), 619);
-        assert_eq!(P.rhs_i1_eth_for_window(W_A_MIN_S), 529);
+        assert_eq!(B_POST, 252);
+        assert_eq!(P.rhs_i1_eth_for_window(W_A_S), 629);
+        assert_eq!(P.rhs_i1_eth_for_window(W_A_MIN_S), 539);
         assert_eq!(ROTATION_GUARD_BLOCKS, 4);
         assert_eq!(TRIAL_START_HEIGHT, 279_388);
         assert_eq!(MIN_CLOSE_FEE, 5_800);
@@ -935,8 +985,15 @@ mod tests {
         P.validate().unwrap();
         R.validate().unwrap();
         S.validate().unwrap();
+        // Formal model finding 2: the reorg-of-Alice's-claim relations hold with room in every profile, and the numbers are pinned.
+        for g in [P, R, S] {
+            assert!(g.m_a_s >= g.eth_finality_s + 2 * g.de_s + g.ra_s, "{}", g.name);
+            assert!(g.w_a_min_s >= g.de_s + g.eth_finality_s + g.ra_s + g.m_a_s, "{}", g.name);
+        }
+        assert_eq!((P.de_s, P.ra_s, S.de_s, S.ra_s, R.de_s, R.ra_s), (120, 120, 120, 120, 60, 60));
+        assert_eq!((P.b_safety, P.b_post(), P.d_offset), (30, 252, 735));
         // ... and `D_offset` really is the section 4.2 formula for each.
-        assert_eq!(P.d_offset_derived(), 725);
+        assert_eq!(P.d_offset_derived(), 735);
         assert_eq!(R.d_offset_derived(), 120);
         assert_eq!(R.b_post(), 33);
         assert_eq!(R.rhs_i1_eth_for_window(R.w_a_s), 68);
@@ -964,11 +1021,16 @@ mod tests {
             ("rehearsal on any chain", Gates { eth_chain_ids: None, ..REHEARSAL }),
             ("production with a cap", Gates { max_noid_micro: Some(1), ..PRODUCTION }),
             ("zero tau", Gates { tau_fast_s: 0, ..REHEARSAL }),
+            ("tx grace below two rebroadcast times", Gates { tx_grace_s: 119, ..REHEARSAL }),
             ("sepolia: M_A not above the ETH finality", Gates { m_a_s: 1_000, ..SEPOLIA }),
             ("sepolia: D_offset one short", Gates { d_offset: 299, ..SEPOLIA }),
             ("sepolia without caps", Gates { max_noid_micro: None, max_eth_wei: None, eth_chain_ids: None, ..SEPOLIA }),
             ("sepolia without a chain pin", Gates { eth_chain_ids: None, ..SEPOLIA }),
             ("sepolia with the rehearsal window", Gates { w_a_s: 600, w_a_min_s: 480, d_offset: 120, ..SEPOLIA }),
+            // Formal model finding 2: the two reorg-of-Alice's-claim relations, each failing alone.
+            ("production: M_A below eth_finality + 2*DE + RA", Gates { de_s: 400, ..PRODUCTION }),
+            ("rehearsal: M_A below 2*DE + RA", Gates { ra_s: 250, tx_grace_s: 600, ..REHEARSAL }),
+            ("sepolia: W_A_min below DE + eth_finality + RA + M_A (M_A relation still holds)", Gates { de_s: 220, ra_s: 220, ..SEPOLIA }),
         ];
         for (what, g) in broken {
             assert!(matches!(g.validate(), Err(GateError::BadProfile(_))), "{what}: {:?}", g.validate());
@@ -976,6 +1038,10 @@ mod tests {
         // Sanity of the "off by one" cases above: the margin is what absorbs a change.
         Gates { margin: 10, d_offset: 121, ..REHEARSAL }.validate().unwrap();
         Gates { margin: 7, d_offset: 301, ..SEPOLIA }.validate().unwrap();
+        // The two relations are tight at their boundary and no tighter: M_A = 1,140 + 2*220 + 220 = 1,800; W_A_min = 220 + 1,140 + 220 + 1,800 = 3,380.
+        Gates { de_s: 220, ra_s: 220, w_a_min_s: 3_380, ..SEPOLIA }.validate().unwrap();
+        assert!(Gates { de_s: 221, ra_s: 220, w_a_min_s: 3_380, ..SEPOLIA }.validate().is_err());
+        assert!(Gates { de_s: 220, ra_s: 220, w_a_min_s: 3_379, ..SEPOLIA }.validate().is_err());
     }
 
     /// The sepolia numbers of the module documentation, pinned.
@@ -1071,13 +1137,13 @@ mod tests {
     fn section_4_3_worked_example_eth() {
         let h_create = 300_000;
         let d = P.alice_deadline_eth(h_create).unwrap();
-        assert_eq!(d, 300_725);
+        assert_eq!(d, 300_735);
         let h_b = 300_040;
         let t_b = 1_794_312_000;
         let t_reveal = t_b + 7_200;
         let r = P.check_i1_eth(d, h_b, t_reveal, t_b).unwrap();
-        assert_eq!(r.needed, 619);
-        assert_eq!(r.available, 685);
+        assert_eq!(r.needed, 629);
+        assert_eq!(r.available, 695);
         assert_eq!(r.slack, 66);
         assert_eq!(P.bob_lock_by(d), 300_106);
         assert_eq!(P.bob_lock_by_min_window(d), 300_196);
@@ -1125,12 +1191,12 @@ mod tests {
 
     #[test]
     fn i1_fails_when_bob_locks_too_late() {
-        let d = 300_725;
+        let d = 300_735;
         // At the lock-by height the full window still fits exactly.
         assert!(P.check_i1_eth(d, 300_106, 1_000_000 + 7_200, 1_000_000).is_ok());
         assert_eq!(
             P.check_i1_eth(d, 300_107, 1_000_000 + 7_200, 1_000_000),
-            Err(GateError::BobUnsafe { d, h_b: 300_107, needed: 619, available: 618 })
+            Err(GateError::BobUnsafe { d, h_b: 300_107, needed: 629, available: 628 })
         );
         // choose_t_reveal shrinks the window down to W_A_min, then refuses.
         let t = P.choose_t_reveal(d, 300_150, 1_000_000, 300_100).unwrap();
@@ -1176,9 +1242,9 @@ mod tests {
 
     #[test]
     fn i5_version_window() {
-        assert_eq!(P.check_i5(300_000, 300_725), Ok(()));
+        assert_eq!(P.check_i5(300_000, 300_735), Ok(()));
         assert!(matches!(
-            P.check_i5(279_000, 279_725),
+            P.check_i5(279_000, 279_735),
             Err(GateError::VersionBoundaryInWindow { .. })
         ));
         // The window end is D + B_post, so D just below the boundary still straddles it.

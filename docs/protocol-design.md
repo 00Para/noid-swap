@@ -305,14 +305,14 @@ sequenceDiagram
 | One epoch-anchor rotation | `B_epoch` | 144 | blocks | A stuck claim (e.g. a conflicting third-party claim admitted first, T2) holds the instance until its anchor rotates. Then Bob re-authorizes. Anchor for child `C` = block `⌊(C−1)/144⌋·144` |
 | Authorization proving time (once, then again after a rotation) | `P_auth` | 20 (×2) | s | **Measured in M0.5 (Q4)**: p50 1.4–1.6 s, worst p99 6.0 s over 8 release series of N = 30 (table below). Budget = 3 × the worst p99, rounded up. Replaces the 600 s placeholder |
 | Relay-floor / congestion wait | `B_fee` | 60 | blocks | the floor is local and pressure-latched (80% on / <50% off). Duration on mainnet is UNKNOWN (Q6) |
-| Ops slack | `B_safety` | 20 | blocks | restarts, RPC hiccups |
+| Ops slack | `B_safety` | 30 | blocks | restarts, RPC hiccups, and an adversarial reorg of Bob's close with margin on top. Was 20 until 2026-11-05 (§9.1) |
 | Reveal detection (ETH) | `Δ_detect` | 300 | s | polling plus a few seconds of block-timestamp skew |
 | Alice's reveal margin (ETH) | `M_A` | 1,800 | s | > Ethereum finality (~13–19 min) plus inclusion |
 | Alice's window (ETH) | `W_A` / `W_A_min` | 7,200 / 5,400 | s | finality of Bob's lock + `M_A` + slack |
 | BTC refund burial | `k_refund` | 5 | BTC blocks | refund minable at `T_b+1`, ≤2 blocks of fee delay, 2 confirmations |
 | BTC lock length | `N_btc` | 24 | BTC blocks | ≈ 4 h nominal |
 
-The post-reveal Parano1d budget, in blocks, is `B_post = B_epoch + B_fee + B_final + B_safety = 144 + 60 + 18 + 20 = 242`.
+The post-reveal Parano1d budget, in blocks, is `B_post = B_epoch + B_fee + B_final + B_safety = 144 + 60 + 18 + 30 = 252`.
 
 **Measured `P_auth` (M0.5, Q4, 2026-11-04).** `P_auth` is the wall-clock time for one complete claim authorization of the `HashTimeLock` contract, the way Bob's client does it: fresh secret and opening, build the 1-input/1-output closing page, prepare the witness, prove (`noid_gkr`, owner-authorization proof). The proof is verified afterwards, outside the timer. Page height 279,369 for V3 and 279,370 for V4. Benchmark: `parano1d/harness/tests/pauth_bench.rs` (`#[ignore]`, run with `PAUTH_BENCH_N`, see `parano1d/README.md`). Times in seconds, nearest-rank percentiles (with N = 30, p99 is the maximum; with N = 10, p90 is the 9th value). Variant `raw` = witness `s`; `stock` = witness `Derive(m,0)` (adds 3 permutations, negligible).
 
@@ -372,13 +372,13 @@ Figures re-derived 2026-11-04 from the measured P_auth (M0.5); see §9.1.
 
 The Parano1d height of 300,000 is illustrative (post-v2.1).
 
-1. `H_create = 300,000`, `D_offset = 725`, so `D = 300,725`.
+1. `H_create = 300,000`, `D_offset = 735`, so `D = 300,735`.
 2. Funding is included by 300,005 and final by 300,022.
 3. Bob locks at `H_b = 300,040`, `t_b = 1,794,312,000` (2026-11-10 12:00:00 UTC), with `T_reveal = t_b + 7,200 = 1,794,319,200` (14:00:00 UTC).
-4. RHS(I1) = `⌈(7,200 + 300 + 40)/20⌉ + 242 = 377 + 242 = 619`. LHS = `300,725 − 300,040 = 685 ≥ 619` ✔ (66 blocks of slack).
-5. Bob's lock-by height is `300,725 − 619 = 300,106` with `W_A = 7,200`. With `W_A_min = 5,400` it is `300,725 − (⌈5,740/20⌉ + 242) = 300,196`.
-6. Nominal times: Alice must broadcast by 13:30 UTC. Bob's worst-case learn time is 14:05 UTC. `D` arrives at about 17:42 UTC at 30 s/block, and at about 15:48 UTC at 20 s/block.
-7. In the fast case Bob still has 310 blocks after `t_L`. He needs `2 (2·P_auth) + 242 = 244` ✔.
+4. RHS(I1) = `⌈(7,200 + 300 + 40)/20⌉ + 252 = 377 + 252 = 629`. LHS = `300,735 − 300,040 = 695 ≥ 629` ✔ (66 blocks of slack).
+5. Bob's lock-by height is `300,735 − 629 = 300,106` with `W_A = 7,200`. With `W_A_min = 5,400` it is `300,735 − (⌈5,740/20⌉ + 252) = 300,735 − 539 = 300,196`. (Measured from `H_create` the lock-by heights are the same as with `B_safety` = 20: `D_offset` and RHS(I1) both grew by 10.)
+6. Nominal times: Alice must broadcast by 13:30 UTC. Bob's worst-case learn time is 14:05 UTC. `D` arrives at about 17:47 UTC at 30 s/block (695 blocks after the lock, 5 h 47 m 30 s), and at about 15:51 UTC at 20 s/block (3 h 51 m 40 s).
+7. In the fast case Bob still has 320 blocks after `t_L` (`300,735 − (300,040 + 375)`). He needs `2 (2·P_auth) + 252 = 254` ✔.
 8. Alice's worst-case lockup if Bob aborts: until about `D + 18`, roughly 6 h nominal.
 
 ### 4.4 Worked example: BTC
@@ -386,18 +386,18 @@ The Parano1d height of 300,000 is illustrative (post-v2.1).
 1. `D_offset = 2,050`, so `D = 302,050`.
 2. Bob locks at `H_b = 300,040`, BTC height `h0 = 975,000` (illustrative), with `T_b = 975,024`.
 3. `t_L − t_b = Q_{0.999}(Gamma(29, 660 s)) + 300 = 32,023 + 300 s` (8.9 h).
-4. RHS(I1) = `⌈(32,323 + 40)/20⌉ + 242 = 1,619 + 242 = 1,861`. LHS = `2,010` ✔ (149 blocks of slack). Bob's lock-by height is 300,189.
+4. RHS(I1) = `⌈(32,323 + 40)/20⌉ + 252 = 1,619 + 252 = 1,871`. LHS = `2,010` ✔ (139 blocks of slack). Bob's lock-by height is `302,050 − 1,871 = 300,179`.
 5. Alice's cutoff is BTC height 975,018. Even in the fast case (p0.1 of 18 blocks = 1.28 h) she has ample time.
-6. Nominal `D` is about 16.8 h after `t_b`. **The cost is Alice's lockup.** Reducing `N_btc` to 12 cuts `D_offset` to about 1,390, but leaves Alice ≥ 0.67 h at p0.1 for 12 blocks. That is acceptable only with automated reveal.
+6. Nominal `D` is about 16.8 h after `t_b`. **The cost is Alice's lockup.** Reducing `N_btc` to 12 cuts `D_offset` to about 1,400 (about 1,390 before `B_safety` was raised to 30; not re-derived exactly), but leaves Alice ≥ 0.67 h at p0.1 for 12 blocks. That is acceptable only with automated reveal.
 
 ### 4.5 Recommended values
 
 | Pair | `W_A` / `N_btc` | `D_offset` (blocks) | Nominal @30 s | Fast case @20 s |
 |---|---|---|---|---|
-| NOID↔ETH | 7,200 s | 725 | 6 h 03 m | 4 h 02 m |
+| NOID↔ETH | 7,200 s | 735 | 6 h 08 m | 4 h 05 m |
 | NOID↔BTC | 24 BTC blocks | 2,050 | 17 h 05 m | 11 h 23 m |
 
-These were re-derived on 2026-11-04 from the measured `P_auth` (M0.5, §4.1, §9.1). They are re-derived again after M2 measures the floor duration, and the empirical Parano1d block-rate distribution (Q6, Q13).
+These were re-derived on 2026-11-04 from the measured `P_auth` (M0.5, §4.1, §9.1) and the ETH row again on 2026-11-05 for `B_safety` = 30 (§9.1). They are re-derived again after M2 measures the floor duration, and the empirical Parano1d block-rate distribution (Q6, Q13).
 
 ---
 
@@ -606,24 +606,30 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 | `F_max` | `max(50,000 μNOID, 3 × estimateFeeDetailed(1,1))`, ≤ 1% of `V` | 50,000 ≈ 8.6 × the 5,800 minimum |
 | `V` | `Q_net + F_max` | Bob gets ≥ `Q_net` |
 | `τ_nom` / `τ_fast` | 30 s / 20 s | |
-| `B_final`, `B_epoch`, `B_fee`, `B_safety` | 18, 144, 60, 20 blocks | `B_post = 242` |
+| `B_final`, `B_epoch`, `B_fee`, `B_safety` | 18, 144, 60, 30 blocks | `B_post = 252` (was 242 with `B_safety` = 20) |
 | `P_auth` budget | 20 s (×2) | M0.5 measurement: worst p99 6.0 s on the owner's WSL2 VM, × 3, rounded up (§4.1). Was 600 s (placeholder) |
 | Bob claim target | include by `D − 18` | hard limit `D − 1` |
 | ETH `W_A` / `W_A_min` / `M_A` / `Δ_detect` | 7,200 / 5,400 / 1,800 / 300 s | |
 | ETH confirmations | Alice waits for Bob's lock to be **finalized** | |
-| ETH `D_offset` | 725 blocks (~6 h 03 m @30 s) | lock-by = `D − 619` (was 780 and `D − 677` with the 600 s placeholder) |
+| ETH `D_offset` | 735 blocks (~6 h 08 m @30 s) | lock-by = `D − 629` (was 725 and `D − 619` with `B_safety` = 20; 780 and `D − 677` with the 600 s placeholder) |
 | BTC `N_btc`, `k_fund`, Alice cutoff, `k_refund` | 24, 3, `T_b − 6`, 5 | BTC p99.9 at 660 s/block |
-| BTC `D_offset` | 2,050 blocks (~17 h 05 m @30 s) | lock-by = `D − 1,861` (was 2,100 and `D − 1,919`) |
+| BTC `D_offset` | 2,050 blocks (~17 h 05 m @30 s) | lock-by = `D − 1,871` (was `D − 1,861` with `B_safety` = 20; 2,100 and `D − 1,919` with the 600 s placeholder) |
 | Bob lock window `B_bob` | ≤ 60 blocks after funding finality | |
 | Fork rule | the window excludes 279,370. Start at ≥ 279,370 + 18 | (I5) |
 | π | RISC Zero, pinned version and image ID, local prover, journal `(tag, variant, H, A)` | §5.4 |
 | ETH contract | `HTLC.sol` at a pinned address and code hash. EOAs only | |
 
-**Re-derivation after M0.5 (Q4).** Replacing `2·P_auth` = 1,200 s by 40 s lowers the right-hand side of (I1) by 58 blocks, which is more than the 10-block threshold, so the offsets were recomputed with the same rule as before, `D_offset = B_fund(10) + B_final(18) + B_bob(60) + RHS(I1) + margin`:
+**Re-derivation after M0.5 (Q4)** (values of 2026-11-04, with `B_safety` = 20; superseded by the 2026-11-05 step below). Replacing `2·P_auth` = 1,200 s by 40 s lowers the right-hand side of (I1) by 58 blocks, which is more than the 10-block threshold, so the offsets were recomputed with the same rule as before, `D_offset = B_fund(10) + B_final(18) + B_bob(60) + RHS(I1) + margin`:
 - ETH: `RHS = ⌈(7,200 + 300 + 40)/20⌉ + 242 = 377 + 242 = 619` (was 677). `10 + 18 + 60 + 619 = 707`; `D_offset` = 725 leaves 18 blocks of margin (780 left 15).
 - BTC: `RHS = ⌈(32,323 + 40)/20⌉ + 242 = 1,619 + 242 = 1,861` (was 1,919). `88 + 1,861 = 1,949`; `D_offset` = 2,050 leaves 101 blocks (2,100 left 93).
 - Nothing else moves: `W_A`, `N_btc` and every other row are unchanged, so Alice's lockup only drops by 55 blocks (about 27 min at 30 s) for ETH and 50 blocks (about 25 min) for BTC. The proving time was never the dominant term; Alice's reveal window and Ethereum/Bitcoin latency are.
 - **Propagated 2026-11-04:** §4.3–§4.5, the T6 advice (4 blocks for `P_auth` = 20 s) and decision 6 in `PROJECT.md` now carry these values. `margin` (18 blocks ETH, 101 BTC) is a deliberate rounding-up of `D_offset`, not an output of the formula; it is named in §4.2 since the same date.
+
+**`B_safety` raised from 20 to 30 (2026-11-05, production profile only).** `B_safety` was raised from 20 to 30 because the explicit-state model check (`docs/formal/README.md`, section 7) showed that 20 blocks equals exactly one adversarial reorg of Bob's close with nothing on top. `D_offset` was recomputed with the same rule:
+- `B_post = 144 + 60 + 18 + 30 = 252`.
+- ETH: `RHS = ⌈(7,200 + 300 + 40)/20⌉ + 252 = 377 + 252 = 629` (minimum window: `⌈(5,400 + 300 + 40)/20⌉ + 252 = 287 + 252 = 539`). `10 + 18 + 60 + 629 = 717`; `D_offset` = 735 leaves the same 18 blocks of margin. Bob's lock-by is `D − 629` / `D − 539`, which is `H_create + 106` / `H_create + 196` as before (both `D_offset` and RHS grew by 10), so Bob's time to lock is unchanged and only Alice's lockup grows, by 10 blocks (about 5 min at 30 s).
+- BTC: `RHS = ⌈(32,323 + 40)/20⌉ + 252 = 1,619 + 252 = 1,871`. `88 + 1,871 = 1,959`; `D_offset` stays 2,050 and the margin shrinks from 101 to 91 blocks. Bob's lock-by moves 10 blocks earlier, from `H_create + 189` to `H_create + 179`.
+- The `rehearsal` and `sepolia` profiles keep `B_safety` = 5 and their numbers.
 
 **Profiles (2026-11-05).** `swap-cli` runs the same (I1)/(I2)/(I3) formulas under three parameter sets. `production` is the table above. `rehearsal` (a local Hardhat chain, instant Ethereum finality) and `sepolia` (public Sepolia, real finality) shrink the budgets so that an abort path takes an hour or two instead of six, and cap the amounts. The derivation, the checker (`Gates::validate`) and the tests that pin the numbers are in `swap-cli/README.md`, "The rehearsal and sepolia profiles", and `swap-cli/src/params.rs`.
 
@@ -631,11 +637,11 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 |---|---|---|---|
 | `W_A` / `W_A_min` / `M_A` | 7,200 / 5,400 / 1,800 s | 600 / 480 / 300 s | 4,200 / 3,360 / 1,800 s |
 | `Δ_detect`, `2·P_auth` | 300 s, 40 s | 60 s, 40 s | 120 s, 40 s |
-| `B_epoch` / `B_fee` / `B_final` / `B_safety` → `B_post` | 144 / 60 / 18 / 20 → 242 | 0 / 10 / 18 / 5 → 33 | 0 / 10 / 18 / 5 → 33 |
-| `RHS(I1)`, full / minimum reveal window | 619 / 529 | 68 / 62 | 251 / 209 |
+| `B_epoch` / `B_fee` / `B_final` / `B_safety` → `B_post` | 144 / 60 / 18 / 30 → 252 | 0 / 10 / 18 / 5 → 33 | 0 / 10 / 18 / 5 → 33 |
+| `RHS(I1)`, full / minimum reveal window | 629 / 539 | 68 / 62 | 251 / 209 |
 | `B_fund` / `B_bob` / `margin` | 10 / 60 / 18 | 5 / 20 / 9 | 5 / 20 / 6 |
-| `D_offset` | 725 (≈ 6 h 03 m) | 120 (1 h) | 300 (2 h 30) |
-| Bob's lock-by, full / minimum window | `D − 619` / `D − 529` | `D − 68` / `D − 62` | `D − 251` / `D − 209` |
+| `D_offset` | 735 (≈ 6 h 08 m) | 120 (1 h) | 300 (2 h 30) |
+| Bob's lock-by, full / minimum window | `D − 629` / `D − 539` | `D − 68` / `D − 62` | `D − 251` / `D − 209` |
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s |
 | Caps | none | ≤ 20 NOID, ≤ 0.01 ETH, chain 31337 only | ≤ 20 NOID, ≤ 0.01 ETH, chain 11155111 only |

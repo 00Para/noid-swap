@@ -36,6 +36,28 @@
  *                        under the same hashlock do not block; they are reported (and noted on stderr).
  *   refund               the lock is present, unclaimed, unrefunded, and its timelock passed.
  *
+ * Mainnet (chain id 1) is refused unless the signing command (deploy, send, lock, claim, refund) is given --mainnet.
+ * With --mainnet: only chain 1 is accepted (a test network is refused, no mixing; --allow-chain-id is refused),
+ * --max-fee-gwei N is required (it is the maxFeePerGas of the transaction; --gas-price-gwei is refused), the dry run
+ * prints the worst-case fee (gas estimate x cap) and the sender's balance, and the command refuses when the balance
+ * cannot cover value + worst-case fee (a real send checks it too). Without --mainnet, --max-fee-gwei is refused.
+ * With --swap, the file must say chain_id 1 and the production profile (a file with no `profile` field is production).
+ * The command line prints one warning line on stderr when --mainnet is in effect.
+ * Under --mainnet, lock, claim and refund REQUIRE --swap FILE (refused without it; there is no warn-and-continue path).
+ *
+ * Fee safety (REVIEW-4 R4-1). Wherever a fee cap is chosen (--max-fee-gwei on mainnet, --gas-price-gwei elsewhere) the latest
+ * block's base fee is read before signing, also in --dry-run: a claim (it publishes the secret) is refused when cap < 2 x base
+ * fee, lock and refund when cap < base fee; the output carries `feeCheck` (base fee, cap, ratio, minimum). `claim --replace` and
+ * `refund --replace` re-send the same call at the signer's oldest pending nonce (never a second nonce) with both fee fields
+ * raised by at least 12.5 % and the cap at least 2 x the base fee; refused when nothing is pending, when the pending transaction
+ * is not this call (found by --replace-tx HASH or in the node's pending block), or when the lock is claimed / refunded.
+ * On the command line the hash of a sent transaction is printed on stderr before the wait.
+ *
+ * Keys (REVIEW-4 R4-5): with --swap, claim needs the key of the file's alice_receiver, refund and lock that of bob_sender.
+ * Late re-send (REVIEW-4 R4-3): with --swap, when the file's history shows the secret may already be public (reveal_submitted,
+ * eth_claim_mined, eth_claim_reorged, eth_reveal_dropped), claim takes the cutoff the intent froze (T_reveal - DE) instead of the
+ * stricter timelock - 1800 s; an explicit --margin-s still tightens it.
+ *
  * Tied to the swap file (REVIEW-3 F3): lock, claim and refund take --swap FILE, the JSON swap file of
  * `swap-cli` (read-only; the sealed secret in it is never touched). The terms (--chain-id, --contract,
  * and for lock --hashlock, --receiver, --amount-wei, --t-reveal; for claim and refund --lock-id)
@@ -55,11 +77,17 @@ const { ethers } = require("ethers");
 
 const ARTIFACT_PATH = path.join(__dirname, "..", "artifacts", "contracts", "HTLC.sol", "HTLC.json");
 // Chains on which this tool will send transactions: Sepolia, Holesky, Hardhat/ganache-style local.
-// Ethereum mainnet (1) is always refused. Another chain needs an explicit allowChainId.
+// Ethereum mainnet (1) is refused unless the command carries --mainnet (see mainnetFlags); it is never in this set.
+// Another chain needs an explicit allowChainId.
 const ALLOWED_CHAIN_IDS = new Set([11155111n, 17000n, 31337n, 1337n]);
+const MAINNET_WARNING = "warning: --mainnet is in effect: this command can spend real ETH on Ethereum mainnet (chainId 1)\n";
 const GWEI = 10n ** 9n;
 const LOG_RANGE_MAX = 50000; // blocks per eth_getLogs request: the cap of public Sepolia RPCs
 const DEFAULT_MARGIN_S = 1800; // M_A, docs/protocol-design.md section 4.3
+// REVIEW-4 R4-3: swap-cli history events that show Alice's secret may already be public (engine.rs `secret_may_be_public`).
+const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped"]);
+// REVIEW-4 R4-1: a same-nonce replacement must raise both fee fields by at least 12.5 % (geth requires 10 %).
+const bumped = (v) => (v * 1125n + 999n) / 1000n;
 
 class UserError extends Error {}
 
@@ -112,7 +140,37 @@ function marginOf(args) {
   if (args.marginS === undefined) return BigInt(DEFAULT_MARGIN_S);
   return uint("--margin-s", args.marginS);
 }
+/**
+ * --mainnet / --max-fee-gwei, validated before anything touches the network. Returns { mainnet, capWei }.
+ * Without --mainnet: --max-fee-gwei is refused (capWei null). With it: --max-fee-gwei is required, --allow-chain-id
+ * and --gas-price-gwei are refused (the cap is the only fee setting; a test network is never mixed in).
+ */
+function mainnetFlags(args) {
+  if (args.mainnet !== undefined && args.mainnet !== true && args.mainnet !== false) throw new UserError("--mainnet is a flag without a value");
+  if (args.mainnet !== true) {
+    if (args.maxFeeGwei !== undefined) throw new UserError("--max-fee-gwei is only accepted together with --mainnet (a test network does not take a fee cap); refusing");
+    return { mainnet: false, capWei: null };
+  }
+  if (args.allowChainId !== undefined) throw new UserError("--mainnet cannot be combined with --allow-chain-id (mainnet and other chains are never mixed); refusing");
+  if (args.gasPriceGwei !== undefined) throw new UserError("--mainnet cannot be combined with --gas-price-gwei; --max-fee-gwei is the only fee setting on mainnet; refusing");
+  const s = String(need(args, "maxFeeGwei", "max-fee-gwei"));
+  if (!/^\d+(\.\d{1,9})?$/.test(s)) throw new UserError("--max-fee-gwei must be a positive decimal number of gwei (at most 9 decimals)");
+  const capWei = ethers.parseUnits(s, "gwei");
+  if (capWei === 0n) throw new UserError("--max-fee-gwei must be > 0");
+  return { mainnet: true, capWei };
+}
+
+/** Under --mainnet, lock / claim / refund must be tied to a swap file; there is no fallback to bare flags. */
+function requireSwapOnMainnet(args) {
+  if (args.mainnet === true && (args.swap === undefined || args.swap === null || args.swap === "")) {
+    throw new UserError("--mainnet requires --swap FILE for lock, claim and refund (the file's chain, profile and pending intent are checked); refusing");
+  }
+}
+
 function feeOverrides(args) {
+  const { mainnet, capWei } = mainnetFlags(args);
+  // On mainnet the cap is the maxFeePerGas; the tip is at most 1 gwei and never above the cap.
+  if (mainnet) return { maxFeePerGas: capWei, maxPriorityFeePerGas: capWei < GWEI ? capWei : GWEI };
   if (args.gasPriceGwei === undefined) return {};
   const s = String(args.gasPriceGwei);
   if (!/^\d+(\.\d+)?$/.test(s)) throw new UserError("--gas-price-gwei must be a positive decimal number");
@@ -120,6 +178,157 @@ function feeOverrides(args) {
   if (max === 0n) throw new UserError("--gas-price-gwei must be > 0");
   // EIP-1559 fields: the override is the max fee; the tip is capped at 1 gwei.
   return { maxFeePerGas: max, maxPriorityFeePerGas: max < GWEI ? max : GWEI };
+}
+
+/**
+ * REVIEW-4 R4-1: refuse a fee cap that the next few blocks can outrun. `mult` is 2 for a claim (it publishes the secret, so it
+ * must not get stuck) and for a replacement, 1 for lock / refund. Applies in --dry-run too. Returns the report that is
+ * printed ({ baseFeeGwei, maxFeeGwei, ratio, minRatio }), or null when no cap was chosen (the node then prices the
+ * transaction itself at 2 x base fee + tip) or the chain has no base fee and is not mainnet.
+ */
+async function checkFeeCap(provider, fees, mult, mainnet, why) {
+  const cap = fees.maxFeePerGas;
+  if (cap === undefined) return null;
+  const blk = await latestBlock(provider);
+  const base = blk.baseFeePerGas;
+  if (base === null || base === undefined) {
+    if (mainnet) throw new UserError("refusing: the latest block carries no baseFeePerGas, so the fee cap cannot be checked against it");
+    return null;
+  }
+  const report = {
+    block: blk.number,
+    baseFeeWei: base.toString(),
+    baseFeeGwei: ethers.formatUnits(base, "gwei"),
+    maxFeeWei: cap.toString(),
+    maxFeeGwei: ethers.formatUnits(cap, "gwei"),
+    ratio: base === 0n ? "n/a (base fee 0)" : (Number((cap * 100n) / base) / 100).toFixed(2),
+    minRatio: mult.toString(),
+  };
+  if (cap < mult * base) {
+    throw new UserError(
+      `refusing: the fee cap ${report.maxFeeGwei} gwei is below ${mult} x the latest base fee (base fee ${report.baseFeeGwei} gwei in block ${blk.number}; ` +
+        `cap / base fee = ${report.ratio}, the minimum is ${mult}): ${why}. Give a higher --max-fee-gwei (mainnet) or --gas-price-gwei`
+    );
+  }
+  return report;
+}
+const FEE_WHY = {
+  claim: "a claim publishes the secret, so it must not get stuck when the base fee rises (R4-1)",
+  other: "the transaction could not be included once the base fee has risen (R4-1)",
+};
+
+/** The pending transaction of `from` at `nonce`, if it can be found: by hash (--replace-tx), else in the node's pending block. Or null. */
+async function findPendingTx(provider, args, from, nonce) {
+  let t = null;
+  if (args.replaceTx !== undefined) {
+    const hash = hex32("--replace-tx", args.replaceTx);
+    const tx = await provider.getTransaction(hash);
+    if (!tx) throw new UserError(`--replace-tx ${hash} is not known to this node; refusing`);
+    if (tx.blockNumber !== null && tx.blockNumber !== undefined) throw new UserError(`--replace-tx ${hash} is already mined (block ${tx.blockNumber}); nothing to replace; refusing`);
+    if (!sameAddr(tx.from, from) || BigInt(tx.nonce) !== BigInt(nonce)) {
+      throw new UserError(`--replace-tx ${hash} is from ${tx.from} nonce ${tx.nonce}, not this signer ${from} at its oldest pending nonce ${nonce}; refusing`);
+    }
+    t = tx;
+  } else {
+    try {
+      const pb = await provider.send("eth_getBlockByNumber", ["pending", true]);
+      const hit = pb && Array.isArray(pb.transactions) ? pb.transactions.find((x) => x && typeof x === "object" && sameAddr(x.from, from) && BigInt(x.nonce) === BigInt(nonce)) : null;
+      if (hit) {
+        t = {
+          hash: hit.hash,
+          to: hit.to,
+          data: hit.input !== undefined ? hit.input : hit.data,
+          maxFeePerGas: hit.maxFeePerGas ? BigInt(hit.maxFeePerGas) : null,
+          maxPriorityFeePerGas: hit.maxPriorityFeePerGas ? BigInt(hit.maxPriorityFeePerGas) : null,
+          gasPrice: hit.gasPrice ? BigInt(hit.gasPrice) : null,
+        };
+      }
+    } catch {
+      /* a node without a pending block: the old fee stays unknown */
+    }
+  }
+  if (t && t.data === undefined) t.data = "0x";
+  return t;
+}
+
+/**
+ * REVIEW-4 R4-1: --replace. Re-send the SAME call at the signer's OLDEST pending nonce with both fee fields raised by at
+ * least 12.5 % and the cap at least 2 x the latest base fee. Refuses when the signer has nothing pending, or when the pending
+ * transaction found there is not this very call (claim / refund of this lock). Never a second nonce. Returns { fees, report }.
+ */
+async function replacePlan(provider, signer, args, { name, contractAddr, lockId }) {
+  const { mainnet } = mainnetFlags(args);
+  const from = await signer.getAddress();
+  const [latestN, pendingN] = await Promise.all([provider.getTransactionCount(from, "latest"), provider.getTransactionCount(from, "pending")]);
+  if (pendingN <= latestN) {
+    throw new UserError(`--replace: ${from} has no pending transaction (latest nonce ${latestN} = pending nonce ${pendingN}); nothing to replace; refusing (send the ${name} without --replace)`);
+  }
+  const nonce = latestN;
+  const old = await findPendingTx(provider, args, from, nonce);
+  if (old) {
+    let parsed = null;
+    try {
+      parsed = htlcInterface().parseTransaction({ data: old.data });
+    } catch {
+      /* not an HTLC call */
+    }
+    if (!old.to || !sameAddr(old.to, contractAddr) || !parsed || parsed.name !== name || String(parsed.args[0]).toLowerCase() !== lockId.toLowerCase()) {
+      throw new UserError(`--replace: the pending transaction at nonce ${nonce} is not a ${name} of lock ${lockId} at ${contractAddr}; replacing it would cancel something else; refusing`);
+    }
+  }
+  const blk = await latestBlock(provider);
+  const base = blk.baseFeePerGas;
+  if ((base === null || base === undefined) && mainnet) throw new UserError("refusing: the latest block carries no baseFeePerGas, so the replacement fee cannot be checked against it");
+  const minByBase = 2n * (base || 0n);
+  const oldCap = old ? (old.maxFeePerGas !== null && old.maxFeePerGas !== undefined ? old.maxFeePerGas : old.gasPrice) : null;
+  const oldTip = old ? (old.maxPriorityFeePerGas !== null && old.maxPriorityFeePerGas !== undefined ? old.maxPriorityFeePerGas : old.gasPrice) : null;
+  const minCap = oldCap !== null && bumped(oldCap) > minByBase ? bumped(oldCap) : minByBase;
+  const minTip = oldTip !== null ? bumped(oldTip) : 0n;
+  const given = feeOverrides(args);
+  let cap;
+  let tip;
+  if (given.maxFeePerGas !== undefined) {
+    cap = given.maxFeePerGas;
+    tip = given.maxPriorityFeePerGas > minTip ? given.maxPriorityFeePerGas : minTip;
+    if (cap < minCap) {
+      throw new UserError(
+        `--replace: the new fee cap ${ethers.formatUnits(cap, "gwei")} gwei is below the minimum ${ethers.formatUnits(minCap, "gwei")} gwei ` +
+          `(the larger of 2 x the latest base fee ${ethers.formatUnits(base || 0n, "gwei")} gwei and the old cap ${oldCap === null ? "unknown" : ethers.formatUnits(oldCap, "gwei") + " gwei"} + 12.5 %); refusing`
+      );
+    }
+    if (tip > cap) throw new UserError(`--replace: the replacement tip ${ethers.formatUnits(tip, "gwei")} gwei (old tip + 12.5 %) is above the fee cap ${ethers.formatUnits(cap, "gwei")} gwei; give a higher cap; refusing`);
+  } else {
+    tip = minTip > GWEI ? minTip : GWEI;
+    cap = minCap > minByBase + tip ? minCap : minByBase + tip;
+  }
+  const feeCheck = await checkFeeCap(provider, { maxFeePerGas: cap }, 2n, mainnet, FEE_WHY.claim);
+  const report = {
+    feeCheck,
+    replace: {
+      nonce,
+      replacesTx: old && old.hash ? old.hash : null,
+      oldFeeKnown: old !== null,
+      oldMaxFeeGwei: oldCap === null ? null : ethers.formatUnits(oldCap, "gwei"),
+      oldTipGwei: oldTip === null ? null : ethers.formatUnits(oldTip, "gwei"),
+      newMaxFeeGwei: ethers.formatUnits(cap, "gwei"),
+      newTipGwei: ethers.formatUnits(tip, "gwei"),
+      note: old ? undefined : "the old transaction was not found on this node (give --replace-tx HASH): its fee is unknown, so the node itself enforces the replacement bump and rejects an underpriced one",
+    },
+  };
+  return { fees: { maxFeePerGas: cap, maxPriorityFeePerGas: tip, nonce }, report };
+}
+
+/** Fees and report for one signing call: the --replace plan, or the cap checked against the base fee. */
+async function feePlan(provider, signer, args, { name, contractAddr, lockId }) {
+  if (args.replaceTx !== undefined && args.replace !== true) throw new UserError("--replace-tx needs --replace; refusing");
+  if (args.replace === true) {
+    if (name !== "claim" && name !== "refund") throw new UserError("--replace exists for claim and refund only; refusing");
+    return replacePlan(provider, signer, args, { name, contractAddr, lockId });
+  }
+  if (args.replace !== undefined && args.replace !== false) throw new UserError("--replace is a flag without a value");
+  const fees = feeOverrides(args);
+  const feeCheck = await checkFeeCap(provider, fees, name === "claim" ? 2n : 1n, mainnetFlags(args).mainnet, name === "claim" ? FEE_WHY.claim : FEE_WHY.other);
+  return { fees, report: feeCheck ? { feeCheck } : {} };
 }
 
 /** Same packing as HTLC.computeLockId. */
@@ -138,8 +347,15 @@ async function latestBlock(provider) {
 
 async function assertAllowedChain(provider, args) {
   const chainId = (await provider.getNetwork()).chainId;
+  const { mainnet } = mainnetFlags(args);
+  if (mainnet) {
+    if (chainId !== 1n) {
+      throw new UserError(`--mainnet is given but the node is chain ${chainId}, not Ethereum mainnet (chainId 1); mainnet and test networks are never mixed; refusing`);
+    }
+    return chainId;
+  }
   const extra = args.allowChainId !== undefined ? uint("allow-chain-id", args.allowChainId) : null;
-  if (chainId === 1n) throw new UserError("refusing to send transactions on Ethereum mainnet (chainId 1)");
+  if (chainId === 1n) throw new UserError("refusing to send transactions on Ethereum mainnet (chainId 1) without --mainnet (which also needs --max-fee-gwei)");
   if (!ALLOWED_CHAIN_IDS.has(chainId) && chainId !== extra) {
     throw new UserError(
       `chainId ${chainId} is not a known test network (allowed: ${[...ALLOWED_CHAIN_IDS].join(", ")}); ` +
@@ -235,16 +451,64 @@ async function readSecret(args) {
 }
 
 /**
+ * The mainnet fee report for one transaction and the balance check. Refuses when the sender's balance is below
+ * value + gas estimate x cap. All amounts in wei (decimal strings) plus an ETH rendering.
+ */
+async function mainnetCosts(provider, from, req, gas, capWei) {
+  const value = req.value || 0n;
+  const worst = gas * capWei;
+  const required = value + worst;
+  const balanceWei = await provider.getBalance(from);
+  const costs = {
+    maxFeeGwei: ethers.formatUnits(capWei, "gwei"),
+    worstCaseFeeWei: worst.toString(),
+    worstCaseFeeEth: ethers.formatEther(worst),
+    requiredWei: required.toString(),
+    requiredEth: ethers.formatEther(required),
+    senderBalanceWei: balanceWei.toString(),
+    senderBalanceEth: ethers.formatEther(balanceWei),
+  };
+  if (balanceWei < required) {
+    throw new UserError(
+      `refusing: the sender ${from} holds ${costs.senderBalanceEth} ETH but amount ${ethers.formatEther(value)} ETH + worst-case fee ` +
+        `${costs.worstCaseFeeEth} ETH (gas estimate ${gas} x ${costs.maxFeeGwei} gwei) = ${costs.requiredEth} ETH is needed`
+    );
+  }
+  return costs;
+}
+
+/**
  * Dry-run or send one transaction. Returns { dry: true, out } or
  * { dry: false, resp, receipt, chainId, from }. Never includes keys.
  * opts.hideData: the calldata carries the secret, so a dry run prints its length only.
+ * opts.fees: fee fields (and nonce) already chosen and checked by feePlan; else the command's own flags.
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
+  const { mainnet, capWei } = mainnetFlags(args);
   const from = await signer.getAddress();
-  const req = { ...tx, ...feeOverrides(args) };
+  const req = { ...tx, ...(opts.fees || feeOverrides(args)) }; // opts.fees: the checked / replacement fees (and nonce) of feePlan
+  // A replacement is estimated against the LATEST state, without its nonce: the pool state (the pending transaction it
+  // replaces, e.g. the very claim) would make a pending-state estimate revert (AlreadyClaimed) on some nodes.
+  const replacing = req.nonce !== undefined;
+  const estimate = async () => {
+    if (!replacing) return signer.estimateGas(req);
+    // (ethers' estimateGas sends no block tag, so ask the node directly.)
+    const rpcTx = { from, to: req.to, data: req.data || "0x" };
+    if (req.value) rpcTx.value = "0x" + BigInt(req.value).toString(16);
+    return BigInt(await provider.send("eth_estimateGas", [rpcTx, "latest"]));
+  };
+  let gas = null;
+  let costs = {};
+  if (mainnet) {
+    // Fee safety on chain 1, dry run or real: worst case = gas estimate x cap; the balance must cover value + worst case.
+    gas = await estimate();
+    costs = await mainnetCosts(provider, from, req, gas, req.maxFeePerGas === undefined ? capWei : req.maxFeePerGas);
+  }
+  if (replacing && gas === null && !args.dryRun) gas = await estimate();
+  if (replacing && gas !== null) req.gasLimit = gas;
   if (args.dryRun) {
-    const gas = await signer.estimateGas(req);
+    if (gas === null) gas = await estimate();
     const data = req.data || "0x";
     const out = {
       dryRun: true,
@@ -254,6 +518,7 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
       to: req.to === undefined ? null : req.to,
       valueWei: (req.value || 0n).toString(),
       gasEstimate: gas.toString(),
+      ...costs,
       ...extra,
     };
     if (opts.hideData) {
@@ -267,12 +532,20 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
     return { dry: true, out };
   }
   const resp = await signer.sendTransaction(req);
+  // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
+  if (typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
   const receipt = await resp.wait(confirmationsOf(args));
   if (!receipt || receipt.status !== 1) throw new UserError(`transaction ${resp.hash} failed (status ${receipt && receipt.status})`);
   return { dry: false, resp, receipt, chainId, from };
 }
 
 // ------------------------------------------------ the swap file (REVIEW-3 F3)
+function profileOf(v) {
+  if (v === undefined) return "production";
+  if (typeof v !== "string" || v === "") throw new UserError("swap file profile must be a non-empty string");
+  return v;
+}
+
 /** Parse the parts of the swap file this script needs. Read-only; `secret` is never looked at. */
 function readSwapFile(file) {
   const abs = path.resolve(String(file));
@@ -289,6 +562,8 @@ function readSwapFile(file) {
     return {
       file: abs,
       chainId: uint("swap file chain_id", eth.chain_id),
+      // As swap-cli stores it: `public.params.profile`, absent for `production` (the default is not written).
+      profile: profileOf(j.public.params.profile),
       contract: address("swap file contract", eth.contract),
       codeHash: eth.code_hash ? hex32("swap file code_hash", eth.code_hash) : null,
       amountWei: uint("swap file amount_wei", eth.amount_wei),
@@ -296,6 +571,8 @@ function readSwapFile(file) {
       bobSender: address("swap file bob_sender", eth.bob_sender),
       hashlock: hex32("swap file hashlock", j.public.hashlock),
       intent: j.pending_intent || null,
+      // REVIEW-4 R4-3: swap-cli's own predicate (`secret_may_be_public`): the file shows Alice's claim reached the network.
+      secretMayBePublic: Array.isArray(j.history) && j.history.some((h) => h && SECRET_PUBLIC_EVENTS.has(h.event)),
       ethFromBlock: j.eth_from_block === undefined || j.eth_from_block === null ? null : uint("swap file eth_from_block", j.eth_from_block),
     };
   } catch (e) {
@@ -330,6 +607,11 @@ function bindSwap(args, want) {
   if (args.swap === undefined) return { args, sw: null }; // the CLI wrapper has already warned (main)
   const sw = readSwapFile(need(args, "swap"));
   const merged = { ...args };
+  if (args.mainnet === true) {
+    // Mainnet: the file must be a mainnet production swap, whatever the flags say.
+    if (sw.chainId !== 1n) throw new UserError(`--mainnet: the swap file's chain_id is ${sw.chainId}, not 1; refusing`);
+    if (sw.profile !== "production") throw new UserError(`--mainnet: the swap file's profile is ${sw.profile}, not production; refusing`);
+  }
   merged.chainId = agree("--chain-id", args.chainId, sw.chainId.toString(), sameUint);
   merged.contract = agree("--contract", args.contract, sw.contract, sameAddr);
   // REVIEW-3 F1: the file must pin the code of this repo's artifact; a given --code-hash must agree with the file (and so with the artifact).
@@ -395,13 +677,18 @@ function targetFlags(args) {
 }
 
 /**
- * Before anything is sent (and in --dry-run): eth_chainId must equal --chain-id (and not be
- * mainnet, and be an allowed test chain), and keccak256(eth_getCode(contract)) must equal the artifact's code hash (REVIEW-3 F1).
+ * Before anything is sent (and in --dry-run): eth_chainId must equal --chain-id (and be an allowed test chain,
+ * or exactly chain 1 with --mainnet and nothing else with it), and keccak256(eth_getCode(contract)) must equal the artifact's code hash (REVIEW-3 F1).
  */
 async function verifyTarget(provider, args, contractAddr) {
   const want = targetFlags(args);
   const actual = BigInt(await provider.send("eth_chainId", []));
-  if (actual === 1n || want.chainId === 1n) throw new UserError("refusing to send transactions on Ethereum mainnet (chainId 1)");
+  if (mainnetFlags(args).mainnet) {
+    if (want.chainId !== 1n) throw new UserError(`--mainnet needs --chain-id 1 (got ${want.chainId}); mainnet and test networks are never mixed; refusing`);
+    if (actual !== 1n) throw new UserError(`--mainnet is given but the RPC endpoint reports chain ${actual}, not 1; mainnet and test networks are never mixed; refusing`);
+  } else if (actual === 1n || want.chainId === 1n) {
+    throw new UserError("refusing to send transactions on Ethereum mainnet (chainId 1) without --mainnet (which also needs --max-fee-gwei)");
+  }
   if (actual !== want.chainId) {
     throw new UserError(`chain id mismatch: --chain-id is ${want.chainId} but the RPC endpoint reports ${actual}; refusing`);
   }
@@ -500,6 +787,7 @@ async function balance(provider, _signer, args) {
 
 async function deploy(provider, signer, args) {
   requireSigner(signer);
+  mainnetFlags(args);
   const artifact = loadArtifact();
   const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode, signer);
   const tx = await factory.getDeployTransaction();
@@ -525,6 +813,8 @@ async function deploy(provider, signer, args) {
 
 async function lock(provider, signer, args0) {
   requireSigner(signer);
+  mainnetFlags(args0);
+  requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "lock_eth");
   const contractAddr = address("--contract", need(args, "contract"));
   const hashlock = hex32("--hashlock", need(args, "hashlock"));
@@ -579,9 +869,11 @@ async function lock(provider, signer, args0) {
 
   const checks = { codeHash: target.codeHash, scannedFromBlock: fromBlock, lockedEventsScanned: events.length, foreignLocksSameHashlock };
   const tx = { to: contractAddr, data: iface.encodeFunctionData("newLock", [hashlock, tReveal, receiver]), value: amount };
-  if (args.dryRun) return (await execute(provider, signer, args, tx, { expectedLockId, ...checks })).out;
+  // REVIEW-4 R4-1: the fee cap must clear the latest base fee (also in --dry-run); --replace does not exist for lock.
+  const fp = await feePlan(provider, signer, args, { name: "newLock", contractAddr, lockId: expectedLockId });
+  if (args.dryRun) return (await execute(provider, signer, args, tx, { expectedLockId, ...checks, ...fp.report }, { fees: fp.fees })).out;
 
-  const r = await execute(provider, signer, args, tx);
+  const r = await execute(provider, signer, args, tx, {}, { fees: fp.fees });
   let eventLockId = null;
   for (const log of r.receipt.logs) {
     if (log.address.toLowerCase() !== contractAddr.toLowerCase()) continue;
@@ -606,6 +898,7 @@ async function lock(provider, signer, args0) {
     sender,
     chainId: target.chainId.toString(),
     ...checks,
+    ...fp.report,
   };
 }
 
@@ -621,24 +914,45 @@ async function fetchLock(provider, contractAddr, lockId) {
 
 async function claim(provider, signer, args0) {
   requireSigner(signer);
+  mainnetFlags(args0);
+  requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "reveal_eth");
+  // REVIEW-4 R4-5: the claim is Alice's; swap-cli reads the nonces of alice_receiver (drop detection, cancel guard), so no other key.
+  if (sw) {
+    const me = await signer.getAddress();
+    if (!sameAddr(me, sw.aliceReceiver)) throw new UserError(`this key is ${me} but the swap file's alice_receiver is ${sw.aliceReceiver}; refusing`);
+  }
   const contractAddr = address("--contract", need(args, "contract"));
   const lockId = hex32("--lock-id", need(args, "lockId", "lock-id"));
   const margin = marginOf(args);
+  const marginGiven = args.marginS !== undefined;
   targetFlags(args);
   const secret = await readSecret(args);
   if (secret === null && !args.dryRun) {
     throw new UserError("claim needs the secret: pipe it to --secret-stdin or pass --secret-file PATH (it is never accepted on the command line)");
   }
   try {
-    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, secret, sw });
+    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw });
   } catch (e) {
     if (e instanceof UserError) throw new UserError(redact(e.message));
     throw new UserError(explain(e)); // ethers errors can carry the calldata, which holds the secret
   }
 }
 
-async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, secret, sw }) {
+/** claim --dry-run without the secret on mainnet: no gas estimate, so no worst case; the cap and the balance are shown. */
+async function mainnetDryRunNote(provider, signer, args) {
+  const { capWei } = mainnetFlags(args);
+  const balanceWei = await provider.getBalance(await signer.getAddress());
+  return {
+    maxFeeGwei: ethers.formatUnits(capWei, "gwei"),
+    worstCaseFeeWei: null,
+    worstCaseFeeNote: "not computed without the real secret (no gas estimate); the balance check runs on the real claim",
+    senderBalanceWei: balanceWei.toString(),
+    senderBalanceEth: ethers.formatEther(balanceWei),
+  };
+}
+
+async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw }) {
   const target = await verifyTarget(provider, args, contractAddr);
   const l = await fetchLock(provider, contractAddr, lockId);
   if (!l) throw new UserError(`no such lock ${lockId} at ${contractAddr}`);
@@ -669,11 +983,22 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   const wall = BigInt(Math.floor(Date.now() / 1000));
   const now = wall > BigInt(blk.timestamp) ? wall : BigInt(blk.timestamp);
   let cutoff = l.timelock - margin;
-  if (intentCutoff !== null && intentCutoff < cutoff) cutoff = intentCutoff;
+  let cutoffRule = "timelock - margin";
+  // REVIEW-4 R4-3: once the file shows the secret may already be public (swap-cli's late re-send, review H1), a re-send
+  // publishes nothing new and the cutoff the intent froze (T_reveal - DE) is the authority, not the stricter default margin.
+  // An explicit --margin-s still tightens it. Without that evidence the earlier of the two stays the rule.
+  const lateResend = intentCutoff !== null && sw.secretMayBePublic && !marginGiven;
+  if (lateResend) {
+    cutoff = intentCutoff < l.timelock ? intentCutoff : l.timelock;
+    cutoffRule = "the swap file's frozen cutoff (the file shows the secret may already be public)";
+  } else if (intentCutoff !== null && intentCutoff < cutoff) {
+    cutoff = intentCutoff;
+    cutoffRule = "the swap file's frozen cutoff";
+  }
   if (now > cutoff) {
     throw new UserError(
       `refusing: past the reveal cutoff. now ${now} > cutoff ${cutoff} (timelock ${l.timelock} - margin ${margin} s` +
-        `${intentCutoff !== null ? `, or the swap file's frozen cutoff ${intentCutoff}, whichever is earlier` : ""}) ` +
+        `${intentCutoff !== null ? `, or the swap file's frozen cutoff ${intentCutoff}, ${lateResend ? "which rules because the secret may already be public" : "whichever is earlier"}` : ""}) ` +
         `(a late claim publishes the secret and lets the counterparty take both legs; use --margin-s only if you know the risk)`
     );
   }
@@ -720,12 +1045,15 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     marginS: margin.toString(),
     swapFile: sw ? sw.file : null,
     revealCutoff: cutoff.toString(),
+    revealCutoffRule: cutoffRule,
     secondsToCutoff: (cutoff - now).toString(),
     lockedBlock: ev.log.blockNumber,
     finalizedBlock: finalized.number,
     codeHash: target.codeHash,
     secretProvided: secret !== null,
   };
+  // REVIEW-4 R4-1: the fee cap (or the --replace plan) is decided and checked before anything is signed, also without the secret.
+  const fp = await feePlan(provider, signer, args, { name: "claim", contractAddr, lockId });
   if (secret === null) {
     // --dry-run without the secret: all gates passed, but gas cannot be estimated without the real preimage.
     return {
@@ -737,18 +1065,27 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       valueWei: "0",
       gasEstimate: null,
       gasEstimateNote: "not estimated: the real secret is needed (a wrong preimage would revert)",
+      ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args) : {}),
       ...plan,
+      ...fp.report,
     };
   }
   const tx = { to: contractAddr, data: htlcInterface().encodeFunctionData("claim", [lockId, secret]) };
-  const r = await execute(provider, signer, args, tx, plan, { hideData: true });
+  const r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees });
   if (r.dry) return r.out;
-  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber };
+  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...fp.report };
 }
 
 async function refund(provider, signer, args0) {
   requireSigner(signer);
+  mainnetFlags(args0);
+  requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "refund_eth");
+  // REVIEW-4 R4-5: the refund is Bob's; the key must be the swap file's bob_sender (checked before the network is touched).
+  if (sw) {
+    const me = await signer.getAddress();
+    if (!sameAddr(me, sw.bobSender)) throw new UserError(`this key is ${me} but the swap file's bob_sender is ${sw.bobSender}; refusing`);
+  }
   const contractAddr = address("--contract", need(args, "contract"));
   const lockId = hex32("--lock-id", need(args, "lockId", "lock-id"));
   targetFlags(args);
@@ -768,13 +1105,15 @@ async function refund(provider, signer, args0) {
     );
   }
   const tx = { to: contractAddr, data: htlcInterface().encodeFunctionData("refund", [lockId]) };
-  const r = await execute(provider, signer, args, tx, { lockId, amountWei: l.amount.toString(), codeHash: target.codeHash });
+  const fp = await feePlan(provider, signer, args, { name: "refund", contractAddr, lockId });
+  const r = await execute(provider, signer, args, tx, { lockId, amountWei: l.amount.toString(), codeHash: target.codeHash, ...fp.report }, { fees: fp.fees });
   if (r.dry) return r.out;
-  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber };
+  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...fp.report };
 }
 
 async function send(provider, signer, args) {
   requireSigner(signer);
+  mainnetFlags(args);
   const to = address("--to", need(args, "to"));
   const amount = uint("--amount-wei", need(args, "amountWei", "amount-wei"));
   if (amount === 0n) throw new UserError("--amount-wei must be > 0");
@@ -848,7 +1187,7 @@ async function status(provider, _signer, args) {
 }
 
 // ------------------------------------------------------------------- CLI
-const COMMON = { "confirmations": "v", "dry-run": "b", "gas-price-gwei": "v", "allow-chain-id": "v" };
+const COMMON = { "confirmations": "v", "dry-run": "b", "gas-price-gwei": "v", "allow-chain-id": "v", "mainnet": "b", "max-fee-gwei": "v" };
 const TARGET = { "chain-id": "v", "code-hash": "v", "from-block": "v" };
 const SPECS = {
   keygen: { flags: { out: "v" }, signer: false },
@@ -859,10 +1198,10 @@ const SPECS = {
     signer: true,
   },
   claim: {
-    flags: { ...COMMON, ...TARGET, "key-file": "v", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v" },
+    flags: { ...COMMON, ...TARGET, "key-file": "v", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v", replace: "b", "replace-tx": "v" },
     signer: true,
   },
-  refund: { flags: { ...COMMON, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v" }, signer: true },
+  refund: { flags: { ...COMMON, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
   send: { flags: { ...COMMON, "key-file": "v", to: "v", "amount-wei": "v" }, signer: true },
   status: { flags: { contract: "v", "lock-id": "v", "from-block": "v" }, signer: false },
 };
@@ -908,10 +1247,22 @@ const jsonOut = (obj) => JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ?
 
 async function main(argv) {
   const { command, args } = parseArgs(argv);
-  if (["lock", "claim", "refund"].includes(command) && args.swap === undefined) process.stderr.write(NO_SWAP_WARNING);
+  if (args.mainnet === true) process.stderr.write(MAINNET_WARNING);
+  // Under --mainnet a missing --swap is a refusal (requireSwapOnMainnet), not a warning.
+  if (["lock", "claim", "refund"].includes(command) && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_WARNING);
   const provider = command === "keygen" ? null : new ethers.JsonRpcProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545", undefined, { cacheTimeout: -1 });
   try {
     const signer = SPECS[command].signer ? loadSigner(provider, args.keyFile) : null;
+    if (signer) {
+      // Shown as soon as the transaction is sent, before the wait for the receipt: a stuck one needs its hash for --replace-tx.
+      args.onSent = (s) =>
+        process.stderr.write(
+          `sent: ${s.hash} nonce ${s.nonce} maxFeePerGas ${s.maxFeePerGas === null || s.maxFeePerGas === undefined ? "?" : ethers.formatUnits(s.maxFeePerGas, "gwei")} gwei ` +
+            (command === "claim" || command === "refund"
+              ? `(waiting for the receipt; if it stays pending: ${command} --replace --replace-tx ${s.hash} with a higher --max-fee-gwei)\n`
+              : "(waiting for the receipt)\n")
+        );
+    }
     const result = await COMMANDS[command](provider, signer, args);
     process.stdout.write(redact(jsonOut(result)) + "\n");
   } finally {
@@ -921,7 +1272,7 @@ async function main(argv) {
 
 module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
-  loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS,
+  loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
 };
 

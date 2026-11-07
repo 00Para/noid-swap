@@ -15,12 +15,27 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *         The sender must approve this contract for `amount` of `token`
  *         before calling newLock.
  *
- *         Fee-on-transfer / rebasing tokens are rejected: newLock reverts
- *         unless the contract's balance grows by exactly `amount`.
+ *         TOKEN TRUST. Only the INBOUND transfer is checked: newLock reverts
+ *         (UnsupportedToken) unless the contract's balance grows by exactly
+ *         `amount`, which rejects fee-on-transfer tokens (a fee that rounds
+ *         to zero on a tiny amount is accepted, correctly: the full amount
+ *         arrived). The OUTBOUND transfers in claim() and refund() are not
+ *         measured, and balances are not tracked, so a token that charges a
+ *         fee on payouts, returns true without moving anything, or shrinks
+ *         the contract's balance after locking (rebase, confiscation) leaves
+ *         the receiver short or later locks of that token under-backed (their
+ *         claim and refund then revert). Use plain ERC-20s only: no fee
+ *         switch, no rebasing, no confiscation.
  *
- *         Hazard: if the token blocks transfers to `receiver` (e.g. a
- *         blacklist), claim() reverts and funds stay locked until the sender
- *         refunds after the timelock.
+ *         Hazards (both are delays, not losses, while the token behaves):
+ *           - if the token blocks transfers to `receiver` (blacklist, pause),
+ *             claim() reverts and the funds wait for the sender's refund after
+ *             the timelock;
+ *           - if the token blocks transfers to `sender`, refund() reverts and
+ *             only a claim before the timelock can move the funds; if both
+ *             are blocked the funds wait until one of them is unblocked.
+ *         A receiver equal to this contract is refused (InvalidReceiver):
+ *         the payout would be a self-transfer that strands the tokens.
  */
 contract HTLCERC20 {
     using SafeERC20 for IERC20;
@@ -53,6 +68,7 @@ contract HTLCERC20 {
 
     error ZeroAmount();
     error ZeroReceiver();
+    error InvalidReceiver();
     error ZeroToken();
     error TimelockNotInFuture();
     error LockAlreadyExists();
@@ -95,6 +111,7 @@ contract HTLCERC20 {
     ) external nonReentrant returns (bytes32 lockId) {
         if (amount == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroReceiver();
+        if (receiver == address(this)) revert InvalidReceiver();
         if (address(token) == address(0)) revert ZeroToken();
         if (timelock <= block.timestamp) revert TimelockNotInFuture();
 

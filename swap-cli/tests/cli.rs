@@ -26,15 +26,15 @@ fn run(cmd: &mut Command) -> (bool, String, String) {
 
 #[test]
 fn gates_reproduce_the_section_4_3_example() {
-    let (ok, out, _) = run(bin().args(["gates", "--d", "300725", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
+    let (ok, out, _) = run(bin().args(["gates", "--d", "300735", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["lock_by_full_window"], 300_106);
     assert_eq!(v["lock_by_min_window"], 300_196);
-    assert_eq!(v["rhs_i1_full_window"], 619);
+    assert_eq!(v["rhs_i1_full_window"], 629);
     assert_eq!(v["t_reveal"], "1794319200");
     assert_eq!(v["reveal_cutoff"], 1_794_317_400);
-    assert_eq!(v["claim_target_height"], 300_707);
+    assert_eq!(v["claim_target_height"], 300_717);
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn alice_and_bob_files_through_the_binary() {
     let (ok, bundle, err) = run(bin().args(["new-alice", "--out", a.to_str().unwrap()]).args(common).env("SWAP_PASSPHRASE", "correct horse battery staple"));
     assert!(ok, "{err}");
     let public: swap_cli::swapfile::SwapPublic = serde_json::from_str(&bundle).unwrap();
-    assert_eq!(public.params.deadline_height, 300_725);
+    assert_eq!(public.params.deadline_height, 300_735);
     let file = SwapFile::load(&a).unwrap();
     assert!(file.secret.is_some());
     assert_eq!(file.decrypt_secret(&swap_cli::swapfile::Passphrase::new("correct horse battery staple")).unwrap().hashlock(), public.hashlock);

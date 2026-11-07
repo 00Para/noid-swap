@@ -764,6 +764,11 @@ pub struct SwapFile {
     /// REVIEW-2 F3: the spending action `tick --apply` decided on and printed, until the chain shows it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_intent: Option<PendingIntent>,
+    /// REVIEW-4 R4-2: every intent `intent --cancel` dropped, with its frozen parameters (oldest first). A cancel rests on one
+    /// node's view of the mempool, so the dropped send may still land: a later `lock_eth` re-uses the cancelled lock's `T_reveal`
+    /// (the same lock id, so a duplicate reverts on chain) instead of choosing a fresh one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancelled_intents: Vec<PendingIntent>,
     /// REVIEW-3 F7: the first block `eth_getLogs` searches (the HTLC deployment block, or any block before this swap
     /// started). Given once with `--eth-from-block`, stored by `tick --apply` / `claim --submit`, then used without the flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -805,6 +810,7 @@ impl SwapFile {
             phase: Phase::Alice(crate::state::AlicePhase::Created),
             pending_action: None,
             pending_intent: None,
+            cancelled_intents: Vec::new(),
             eth_from_block: None,
             history: Vec::new(),
             secret: Some(sealed),
@@ -832,6 +838,7 @@ impl SwapFile {
             phase: Phase::Bob(crate::state::BobPhase::Received),
             pending_action: None,
             pending_intent: None,
+            cancelled_intents: Vec::new(),
             eth_from_block: None,
             history: Vec::new(),
             secret: None,
@@ -1181,7 +1188,7 @@ mod tests {
     fn build_and_check_public_section() {
         let s = fresh();
         let p = example_public(&s, Variant::Raw);
-        assert_eq!(p.params.deadline_height, 300_725);
+        assert_eq!(p.params.deadline_height, 300_735);
         assert_eq!(p.params.lock_by_height, 300_106);
         assert_eq!(p.params.max_fee_micronoid, 50_000);
         assert_eq!(p.opening_hex.len(), 2 * noid_tx::experimental_object::OPENING_BYTES);

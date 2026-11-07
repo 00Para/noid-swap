@@ -54,7 +54,7 @@ fn production_files_do_not_mention_the_profile_and_rehearsal_files_do() {
     assert_eq!(back.digest(), prod.digest());
     assert_ne!(prod.digest(), reh.digest());
     // The two share nothing but the secret: different deadline, lock-by, chain.
-    assert_eq!(prod.params.deadline_height, 300_725);
+    assert_eq!(prod.params.deadline_height, 300_735);
     assert_eq!(reh.params.deadline_height, 300_120);
     assert_eq!(reh.params.lock_by_height, 300_052);
     assert_eq!(reh.params.eth.chain_id, 31_337);
@@ -65,11 +65,11 @@ fn a_bundle_cannot_be_moved_between_profiles() {
     let secret = Secret::generate().unwrap();
     let reh = example_public_with(&secret, Variant::Raw, ProfileName::Rehearsal);
     reh.check().unwrap();
-    // Relabel it production: D is no longer h_create + 725.
+    // Relabel it production: D is no longer h_create + 735.
     let mut as_prod = reh.clone();
     as_prod.params.profile = ProfileName::Production;
     let e = as_prod.check().unwrap_err().to_string();
-    assert!(e.contains("725"), "{e}");
+    assert!(e.contains("735"), "{e}");
     // Strip the profile field from the JSON (what an old tool would produce): the same result.
     let mut v: serde_json::Value = serde_json::to_value(&reh).unwrap();
     v["params"].as_object_mut().unwrap().remove("profile").unwrap();
@@ -259,11 +259,11 @@ fn gates_prints_the_rehearsal_numbers() {
     assert_eq!(v["reveal_cutoff"], 1_794_312_300u64);
     assert_eq!(v["claim_target_height"], 300_102);
     // The default is unchanged (no profile key for production).
-    let (ok, out, _) = run(&s(&["gates", "--d", "300725", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
+    let (ok, out, _) = run(&s(&["gates", "--d", "300735", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("profile").is_none());
-    assert_eq!(v["rhs_i1_full_window"], 619);
+    assert_eq!(v["rhs_i1_full_window"], 629);
     let (ok, _, err) = run(&s(&["gates", "--profile", "nope", "--d", "1", "--h-now", "1", "--t-now", "1"]));
     assert!(!ok && err.contains("unknown profile"), "{err}");
 }

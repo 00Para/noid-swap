@@ -215,7 +215,7 @@ fn fixture_openings_are_what_the_code_builds() {
     let obj = &st.result.as_ref().unwrap()["object"];
     assert_eq!(obj["opening_hex"], json!(open));
     assert_eq!(obj["claim_authority"], json!(CLAIM_AUTHORITY));
-    assert_eq!(obj["deadline_height"], json!(300_725));
+    assert_eq!(obj["deadline_height"], json!(300_735));
     // The "other contract" entry in pending_claim carries the other real opening.
     let pc = load("pending_claim");
     let others: Vec<_> = pc
@@ -1052,8 +1052,11 @@ fn real_replies_recorded_from_the_node_have_the_declared_shapes_and_error_codes(
     keys_declared("getObjectStatus.object", &st["object"], &v.fields("ObjectInfo"));
     assert_eq!((st["matches_opening"].as_bool(), st["slot"]["empty"].as_bool()), (Some(false), Some(true)));
     assert_eq!(st["active_authority"], json!(CLAIM_AUTHORITY));
-    assert_eq!(st["object"]["opening_hex"], json!(opening_of(0x33).0));
-    assert_eq!(st["object"]["address"], json!(opening_of(0x33).1));
+    // The recording was made against the seed-0x33 example opening of its day (deadline 300,725; the example's D has since moved with
+    // B_safety 30 to 300,735, which no real node was asked about): the reply must echo the opening it was asked, whatever that was.
+    let asked = first("paranoid_getObjectStatus").params.as_ref().unwrap()[0].clone();
+    assert_eq!(st["object"]["opening_hex"], asked);
+    assert!(st["object"]["address"].as_str().unwrap().starts_with("o1"));
     // An unknown txid is JSON null from both lookups (read by the watcher as "not confirmed / not pending").
     assert_eq!(result("paranoid_getTx"), Value::Null);
     assert_eq!(result("paranoid_getMempoolEntry"), Value::Null);

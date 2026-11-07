@@ -18,13 +18,15 @@ typing anything. Every command that spends is a go-ahead you give yourself.
 - **The receipt (a proof file).** Before Bob locks anything, Alice gives him a proof that the same `s` is behind
   `H` (Ethereum side) and `A = Addr(s)` (Parano1d side). Without it Alice could lock NOID under a different secret
   and Bob's ETH would be stuck. Alice proves; Bob only verifies.
-- **Two timeouts.** Parano1d `D` (a block height, `h_create + 725` blocks, about 6 h): from `D` on, Alice can take
+- **Two timeouts.** Parano1d `D` (a block height, `h_create + 735` blocks, about 6 h): from `D` on, Alice can take
   her NOID back. Ethereum `T_reveal` (a time, Bob's lock time + 7,200 s): from `T_reveal` on, Bob can take his ETH
   back. Alice must reveal at least 1,800 s before `T_reveal`, or Bob could refund the ETH and still claim the
-  NOID. Bob must lock by Parano1d height `D - 619` and have his NOID claim final before `D` (target `D - 18`, hard
+  NOID. Bob must lock by Parano1d height `D - 629` and have his NOID claim final before `D` (target `D - 18`, hard
   limit `D - 1`). Miss your window and the other side keeps your money.
 - **Real money.** Parano1d has no test network: every NOID amount is mainnet. The ETH side runs on Sepolia or a
-  Hardhat chain (`live.js` refuses Ethereum mainnet). Use amounts you can lose until the external review (M4).
+  Hardhat chain by default; `live.js` refuses Ethereum mainnet unless the command carries `--mainnet` together with
+  `--max-fee-gwei N`, and under `--mainnet` `lock`, `claim` and `refund` also need `--swap FILE` (a chain-1 `production`
+  swap file). See `eth/README.md` ("Mainnet") and `docs/live-run-4.md`. Use amounts you can lose until the external review (M4).
 
 The five hard rules (`PROJECT.md`):
 1. Never fund `parano1d/contracts/htlc.params.example.json`: its secret is the public test vector `00 01 ... 1f`.
@@ -231,7 +233,7 @@ $BIN intent bob.swap.json --cancel --transport curl --noid-rpc http://127.0.0.1:
 ## 5. When it goes wrong (abort paths)
 
 - **Bob never locks.** Alice does nothing until `D`; at tip + 1 >= `D` her engine says `refund_noid`. Bob's engine
-  stops offering `lock_eth` once the lock-by limit (`D - 619`, hard `D - 529`) has passed. Alice keeps `s` secret.
+  stops offering `lock_eth` once the lock-by limit (`D - 629`, hard `D - 539`) has passed. Alice keeps `s` secret.
 - **Alice never reveals (run 2).** At `T_reveal - 1800 s` Alice's engine switches to `wait` with the reason `reveal
   cutoff passed; keeping the secret and waiting for D` and will not reveal even if asked. At `T_reveal` Bob's engine
   goes from `locked` to `refund_eth` (run 2: about 80 s later, mostly the poll interval):
@@ -267,8 +269,8 @@ the profile's reveal cutoff, so no extra flag is needed.
 
 | item | production | rehearsal | sepolia |
 |---|---|---|---|
-| `D - h_create` | 725 blocks (about 6 h) | 120 blocks (1 h at 30 s) | 300 blocks (2 h 30 at 30 s) |
-| Bob's lock-by (hard limit) | `D - 619` (`D - 529`) | `D - 68` (`D - 62`) | `D - 251` (`D - 209`) |
+| `D - h_create` | 735 blocks (about 6 h) | 120 blocks (1 h at 30 s) | 300 blocks (2 h 30 at 30 s) |
+| Bob's lock-by (hard limit) | `D - 629` (`D - 539`) | `D - 68` (`D - 62`) | `D - 251` (`D - 209`) |
 | `W_A` / reveal cutoff before `T_reveal` | 7,200 s / 1,800 s | 600 s / 300 s | 4,200 s / 1,800 s |
 | Bob's claim target / hard limit | `D - 18` / `D - 1` | same | same |
 | finality, close fee | 18 blocks, 5,800 uNOID | same | same |

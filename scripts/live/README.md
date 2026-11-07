@@ -19,7 +19,7 @@ which only observes and records (`tick --apply` writes events and intents into t
 | `tick.sh ROLE [--apply]` | either | one tick; read-only without `--apply` (then a spend's parameters are withheld, REVIEW-3 F3); records every node answer | no |
 | `watch.sh [alice\|bob\|both] [s]` | either | `tick --apply` loop, one summary line per tick in `$L/loop-ROLE.txt`; stops when every watched file is terminal | no |
 | `lock.sh [--dry-run]` | Bob | `live.js lock --swap bob.swap.json`: the lock Bob's file recorded as `lock_eth` | **yes** without `--dry-run` |
-| `reveal.sh [--dry-run]` | Alice | `swap-cli secret \| live.js claim --swap alice.swap.json --secret-stdin`: the reveal | **yes** without `--dry-run` |
+| `reveal.sh [--dry-run] [--replace [TXHASH]]` | Alice | `swap-cli secret \| live.js claim --swap alice.swap.json --secret-stdin`: the reveal; `--replace` re-sends a stuck claim (see below) | **yes** without `--dry-run` |
 | `claim.sh [--submit]` | Bob | `swap-cli claim`: proves and prints the close; `--submit` sends it to the node | **yes** with `--submit` |
 | `refund-eth.sh [--dry-run]` | Bob | `live.js refund --swap bob.swap.json` after `T_reveal` (abort path) | **yes** without `--dry-run` |
 
@@ -47,9 +47,33 @@ the Sepolia contract link, the bundle and the object file.
 ## Two nodes (REVIEW-3 F5)
 
 Under `sepolia` and `production`, Bob's lock and Alice's reveal wait for a second, distinct node per chain unless
-`--single-node-ok`. The helpers pass `--single-node-ok` while `NOID_RPC2` / `ETH_RPC2` are empty and print a warning;
-for a run with a stranger set both in `$L/env.local.sh` (another Parano1d node on another host or port; another
-Sepolia RPC provider). The same endpoint twice is refused by `swap-cli`.
+`--single-node-ok`. The helpers pass `--single-node-ok` while `NOID_RPC2` / `ETH_RPC2` are empty, and print a warning
+on EVERY call of `tick.sh` / `claim.sh` (so on every poll of `watch.sh`), not once in `setup.sh` (REVIEW-4 R4-8). That is for a
+run in which one person controls both roles or trusts the counterparty. **A run with a stranger needs BOTH second nodes**: set
+`NOID_RPC2` and `ETH_RPC2` in `$L/env.local.sh` (another Parano1d node on another host or port; another Sepolia RPC provider).
+If either is empty the flag waives the second-node rule for BOTH chains. The same endpoint twice is refused by `swap-cli`.
+
+With two Ethereum nodes Bob's tool also reads the secret from either of them, and while Bob waits for it every tick compares the
+Ethereum head time with the clock (limit 600 s): a lagging node shows up as an `ALARM` in the action reason. Switch `ETH_RPC` to a
+healthy node when you see it.
+
+## The reveal: fee cap, a stuck claim, a late re-send (REVIEW-4 R4-1, R4-3, R4-5)
+
+- **Fee cap.** `live.js claim` reads the latest base fee before it signs (also in `--dry-run`) and refuses a cap below 2 x that
+  base fee; the dry run prints `feeCheck` (base fee, cap, ratio). On mainnet put `MAX_FEE_GWEI=N` in `$L/env.local.sh`:
+  `reveal.sh` then adds `--mainnet --max-fee-gwei N` (without it a chain-1 file is refused; on a test chain `GAS_PRICE_GWEI` does
+  the same for `--gas-price-gwei`). Look at the base fee in the minute before the reveal and use at least 3 x.
+- **Stuck claim.** A claim that sits in the mempool has already published the secret, and only Bob can use it. `live.js` prints
+  `sent: 0x… nonce N …` on stderr (in `$L/eth-claim.err`) the moment it sends, before it waits for the receipt. If the claim does
+  not get mined, run `reveal.sh --replace 0xHASH` (or `--replace` alone; then the node's pending block is searched) with a higher
+  `MAX_FEE_GWEI`: the same call is re-sent at the SAME nonce, both fee fields at least 12.5 % up and the cap at least 2 x the
+  base fee. It refuses when nothing is pending, when the pending transaction is not this claim, or when the lock is claimed
+  already; it never uses a second nonce. `reveal.sh --dry-run --replace 0xHASH` shows the plan first.
+- **Late re-send.** No margin flag is needed or passed. When the swap file's history shows the secret may already be public (a
+  mined, reorged or dropped claim), `live.js claim --swap` takes the cutoff the intent froze (`T_reveal - DE`) and not the
+  stricter `T_reveal - 1800 s`, so `swap-cli`'s late re-send can actually be sent. Without that evidence the earlier cutoff rules.
+- **Keys.** With `--swap`, `claim` needs the key of the file's `alice_receiver` (`keys/alice.key`), `refund` and `lock` that of
+  `bob_sender` (`keys/bob.key`); another key is refused.
 
 ## What changed since run 3's helpers
 

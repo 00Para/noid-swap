@@ -8,6 +8,7 @@ Hardhat project containing the Ethereum half of a cross-chain atomic swap.
 | `contracts/HTLCERC20.sol` | Same, for ERC20 (OpenZeppelin `SafeERC20`) |
 | `contracts/test/*.sol` | Test-only mocks (ETH-rejecting receiver, re-entrancy attacker, mock/fee tokens). Never deploy these. |
 | `test/HTLC.test.js` | Test suite (Hardhat + ethers v6 + chai) |
+| `test/fuzz.test.js`, `contracts/test/Fuzz*.sol`, `FUZZ.md` | Seeded fuzz and invariant campaign for both contracts, with the findings; see "Fuzz campaign" below |
 | `scripts/secret.js` | Generates a 32-byte secret and its SHA-256 hashlock |
 | `scripts/live.js`, `scripts/rpc-proxy.js`, `test/live.test.js` | Live-run CLI for Sepolia and a loopback RPC forwarder; see "Live runs (Sepolia)" below |
 
@@ -17,6 +18,12 @@ Hardhat project containing the Ethereum half of a cross-chain atomic swap.
 npm install
 npx hardhat test
 ```
+
+Fuzz campaign (`test/fuzz.test.js`, report in `FUZZ.md`): the default `npx hardhat test` runs a
+quick 200 ETH + 200 ERC-20 random sequences (about a minute); the full campaign is
+`FUZZ_N=2000 npx hardhat test test/fuzz.test.js` (about 6 to 10 minutes; on a machine with little free
+memory run slices in separate processes with `FUZZ_START`). The seed is printed and any failing sequence
+can be replayed with `FUZZ_SEED`, `FUZZ_ONLY`, `FUZZ_KIND` (see `FUZZ.md`).
 
 Solidity 0.8.24. Hardhat normally downloads the native `solc` from
 `binaries.soliditylang.org`. If that download fails (offline or firewalled),
@@ -65,7 +72,7 @@ event Refunded(bytes32 indexed lockId);
 
 `HTLCERC20.newLock` additionally takes `(IERC20 token, uint256 amount)`, the
 sender must `approve` the contract first, and `Locked` also carries `token`.
-Fee-on-transfer tokens are rejected.
+Fee-on-transfer tokens are rejected at `newLock` (only the inbound transfer is checked; see "Token trust" under Hazards). A receiver equal to the contract itself is refused (`InvalidReceiver`).
 
 `lockId = keccak256(abi.encodePacked(sender, receiver, amount, hashlock, timelock))`
 (ERC20 variant also packs `token` after `receiver`). It is deterministic, so
@@ -101,6 +108,26 @@ Errors are custom errors (`InvalidPreimage`, `TimelockExpired`,
   `claim` can never succeed and the funds stay locked until the sender calls
   `refund` after the timelock. Use an EOA, or a contract known to accept ETH.
   Covered by a test.
+* **A sender that cannot accept ETH has no refund path** (fuzz finding F-ETH-1).
+  `refund` pays `sender` the same way, so a sender contract whose `receive`
+  reverts (or burns gas) can never refund; after the timelock `claim` is closed
+  too, and the funds are locked for good (before it, only a claim with the
+  preimage can move them). Use an EOA as sender as well. `swap-cli` already
+  requires both addresses to have no code.
+* **A reverted `claim` still publishes the preimage** (fuzz finding F-ETH-2).
+  If the receiver rejects ETH, `claim` reverts and leaves no `Claimed` event, but
+  the transaction (and its mempool entry) carries the preimage in its calldata.
+  The counterparty can read it there and take the other leg of the swap while
+  the ETH waits for the refund, so a receiver that cannot accept ETH risks its
+  principal, not only a delay. A watcher that follows events only will not see
+  it. Another reason for EOA-only receivers.
+* **Token trust (`HTLCERC20`).** Only the inbound transfer is measured. A token
+  that charges a fee on payouts, returns true without moving tokens, or shrinks
+  the contract's balance after locking (rebase, confiscation) leaves the receiver
+  short or later locks of that token under-backed (their claim and refund
+  revert). A token that blocks transfers to the receiver stops `claim`; one that
+  blocks transfers to the sender stops `refund`; both blocked: stuck until one is
+  unblocked. Use plain ERC-20s only. Details and reproducing tests: `FUZZ.md`.
 * **The preimage becomes public.** `claim` takes the preimage in calldata and
   writes it to the lock and to the `Claimed` event. Anyone can read it,
   including from the mempool before inclusion. That is how the counterparty
@@ -143,10 +170,11 @@ using it.
 
 ## Live runs (Sepolia)
 
-Tooling for one real swap on a public testnet. **Testnet only**: `scripts/live.js`
-refuses to send on Ethereum mainnet (chainId 1) and on any chain other than
-Sepolia (11155111), Holesky (17000) and local Hardhat (31337 / 1337) unless you
-pass `--allow-chain-id N`. Use test ETH only.
+Tooling for one real swap on a public testnet. **Testnet by default**: `scripts/live.js`
+refuses to send on Ethereum mainnet (chainId 1) unless the command carries `--mainnet`
+(see "Mainnet" below), and on any chain other than Sepolia (11155111), Holesky (17000)
+and local Hardhat (31337 / 1337) unless you pass `--allow-chain-id N`. Use test ETH only
+until the first mainnet swap is planned.
 
 | File | Purpose |
 |------|---------|
@@ -175,10 +203,38 @@ typed by hand or repeated.
 
 | Command | Required flags | Refuses unless |
 |---------|----------------|----------------|
-| `lock`, `claim`, `refund` | `--chain-id N` (mandatory); `--code-hash 0x…` (optional) | `eth_chainId` equals `--chain-id`, the chain is not mainnet (chainId 1 is always refused) and is an allowed test chain, and `keccak256(eth_getCode(CONTRACT))` equals `keccak256(deployedBytecode)` of this repo's compiled artifact (REVIEW-3 F1; run `npx hardhat compile` first). `--code-hash` defaults to that value and, when given, must equal it. With `--swap FILE` the file's `code_hash` must equal it too. A contract address with no code is refused too. |
+| `lock`, `claim`, `refund` | `--chain-id N` (mandatory); `--code-hash 0x…` (optional) | `eth_chainId` equals `--chain-id`, the chain is an allowed test chain (chainId 1 is refused unless `--mainnet` is given, see "Mainnet"), and `keccak256(eth_getCode(CONTRACT))` equals `keccak256(deployedBytecode)` of this repo's compiled artifact (REVIEW-3 F1; run `npx hardhat compile` first). `--code-hash` defaults to that value and, when given, must equal it. With `--swap FILE` the file's `code_hash` must equal it too. A contract address with no code is refused too. |
 | `lock` | | no `Locked` event with the same hashlock from your own sender address (the key file's) exists in the contract's logs, and the exact lockId is unused. There is no override flag: a second lock of yours under one hashlock means you pay twice. A lock by another sender under the same hashlock does not block you (a third party who knows the public hashlock could otherwise grief the swap); it is listed in the JSON as `foreignLocksSameHashlock: [{sender, lockId, blockNumber}]` and noted on stderr, because whoever reveals the secret can claim those too. |
-| `claim` | `--secret-stdin` or `--secret-file PATH` (not needed for `--dry-run`) | `now <= timelock - --margin-s` (default 1800 s = `M_A`, design §4.3; `now` is the later of your clock and the latest block's timestamp), the lock exists, is unclaimed and unrefunded, `sha256(secret)` equals its hashlock, and the `Locked` event's block is at or below the node's `finalized` block (a node that does not answer the `finalized` tag is refused; on a local Hardhat node it equals `latest`). `--confirmations` still decides how long to wait after sending. |
-| `refund` | | the lock exists, this key is its sender, it is unclaimed and unrefunded, and the latest block's timestamp is at or past the timelock. |
+| `claim` | `--secret-stdin` or `--secret-file PATH` (not needed for `--dry-run`) | `now <= timelock - --margin-s` (default 1800 s = `M_A`, design §4.3; `now` is the later of your clock and the latest block's timestamp), the lock exists, is unclaimed and unrefunded, `sha256(secret)` equals its hashlock, and the `Locked` event's block is at or below the node's `finalized` block (a node that does not answer the `finalized` tag is refused; on a local Hardhat node it equals `latest`). `--confirmations` still decides how long to wait after sending. With `--swap FILE` the key must be the file's `alice_receiver` (REVIEW-4 R4-5). |
+| `refund` | | the lock exists, this key is its sender (with `--swap FILE`: the file's `bob_sender`, checked first, R4-5), it is unclaimed and unrefunded, and the latest block's timestamp is at or past the timelock. |
+| `lock`, `claim`, `refund` | | the fee cap is not outrun by the base fee (REVIEW-4 R4-1, next section). |
+
+#### Fee cap, stuck transactions, `--replace` (REVIEW-4 R4-1)
+
+Whenever a fee cap is chosen (`--max-fee-gwei` under `--mainnet`, `--gas-price-gwei` on a test chain), the latest block's
+base fee is read before signing, **also under `--dry-run`**. A `claim` is refused when `cap < 2 x base fee` (it publishes the
+secret, so it must not get stuck when the base fee climbs 12.5 % a block); `lock` and `refund` are refused when `cap < base fee`.
+The output carries `feeCheck`: `baseFeeGwei`, `maxFeeGwei`, `ratio` (cap / base fee) and `minRatio`. With no cap chosen (test
+chain, no flag) the node prices the transaction itself and nothing is checked.
+
+`claim --replace` and `refund --replace` re-send the same call when the first one is stuck. They use the signer's **oldest pending
+nonce** (never a second nonce), raise `maxFeePerGas` and the tip by at least 12.5 % over the old transaction and the cap to at
+least 2 x the latest base fee, and estimate gas against the `latest` state (a pool-aware estimate would see the stuck claim and
+revert). On mainnet `--max-fee-gwei` is the new cap and must clear that minimum; on a test chain without a cap the fees are
+chosen. Refused: nothing pending for the signer, a pending transaction that is not this very `claim` / `refund` of this lock (it
+would cancel something else), `--replace-tx` naming a mined or foreign transaction, a lock already claimed or refunded.
+The old transaction is found with `--replace-tx HASH` (the hash the command line prints on stderr as `sent: 0x… nonce N …`
+right after sending, before it waits for the receipt) or, if omitted, in the node's pending block; if the node cannot show it the
+plan says `oldFeeKnown: false` and the node itself rejects an underpriced replacement. `--dry-run` shows the plan
+(`replace: { nonce, replacesTx, old/new fee and tip }`) and sends nothing. `--replace` does not exist for `lock`.
+
+#### Late re-send (REVIEW-4 R4-3)
+
+With `--swap FILE`, the reveal cutoff is the earlier of `timelock - --margin-s` and the cutoff the `reveal_eth` intent froze. One
+exception: when the file's `history` shows the secret may already be public (`reveal_submitted`, `eth_claim_mined`,
+`eth_claim_reorged` or `eth_reveal_dropped`, the same events as `swap-cli`'s `secret_may_be_public`), a re-send publishes nothing
+new, and the intent's own cutoff (`T_reveal - DE`, which `swap-cli` froze for exactly that case) rules even when it is later than
+`timelock - 1800 s`. An explicit `--margin-s` still tightens it. The plan prints `revealCutoffRule`.
 
 `--chain-id` comes from your own records, not from the counterparty: the chain id of the network you mean
 to use. The code hash is not typed at all (REVIEW-3 F1): it is the hash of this repo's compiled artifact, so a
@@ -198,6 +254,36 @@ never printed: not in the JSON, not in errors, not in the dry-run calldata (only
 error text that happens to contain it is scrubbed. `--dry-run` works without it and prints the plan; it
 then shows `"gasEstimate": null` (gas cannot be estimated without the real preimage, since a wrong one
 reverts). Pipe the secret in for a dry run only if you want the gas figure.
+
+### Mainnet
+
+Ethereum mainnet (chainId 1) is refused by default, as before. Two flags open it, on the five signing
+commands only (`deploy`, `send`, `lock`, `claim`, `refund`); `balance`, `status` and `keygen` do not take them.
+
+| Flag | Rule |
+|------|------|
+| `--mainnet` | Chain 1 is accepted, and **only** chain 1: a node on any other chain is refused (no mixing), `--chain-id` must be `1` (lock, claim, refund), and `--allow-chain-id` is refused. The command line prints one warning line on stderr. |
+| `--max-fee-gwei N` | **Required with `--mainnet`, refused without it.** `N` is the `maxFeePerGas` of the transaction (decimal gwei, up to 9 decimals; the tip is at most 1 gwei and never above `N`). `--gas-price-gwei` is refused with `--mainnet`: the cap is the only fee setting. |
+
+`--dry-run` prints, besides the usual plan, `maxFeeGwei`, the worst-case cost (`worstCaseFeeWei` / `worstCaseFeeEth` =
+gas estimate x cap), `requiredWei` / `requiredEth` (value + worst case) and the sender's balance
+(`senderBalanceWei` / `senderBalanceEth`). The command refuses, dry run and real send alike, when the balance is
+below value + worst case. (`claim --dry-run` without the secret has no gas estimate: it shows the cap and the balance, and
+`worstCaseFeeWei: null`; pipe the real secret in for the figure.)
+
+**Under `--mainnet`, `lock`, `claim` and `refund` require `--swap FILE`** (the `swap-cli` swap file): without it they refuse, also
+with `--dry-run`, and there is no warn-and-continue path. The swap file must say `chain_id` 1 and the `production` profile (a file with no
+`profile` field is production; `sepolia`, `rehearsal` or any other value is refused). A file with `chain_id` 1 is also
+refused when `--mainnet` is not given, so a swap file never unlocks mainnet by itself.
+
+**The first mainnet swap uses 0.001 ETH** (`--amount-wei 1000000000000000`), against 10 NOID, and nothing larger until it has settled
+and been looked at. The plan is in `docs/live-run-4.md`. The production profile of `swap-cli` has no amount cap of its
+own, so this limit is a rule of the operator, not a gate.
+
+```sh
+# dry run first, always; the cap is an upper bound, not a price (the network charges base fee + tip)
+node scripts/live.js lock --mainnet --max-fee-gwei 20 --swap ../path/bob.swap.json --chain-id 1 --dry-run
+```
 
 ### Roles on the ETH side
 

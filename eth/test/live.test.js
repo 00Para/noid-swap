@@ -963,7 +963,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
   const nonce = (a) => provider.getTransactionCount(a);
 
   /** A swap file with only the parts live.js reads (plus a `secret` it must never touch). Returns its path. */
-  function swapFile({ intent = null, eth = {}, hash, ethFromBlock } = {}) {
+  function swapFile({ intent = null, eth = {}, hash, ethFromBlock, profile } = {}) {
     const j = {
       version: 1,
       role: "bob",
@@ -971,6 +971,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         hashlock: hash || hashlock,
         claim_authority: "o1test",
         params: {
+          ...(profile !== undefined ? { profile } : {}), // as swap-cli stores it: absent for production
           eth: {
             chain_id: 31337,
             contract: htlcAddr.toLowerCase(),
@@ -1185,9 +1186,9 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       const l = await makeLock();
       const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
       const before = await bal(aliceAddr);
-      const r = await live.claim(provider, carol, { swap, secret: preimage });
+      const r = await live.claim(provider, alice, { swap, secret: preimage });
       expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
-      expect(await bal(aliceAddr)).to.equal(before + amount);
+      expect(await bal(aliceAddr)).to.be.gt(before + amount - ethers.parseEther("0.01"));
       expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
     });
   });
@@ -1220,6 +1221,125 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       await expect(live.refund(provider, bob, { swap: swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) }) })).to.be.rejectedWith(/pending intent is reveal_eth, but this command carries out refund_eth/);
       await expect(live.refund(provider, bob, { swap: swapFile({}) })).to.be.rejectedWith(/no pending intent; expected refund_eth/);
       expect(await nonce(bobAddr)).to.equal(n);
+    });
+  });
+
+  // ------------------------------------------------------------------ --mainnet with --swap
+  describe("mainnet: the file must be a chain-1 production swap", () => {
+    const FEE = { mainnet: true, maxFeeGwei: "50" };
+    /** The in-process node answering as chain 1; the signers stay bound to the real in-process node. */
+    const asMainnet = () =>
+      new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "getNetwork") return async () => ({ chainId: 1n });
+          if (prop === "send") return async (method, params) => (method === "eth_chainId" ? "0x1" : provider.send(method, params));
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+    const lockSwap = (tReveal, opts = {}) => swapFile({ intent: lockIntent(tReveal), ...opts });
+
+    it("a chain_id 1 file with no profile field (production) or with profile \"production\" is accepted: lock dry run and real, claim, refund", async () => {
+      const net = asMainnet();
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      for (const opts of [{ eth: { chain_id: 1 } }, { eth: { chain_id: 1 }, profile: "production" }, { eth: { chain_id: "1" } }]) {
+        const dry = await live.lock(net, bob, { swap: lockSwap(tReveal, opts), dryRun: true, ...FEE });
+        expect(dry.dryRun, JSON.stringify(opts)).to.equal(true);
+        expect(dry.chainId).to.equal("1");
+        expect(dry.maxFeeGwei).to.equal("50.0");
+        expect(dry.expectedLockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+      }
+      const real = await live.lock(net, bob, { swap: lockSwap(tReveal, { eth: { chain_id: 1 } }), ...FEE });
+      expect(real.chainId).to.equal("1");
+      expect(real.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+
+      const before = await bal(aliceAddr);
+      const c = await live.claim(net, alice, { swap: swapFile({ intent: revealIntent(real.lockId, tReveal, tReveal - 1800), eth: { chain_id: 1 } }), secret: preimage, ...FEE });
+      expect(c.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(await bal(aliceAddr)).to.be.gt(before + amount - ethers.parseEther("0.01"));
+
+      const h2 = sha256Raw(rand32());
+      const l = await makeLock({ ttl: HOUR, hash: h2 });
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      const r = await live.refund(net, bob, { swap: swapFile({ intent: refundIntent(l.lockId), eth: { chain_id: 1 }, hash: h2 }), ...FEE });
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+    });
+
+    it("a file whose chain_id is not 1 is refused by lock, claim and refund, dry run or not, even on a node that says chain 1; nothing is sent", async () => {
+      const net = asMainnet();
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const n = await nonce(bobAddr);
+      for (const chain_id of [31337, 11155111, 2, 0]) {
+        const files = {
+          lock: lockSwap(tReveal, { eth: { chain_id } }),
+          claim: swapFile({ intent: revealIntent(rand32(), tReveal, tReveal - 1800), eth: { chain_id } }),
+          refund: swapFile({ intent: refundIntent(rand32()), eth: { chain_id } }),
+        };
+        const re = new RegExp(`--mainnet: the swap file's chain_id is ${chain_id}, not 1; refusing`);
+        for (const dryRun of [true, false]) {
+          await expect(live.lock(net, bob, { swap: files.lock, dryRun, ...FEE }), `lock ${chain_id}`).to.be.rejectedWith(re);
+          await expect(live.claim(net, carol, { swap: files.claim, secret: preimage, dryRun, ...FEE }), `claim ${chain_id}`).to.be.rejectedWith(re);
+          await expect(live.refund(net, bob, { swap: files.refund, dryRun, ...FEE }), `refund ${chain_id}`).to.be.rejectedWith(re);
+        }
+      }
+      expect(await nonce(bobAddr)).to.equal(n);
+    });
+
+    it("a file whose profile is not production (sepolia, rehearsal, any other string) is refused by lock, claim and refund", async () => {
+      const net = asMainnet();
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const n = await nonce(bobAddr);
+      for (const profile of ["sepolia", "rehearsal", "Production", "production ", "mainnet"]) {
+        const files = {
+          lock: lockSwap(tReveal, { eth: { chain_id: 1 }, profile }),
+          claim: swapFile({ intent: revealIntent(rand32(), tReveal, tReveal - 1800), eth: { chain_id: 1 }, profile }),
+          refund: swapFile({ intent: refundIntent(rand32()), eth: { chain_id: 1 }, profile }),
+        };
+        const re = new RegExp(`--mainnet: the swap file's profile is ${profile}, not production; refusing`);
+        for (const dryRun of [true, false]) {
+          await expect(live.lock(net, bob, { swap: files.lock, dryRun, ...FEE }), `lock ${profile}`).to.be.rejectedWith(re);
+          await expect(live.claim(net, carol, { swap: files.claim, secret: preimage, dryRun, ...FEE }), `claim ${profile}`).to.be.rejectedWith(re);
+          await expect(live.refund(net, bob, { swap: files.refund, dryRun, ...FEE }), `refund ${profile}`).to.be.rejectedWith(re);
+        }
+      }
+      // a profile that is not a string at all is a malformed file, not a production file
+      for (const profile of [null, 5, "", {}]) {
+        await expect(live.lock(net, bob, { swap: lockSwap(tReveal, { eth: { chain_id: 1 }, profile }), dryRun: true, ...FEE }), JSON.stringify(profile)).to.be.rejectedWith(/swap file profile must be a non-empty string/);
+      }
+      expect(await nonce(bobAddr)).to.equal(n);
+    });
+
+    it("the profile is only read as the file stores it: a profile in the intent or at the top level does not make a sepolia file production", async () => {
+      const net = asMainnet();
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const file = lockSwap(tReveal, { eth: { chain_id: 1 }, profile: "sepolia" });
+      const j = JSON.parse(fs.readFileSync(file, "utf8"));
+      j.profile = "production";
+      j.pending_intent.params.profile = "production";
+      fs.writeFileSync(file, JSON.stringify(j));
+      await expect(live.lock(net, bob, { swap: file, dryRun: true, ...FEE })).to.be.rejectedWith(/profile is sepolia, not production/);
+    });
+
+    it("the file's chain 1 and profile are not enough on their own: --chain-id must still agree, and a test node is still refused", async () => {
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const file = lockSwap(tReveal, { eth: { chain_id: 1 } });
+      await expect(live.lock(asMainnet(), bob, { swap: file, dryRun: true, chainId: "31337", ...FEE })).to.be.rejectedWith(/--chain-id disagrees with the swap file: you gave 31337, the file has 1/);
+      await expect(live.lock(provider, bob, { swap: file, dryRun: true, ...FEE })).to.be.rejectedWith(/--mainnet is given but the RPC endpoint reports chain 31337, not 1/);
+    });
+
+    it("without --mainnet, a chain_id 1 file is refused on any node (the swap file does not unlock mainnet), a test file is unchanged", async () => {
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const file = lockSwap(tReveal, { eth: { chain_id: 1 } });
+      const n = await nonce(bobAddr);
+      for (const node of [asMainnet(), provider]) {
+        await expect(live.lock(node, bob, { swap: file, dryRun: true })).to.be.rejectedWith(/Ethereum mainnet \(chainId 1\) without --mainnet/);
+        await expect(live.lock(node, bob, { swap: file })).to.be.rejectedWith(/Ethereum mainnet \(chainId 1\) without --mainnet/);
+      }
+      expect(await nonce(bobAddr)).to.equal(n);
+      // a file of another profile on a test chain runs as before (profile is only a mainnet check)
+      const ok = await live.lock(provider, bob, { swap: lockSwap(tReveal, { profile: "sepolia" }), dryRun: true });
+      expect(ok.chainId).to.equal("31337");
     });
   });
 
@@ -1259,6 +1379,789 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
     it("--swap is a flag of exactly lock, claim and refund", () => {
       for (const cmd of ["lock", "claim", "refund"]) expect(live.parseArgs([cmd, "--swap", "f.json"]).args).to.deep.equal({ swap: "f.json" });
       for (const cmd of ["send", "status", "deploy"]) expect(() => live.parseArgs([cmd, "--swap", "f.json"])).to.throw(/unknown flag --swap/);
+    });
+  });
+});
+
+// ===========================================================================
+// Ethereum mainnet: --mainnet and --max-fee-gwei (fail-closed). No mainnet node is needed: the in-process node
+// answers as chain 1 (eth_chainId and getNetwork), while the signers stay bound to the real in-process node.
+// ===========================================================================
+describe("live.js --mainnet (chain id 1)", function () {
+  this.timeout(180000);
+  const SCRIPT = path.join(__dirname, "..", "scripts", "live.js");
+  const GWEI = 10n ** 9n;
+  const CAP = "50";
+  const SIGNING = ["deploy", "send", "lock", "claim", "refund"];
+  const amount = ethers.parseEther("0.2");
+  let provider, alice, bob, carol, htlcAddr, tgt, tgtMain, aliceAddr, bobAddr, carolAddr, dir;
+
+  const latestTs = async () => (await provider.getBlock("latest")).timestamp;
+  const bal = (a) => provider.getBalance(a);
+  const nonce = (a) => provider.getTransactionCount(a);
+  const m = (over = {}) => ({ mainnet: true, maxFeeGwei: CAP, ...over });
+
+  /** The in-process node answering as chain `id`. */
+  const asChain = (id) =>
+    new Proxy(provider, {
+      get(t, prop) {
+        if (prop === "getNetwork") return async () => ({ chainId: BigInt(id) });
+        if (prop === "send") return async (method, params) => (method === "eth_chainId" ? "0x" + BigInt(id).toString(16) : provider.send(method, params));
+        const v = t[prop];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+  const lockTerms = async (over = {}) => ({
+    contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal: String((await latestTs()) + 2 * HOUR), receiver: bobAddr, amountWei: "1000", ...over,
+  });
+  /** A lock on the (test) node itself, made without --mainnet, for the claim and refund cases. */
+  async function makeLock({ ttl = 2 * HOUR, signer = alice } = {}) {
+    const preimage = rand32();
+    const tReveal = (await latestTs()) + ttl;
+    const l = await live.lock(provider, signer, { ...tgt, contract: htlcAddr, hashlock: sha256Raw(preimage), tReveal: String(tReveal), receiver: bobAddr, amountWei: amount.toString() });
+    return { preimage, tReveal, ...l };
+  }
+  const passAge = async (s) => {
+    await provider.send("evm_increaseTime", [s]);
+    await provider.send("evm_mine", []);
+  };
+  /**
+   * A swap file with only the parts live.js reads, for the action (lock_eth, reveal_eth, refund_eth) and chain 1
+   * (production profile: no `profile` field). Under --mainnet, lock, claim and refund need one.
+   */
+  let nSwap = 0;
+  function swapFile({ action, hashlock = rand32(), contract = htlcAddr, receiver = bobAddr, sender = aliceAddr, amountWei = "1000", lockId, tReveal = 0, chain = 1 }) {
+    const params =
+      action === "lock_eth" ? { hashlock, t_reveal: tReveal, receiver, amount_wei: amountWei }
+      : action === "reveal_eth" ? { lock_id: lockId, t_reveal: tReveal, cutoff: tReveal - 1800 }
+      : { lock_id: lockId };
+    const j = {
+      version: 1,
+      role: "bob",
+      public: {
+        hashlock,
+        claim_authority: "o1test",
+        params: { eth: { chain_id: chain, contract, code_hash: tgt.codeHash, amount_wei: amountWei, alice_receiver: receiver, bob_sender: sender } },
+      },
+      pending_intent: { action, params: { action, ...params }, decided_at: 1, phase_at_decision: "x", noid_tip: 1, eth_block: 1 },
+      secret: { ciphertext: "not-read-by-live.js" },
+    };
+    const file = path.join(dir, `swap-${nSwap++}.json`);
+    fs.writeFileSync(file, JSON.stringify(j, null, 2));
+    return file;
+  }
+  /** The swap file of a lock made by makeLock (alice -> bob, `amount`), for claim (reveal_eth) or refund (refund_eth). */
+  const fileOfLock = (action, l, hashlock = sha256Raw(l.preimage), contract = htlcAddr) =>
+    swapFile({ action, hashlock, contract, receiver: bobAddr, sender: aliceAddr, amountWei: amount.toString(), lockId: l.lockId, tReveal: l.tReveal });
+  /** A call of each signing command, with `extra` merged into its flags; on `node`, signed by the right key. Under --mainnet, lock/claim/refund get a matching swap file. */
+  async function call(cmd, node, extra) {
+    const t = await lockTerms();
+    const needSwap = extra.mainnet === true && extra.swap === undefined;
+    const lockId = rand32();
+    switch (cmd) {
+      case "deploy": return live.deploy(node, alice, { ...extra });
+      case "send": return live.send(node, alice, { to: carolAddr, amountWei: "1000", ...extra });
+      case "lock": {
+        const sw = needSwap ? { swap: swapFile({ action: "lock_eth", hashlock: t.hashlock, tReveal: Number(t.tReveal), receiver: t.receiver, amountWei: t.amountWei, sender: aliceAddr }) } : {};
+        return live.lock(node, alice, { ...tgtMain, ...t, ...sw, ...extra });
+      }
+      case "claim": {
+        const sw = needSwap ? { swap: swapFile({ action: "reveal_eth", lockId, tReveal: Number(t.tReveal), sender: aliceAddr }) } : {};
+        return live.claim(node, bob, { ...tgtMain, contract: htlcAddr, lockId, secret: rand32(), ...sw, ...extra });
+      }
+      case "refund": {
+        const sw = needSwap ? { swap: swapFile({ action: "refund_eth", lockId, sender: aliceAddr }) } : {};
+        return live.refund(node, alice, { ...tgtMain, contract: htlcAddr, lockId, ...sw, ...extra });
+      }
+      default: throw new Error(cmd);
+    }
+  }
+
+  beforeEach(async () => {
+    provider = new ethers.BrowserProvider(hre.network.provider, undefined, { cacheTimeout: -1 });
+    [alice, bob, carol] = await Promise.all([0, 1, 2].map((i) => provider.getSigner(i)));
+    [aliceAddr, bobAddr, carolAddr] = await Promise.all([alice.getAddress(), bob.getAddress(), carol.getAddress()]);
+    const d = await live.deploy(provider, carol, {});
+    htlcAddr = d.contract;
+    tgt = { chainId: "31337", codeHash: d.codeHash };
+    tgtMain = { chainId: "1", codeHash: d.codeHash };
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-mainnet-"));
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // ------------------------------------------------------------------ the flags
+  describe("the flags", () => {
+    it("--mainnet and --max-fee-gwei exist on exactly deploy, send, lock, claim and refund", () => {
+      for (const cmd of SIGNING) {
+        expect(live.parseArgs([cmd, "--mainnet", "--max-fee-gwei", "3.5"]).args, cmd).to.deep.equal({ mainnet: true, maxFeeGwei: "3.5" });
+        expect(() => live.parseArgs([cmd, "--max-fee-gwei"]), cmd).to.throw(/needs a value/);
+      }
+      for (const cmd of ["balance", "status", "keygen"]) {
+        expect(() => live.parseArgs([cmd, "--mainnet"]), cmd).to.throw(/unknown flag --mainnet/);
+        expect(() => live.parseArgs([cmd, "--max-fee-gwei", "5"]), cmd).to.throw(/unknown flag --max-fee-gwei/);
+      }
+    });
+
+    it("--max-fee-gwei without --mainnet is refused by all five commands, before the network is touched", async () => {
+      for (const cmd of SIGNING) {
+        const n = await nonce(aliceAddr);
+        await expect(call(cmd, null, { maxFeeGwei: CAP }), cmd).to.be.rejectedWith(/--max-fee-gwei is only accepted together with --mainnet/);
+        await expect(call(cmd, null, { maxFeeGwei: CAP, dryRun: true }), cmd).to.be.rejectedWith(/only accepted together with --mainnet/);
+        expect(await nonce(aliceAddr)).to.equal(n);
+      }
+    });
+
+    it("--mainnet needs --max-fee-gwei, a positive decimal number of gwei (all five commands)", async () => {
+      for (const cmd of SIGNING) {
+        await expect(call(cmd, null, { mainnet: true }), cmd).to.be.rejectedWith(/missing required --max-fee-gwei/);
+        await expect(call(cmd, null, { mainnet: true, maxFeeGwei: "" }), cmd).to.be.rejectedWith(/missing required --max-fee-gwei/);
+        await expect(call(cmd, null, { mainnet: true, maxFeeGwei: "0" }), cmd).to.be.rejectedWith(/--max-fee-gwei must be > 0/);
+        for (const bad of ["abc", "-1", "1e3", "0x10", ".5", "1.0000000001", "5 gwei"]) {
+          await expect(call(cmd, null, { mainnet: true, maxFeeGwei: bad }), `${cmd} ${bad}`).to.be.rejectedWith(/--max-fee-gwei must be a positive decimal number/);
+        }
+      }
+    });
+
+    it("--mainnet is not combined with --allow-chain-id or --gas-price-gwei (all five commands)", async () => {
+      for (const cmd of SIGNING) {
+        await expect(call(cmd, null, m({ allowChainId: "31337" })), cmd).to.be.rejectedWith(/--mainnet cannot be combined with --allow-chain-id/);
+        await expect(call(cmd, null, m({ allowChainId: "1" })), cmd).to.be.rejectedWith(/--mainnet cannot be combined with --allow-chain-id/);
+        await expect(call(cmd, null, m({ gasPriceGwei: "5" })), cmd).to.be.rejectedWith(/--mainnet cannot be combined with --gas-price-gwei/);
+      }
+    });
+  });
+
+  // ------------------------------------------------------------------ the chain
+  describe("the chain", () => {
+    it("without --mainnet, a node that says chain 1 is refused by all five commands, also with --allow-chain-id 1 and --dry-run; nothing is sent", async () => {
+      const net = asChain(1);
+      for (const cmd of SIGNING) {
+        for (const extra of [{}, { dryRun: true }, { allowChainId: "1" }, { allowChainId: "1", dryRun: true }]) {
+          const n = await nonce(aliceAddr);
+          await expect(call(cmd, net, extra), `${cmd} ${JSON.stringify(extra)}`).to.be.rejectedWith(/Ethereum mainnet \(chainId 1\) without --mainnet/);
+          expect(await nonce(aliceAddr)).to.equal(n);
+        }
+      }
+      // --chain-id 1 against a test node is refused the same way (lock, claim, refund)
+      for (const cmd of ["lock", "claim", "refund"]) await expect(call(cmd, provider, { dryRun: true }), cmd).to.be.rejectedWith(/Ethereum mainnet \(chainId 1\) without --mainnet/);
+    });
+
+    it("with --mainnet, a test network is refused by all five commands (the node's chain id), also with --dry-run; nothing is sent", async () => {
+      // the real node is chain 31337
+      for (const cmd of SIGNING) {
+        for (const extra of [m(), m({ dryRun: true })]) {
+          const n = await nonce(aliceAddr);
+          const re = cmd === "lock" || cmd === "claim" || cmd === "refund" ? /--mainnet is given but the RPC endpoint reports chain 31337, not 1/ : /--mainnet is given but the node is chain 31337/;
+          await expect(call(cmd, provider, extra), `${cmd} ${JSON.stringify(extra)}`).to.be.rejectedWith(re);
+          expect(await nonce(aliceAddr)).to.equal(n);
+        }
+      }
+      // other well-known test chains behind the proxy, and an unknown one
+      for (const id of [11155111, 17000, 1337, 10]) {
+        await expect(call("send", asChain(id), m()), String(id)).to.be.rejectedWith(new RegExp(`--mainnet is given but the node is chain ${id}, not Ethereum mainnet`));
+        await expect(call("deploy", asChain(id), m({ dryRun: true })), String(id)).to.be.rejectedWith(/mainnet and test networks are never mixed/);
+      }
+    });
+
+    it("with --mainnet, --chain-id must be 1 (lock, claim, refund), whatever the node says; the swap file (chain 1) disagrees with any other value", async () => {
+      const net = asChain(1);
+      for (const cmd of ["lock", "claim", "refund"]) {
+        const n = await nonce(aliceAddr);
+        await expect(call(cmd, net, m({ chainId: "31337", dryRun: true })), cmd).to.be.rejectedWith(/--chain-id disagrees with the swap file: you gave 31337, the file has 1/);
+        await expect(call(cmd, provider, m({ chainId: "31337", dryRun: true })), cmd).to.be.rejectedWith(/--chain-id disagrees with the swap file: you gave 31337, the file has 1/);
+        expect(await nonce(aliceAddr)).to.equal(n);
+      }
+    });
+
+    it("lock under --mainnet refuses without --swap FILE (also with --dry-run and an empty value); nothing is sent", async () => {
+      const net = asChain(1);
+      const n = await nonce(aliceAddr);
+      const t = await lockTerms();
+      for (const extra of [{}, { dryRun: true }, { swap: "" }]) {
+        await expect(live.lock(net, alice, { ...tgtMain, ...t, ...m(), ...extra }), JSON.stringify(extra)).to.be.rejectedWith(/--mainnet requires --swap FILE for lock, claim and refund/);
+      }
+      expect(await nonce(aliceAddr)).to.equal(n);
+    });
+
+    it("claim under --mainnet refuses without --swap FILE (also with --dry-run and an empty value); nothing is sent", async () => {
+      const net = asChain(1);
+      const l = await makeLock({ ttl: HOUR });
+      const n = await nonce(bobAddr);
+      for (const extra of [{}, { dryRun: true }, { swap: "" }]) {
+        await expect(live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, secret: l.preimage, ...m(), ...extra }), JSON.stringify(extra)).to.be.rejectedWith(/--mainnet requires --swap FILE for lock, claim and refund/);
+      }
+      expect(await nonce(bobAddr)).to.equal(n);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+    });
+
+    it("refund under --mainnet refuses without --swap FILE (also with --dry-run and an empty value); nothing is sent", async () => {
+      const net = asChain(1);
+      const l = await makeLock({ ttl: HOUR });
+      await passAge(HOUR + 5);
+      const n = await nonce(aliceAddr);
+      for (const extra of [{}, { dryRun: true }, { swap: "" }]) {
+        await expect(live.refund(net, alice, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, ...m(), ...extra }), JSON.stringify(extra)).to.be.rejectedWith(/--mainnet requires --swap FILE for lock, claim and refund/);
+      }
+      expect(await nonce(aliceAddr)).to.equal(n);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^expired-unclaimed/);
+    });
+  });
+
+  // ------------------------------------------------------------------ the fee cap and the balance
+  describe("fee safety on chain 1", () => {
+    const worstOf = (r, cap = CAP) => BigInt(r.gasEstimate) * ethers.parseUnits(cap, "gwei");
+
+    it("send --dry-run prints the cap, the worst-case cost (gas estimate x cap), the amount and the sender's balance", async () => {
+      const net = asChain(1);
+      const before = await bal(aliceAddr);
+      const r = await live.send(net, alice, { to: carolAddr, amountWei: "1000", dryRun: true, ...m() });
+      expect(r.dryRun).to.equal(true);
+      expect(r.sent).to.equal(false);
+      expect(r.chainId).to.equal("1");
+      expect(r.maxFeeGwei).to.equal("50.0");
+      expect(BigInt(r.gasEstimate)).to.be.gt(0n);
+      expect(r.worstCaseFeeWei).to.equal(worstOf(r).toString());
+      expect(r.worstCaseFeeEth).to.equal(ethers.formatEther(worstOf(r)));
+      expect(r.requiredWei).to.equal((worstOf(r) + 1000n).toString());
+      expect(r.senderBalanceWei).to.equal(before.toString());
+      expect(r.senderBalanceEth).to.equal(ethers.formatEther(before));
+      expect(await bal(aliceAddr)).to.equal(before);
+      // a decimal cap
+      const half = await live.send(net, alice, { to: carolAddr, amountWei: "1000", dryRun: true, ...m({ maxFeeGwei: "2.5" }) });
+      expect(half.maxFeeGwei).to.equal("2.5");
+      expect(half.worstCaseFeeWei).to.equal(worstOf(half, "2.5").toString());
+    });
+
+    it("deploy, lock and refund dry runs print the same fee block; claim does with the secret, and without it states what is missing", async () => {
+      const net = asChain(1);
+      const d = await live.deploy(net, alice, { dryRun: true, ...m() });
+      expect(d.worstCaseFeeWei).to.equal(worstOf(d).toString());
+      expect(d.requiredWei).to.equal(worstOf(d).toString()); // no value
+      expect(d.expectedContract).to.match(/^0x[0-9a-fA-F]{40}$/);
+
+      const t = await lockTerms({ amountWei: amount.toString() });
+      const lk = await live.lock(net, alice, { ...tgtMain, ...t, swap: swapFile({ action: "lock_eth", hashlock: t.hashlock, tReveal: Number(t.tReveal), receiver: t.receiver, amountWei: t.amountWei, sender: aliceAddr }), dryRun: true, ...m() });
+      expect(lk.worstCaseFeeWei).to.equal(worstOf(lk).toString());
+      expect(lk.requiredWei).to.equal((worstOf(lk) + amount).toString());
+      expect(lk.senderBalanceWei).to.equal((await bal(aliceAddr)).toString());
+      expect(lk.expectedLockId).to.match(/^0x[0-9a-f]{64}$/);
+
+      const l = await makeLock({ ttl: HOUR });
+      const clSwap = fileOfLock("reveal_eth", l);
+      const cl = await live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, secret: l.preimage, swap: clSwap, dryRun: true, ...m() });
+      expect(cl.worstCaseFeeWei).to.equal(worstOf(cl).toString());
+      expect(cl.senderBalanceWei).to.equal((await bal(bobAddr)).toString());
+      const clNoSecret = await live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, swap: clSwap, dryRun: true, ...m() });
+      expect(clNoSecret.gasEstimate).to.equal(null);
+      expect(clNoSecret.maxFeeGwei).to.equal("50.0");
+      expect(clNoSecret.worstCaseFeeWei).to.equal(null);
+      expect(clNoSecret.worstCaseFeeNote).to.match(/real secret/);
+      expect(clNoSecret.senderBalanceWei).to.equal((await bal(bobAddr)).toString());
+
+      await passAge(HOUR + 5);
+      const rf = await live.refund(net, alice, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, swap: fileOfLock("refund_eth", l), dryRun: true, ...m() });
+      expect(rf.worstCaseFeeWei).to.equal(worstOf(rf).toString());
+      expect(rf.senderBalanceWei).to.equal((await bal(aliceAddr)).toString());
+    });
+
+    it("a test-network dry run is unchanged: no fee block", async () => {
+      const r = await live.send(provider, alice, { to: carolAddr, amountWei: "1000", dryRun: true });
+      for (const k of ["maxFeeGwei", "worstCaseFeeWei", "worstCaseFeeEth", "requiredWei", "senderBalanceWei"]) expect(r, k).to.not.have.property(k);
+    });
+
+    it("refuses when the balance cannot cover amount + worst-case fee: dry run and real send, nothing is sent", async () => {
+      const net = asChain(1);
+      const w = ethers.Wallet.createRandom().connect(provider);
+      await live.send(provider, alice, { to: w.address, amountWei: ethers.parseEther("1").toString() });
+      const cap = "10";
+      // The balance covers the amount but not amount + worst-case fee.
+      const tooMuch = ethers.parseEther("0.9999").toString();
+      const re = new RegExp(`refusing: the sender ${w.address} holds 1\\.0 ETH but amount 0\\.9999 ETH \\+ worst-case fee 0\\.\\d+ ETH \\(gas estimate \\d+ x 10\\.0 gwei\\) = 1\\.\\d+ ETH is needed`);
+      const before = await bal(w.address);
+      await expect(live.send(net, w, { to: carolAddr, amountWei: tooMuch, dryRun: true, ...m({ maxFeeGwei: cap }) })).to.be.rejectedWith(re);
+      await expect(live.send(net, w, { to: carolAddr, amountWei: tooMuch, ...m({ maxFeeGwei: cap }) })).to.be.rejectedWith(re);
+      expect(await bal(w.address)).to.equal(before);
+      expect(await nonce(w.address)).to.equal(0);
+      // The same wallet, with an amount that leaves room for the worst case, is accepted (dry run, then real).
+      const ok = await live.send(net, w, { to: carolAddr, amountWei: ethers.parseEther("0.5").toString(), dryRun: true, ...m({ maxFeeGwei: cap }) });
+      expect(BigInt(ok.requiredWei)).to.be.lt(before);
+      const sent = await live.send(net, w, { to: carolAddr, amountWei: ethers.parseEther("0.5").toString(), ...m({ maxFeeGwei: cap }) });
+      expect(sent.txHash).to.match(/^0x[0-9a-f]{64}$/);
+    });
+
+    it("the boundary is exact: a balance of amount + worst-case fee passes, one wei less is refused", async () => {
+      const net = asChain(1);
+      const w = ethers.Wallet.createRandom().connect(provider);
+      await live.send(provider, alice, { to: w.address, amountWei: ethers.parseEther("1").toString() });
+      const flags = { to: carolAddr, amountWei: ethers.parseEther("0.25").toString(), dryRun: true, ...m({ maxFeeGwei: "10" }) };
+      const probe = await live.send(net, w, flags);
+      const exact = BigInt(probe.requiredWei);
+      await provider.send("hardhat_setBalance", [w.address, "0x" + exact.toString(16)]);
+      const pass = await live.send(net, w, flags);
+      expect(pass.requiredWei).to.equal(exact.toString());
+      expect(pass.senderBalanceWei).to.equal(exact.toString());
+      await provider.send("hardhat_setBalance", [w.address, "0x" + (exact - 1n).toString(16)]);
+      await expect(live.send(net, w, flags)).to.be.rejectedWith(/refusing: the sender 0x[0-9a-fA-F]{40} holds .* ETH but amount 0\.25 ETH \+ worst-case fee/);
+    });
+
+    it("lock refuses on balance too (value + worst case), before anything is sent", async () => {
+      const net = asChain(1);
+      const w = ethers.Wallet.createRandom().connect(provider);
+      await live.send(provider, alice, { to: w.address, amountWei: ethers.parseEther("1").toString() });
+      const t = await lockTerms({ amountWei: ethers.parseEther("0.9999").toString() });
+      const n = await nonce(w.address);
+      for (const dryRun of [true, false]) {
+        const swap = swapFile({ action: "lock_eth", hashlock: t.hashlock, tReveal: Number(t.tReveal), receiver: t.receiver, amountWei: t.amountWei, sender: w.address });
+        await expect(live.lock(net, w, { ...tgtMain, ...t, swap, dryRun, ...m({ maxFeeGwei: "10" }) }), `dryRun ${dryRun}`).to.be.rejectedWith(/refusing: the sender 0x[0-9a-fA-F]{40} holds 1\.0 ETH but amount 0\.9999 ETH \+ worst-case fee/);
+      }
+      expect(await nonce(w.address)).to.equal(n);
+    });
+  });
+
+  // ------------------------------------------------------------------ accepted on chain 1
+  describe("accepted with --mainnet on chain 1", () => {
+    it("deploy, lock, claim, refund and send run for real; the transactions carry the cap as maxFeePerGas", async () => {
+      const net = asChain(1);
+      const flags = m({ maxFeeGwei: "20" });
+      const cap = 20n * GWEI;
+      const feeOf = async (hash) => {
+        const tx = await provider.getTransaction(hash);
+        expect(tx.maxFeePerGas, hash).to.equal(cap);
+        expect(tx.maxPriorityFeePerGas, hash).to.equal(GWEI);
+      };
+
+      const d = await live.deploy(net, alice, flags);
+      expect(d.chainId).to.equal("1");
+      expect(d.matchesArtifact).to.equal(true);
+      expect(d.codeHash).to.equal(tgt.codeHash);
+      await feeOf(d.txHash);
+
+      const s = await live.send(net, alice, { to: carolAddr, amountWei: "12345", ...flags });
+      await feeOf(s.txHash);
+
+      const preimage = rand32();
+      const hashlock = sha256Raw(preimage);
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const lockFile = (hl, tr) =>
+        swapFile({ action: "lock_eth", hashlock: hl, contract: d.contract, tReveal: tr, receiver: aliceAddr, sender: bobAddr, amountWei: amount.toString() });
+      const l = await live.lock(net, bob, { swap: lockFile(hashlock, tReveal), ...tgtMain, contract: d.contract, hashlock, tReveal: String(tReveal), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
+      expect(l.chainId).to.equal("1");
+      const ofLock = (action, lockId, hl, tr) =>
+        swapFile({ action, hashlock: hl, contract: d.contract, tReveal: tr, receiver: aliceAddr, sender: bobAddr, amountWei: amount.toString(), lockId });
+      await feeOf(l.txHash);
+
+      const before = await bal(aliceAddr);
+      const c = await live.claim(net, alice, { swap: ofLock("reveal_eth", l.lockId, hashlock, tReveal), ...tgtMain, contract: d.contract, lockId: l.lockId, secret: preimage, ...flags });
+      await feeOf(c.txHash);
+      expect(await bal(aliceAddr)).to.be.gt(before + amount - ethers.parseEther("0.01"));
+
+      const t2 = (await latestTs()) + HOUR;
+      const h2 = sha256Raw(rand32());
+      const l2 = await live.lock(net, bob, { swap: lockFile(h2, t2), ...tgtMain, contract: d.contract, hashlock: h2, tReveal: String(t2), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
+      await passAge(HOUR + 5);
+      const r = await live.refund(net, bob, { swap: ofLock("refund_eth", l2.lockId, h2, t2), ...tgtMain, contract: d.contract, lockId: l2.lockId, ...flags });
+      await feeOf(r.txHash);
+      expect((await live.status(provider, null, { contract: d.contract, lockId: l2.lockId })).state).to.equal("refunded");
+    });
+  });
+
+  // ------------------------------------------------------------------ the command line
+  describe("the command line", () => {
+    const run = (args) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, [SCRIPT, ...args], { env: { ...process.env, ETH_RPC_URL: "http://127.0.0.1:9" } });
+        let out = "";
+        let err = "";
+        child.stdout.on("data", (d) => (out += d));
+        child.stderr.on("data", (d) => (err += d));
+        child.on("close", (code) => resolve({ code, out, err }));
+        child.stdin.end("");
+      });
+    const count = (text, needle) => text.split(needle).length - 1;
+    const WARNING = "warning: --mainnet is in effect";
+
+    it("the warning is exactly one line", () => {
+      expect(live.MAINNET_WARNING.startsWith(WARNING)).to.equal(true);
+      expect(live.MAINNET_WARNING.endsWith("\n")).to.equal(true);
+      expect(count(live.MAINNET_WARNING, "\n")).to.equal(1);
+    });
+
+    it("--mainnet prints one warning line on stderr for each signing command, then refuses a missing cap; without --mainnet there is none", async () => {
+      const keyFile = path.join(dir, "k.key");
+      await live.keygen(null, null, { out: keyFile });
+      const swap = path.join(dir, "none.json");
+      const extra = { deploy: [], send: ["--to", carolAddr, "--amount-wei", "1"], lock: ["--swap", swap], claim: ["--swap", swap], refund: ["--swap", swap] };
+      for (const cmd of SIGNING) {
+        const mainnet = await run([cmd, "--key-file", keyFile, ...extra[cmd], "--mainnet"]);
+        expect(mainnet.code, `${cmd}: ${mainnet.err}`).to.equal(1);
+        expect(count(mainnet.err, WARNING), `${cmd}: ${mainnet.err}`).to.equal(1);
+        expect(mainnet.err, cmd).to.match(/error: missing required --max-fee-gwei/);
+        if (cmd === "deploy" || cmd === "send") continue; // without --mainnet these would reach the (dead) RPC endpoint
+        const plain = await run([cmd, "--key-file", keyFile, ...extra[cmd]]);
+        expect(plain.err, cmd).to.not.include(WARNING);
+        expect(plain.err, cmd).to.not.include("--max-fee-gwei");
+      }
+    });
+
+    it("--mainnet without --swap is refused by lock, claim and refund on the command line, with no \"no --swap\" warning", async () => {
+      const keyFile = path.join(dir, "k.key");
+      await live.keygen(null, null, { out: keyFile });
+      for (const cmd of ["lock", "claim", "refund"]) {
+        const r = await run([cmd, "--key-file", keyFile, "--mainnet", "--max-fee-gwei", "5"]);
+        expect(r.code, `${cmd}: ${r.err}`).to.equal(1);
+        expect(r.err, cmd).to.match(/error: --mainnet requires --swap FILE for lock, claim and refund/);
+        expect(r.err, cmd).to.not.include("warning: no --swap");
+        expect(count(r.err, WARNING), cmd).to.equal(1);
+      }
+    });
+
+    it("--max-fee-gwei without --mainnet is refused on the command line, with no mainnet warning; --mainnet with --allow-chain-id likewise", async () => {
+      const keyFile = path.join(dir, "k.key");
+      await live.keygen(null, null, { out: keyFile });
+      const send = ["send", "--key-file", keyFile, "--to", carolAddr, "--amount-wei", "1"];
+      const cap = await run([...send, "--max-fee-gwei", "5"]);
+      expect(cap.code).to.equal(1);
+      expect(cap.err).to.match(/error: --max-fee-gwei is only accepted together with --mainnet/);
+      expect(cap.err).to.not.include(WARNING);
+      const mixed = await run([...send, "--mainnet", "--max-fee-gwei", "5", "--allow-chain-id", "31337"]);
+      expect(mixed.code).to.equal(1);
+      expect(mixed.err).to.match(/error: --mainnet cannot be combined with --allow-chain-id/);
+      expect(count(mixed.err, WARNING)).to.equal(1);
+    });
+  });
+});
+
+// ===========================================================================
+// REVIEW-4 R4-1 (base fee check, --replace), R4-3 (late re-send cutoff), R4-5 (signer tied to the file)
+// ===========================================================================
+describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
+  this.timeout(180000);
+  const GWEI = 10n ** 9n;
+  const amount = ethers.parseEther("0.2");
+  const ABI = () => JSON.parse(fs.readFileSync(path.join(__dirname, "..", "artifacts", "contracts", "HTLC.sol", "HTLC.json"), "utf8")).abi;
+  let provider, alice, bob, carol, htlcAddr, tgt, aliceAddr, bobAddr, carolAddr, dir, preimage, hashlock, nSwap;
+
+  const latestBlk = () => provider.getBlock("latest");
+  const latestTs = async () => (await latestBlk()).timestamp;
+  const nonce = (a, tag = "latest") => provider.getTransactionCount(a, tag);
+  const setBase = async (gwei) => {
+    await provider.send("hardhat_setNextBlockBaseFeePerGas", ["0x" + (BigInt(gwei) * GWEI).toString(16)]);
+    await provider.send("evm_mine", []);
+  };
+  const asChain1 = () =>
+    new Proxy(provider, {
+      get(t, prop) {
+        if (prop === "getNetwork") return async () => ({ chainId: 1n });
+        if (prop === "send") return async (method, params) => (method === "eth_chainId" ? "0x1" : provider.send(method, params));
+        const v = t[prop];
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+
+  function swapFile({ intent = null, chain = 31337, history, hash = hashlock } = {}) {
+    const j = {
+      version: 1,
+      role: "bob",
+      public: {
+        hashlock: hash,
+        claim_authority: "o1test",
+        params: {
+          eth: { chain_id: chain, contract: htlcAddr.toLowerCase(), code_hash: tgt.codeHash, amount_wei: amount.toString(), alice_receiver: aliceAddr.toLowerCase(), bob_sender: bobAddr.toLowerCase() },
+        },
+      },
+      secret: { ciphertext: "not-read-by-live.js" },
+    };
+    if (intent) j.pending_intent = intent;
+    if (history) j.history = history.map((event, i) => ({ at: 100 + i, event, from: "x", to: "y" }));
+    const file = path.join(dir, `swap-${nSwap++}.json`);
+    fs.writeFileSync(file, JSON.stringify(j, null, 2));
+    return file;
+  }
+  const wrapIntent = (action, params) => ({ action, params: { action, ...params }, decided_at: 1, phase_at_decision: "x", noid_tip: 1, eth_block: 1 });
+  const revealIntent = (lockId, tReveal, cutoff) => wrapIntent("reveal_eth", { lock_id: lockId, t_reveal: tReveal, cutoff });
+  const refundIntent = (lockId) => wrapIntent("refund_eth", { lock_id: lockId });
+  const lockIntent = (tReveal, hash = hashlock) => wrapIntent("lock_eth", { hashlock: hash, t_reveal: tReveal, receiver: aliceAddr.toLowerCase(), amount_wei: amount.toString() });
+
+  async function makeLock({ ttl = 2 * HOUR } = {}) {
+    const tReveal = (await latestTs()) + ttl;
+    const l = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock, tReveal: String(tReveal), receiver: aliceAddr, amountWei: amount.toString() });
+    return { tReveal, ...l };
+  }
+
+  beforeEach(async () => {
+    provider = new ethers.BrowserProvider(hre.network.provider, undefined, { cacheTimeout: -1 });
+    [alice, bob, carol] = await Promise.all([0, 1, 2].map((i) => provider.getSigner(i)));
+    [aliceAddr, bobAddr, carolAddr] = await Promise.all([alice.getAddress(), bob.getAddress(), carol.getAddress()]);
+    const d = await live.deploy(provider, carol, {});
+    htlcAddr = d.contract;
+    tgt = { chainId: "31337", codeHash: d.codeHash };
+    preimage = rand32();
+    hashlock = sha256Raw(preimage);
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-r4-"));
+    nSwap = 0;
+  });
+  afterEach(async () => {
+    await provider.send("evm_setAutomine", [true]);
+    await setBase(1); // later tests assume a low base fee
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // ------------------------------------------------------------------ R4-1: the base fee check
+  describe("R4-1: the fee cap is checked against the latest base fee, also in --dry-run", () => {
+    const MAIN = { mainnet: true };
+    it("claim: a cap below 2 x the base fee is refused (dry run and real), 2 x passes and the report shows base fee, cap and ratio", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBase(20);
+      expect((await latestBlk()).baseFeePerGas).to.equal(20n * GWEI);
+      const net = asChain1();
+      const n = await nonce(aliceAddr);
+      const re = /refusing: the fee cap 30\.0 gwei is below 2 x the latest base fee \(base fee 20\.0 gwei in block \d+; cap \/ base fee = 1\.50, the minimum is 2\)/;
+      for (const dryRun of [true, false]) {
+        await expect(live.claim(net, alice, { swap, secret: preimage, dryRun, ...MAIN, maxFeeGwei: "30" }), `dryRun ${dryRun}`).to.be.rejectedWith(re);
+      }
+      // without the secret the dry run refuses too
+      await expect(live.claim(net, alice, { swap, dryRun: true, ...MAIN, maxFeeGwei: "30" })).to.be.rejectedWith(re);
+      expect(await nonce(aliceAddr)).to.equal(n);
+      const ok = await live.claim(net, alice, { swap, secret: preimage, dryRun: true, ...MAIN, maxFeeGwei: "40" });
+      expect(ok.feeCheck).to.include({ baseFeeGwei: "20.0", maxFeeGwei: "40.0", ratio: "2.00", minRatio: "2" });
+      const noSecret = await live.claim(net, alice, { swap, dryRun: true, ...MAIN, maxFeeGwei: "45" });
+      expect(noSecret.feeCheck).to.include({ ratio: "2.25", minRatio: "2" });
+      const real = await live.claim(net, alice, { swap, secret: preimage, ...MAIN, maxFeeGwei: "40" });
+      expect(real.feeCheck.baseFeeGwei).to.equal("20.0");
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("lock and refund: a cap below the base fee is refused, one between 1 x and 2 x passes", async () => {
+      const t1 = (await latestTs()) + 2 * HOUR;
+      const h2 = sha256Raw(rand32()); // a second lock of this sender under the first lock's hashlock is refused by the F3 gate
+      const lockSwap = swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) });
+      const l = await makeLock({ ttl: HOUR });
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      await setBase(20);
+      const net = asChain1();
+      const refundSwap = () => swapFile({ chain: 1, intent: refundIntent(l.lockId) });
+      const n = await nonce(bobAddr);
+      const re = /refusing: the fee cap 15\.0 gwei is below 1 x the latest base fee \(base fee 20\.0 gwei.*cap \/ base fee = 0\.75, the minimum is 1\)/;
+      for (const dryRun of [true, false]) {
+        await expect(live.lock(net, bob, { swap: lockSwap, dryRun, ...MAIN, maxFeeGwei: "15" })).to.be.rejectedWith(re);
+        await expect(live.refund(net, bob, { swap: refundSwap(), dryRun, ...MAIN, maxFeeGwei: "15" })).to.be.rejectedWith(re);
+      }
+      expect(await nonce(bobAddr)).to.equal(n);
+      const lk = await live.lock(net, bob, { swap: lockSwap, dryRun: true, ...MAIN, maxFeeGwei: "25" });
+      expect(lk.feeCheck).to.include({ ratio: "1.25", minRatio: "1" });
+      const rf = await live.refund(net, bob, { swap: refundSwap(), ...MAIN, maxFeeGwei: "25" });
+      expect(rf.feeCheck).to.include({ ratio: "1.25", minRatio: "1" });
+    });
+
+    it("the --gas-price-gwei cap on a test chain is checked the same way; with no cap chosen there is no check", async () => {
+      const l = await makeLock();
+      await setBase(20);
+      await expect(live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true, gasPriceGwei: "30" })).to.be.rejectedWith(/fee cap 30\.0 gwei is below 2 x the latest base fee/);
+      const none = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true });
+      expect(none).to.not.have.property("feeCheck");
+    });
+  });
+
+  // ------------------------------------------------------------------ R4-1: --replace
+  describe("R4-1: --replace re-sends the same call at the pending nonce with a raised fee", () => {
+    const claimData = (lockId) => new ethers.Interface(ABI()).encodeFunctionData("claim", [lockId, preimage]);
+    /** A stuck claim: sent with automine off, so it stays in the node's pool. Returns its hash. */
+    async function stuckClaim(l, { maxFee = 3n * GWEI, tip = GWEI } = {}) {
+      await provider.send("evm_setAutomine", [false]);
+      const resp = await alice.sendTransaction({ to: htlcAddr, data: claimData(l.lockId), maxFeePerGas: maxFee, maxPriorityFeePerGas: tip });
+      return resp.hash;
+    }
+    /** Run a real send while automine is off: wait until it has been sent (onSent), mine one block, return its result. */
+    async function sendAndMine(run) {
+      let sent;
+      const sentP = new Promise((r) => (sent = r));
+      const p = run({ onSent: sent });
+      await Promise.race([sentP, p.catch(() => {})]);
+      await provider.send("evm_mine", []);
+      return p;
+    }
+
+    it("replaces the stuck claim: same nonce, both fee fields up by 12.5 % or more, the old hash never mines, never a second nonce", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const n0 = await nonce(aliceAddr);
+      const oldHash = await stuckClaim(l);
+      expect(await nonce(aliceAddr, "pending")).to.equal(n0 + 1);
+      const net = asChain1();
+      // a dry run shows the plan and sends nothing
+      const dry = await live.claim(net, alice, { swap, secret: preimage, dryRun: true, replace: true, replaceTx: oldHash, mainnet: true, maxFeeGwei: "4" });
+      expect(dry.replace).to.include({ nonce: n0, replacesTx: oldHash, oldFeeKnown: true, oldMaxFeeGwei: "3.0", oldTipGwei: "1.0", newMaxFeeGwei: "4.0", newTipGwei: "1.125" });
+      expect(await nonce(aliceAddr, "pending")).to.equal(n0 + 1);
+      // a cap that is not 12.5 % above the old one is refused
+      await expect(live.claim(net, alice, { swap, secret: preimage, replace: true, replaceTx: oldHash, mainnet: true, maxFeeGwei: "3.2" })).to.be.rejectedWith(/--replace: the new fee cap 3\.2 gwei is below the minimum 3\.375 gwei/);
+      const r = await sendAndMine((o) => live.claim(net, alice, { swap, secret: preimage, replace: true, replaceTx: oldHash, mainnet: true, maxFeeGwei: "4", ...o }));
+      const nw = await provider.getTransaction(r.txHash);
+      expect(nw.nonce).to.equal(n0);
+      expect(nw.maxFeePerGas).to.equal(4n * GWEI);
+      expect(nw.maxPriorityFeePerGas).to.be.gte((GWEI * 1125n) / 1000n);
+      expect(await provider.getTransactionReceipt(oldHash)).to.equal(null);
+      expect(await nonce(aliceAddr)).to.equal(n0 + 1); // exactly one transaction consumed the nonce
+      expect(await nonce(aliceAddr, "pending")).to.equal(n0 + 1);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("without --max-fee-gwei (test chain) the fees are chosen: at least old + 12.5 % and 2 x the base fee", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const n0 = await nonce(aliceAddr);
+      const oldHash = await stuckClaim(l, { maxFee: 5n * GWEI });
+      const dry = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true, replaceTx: oldHash });
+      expect(dry.replace.nonce).to.equal(n0);
+      expect(ethers.parseUnits(dry.replace.newMaxFeeGwei, "gwei")).to.be.gte((5n * GWEI * 1125n) / 1000n);
+      expect(ethers.parseUnits(dry.replace.newTipGwei, "gwei")).to.be.gte((GWEI * 1125n) / 1000n);
+      const r = await sendAndMine((o) => live.claim(provider, alice, { swap, secret: preimage, replace: true, replaceTx: oldHash, ...o }));
+      expect((await provider.getTransaction(r.txHash)).nonce).to.equal(n0);
+      expect(await nonce(aliceAddr)).to.equal(n0 + 1);
+    });
+
+    it("without --replace-tx the old transaction is looked for in the node's pending block; if the node cannot show it the plan says its fee is unknown", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const n0 = await nonce(aliceAddr);
+      await stuckClaim(l);
+      const dry = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true });
+      expect(dry.replace.nonce).to.equal(n0);
+      if (!dry.replace.oldFeeKnown) expect(dry.replace.note).to.match(/old transaction was not found/);
+      const r = await sendAndMine((o) => live.claim(provider, alice, { swap, secret: preimage, replace: true, ...o }));
+      expect((await provider.getTransaction(r.txHash)).nonce).to.equal(n0);
+    });
+
+    it("refuses when nothing is pending, dry run or not; never sends a second nonce", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const n = await nonce(aliceAddr, "pending");
+      for (const dryRun of [true, false]) {
+        await expect(live.claim(provider, alice, { swap, secret: preimage, replace: true, dryRun })).to.be.rejectedWith(/--replace: 0x[0-9a-fA-F]{40} has no pending transaction \(latest nonce \d+ = pending nonce \d+\); nothing to replace; refusing/);
+      }
+      expect(await nonce(aliceAddr, "pending")).to.equal(n);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+    });
+
+    it("refuses a pending transaction that is not this claim, a mined hash, and a lock that is already claimed", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      // an unrelated pending transaction at the nonce: replacing it would cancel something else
+      await provider.send("evm_setAutomine", [false]);
+      const other = await alice.sendTransaction({ to: carolAddr, value: 1n, maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      await expect(live.claim(provider, alice, { swap, secret: preimage, replace: true, replaceTx: other.hash })).to.be.rejectedWith(/is not a claim of lock/);
+      await provider.send("evm_mine", []);
+      // the hash of a mined transaction, while another transaction of the signer is pending
+      await alice.sendTransaction({ to: carolAddr, value: 2n, maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      await expect(live.claim(provider, alice, { swap, secret: preimage, replace: true, replaceTx: other.hash })).to.be.rejectedWith(/already mined/);
+      await provider.send("evm_mine", []);
+      await provider.send("evm_setAutomine", [true]);
+      // the lock gets claimed: a later replace refuses on the lock, not on a nonce
+      await live.claim(provider, alice, { swap, secret: preimage });
+      const n = await nonce(aliceAddr, "pending");
+      await expect(live.claim(provider, alice, { swap, secret: preimage, replace: true })).to.be.rejectedWith(/lock is already claimed/);
+      expect(await nonce(aliceAddr, "pending")).to.equal(n);
+    });
+
+    it("--replace exists for claim and refund only, and --replace-tx needs --replace", async () => {
+      for (const cmd of ["claim", "refund"]) expect(live.parseArgs([cmd, "--replace", "--replace-tx", rand32()]).args.replace).to.equal(true);
+      for (const cmd of ["lock", "send", "deploy", "status"]) expect(() => live.parseArgs([cmd, "--replace"])).to.throw(/unknown flag --replace/);
+      const t = (await latestTs()) + 2 * HOUR;
+      await expect(live.lock(provider, bob, { swap: swapFile({ intent: lockIntent(t) }), replace: true, dryRun: true })).to.be.rejectedWith(/--replace exists for claim and refund only/);
+      const l = await makeLock();
+      await expect(live.claim(provider, alice, { swap: swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) }), secret: preimage, replaceTx: rand32(), dryRun: true })).to.be.rejectedWith(/--replace-tx needs --replace/);
+    });
+
+    it("refund --replace works on a stuck refund the same way", async () => {
+      const l = await makeLock({ ttl: HOUR });
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      const n0 = await nonce(bobAddr);
+      await provider.send("evm_setAutomine", [false]);
+      const old = await bob.sendTransaction({ to: htlcAddr, data: new ethers.Interface(ABI()).encodeFunctionData("refund", [l.lockId]), maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      const swap = swapFile({ intent: refundIntent(l.lockId) });
+      const r = await sendAndMine((o) => live.refund(provider, bob, { swap, replace: true, replaceTx: old.hash, ...o }));
+      expect((await provider.getTransaction(r.txHash)).nonce).to.equal(n0);
+      expect(await provider.getTransactionReceipt(old.hash)).to.equal(null);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("refunded");
+    });
+
+    it("a sent transaction is reported (hash, nonce) through onSent before the wait; the command line prints it for --replace-tx", async () => {
+      const l = await makeLock();
+      const seen = [];
+      await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, onSent: (s) => seen.push(s) });
+      expect(seen).to.have.length(1);
+      expect(seen[0].hash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(seen[0].nonce).to.be.a("number");
+    });
+  });
+
+  // ------------------------------------------------------------------ R4-3
+  describe("R4-3: the late re-send uses the cutoff the intent froze, when the file shows the secret may be public", () => {
+    it("with history showing a public secret, a cutoff later than timelock - 1800 s rules; without it the earlier of the two stays the rule", async () => {
+      const l = await makeLock({ ttl: 1000 }); // inside the default 1800 s margin
+      const late = l.tReveal - 100;
+      const intent = revealIntent(l.lockId, l.tReveal, late);
+      // no marker: the default margin refuses
+      const noHist = swapFile({ intent });
+      await expect(live.claim(provider, alice, { swap: noHist, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff.*whichever is earlier/);
+      // events that are not evidence do not count
+      const weak = swapFile({ intent, history: ["intent_decided:reveal_eth", "lock_final"] });
+      await expect(live.claim(provider, alice, { swap: weak, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
+      // each of swap-cli's own public-secret events does
+      for (const ev of ["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped"]) {
+        const swap = swapFile({ intent, history: ["lock_final", ev] });
+        const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
+        expect(p.revealCutoff, ev).to.equal(String(late));
+        expect(p.revealCutoffRule, ev).to.match(/may already be public/);
+      }
+      // the dry run without the secret agrees, and an explicit --margin-s still tightens
+      const pub = swapFile({ intent, history: ["eth_claim_reorged"] });
+      expect((await live.claim(provider, alice, { swap: pub, dryRun: true })).revealCutoff).to.equal(String(late));
+      await expect(live.claim(provider, alice, { swap: pub, secret: preimage, dryRun: true, marginS: "1800" })).to.be.rejectedWith(/past the reveal cutoff/);
+      expect((await live.claim(provider, alice, { swap: pub, secret: preimage, dryRun: true, marginS: "900" })).revealCutoff).to.equal(String(l.tReveal - 900));
+    });
+
+    it("the frozen cutoff still binds in the late case: past it the claim is refused; inside it the claim is a real, mined one", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const past = (await latestTs()) - 5;
+      const swapPast = swapFile({ intent: revealIntent(l.lockId, l.tReveal, past), history: ["eth_claim_mined"] });
+      await expect(live.claim(provider, alice, { swap: swapPast, secret: preimage })).to.be.rejectedWith(new RegExp(`past the reveal cutoff.*frozen cutoff ${past}.*the secret may already be public`));
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 100), history: ["eth_claim_mined"] });
+      const r = await live.claim(provider, alice, { swap, secret: preimage });
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+  });
+
+  // ------------------------------------------------------------------ R4-5
+  describe("R4-5: the signing key is the swap file's party", () => {
+    it("claim needs alice_receiver's key (dry run or not); refund needs bob_sender's; nothing is sent", async () => {
+      const l = await makeLock();
+      const claimSwap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const nc = await nonce(carolAddr);
+      const nb = await nonce(bobAddr);
+      for (const wrong of [carol, bob]) {
+        const who = await wrong.getAddress();
+        const re = new RegExp(`this key is ${who} but the swap file's alice_receiver is ${aliceAddr}; refusing`);
+        await expect(live.claim(provider, wrong, { swap: claimSwap, secret: preimage, dryRun: true })).to.be.rejectedWith(re);
+        await expect(live.claim(provider, wrong, { swap: claimSwap, secret: preimage })).to.be.rejectedWith(re);
+      }
+      expect((await live.claim(provider, alice, { swap: claimSwap, secret: preimage, dryRun: true })).dryRun).to.equal(true);
+      await provider.send("evm_increaseTime", [2 * HOUR + 5]);
+      await provider.send("evm_mine", []);
+      const refundSwap = swapFile({ intent: refundIntent(l.lockId) });
+      for (const wrong of [carol, alice]) {
+        const who = await wrong.getAddress();
+        const re = new RegExp(`this key is ${who} but the swap file's bob_sender is ${bobAddr}; refusing`);
+        await expect(live.refund(provider, wrong, { swap: refundSwap, dryRun: true })).to.be.rejectedWith(re);
+        await expect(live.refund(provider, wrong, { swap: refundSwap })).to.be.rejectedWith(re);
+      }
+      expect(await nonce(carolAddr)).to.equal(nc);
+      expect(await nonce(bobAddr)).to.equal(nb);
+      const rf = await live.refund(provider, bob, { swap: refundSwap });
+      expect(rf.txHash).to.match(/^0x[0-9a-f]{64}$/);
     });
   });
 });

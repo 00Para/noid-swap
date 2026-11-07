@@ -27,7 +27,7 @@ Plain words for the pieces (the design doc explains them in full):
 | Path | What | Status |
 |---|---|---|
 | `src/secret.rs` | `Secret` (zeroized, redacted `Debug`), `H = SHA-256(s)`, `Addr(s)` / `Addr(Derive(m,0))`, the `0x`/no-`0x` hex rules, Bob's step-11 `check_preimage` | tested against the §0 vectors |
-| `src/params.rs` | §9.1 constants and the gates: `rhs_i1_eth` (619), `bob_lock_by` (`D − 619`), `t_max_eth`, `choose_t_reveal` (I1 + `W_A_min` + `B_bob`), `check_i2_eth` (reveal cutoff `T_reveal − M_A`), `classify_claim_height` (`D − 18` target, `D − 1` hard), `check_i5` (no 279,370 in `[H_create, D + 242]`, start ≥ 279,388), `fee_cap`, epoch anchor / T6 rotation guard | pins the §4.3 worked example |
+| `src/params.rs` | §9.1 constants and the gates: `rhs_i1_eth` (629), `bob_lock_by` (`D − 629`), `t_max_eth`, `choose_t_reveal` (I1 + `W_A_min` + `B_bob`), `check_i2_eth` (reveal cutoff `T_reveal − M_A`), `classify_claim_height` (`D − 18` target, `D − 1` hard), `check_i5` (no 279,370 in `[H_create, D + 252]`, start ≥ 279,388), `fee_cap`, epoch anchor / T6 rotation guard | pins the §4.3 worked example |
 | `src/swapfile.rs` | **M2.3** the swap file: `SwapPublic` (hashlock, authority, 699-byte opening hex, root, params; `check()` rebuilds the opening byte-for-byte through the M0.6 guard), `SwapFile` (role, phase, history, `pending_action`, sealed secret), atomic save (unique `.<pid>.<random>.tmp` + fsync + rename) and `SwapLock` (exclusive `.lock` sidecar), the `pending_intent` ledger, `HashlockRegistry` (T9) | secret at rest: Argon2id → XChaCha20-Poly1305, AAD = digest of the public section |
 | `src/state.rs` | `AlicePhase` / `BobPhase`, `Event`, `transition()`: every allowed move, nothing else | unit-tested |
 | `src/watch/mod.rs` | `JsonRpc` transport trait, `FixtureRpc` (replays `{"calls":[{method, params?, result|error}]}`), `NoidObservation`, `EthObservation`, the JSON-RPC envelope helpers | |
@@ -66,9 +66,9 @@ about 8 s on real authorization proofs. No test reaches outside the machine (the
 test process, the `curl` tests use fake shell scripts); `cargo` fetches four small crates from crates.io on the first build
 (`chacha20poly1305`, `argon2`, `sha3`, `getrandom`) and nothing else. Use `--offline`; the live layer adds no crate.
 
-Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
-`client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 359 tests (+1 ignored), was 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
+`client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `scenarios` 92, `watch_eth` 18,
+`watch_eth_discovery` 6, `watch_parano1d` 29: 404 tests (+1 ignored), was 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -118,7 +118,7 @@ swap-cli tick bob.swap.json --noid-fixture fixtures/parano1d/funded.json \
 #   {"kind": ..., "parameters": "withheld", ...} (REVIEW-3 F3); tick --apply records the intent first and then prints the parameters
 swap-cli intent bob.swap.json [--show]                                      # the frozen intent, if any
 swap-cli intent bob.swap.json --cancel <the tick chain flags>               # drops an intent that was never sent; fails closed (below)
-swap-cli gates --d 300725 --h-now 300040 --t-now 1794312000 --h-final 300022
+swap-cli gates --d 300735 --h-now 300040 --t-now 1794312000 --h-final 300022
 ```
 
 ### Data sources: fixture or live node, per chain
@@ -527,6 +527,60 @@ safe to hand to a stranger. The must-fix list in that file (F3 first: a read-onl
 parameters unrecorded, `intent --cancel` ignores the mempool, `live.js` is not tied to the swap file) is the
 next gate.
 
+## What REVIEW-4 changed (2026-11-05)
+
+`REVIEW-4.md` (independent, 2026-11-05, against `2077e78`) found twelve things around the engine rather than in it. This section is the fix
+status of the ones on the Rust side, finding by finding; each is pinned by a test in `tests/review4.rs` (19 tests) that fails on the code as the
+review read it. The three findings that live in `eth/scripts/live.js` (R4-1 the mainnet fee check and replacement, R4-3 the late re-send
+through `live.js`, R4-5 the signer check of `claim`) are fixed there, not here.
+
+- **R4-2, a cancelled lock is never re-decided under a new lock id (`src/engine.rs`, `src/swapfile.rs`).** *Plain words:* `intent --cancel`
+  says "the send never happened", but it rests on one node's view of the mempool; the send may still be queued somewhere and land later. The
+  lock id is computed from `T_reveal` (among others), so a second lock chosen afresh gets a different id and BOTH could land: Bob pays twice.
+  Now the swap file keeps every cancelled intent with its frozen parameters (`cancelled_intents`). A later `lock_eth` re-uses the cancelled
+  lock's own `T_reveal` (the same lock id, so a duplicate reverts in `HTLC.sol`) while (I1), `M_A`, the minimum reveal window and the lock-by
+  height still hold for it; when they no longer do, the action is `abort` (Bob walks away; the abort is recorded an hour after the cancel, as
+  before). The watcher keeps asking `getLock` for the cancelled id, so a late landing is noticed. A file whose history shows a cancelled
+  `lock_eth` but holds no record of it (written before this change) aborts too: its lock id is unknown.
+- **R4-4, the re-send of a public secret is not blocked by a second fitting instance.** The "two instances of the agreed amount: do not
+  reveal" rule protects a FIRST publication. Once the secret may be public (a reveal that was sent, mined, reorged or dropped) withholding the
+  re-send protects nothing and only helps a Bob who funded a second instance, so the rule is skipped then (a note names the slots; refund the
+  extra instances with the wallet at `D`).
+- **R4-6, an abort after the lock is on chain is recorded.** The hold ("a `lock_eth` was decided and never cancelled, so the abort is not
+  recorded") now ends when the file has SEEN the lock (Bob in `secret_seen` whose claim branch closed on him is recorded as `aborted` instead
+  of printing `abort` for ever). A `fund_noid` stays held on purpose: the only phase an abort can end Alice's file from is `created`, and a
+  visible instance that did not fit is not proof that hers has landed (found by the chaos test while fixing this). Two guards came out of the
+  same chaos runs (`CHAOS.md`, "After REVIEW-4"): Bob's abort in `secret_seen` waits until his Ethereum lock is closed in a FINAL block and
+  visible in the poll (a refund or claim a reorg can still take back must not end the file), and a file that already received its ETH
+  (`eth_claim_final`) does not look for another lock when a reorg of its NOID recovery close sends it back to `funding_final`.
+- **R4-7, a refund known only from the `getLock` record becomes final.** The record gives no block, so the watcher reports the poll's head,
+  which grows. Bob's `refund_mined` treated every growth as a re-inclusion and restarted the finality count at every poll. Now a record-only
+  refund (zero tx hash, `claim_state_from_record`) that only moves up is the same refund, counted from the block first seen, exactly as for Alice's
+  claim.
+- **R4-8, Bob's post-lock view is no longer a single quiet source (`src/engine.rs`, `scripts/live/env.sh`, `scripts/live/README.md`).** While
+  Bob waits for the secret every tick compares the Ethereum head time with the clock (the limit `lock_eth` already used, 600 s; not under
+  `rehearsal`) and a lagging first or second node puts an `ALARM` in the action reason and the notes. With two Ethereum nodes the secret is read
+  from either one; each candidate is checked against the hashlock and the NOID address, so a junk preimage on one node never hides the real one on
+  the other. The helpers still pass `--single-node-ok` when a second node is missing, but `single_node_warning` now prints on every
+  `node_flags` call (every tick, every claim), and the README says a run with a stranger needs BOTH `NOID_RPC2` and `ETH_RPC2`.
+- **R4-9, `lost` needs the second node.** Where the profile asks for a second node (production, sepolia) and `--single-node-ok` was not given,
+  `lost` is declared only if the second Parano1d node was read, is fresh, has itself reached `D + 18` and does not list the instance. A second
+  node that was configured but cannot be read blocks it whatever the flag says. The note says to recover with the wallet if the instance is still
+  listed.
+- **R4-10, a second ledger spend beside a held intent is refused.** The ledger holds one intent. A different ledger spend due beside it (a
+  `refund_noid` at `D` beside a held `reveal_eth`) used to be printed with parameters at every tick and never recorded. It is now `wait` with
+  the reason and the frozen parameters of the held intent until that one resolves or is cancelled. After `D` only the recovery branch is open, so
+  nobody races the delay. `claim_noid` is not a ledger kind and still goes through (REVIEW-2 F9).
+- **R4-11, the drop grace is a profile value and the relay-floor note reaches a `done` that still needs a refund.** `Gates::tx_grace_s`: 600 s
+  for production and sepolia, 120 s for rehearsal (whose whole reveal window is 600 s); `validate` requires at least two rebroadcast times. The
+  relay-floor and "several instances" notes are shown for a `done` file whose leg is still refundable.
+- **R4-12, documentation.** `PROJECT.md` decision 6 and design section 9.1 already say 735 / 629 / 252 (historical derivations keep the old
+  numbers, marked as such). **Production swap files created before the `B_safety` 30 change (`D_offset` 725) no longer load, by design:** the
+  file's `D` is re-derived at load and must equal `h_create` plus the profile's offset; a swap in flight would need the wallet.
+
+Not changed: Alice's `lost` is judged on Bob's refund as the first node reports it, so a refund known only from the record (R4-7's case, Alice's
+side) stays "not final" for her and `lost` is not reached while the log is missing (it fails safe; the wallet recovers the NOID).
+
 ## What REVIEW-3 changed (2026-11-05)
 
 `REVIEW-3.md` re-checked the REVIEW-2 fixes. This section lists what was fixed since, finding by finding (F3 first; the
@@ -736,7 +790,7 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
 - **F12.** `--now` with a live RPC is refused. **F14.** `--fast-kdf` and `KdfParams::fast_for_tests` exist only
   under `cfg(test)` or the `dev` feature (a normal or `--release` build rejects the flag); `m_cost_kib`,
   `t_cost`, `p_cost` read from a file are bounded (512 MiB, 16, 8) at load and at use.
-- **F13.** Checked arithmetic on bundle data (`h_create + 725`) and node data (`tip + B_FUND + B_FINAL`);
+- **F13.** Checked arithmetic on bundle data (`h_create + 735`) and node data (`tip + B_FUND + B_FINAL`);
   the harness' `expect` (outside this crate) is wrapped so a panic becomes an error.
 
 - **F2 (done, `src/equiv.rs`).** `new-bob --receipt PATH --equiv-prove BIN [--pinned-image-id HEX]` runs
@@ -820,6 +874,19 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
 
 Not done: the compiled-in image id of F2 (it needs the reproducible docker build of M1.1; the pin is a CLI flag checked against the receipt).
 
+## What the chaos test changed (2026-11-05)
+
+`CHAOS.md` lists the sixteen findings of the seeded chaos test and, in its "Fix status" table, which are fixed and where the test is
+(`tests/chaos_fixes.rs`, plus the chaos run itself, which no longer lets any of those symptoms through). In short: Alice's `revealed` re-checks her
+claim before `done` (a reorg sends her back to `reveal_submitted`); a submitted Ethereum lock, reveal or refund that is no longer pending
+(the signer's pending nonce equals its latest) and not mined after 10 minutes is treated as dropped and offered again; `intent --cancel` of a
+`fund_noid` needs the node to say no funding is pending, or the operator's `--i-checked-the-wallet` (a real node cannot list a funding in its
+mempool); `tick --apply` records `abort` (not while a funding or lock decided for the swap was never cancelled); Alice on the CLI path can
+reach `lost`; the reveal needs the instance in that very poll; funding finality restarts when the instance is absent from a poll or comes back as
+another incarnation; `refund_noid` is not offered for an instance that is gone, on either path; `done` is *settled* but no longer *terminal*
+(`Phase::is_settled()` vs `is_terminal()`); the formal-model findings: `Gates::validate` checks the two `DE`/`RA` relations and the production
+`B_safety` is 30 (`D_offset` 735).
+
 ## Contract versions (`--contract-version 1|2`)
 
 The NOID is locked in one of two Parano1d contracts. Which one is a swap parameter, like the profile.
@@ -896,14 +963,15 @@ D_offset = B_fund + B_final + B_bob + RHS(I1) + margin
 |---|---|---|---|---|
 | `W_A` / `W_A_min` / `M_A` | 7,200 / 5,400 / 1,800 s | 600 / 480 / 300 s | 4,200 / 3,360 / 1,800 s | `W_A` from ideas idea 3 (rehearsal); `W_A_min` = 0.8 `W_A`; `M_A` must exceed the Ethereum finality; sepolia: `W_A_min − M_A` = 1,560 s ≥ 1,260 s |
 | `Δ_detect`, `2·P_auth` | 300 s, 40 s | 60 s, 40 s | 120 s, 40 s | one fast poll on a local chain; two Sepolia blocks plus one poll of a public RPC; same prover |
-| `B_epoch` budget / `B_fee` / `B_final` / `B_safety` | 144 / 60 / 18 / 20 | 0 / 10 / 18 / 5 | 0 / 10 / 18 / 5 | `B_final` is Parano1d's finality and is not shortened; `B_epoch` 0 accepts the rotation risk in a rehearsal only |
-| `B_post` | 242 | 33 | 33 | `0 + 10 + 18 + 5` |
-| `RHS(I1)` full window | 619 = 377 + 242 | **68** = ⌈(600+60+40)/20⌉ + 33 = 35 + 33 | **251** = ⌈(4,200+120+40)/20⌉ + 33 = 218 + 33 | minimum window: 529, 62 and **209** |
+| `B_epoch` budget / `B_fee` / `B_final` / `B_safety` | 144 / 60 / 18 / **30** | 0 / 10 / 18 / 5 | 0 / 10 / 18 / 5 | `B_final` is Parano1d's finality and is not shortened; `B_epoch` 0 accepts the rotation risk in a rehearsal only; production `B_safety` was 20, which the model check (`docs/formal/README.md` §7) showed to be exactly one adversarial reorg of Bob's close with nothing on top, so it is 30 |
+| `DE` / `RA` (Ethereum inclusion delay, Alice's rebroadcast time) | 120 s / 120 s | 60 s / 60 s | 120 s / 120 s | `Gates::validate` demands `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (one Ethereum reorg of Alice's claim can still be answered); 12-s blocks: ten blocks; the local chain mines on demand |
+| `B_post` | 252 | 33 | 33 | `0 + 10 + 18 + 5` |
+| `RHS(I1)` full window | 629 = 377 + 252 | **68** = ⌈(600+60+40)/20⌉ + 33 = 35 + 33 | **251** = ⌈(4,200+120+40)/20⌉ + 33 = 218 + 33 | minimum window: 539, 62 and **209** |
 | `B_fund` / `B_bob` / `margin` | 10 / 60 / 18 | 5 / 20 / 9 | 5 / 20 / 6 | `margin` is a deliberate rounding-up |
-| `D_offset` | **725** = 10+18+60+619+18 | **120** = 5+18+20+68+9 | **300** = 5+18+20+251+6 | 6 h 03 m vs exactly 1 h vs exactly 2 h 30 at 30 s/block |
-| Bob's lock-by (full / minimum window) | `D − 619` / `D − 529` | `D − 68` / `D − 62` | `D − 251` / `D − 209` | |
+| `D_offset` | **735** = 10+18+60+629+18 | **120** = 5+18+20+68+9 | **300** = 5+18+20+251+6 | 6 h 08 m vs exactly 1 h vs exactly 2 h 30 at 30 s/block |
+| Bob's lock-by (full / minimum window) | `D − 629` / `D − 539` | `D − 68` / `D − 62` | `D − 251` / `D − 209` | |
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` | |
-| Full "Alice never reveals" cycle (creation to her final refund) | 742 blocks | 137 blocks | 317 blocks (≈ 2 h 40) | `D_offset + 17` |
+| Full "Alice never reveals" cycle (creation to her final refund) | 752 blocks | 137 blocks | 317 blocks (≈ 2 h 40) | `D_offset + 17` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s | local Hardhat finalizes at once; Sepolia does not |
 | caps | none | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
 
@@ -920,9 +988,9 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   tests; the engine does not read them. The fee rule (`F_max`) and the chain facts (finality 18, epoch 144, minimum fee 5,800) are the same in
   every profile and stay global.
 - `Gates::validate()` is the one checker of the §4.2/§4.3 relations (non-zero times and `W_A_min ≤ W_A`; `B_final` = Parano1d's 18; `M_A` >
-  Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `D_offset` = the formula above; the T6 guard fits in `B_safety`; every non-production
+  Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (the per-profile Ethereum inclusion delay `DE` and Alice's rebroadcast time `RA`: one Ethereum reorg of her claim can still be answered); `D_offset` = the formula above; the T6 guard fits in `B_safety`; every non-production
   profile (`rehearsal`, `sepolia`) has all three caps and production none). All three profiles pass it; `params::tests::a_broken_profile_is_rejected`
-  lists seventeen hand-made broken ones (five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
+  lists twenty hand-made broken ones (the last three are the `DE`/`RA` relations, each failing alone; five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
   rehearsal window).
 - Tests: `tests/scenarios.rs` runs, under `rehearsal` and under `sepolia` (`Scenario::with_profile`), the happy path (raw and stock), "Alice never
   reveals, both refund" (the whole abort cycle is `D_offset + 17` blocks from the creation height: 137 and 317), "Bob never locks" and the reveal

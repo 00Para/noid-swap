@@ -122,7 +122,7 @@ because the virtual machine is short of memory. There are four ways to make that
 working day each. A second set of smaller numbers, computed by the same formula and only usable with tiny amounts, lets
 the same software rehearse an abort in about an hour.
 
-- **Problem.** `D_offset = 725`, `W_A = 7,200 s`, `B_post = 242` are constants in `swap-cli/src/params.rs`. Run 2 funded at
+- **Problem.** `D_offset = 725`, `W_A = 7,200 s`, `B_post = 242` (at the time of writing; production is now 735 and 252, design §9.1) are constants in `swap-cli/src/params.rs`. Run 2 funded at
   15:55 UTC and `D` arrived at about 21:45 UTC. Six M2.7 scenarios remain (Alice-abort before lock, Bob-abort, rotation, `F_max`
   burn, conflicting close, stock) and each needs an abort cycle.
 - **Proposal.** `Profile { w_a, w_a_min, m_a, delta_detect, p_auth, b_epoch, b_fee, b_final, b_safety, b_fund, b_bob,

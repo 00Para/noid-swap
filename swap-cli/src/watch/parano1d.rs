@@ -281,6 +281,7 @@ impl<R: JsonRpc> NoidWatcher<R> {
             pending_calls,
             confirmed_tx,
             tracked_tx_pending,
+            funding_pending: None,
             tip_time,
             second: None,
             second_error: None,

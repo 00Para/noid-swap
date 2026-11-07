@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # usage: watch.sh [alice|bob|both] [interval_s]
 # Tick the role(s) with --apply every interval (default 30 s) and append one summary line per tick to
-# $L/loop-ROLE.txt. Stops by itself once every watched file is terminal (phase_after done/refunded/lost/aborted).
+# $L/loop-ROLE.txt. Stops by itself once every watched file is terminal (phase_after done/refunded/lost/aborted; a `done` that still names a leftover leg to refund does not count).
 # Run 3 lesson: never edit a helper in place while a loop calls it; install.sh freezes a copy under $L/bin.
 set -u
 . "$(dirname "$0")/env.sh"
@@ -14,7 +14,12 @@ while true; do
     OUT=$(bash "$HERE/tick.sh" "$R" --apply 2>&1)
     LINE="$(date +%T) $(echo "$OUT" | grep -E '^\[|^ACTION|^noid:|^eth :|^notes:|^phase_after|^applied|^intent' | tr '\n' ' ' | cut -c1-1200)"
     echo "$LINE" >> "$L/loop-$R.txt"
-    case "$LINE" in *"phase_after: done"*|*"phase_after: refunded"*|*"phase_after: lost"*|*"phase_after: aborted"*) TERMINAL=$((TERMINAL+1));; esac
+    # CHAOS F-16 / review M3: `done` is not terminal while a leftover leg can still be refunded: the action then names it
+    # (a refund_noid / refund_eth, a "still at the contract" / "ETH lock is still open" wait, a refund already submitted).
+    case "$LINE" in
+      *"phase_after: done"*) case "$LINE" in *refund_*|*"still at the contract"*|*"ETH lock is still open"*|*"already submitted"*|*"open past T_reveal"*|*"taking it back"*) ;; *) TERMINAL=$((TERMINAL+1));; esac;;
+      *"phase_after: refunded"*|*"phase_after: lost"*|*"phase_after: aborted"*) TERMINAL=$((TERMINAL+1));;
+    esac
   done
   [ "$TERMINAL" -eq "${#ROLES[@]}" ] && { echo "all watched files terminal at $(date +%T)"; exit 0; }
   sleep "$EVERY"

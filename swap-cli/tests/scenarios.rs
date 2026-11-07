@@ -95,7 +95,7 @@ fn alice_aborts_before_funding_when_too_late_and_bob_walks_away() {
     let w = s.world.borrow();
     assert!(w.instance.is_none() && w.lock.is_none() && w.noid_payout.is_none() && w.eth_payout.is_none());
     drop(w);
-    // Bob waits, then gives up once even the minimum-window lock-by height (D - 529 = 300,196) passed.
+    // Bob waits, then gives up once even the minimum-window lock-by height (D - 539 = 300,196) passed.
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "wait");
     s.world.borrow_mut().advance_noid(100); // tip 300,191: still waiting
@@ -485,9 +485,16 @@ fn f9_a_closed_claim_branch_is_no_reason_to_abort_while_the_eth_lock_is_refundab
     assert_eq!(rb.action.kind(), "refund_eth", "{rb:?}");
     assert_eq!(s.bob_phase(), "secret_seen");
     s.world.borrow_mut().advance_eth(1);
-    // The lock is refunded and the claim branch is closed: now it is over for Bob (no terminal abort before this).
+    // The lock is refunded and the claim branch is closed, but the refund is not final yet (REVIEW-4 R4-6, found by the chaos test: a refund a
+    // reorg can still take back must not end the file): wait. Once it is final, it is over for Bob (no terminal abort before this).
     let rb = s.tick_bob();
     assert_eq!(rb.events[0], "eth_refund_mined", "{rb:?}");
+    assert_eq!(rb.action.kind(), "wait", "{rb:?}");
+    assert!(rb.notes.iter().any(|n| n.contains("not aborting yet") && n.contains("not final")), "{:?}", rb.notes);
+    assert_eq!(s.bob_phase(), "secret_seen");
+    let lag = s.world.borrow().finality_lag;
+    s.world.borrow_mut().advance_eth(lag + 1);
+    let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "abort", "{rb:?}");
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Aborted { .. })));
     // Alice, whose claim reverted: refunds the NOID at D. Everyone is whole.
@@ -1062,7 +1069,7 @@ fn the_engine_reads_the_profile_from_the_file() {
     assert_eq!(bob_after_funding(ProfileName::Production, 25), "lock_eth");
     let p = Scenario::with_profile(Variant::Raw, ProfileName::Production);
     let r = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
-    assert_eq!(p.public.params.deadline_height - p.public.params.h_create, 725);
+    assert_eq!(p.public.params.deadline_height - p.public.params.h_create, 735);
     assert_eq!(r.public.params.deadline_height - r.public.params.h_create, 120);
 }
 
