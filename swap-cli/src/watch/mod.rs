@@ -518,6 +518,61 @@ pub struct EthLock {
     pub block_timestamp: Option<u64>,
 }
 
+/// One `Locked` event that carries our lock word and was made by Bob's own sender (`poseidon` kind only: the sender query of `watch::eth`).
+/// The word is not an indexed topic of `HTLCPoseidonV2` but the sender is (REVIEW-7 R7-1), so "has Bob's address locked on this A before" is
+/// asked of the node by sender topic and the word is compared locally.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WordLock {
+    #[serde(with = "hexbytes")]
+    pub lock_id: [u8; 32],
+    #[serde(with = "hexbytes")]
+    pub sender: [u8; 20],
+    #[serde(with = "hexbytes")]
+    pub receiver: [u8; 20],
+    #[serde(with = "u128dec")]
+    pub amount_wei: u128,
+    pub timelock: u64,
+    pub block_number: u64,
+}
+
+/// What happened to the word check of a poll (`poseidon` kind, REVIEW-6 R6-1, REVIEW-7 R7-1). It answers one question only, "has this word A
+/// been locked before by Bob's own sender", which matters at exactly one moment: when Bob decides to put ETH into a lock. It is asked of the
+/// node through the indexed sender topic (not by reading every `Locked` log of the shared contract), only while Bob has not locked yet (and for a
+/// re-send of a dropped lock), and its failure is a state of the observation, never an error of the poll: the lock decision waits, everything
+/// else (`tick`, Alice's reveal, Bob's `claim`) goes on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WordScan {
+    /// Not asked in this poll (the `sha256` kind, Alice, a poll after Bob's lock). A lock decision never rests on it.
+    #[default]
+    NotRun,
+    /// The node answered and the answer is plausible (the targeted lock, if any, is in it): `word_locks` is the complete list of Bob's own locks
+    /// on the word.
+    Complete,
+    /// The check could not be trusted (a node error, a malformed log, a lock the targeted query found but the sender query misses). The reason
+    /// is for the operator; Bob does not lock on it.
+    Failed(String),
+}
+
+impl WordScan {
+    pub fn is_not_run(&self) -> bool {
+        matches!(self, WordScan::NotRun)
+    }
+}
+
+/// A claim of OUR lock that was mined and REVERTED (receipt status 0): it published the secret in its calldata and paid nobody (REVIEW-6 R6-3).
+/// Filled only from the transaction the operator named with `--reveal-tx`, after the watcher checked it against the lock.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevertedClaim {
+    #[serde(with = "hexbytes")]
+    pub lock_id: [u8; 32],
+    #[serde(with = "hexbytes")]
+    pub preimage: [u8; 32],
+    #[serde(with = "hexbytes")]
+    pub tx_hash: [u8; 32],
+    pub block_number: u64,
+}
+
 /// The `Claimed` event: the preimage is public on chain.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EthClaimed {
@@ -586,6 +641,29 @@ pub struct EthObservation {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claim_state_from_record: bool,
     pub pending_preimage: Option<PendingPreimage>,
+    /// `poseidon` kind: a still-pending `claim` of our lock whose calldata is LONGER than 68 bytes and carries the secret. The contract
+    /// reverts it (`BadCalldataLength`), so it pays nobody and is no reveal of Alice's, but the secret is public: Bob claims the NOID from
+    /// it (`docs/poseidon-leg.md` 9.4). Only Bob's preimage candidates read it; Alice's side does not treat it as a reveal or a leak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlong_claim: Option<PendingPreimage>,
+    /// `poseidon` kind: every `Locked` event of the contract that carries our lock word and was made by Bob's OWN sender (any receiver), from
+    /// the indexed-sender query (REVIEW-7 R7-1: `[Locked, null, sender]`, not a scan of every log); empty for the `sha256` kind and whenever
+    /// the query did not run or failed (see [`EthObservation::word_scan`]). Bob does not lock while any exists that is not his lock
+    /// (REVIEW-6 R6-2). Locks of other senders are not read at all (they cannot hurt him and the query for them is the one anyone could pad).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub word_locks: Vec<WordLock>,
+    /// `poseidon` kind (REVIEW-6 R6-1): what became of the scan behind `word_locks`. Only asked while Bob has not locked yet; a failure is
+    /// recorded here and never fails the poll. Bob's lock decision (first lock and re-send) needs `Complete` on every node it asks.
+    #[serde(default, skip_serializing_if = "WordScan::is_not_run")]
+    pub word_scan: WordScan,
+    /// REVIEW-6 R6-3: the claim named by `--reveal-tx` was mined and reverted: it carries the secret and paid nobody. Checked by the watcher
+    /// against this lock (contract, selector, lock id, sender = Alice's receiver, preimage matches the lock word).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverted_claim: Option<RevertedClaim>,
+    /// REVIEW-6 R6-3: what the watcher made of the `--reveal-tx` hash (not found, still pending, mined and fine, does not match this lock, ...).
+    /// Informational; the engine copies it into the notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reveal_tx_note: Option<String>,
     /// REVIEW-3 F3: `eth_getTransactionCount(signer, "latest")` for the address this file's role signs Ethereum
     /// transactions with (Bob: `bob_sender`; Alice: `alice_receiver`). `None` = not asked, or the node could not
     /// answer: unknown, never an error. `intent --cancel` reads it.
@@ -715,6 +793,11 @@ mod tests {
             refunded: None,
             claim_state_from_record: false,
             pending_preimage: Some(PendingPreimage { lock_id: [1; 32], preimage: [9; 32], tx_hash: [6; 32] }),
+            overlong_claim: Some(PendingPreimage { lock_id: [1; 32], preimage: [9; 32], tx_hash: [7; 32] }),
+            word_locks: vec![WordLock { lock_id: [1; 32], sender: [2; 20], receiver: [3; 20], amount_wei: 5, timelock: 9, block_number: 2 }],
+            word_scan: WordScan::Failed("x".into()),
+            reverted_claim: Some(RevertedClaim { lock_id: [1; 32], preimage: [9; 32], tx_hash: [8; 32], block_number: 6 }),
+            reveal_tx_note: Some("n".into()),
             signer_nonce_latest: Some(4),
             signer_nonce_pending: Some(5),
             second: None,

@@ -742,6 +742,31 @@ fn f7_eth_from_block_is_stored_by_apply_reused_without_the_flag_and_required_on_
 }
 
 #[test]
+fn r6_3_reveal_tx_flag_is_one_hash_and_without_a_visible_lock_it_is_only_a_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = dir.path().join("b.swap.json");
+    let mut public = example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw);
+    public.params.eth.chain_id = 31_337;
+    example_bob_file(public, 1).unwrap().save(&b).unwrap();
+    let noid = fixtures().join("parano1d/idle.json");
+    let node = empty_eth_node(31_337);
+    let tick = |extra: &[&str]| run(bin().args(["tick", s(&b), "--noid-fixture", s(&noid), "--eth-rpc", &node.url]).args(extra));
+    let h = format!("0x{}", "ab".repeat(32));
+    let (ok, _, err) = tick(&["--reveal-tx", "0x1234"]);
+    assert!(!ok && err.contains("--reveal-tx"), "{err}");
+    let (ok, _, err) = tick(&["--reveal-tx", &h, "--reveal-tx", &h]);
+    assert!(!ok && err.contains("exactly one transaction hash"), "{err}");
+    // A well-formed hash and no lock of ours on the node: the tick goes on, says why nothing was checked, and asks the node nothing about it.
+    let (ok, out, err) = tick(&["--reveal-tx", &h]);
+    assert!(ok, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert!(v["eth"]["reveal_tx_note"].as_str().unwrap().contains("no lock of ours is visible"), "{out}");
+    assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("--reveal-tx")), "{out}");
+    assert_eq!(node.count("eth_getTransactionReceipt"), 0);
+    assert!(v["eth"]["reverted_claim"].is_null() || v["eth"].get("reverted_claim").is_none());
+}
+
+#[test]
 fn f7_eth_from_block_defaults_to_zero_only_on_a_local_chain() {
     let dir = tempfile::tempdir().unwrap();
     let b = dir.path().join("b.swap.json");

@@ -455,3 +455,25 @@ deployed size of 15,145 bytes is under the 24,576 limit.
 - **F11 / item 7.** `poseidon-evm.md` now says the ETH claim is Alice's reveal; the `HTLCPoseidon`
   header carries the measured gas (428,747 / 519,537 / 88,926) instead of the stale figures.
 - Still open: item 1 (vendor differential), item 4 (second Yul review), items 5-6.
+
+## Applied 2026-11-05 (must-do items 1, 5 contract side, 6 sizing; production contract)
+
+- **Item 1 (vendor differential): done.** `equiv-ref addr-vectors` (new subcommand in `equiv/reference`) writes
+  `eth/test/vectors/addr-vectors.bin`: 12,299 vectors computed by the vendor crate (299 structured, including all 256
+  single-bit secrets, the all-zero, all-ones and published secrets; 12,000 seeded random). `eth/test/poseidon-vectors.test.js`
+  compares the EVM contract on a trace-limited chain (recycled every few dozen calls): the whole file in four slices, **12,299 of
+  12,299 equal, 0 mismatches**; the JS port also equals the vendor on all of them. No `Derive` vectors (the production contract
+  does not use `Derive`).
+- **Item 2 (fail, do not skip): done earlier, kept.** The new vector test, the V2 unit tests and the V2 fuzz campaign never skip
+  or shrink; a machine that cannot hold a chunk fails with a message.
+- **Item 3 (generator and regenerate test): done earlier**; unchanged.
+- **Item 4 (second independent review of the Yul): not done.** The library `Poseidon2b.sol` is unchanged; the V2 contract is a small
+  diff against `HTLC.sol` (`docs/poseidon-leg.md` section 8) and has not been reviewed independently either.
+- **Item 5 (protocol and tooling for v2):** contract side done in `HTLCPoseidonV2.sol`: no `addrOf`, lock word and all terms in
+  `Locked`, explicit minimum-gas check (`MIN_CLAIM_GAS` 540,000, recommended limit 650,000, measured claim gas 499,288 to 544,584),
+  secret exactly 32 bytes, new runtime code hash pinned. Tool and design-document changes are specified in `docs/poseidon-leg.md`
+  section 9 and not implemented (`swap-cli`, `live.js`, `protocol-design.md` untouched).
+- **Item 6 (pick the chain and test there): not done.** Only Hardhat's EVM was used. `docs/poseidon-leg.md` section 5 gives the
+  minimum swap size on L1 (about 0.055 ETH at 1 gwei for a 1 % fee).
+- **Item 7 (documentation errors): done earlier.**
+- F9: `addrOf` is gone from the production contract (a test checks the ABI and the bytecode selectors).

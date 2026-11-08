@@ -302,3 +302,52 @@ Hostile payees are bounded only by the gas the caller supplies (see I-ETH-6).
 * Gas numbers are from the Hardhat EVM with the project's compiler settings, not from a deployed contract.
 * The campaign found one real validation gap and no state-machine bug in 8,500 sequences; that is evidence, not a proof.
   Formal verification or an external audit (milestone M4) remains the way to close the question.
+
+## 8. `HTLCPoseidonV2` (the ETH leg locked on `Addr(s)`), 2026-11-05
+
+The same harness runs a third campaign against `contracts/HTLCPoseidonV2.sol` (campaign title "HTLCPoseidonV2 (ETH): random
+sequences"); the protocol and the contract are described in `docs/poseidon-leg.md`. It uses its own pair of environments
+(`env.pv2`, four contract actors armed to the new contract) and the same random steps, actors, invariants I1 to I11 and
+boundary coverage as the ETH campaign. The model differs from the `HTLC.sol` one in exactly four rules, all deliberate
+contract differences:
+
+* the lock word is `Addr(secret)`, computed by the JavaScript port `scripts/poseidon/poseidon2b.js` (which
+  `test/poseidon-vectors.test.js` ties to the vendor crate on 12,299 vectors, so the model's `Addr` is the vendor's);
+* `claim` with trailing calldata after the 32-byte secret (the `long33` and `shifted33` variants) reverts `BadCalldataLength`
+  before anything else; a short secret fails in the ABI decoder as before;
+* the timelock is checked before the hash: expired lock gives `TimelockExpired` even for a wrong secret;
+* `InsufficientGas` is never expected (the harness sends 6,000,000 gas); it is covered by `test/HTLCPoseidonV2.test.js`.
+
+Memory: each claim that reaches the permutation leaves ~30 MB in the Hardhat runtime until the provider is recreated. The
+campaign counts those claims (`test/helpers/chain-budget.js`) and recycles the chain (`hardhat_reset`, forced GC, redeploy)
+between sequences, never inside one. Nothing that is computed changes.
+
+```sh
+npx hardhat test test/fuzz.test.js --grep HTLCPoseidonV2                       # FUZZ_PN sequences (default = FUZZ_N = 200), ~35 s
+FUZZ_N=0 FUZZ_PN=2000 npx hardhat test test/fuzz.test.js --grep HTLCPoseidonV2   # only this campaign, 2,000 sequences, ~6 min
+FUZZ_ONLY=3 FUZZ_KIND=pv2 FUZZ_TRACE=1 npx hardhat test test/fuzz.test.js --grep reproduce
+FUZZ_MUTANT_P=7 npx hardhat test test/fuzz.test.js --grep HTLCPoseidonV2        # a planted bug: must FAIL
+```
+
+Results (seed `noid-swap-fuzz-1`, 16 steps): default run 200 sequences pass (4,579 transactions); full run **2,000 sequences pass,
+46,730 transactions, 323 right-secret claims that paid, 609 re-entry attempts by hostile receivers, 0 successful, 0 invariant violations**
+(8 chunks of 250, 5 min 44 s, chain recycled 24 times in chunks of 39 permutation-sized calls). Claim gas to an EOA receiver:
+mean 534,737, max 549,139 (126 claims; some sent through a contract caller); hostile contract receivers up to 741,522 (not allowed
+by the swap tool).
+
+Whole suite after adding this campaign, the V2 unit tests and the vector test: `npx hardhat test` 214 passing, 0 failing (3 min).
+
+Mutants (`contracts/test/HTLCPoseidonV2Mutant.sol`, `FUZZ_MUTANT_P=n`): every one fails the campaign, in the first 12 sequences:
+
+| Mutant | Planted bug | Caught as (sequence) |
+|---|---|---|
+| 1 | claim also allowed at `ts == timelock` | expected `TimelockExpired`, got `InvalidPreimage` (3) |
+| 2 | refund refused at `ts == timelock` | expected success, reverted `TimelockNotExpired` (1) |
+| 3 | refund callable by anyone | expected `NotSender`, got `TimelockNotExpired` (0) |
+| 4 | payment before effects, no guard | events differ from the model (2) |
+| 5 | lock id leaves out the timelock | events differ from the model (0) |
+| 6 | a claimed lock can be claimed again | expected `AlreadyClaimed`, got `TimelockExpired` (11) |
+| 7 | no timelock check in `claim` | expected `TimelockExpired`, got `InvalidPreimage` (3) |
+| 8 | trailing calldata after the secret accepted | expected `BadCalldataLength`, got `TimelockExpired` (4) |
+| 9 | the secret is hashed with SHA-256 instead of `Addr` | expected success, reverted `InvalidPreimage` (2) |
+| 10 | stored preimage is not the revealed one | storage differs from the model (2) |

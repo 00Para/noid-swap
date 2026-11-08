@@ -8,6 +8,8 @@
 # --replace re-sends a STUCK claim at the same nonce with a fee raised by >= 12.5 % and >= 2 x the base fee (never a second nonce);
 # give the hash live.js printed ("sent: 0x...") as TXHASH, or leave it out and the node's pending block is searched.
 # --dry-run needs no secret and sends nothing. A REAL reveal otherwise: owner's go-ahead first.
+# A claim that is MINED AND REVERTED (live.js exits 3 and prints reverted/secretPublic) has paid nobody but published the secret: this script
+# saves its hash in $L/reveal-reverted-tx.txt and tick.sh / claim.sh pass it on as `--reveal-tx HASH` from then on (REVIEW-6 R6-3).
 set -u
 . "$(dirname "$0")/env.sh"
 cd "$ETH_DIR" || exit 2
@@ -38,11 +40,17 @@ load_passphrase || exit 2
 "$BIN" secret "$ALICE_FILE" 2>/dev/null | "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err"
 EC=${PIPESTATUS[1]}
 echo "claim exit $EC at $(date +%T)"; head -c 600 "$L/eth-claim.err"; echo
-python3 - "$L/eth-claim.json" <<'PY'
+python3 - "$L/eth-claim.json" "$L/reveal-reverted-tx.txt" <<'PY'
 import sys, json
 try: d = json.load(open(sys.argv[1]))
 except Exception as e: print("no json:", e); sys.exit(0)
-print(json.dumps({k: d.get(k) for k in ("sent", "txHash", "blockNumber", "blockTimestamp", "lockId", "receiver", "amountWei", "cutoff", "revealCutoff", "revealCutoffRule", "feeCheck", "replace", "lockBlock", "finalizedBlock")}, indent=1))
+print(json.dumps({k: d.get(k) for k in ("sent", "txHash", "blockNumber", "blockTimestamp", "lockId", "receiver", "amountWei", "cutoff", "revealCutoff", "revealCutoffRule", "feeCheck", "replace", "lockBlock", "finalizedBlock", "reverted", "secretPublic")}, indent=1))
+# REVIEW-6 R6-3: a claim that was mined and REVERTED has published the secret and paid nobody. Keep its hash where tick.sh / claim.sh
+# find it (they pass --reveal-tx HASH to swap-cli, which re-checks the transaction against the node before it records anything).
+if d.get("reverted") is True and isinstance(d.get("txHash"), str):
+    open(sys.argv[2], "w").write(d["txHash"] + "\n")
+    print("!!! THE CLAIM", d["txHash"], "WAS MINED AND REVERTED: THE SECRET IS PUBLIC. Saved to", sys.argv[2], "; the next tick.sh / claim.sh pass --reveal-tx for it.")
+    print("!!! Run tick.sh alice --apply now (it records that the secret is public, so a re-send is judged by the late cutoff), then decide on a re-send.")
 PY
 cp "$L/eth-claim.json" "$PUB/eth-claim.json" 2>/dev/null
 exit $EC

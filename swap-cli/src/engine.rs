@@ -36,11 +36,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::params::{self, ClaimHeight, ContractVersion, RotationGuard};
-use crate::secret::check_preimage;
+use crate::secret::{check_preimage_for, LockKind};
 use crate::state::{transition, AlicePhase, BobPhase, Event, InvalidTransition, LockSummary, Phase, Role};
 use crate::swapfile::{PendingAction, PendingIntent, SwapFile, SwapFileError};
 use crate::watch::eth::compute_lock_id;
-use crate::watch::{hexbytes, u128dec, EthLock, EthObservation, NoidInstance, NoidInstanceStatus, NoidObservation};
+use crate::watch::{hexbytes, u128dec, EthLock, EthObservation, NoidInstance, NoidInstanceStatus, NoidObservation, WordScan};
 
 // ---------------------------------------------------------------- actions
 
@@ -217,6 +217,10 @@ fn preimage_candidates(eth: &EthObservation, lock_id: [u8; 32]) -> Vec<[u8; 32]>
             .map(|p| p.preimage)
             .into_iter()
             .chain(e.claimed.as_ref().filter(|c| c.lock_id == lock_id).map(|c| c.preimage))
+            // `poseidon` kind: a pending claim with trailing calldata reverts, but it has shown `s` (docs/poseidon-leg.md 9.4).
+            .chain(e.overlong_claim.as_ref().filter(|p| p.lock_id == lock_id).map(|p| p.preimage))
+            // REVIEW-6 R6-3: a claim that was mined and REVERTED published the secret too (named with `--reveal-tx`, checked by the watcher).
+            .chain(e.reverted_claim.as_ref().filter(|p| p.lock_id == lock_id).map(|p| p.preimage))
             .collect::<Vec<_>>()
     };
     let mut all = one(eth);
@@ -409,6 +413,22 @@ fn describe_locks(locks: &[EthLock], mark: Option<&[u8; 32]>) -> String {
 /// See `spend_blocker` for the field list.
 pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Decision {
     let mut notes = Vec::new();
+    // REVIEW-6 R6-3: what the watcher made of a `--reveal-tx` hash (on either node) is always said.
+    for e in std::iter::once(eth).chain(eth.second.as_deref()) {
+        if let Some(n) = &e.reveal_tx_note {
+            if !notes.contains(n) {
+                notes.push(n.clone());
+            }
+        }
+    }
+    // REVIEW-7 R7-5: say so when a reverted claim is reported by one node but the evidence (two nodes, when two are configured) is not enough.
+    if file.role == Role::Alice {
+        if let Err(why) = reverted_claim_evidence(eth, alice_lock_id(file)) {
+            if !notes.contains(&why) {
+                notes.push(why);
+            }
+        }
+    }
     // REVIEW-2 F10: with several instances at the root, exactly one of which fits, every check reads that one.
     let canonical = canonical_noid(file, noid);
     let noid = canonical.as_ref().unwrap_or(noid);
@@ -451,6 +471,18 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     // Alice only (CHAOS F-17): the instance was alive when Bob could no longer claim it.
     if let Phase::Alice(p) = &phase {
         if let Some(e) = alice_alive_at_d(file, p, noid) {
+            match transition(&phase, &e) {
+                Ok(np) => {
+                    phase = np;
+                    events.push(e);
+                }
+                Err(err) => notes.push(format!("internal: {err}")),
+            }
+        }
+    }
+    // Alice only (CHAOS F-18): the positive evidence for `lost` and its withdrawal, also log-only.
+    if let Phase::Alice(p) = &phase {
+        if let Some(e) = alice_gone_trace(file, p, noid) {
             match transition(&phase, &e) {
                 Ok(np) => {
                     phase = np;
@@ -975,6 +1007,25 @@ fn alice_fact(
     match p {
         A::Created | A::FundingSubmitted { .. } => match instance_ok(file, noid) {
             Ok(()) => Some(Event::NoidInstanceSeen { instance: noid.instance.clone()?, tip: noid.tip }),
+            // CHAOS F-19 (seed 0x5eed0001, scenario 2792): her funding is on record (sent, or decided and never cancelled) and the root
+            // lists several instances of the agreed amount, hers and a lookalike that someone else deposited. Until `D` nothing can be
+            // done with that (Bob does not lock on a guess, she does not reveal with two); from `D` on the NOID is hers to take back,
+            // and a file that never recorded an instance would print `abort` for ever and offer no recovery. She funded once, and an
+            // allocation counter orders the deposits, so the oldest fitting instance is taken as hers; the others are named for the wallet.
+            Err(InstanceProblem::Ambiguous(_)) if alice_funding_on_record(file, p) && params::alice_refund_ready(noid.tip, file.public.params.deadline_height) => {
+                let mut fitting: Vec<NoidInstanceStatus> = noid.all_instances().into_iter().filter(|v| instance_fits(file, v)).collect();
+                fitting.sort_by_key(|v| (v.instance.creation_id, v.instance.slot_index));
+                let mine = fitting.first()?.instance.clone();
+                notes.push(format!(
+                    "{} instances of the agreed amount sit at the contract root and Alice funded once: the OLDEST (slot {}, creation {}) is taken as hers so that the NOID can be taken back at D {}; the others were deposited by someone else and are NOT refunded by this tool (refund them with the wallet): {} (CHAOS F-19)",
+                    fitting.len(),
+                    mine.slot_index,
+                    mine.creation_id,
+                    file.public.params.deadline_height,
+                    describe_instances(&fitting, Some(&mine))
+                ));
+                Some(Event::NoidInstanceSeen { instance: mine, tip: noid.tip })
+            }
             Err(e) if noid.instance.is_some() => {
                 notes.push(format!("instance seen but not accepted: {e}"));
                 None
@@ -1094,7 +1145,92 @@ fn alice_fact(
 /// Review H1: this file shows that Alice's claim reached the Ethereum network (sent through the tool, mined, reorged, dropped): the
 /// secret may be public. A reveal merely DECIDED on the CLI path is not enough (it may never have been sent).
 pub fn secret_may_be_public(file: &SwapFile) -> bool {
-    file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_claim_mined" | "eth_claim_reorged" | "eth_reveal_dropped"))
+    file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_claim_mined" | "eth_claim_reorged" | "eth_reveal_dropped" | REVEAL_PENDING_SEEN | REVEAL_REVERTED_SEEN))
+}
+
+/// REVIEW-6 R6-3: a claim of Alice's for this lock was MINED AND REVERTED (checked against the node from the hash the operator gave with
+/// `--reveal-tx`): the secret is public although no `Claimed` event exists. `secret_may_be_public` counts it, so the re-send is judged by the
+/// late cutoff `T_reveal - DE`, not by the first-publication cutoff. `live.js` reads the same name.
+pub const REVEAL_REVERTED_SEEN: &str = "reveal_reverted_seen";
+
+/// REVIEW-7 R7-5: is a reverted claim (`--reveal-tx`) established well enough to record [`REVEAL_REVERTED_SEEN`]? Each node's reading already
+/// passed the watcher's checks (our contract, the lock's receiver, the claim selector and lock id, a preimage that opens the lock word, a block that
+/// is on that node's canonical chain). On top of that, when a SECOND Ethereum node is configured (it answered, or it is `second_error`), both nodes
+/// must report the same reverted claim: one node alone cannot flip the late-cutoff switch. `Ok(true)` = record it; `Ok(false)` = no node reports
+/// one; `Err(why)` = at least one node reports one but the evidence is not enough (said in the notes; it is re-read on every poll).
+fn reverted_claim_evidence(eth: &EthObservation, lock_id: Option<[u8; 32]>) -> Result<bool, String> {
+    fn seen(e: &EthObservation, lock_id: Option<[u8; 32]>) -> Option<&crate::watch::RevertedClaim> {
+        e.reverted_claim.as_ref().filter(|r| lock_id.is_none_or(|id| id == r.lock_id))
+    }
+    let first = seen(eth, lock_id);
+    if eth.second.is_none() && eth.second_error.is_none() {
+        return Ok(first.is_some());
+    }
+    let second = eth.second.as_deref().and_then(|e| seen(e, lock_id));
+    match (first, second) {
+        (None, None) => Ok(false),
+        (Some(a), Some(b)) if a.lock_id == b.lock_id && a.preimage == b.preimage && a.tx_hash == b.tx_hash && a.block_number == b.block_number => Ok(true),
+        (Some(_), Some(_)) => Err("--reveal-tx: the two Ethereum nodes report different reverted claims; the reverted claim is NOT recorded until they agree".to_string()),
+        (one, _) => {
+            let (who, other) = if one.is_some() { ("the first", "second") } else { ("the second", "first") };
+            let why = match (&eth.second_error, eth.second.is_some()) {
+                (Some(e), false) => format!("the second node failed ({e})"),
+                _ => format!("the {other} node does not confirm it (see its --reveal-tx note)"),
+            };
+            Err(format!("--reveal-tx: {who} Ethereum node reports a mined, reverted claim but {why}; with two nodes configured both must agree, so it is NOT recorded yet"))
+        }
+    }
+}
+
+/// Alice's lock id as far as her phase knows it.
+fn alice_lock_id(file: &SwapFile) -> Option<[u8; 32]> {
+    match &file.phase {
+        Phase::Alice(p) => p.lock().map(|l| l.lock_id),
+        Phase::Bob(_) => None,
+    }
+}
+
+/// Alice's file only: record [`REVEAL_REVERTED_SEEN`] once, from a reverted claim the watcher verified (and, with two Ethereum nodes, both).
+fn note_reverted_reveal(file: &mut SwapFile, eth: &EthObservation, now: u64) {
+    if file.role != Role::Alice || last_history(file, REVEAL_REVERTED_SEEN).is_some() {
+        return;
+    }
+    if reverted_claim_evidence(eth, alice_lock_id(file)) == Ok(true) {
+        file.log(REVEAL_REVERTED_SEEN, now);
+    }
+}
+
+/// REVIEW-5 R5-1, library path: the reveal may have left the process ([`secret_may_be_public`], or an executor that reported an unknown
+/// outcome, [`REVEAL_MAYBE_SENT`]). Used only for the CUTOFF of a re-send (`T_reveal - DE` instead of `T_reveal - M_A`): not for the
+/// two-instances rule, which waits for evidence and not for a crash that may have sent nothing.
+fn reveal_may_have_been_sent(file: &SwapFile) -> bool {
+    secret_may_be_public(file) || last_history(file, REVEAL_MAYBE_SENT).is_some()
+}
+
+/// REVIEW-5 R5-1, CLI path: Alice's receiver key had a transaction in the Ethereum mempool (pending nonce above the latest) while a
+/// `reveal_eth` intent was held, so the claim was most likely sent and her secret is in the public mempool. Written once by
+/// [`tick_apply`]; `secret_may_be_public` counts it, `live.js` reads the same name.
+pub const REVEAL_PENDING_SEEN: &str = "reveal_pending_seen";
+/// REVIEW-5 R5-1, library path: the [`Runner`] handed the reveal to its executor and the executor said the outcome is unknown (it may have
+/// been sent). Written once. A failure the executor knows sent nothing leaves no marker.
+pub const REVEAL_MAYBE_SENT: &str = "reveal_maybe_sent";
+
+/// REVIEW-5 R5-1: while a `reveal_eth` intent is held, a signer transaction in the node's mempool (pending nonce above latest, on a fresh
+/// observation) is the operator's send. Records [`REVEAL_PENDING_SEEN`] once, so a re-send past the `M_A` cutoff is judged by the late
+/// cutoff (`T_reveal - DE`) and not as a first publication. The nonce is the receiver key's, which a swap uses for nothing else; the same
+/// signal `intent --cancel` already reads to refuse a cancel.
+fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
+    if !file.pending_intent.as_ref().is_some_and(|i| i.action == "reveal_eth") || last_history(file, REVEAL_PENDING_SEEN).is_some() {
+        return;
+    }
+    if eth.observed_at.is_none_or(|t| t.abs_diff(now) > MAX_OBSERVATION_AGE_S) {
+        return;
+    }
+    if let (Some(latest), Some(pending)) = (eth.signer_nonce_latest, eth.signer_nonce_pending) {
+        if pending > latest {
+            file.log(REVEAL_PENDING_SEEN, now);
+        }
+    }
 }
 
 /// The latest time Alice's reveal may still be sent under this file's profile: the `M_A` cutoff, or `T_reveal - DE` once the secret may
@@ -1128,6 +1264,55 @@ fn alice_alive_at_d(file: &SwapFile, p: &AlicePhase, noid: &NoidObservation) -> 
     }
     let seen = p.instance().and_then(|i| noid.find_instance(i)).is_some();
     seen.then_some(Event::NoidInstanceAliveAtD)
+}
+
+/// CHAOS F-19: Alice's file shows that a funding of hers was sent or may have been: the phase says so (`funding_submitted`), or a
+/// `fund_noid` was handed to the executor and its outcome is unknown (`pending_action`), or the CLI decided one and the operator never
+/// cancelled it (`intent_decided:fund_noid`). Without such a trace an instance at the root is nobody's business of hers.
+fn alice_funding_on_record(file: &SwapFile, p: &AlicePhase) -> bool {
+    let decided = last_history(file, "intent_decided:fund_noid");
+    matches!(p, AlicePhase::FundingSubmitted { .. })
+        || file.pending_action.as_ref().is_some_and(|a| a.kind == "fund_noid")
+        || file.pending_intent.as_ref().is_some_and(|i| i.action == "fund_noid")
+        || (decided.is_some() && decided > last_history(file, "intent_cancelled:fund_noid"))
+}
+
+/// The phases `lost` can be declared from. The evidence is only collected there: a file that went on to `revealed` and `done` does not
+/// need it and its history stays free of it (a claim of Alice's that a reorg drops sends her back to `reveal_submitted`, where the
+/// next poll before `D` records it).
+fn alice_tracks_instance(p: &AlicePhase) -> bool {
+    matches!(p, AlicePhase::LockFinal { .. } | AlicePhase::RevealSubmitted { .. })
+}
+
+/// CHAOS F-18: the recorded instance is marked gone (a poll with `tip < D` did not list it) and not marked back since.
+fn instance_marked_gone_before_d(file: &SwapFile) -> bool {
+    let gone = last_history(file, "noid_instance_gone_before_d");
+    gone.is_some() && last_history(file, "noid_instance_back_after_gone") < gone
+}
+
+/// CHAOS F-18 (found by the long chaos runs: base seed `0xc4a05eed`, scenario 1259): an instance that is gone at `D + B_FINAL` was
+/// closed either by Bob's claim (included at `h < D`) or by Alice's own recovery (included at `h >= D`, outside this tool, perhaps
+/// never recorded with `--closed-by`). The tool cannot tell the two apart from a poll made after `D`, and a terminal `lost` has to be
+/// true. The one fact that does tell them apart: a poll with `tip < D` that did not list the instance, because nothing but the claim
+/// branch can close it before `D`. This writes that fact (log-only) and takes it back when the instance is listed again (a reorg
+/// that dropped the close), so an absence a reorg undid proves nothing. `alice_both_legs_lost` needs it.
+fn alice_gone_trace(file: &SwapFile, p: &AlicePhase, noid: &NoidObservation) -> Option<Event> {
+    if !alice_tracks_instance(p) {
+        return None;
+    }
+    let instance = p.instance()?;
+    let marked = instance_marked_gone_before_d(file);
+    if noid.find_instance(instance).is_some() {
+        return marked.then_some(Event::NoidInstanceBackAfterGone);
+    }
+    if marked || noid.tip >= file.public.params.deadline_height {
+        return None;
+    }
+    // A second node that still lists it, or one that could not be read, takes the word of the first away.
+    if noid.second_error.is_some() || noid.second.as_deref().is_some_and(|s| s.find_instance(instance).is_some()) {
+        return None;
+    }
+    Some(Event::NoidInstanceGoneBeforeD)
 }
 
 /// M2.5b: Alice's reveal was still pending when Bob's refund of the same lock was mined, so the reveal reverted (claim and
@@ -1182,6 +1367,16 @@ fn alice_both_legs_lost(
     if last_history(file, "noid_instance_alive_at_d").is_some() {
         notes.push(
             "the NOID instance is gone and the ETH refund is final, but the instance was still at the contract when Bob's claim branch had closed: it went by a recovery close (hers), not by Bob's claim; not declaring both legs lost (CHAOS F-17); if the close confirmed, record it with `tick --closed-by`"
+                .to_string(),
+        );
+        return None;
+    }
+    // CHAOS F-18: the instance being gone is not enough, nor is it enough that Bob COULD have claimed it. Positive evidence is needed that
+    // it went before `D` (only the claim branch closes then): a poll with `tip < D` that did not list it. Without that poll the close
+    // may be Alice's own recovery at `h >= D` that nobody recorded, and `lost` would be false (a terminal state must be true).
+    if !instance_marked_gone_before_d(file) {
+        notes.push(
+            "the NOID instance is gone and the ETH refund is final, but no poll made before D ever saw it gone: a close at or after D is Alice's own recovery, and from a poll after D the tool cannot tell it from Bob's claim; not declaring both legs lost (CHAOS F-18). If your wallet closed it, record that with `tick --closed-by`; if it did not, check the contract receipts: the NOID went to Bob and the file stays in this phase"
                 .to_string(),
         );
         return None;
@@ -1488,7 +1683,7 @@ fn alice_action(
             // `M_A` cutoff is gone (it protects a first publication that has no time to be final); what is left is to get a claim mined
             // before `T_reveal`, so a re-send is allowed until `T_reveal - DE`.
             let i2 = g.check_i2_eth(t_now, lock.t_reveal, true).or_else(|e| {
-                if secret_may_be_public(file) && t_now.saturating_add(g.de_s) <= lock.t_reveal {
+                if reveal_may_have_been_sent(file) && t_now.saturating_add(g.de_s) <= lock.t_reveal {
                     notes.push(format!(
                         "re-sending the reveal past the M_A cutoff: the secret may already be public, so only DE {} s before T_reveal {} count ({e})",
                         g.de_s, lock.t_reveal
@@ -1824,9 +2019,11 @@ fn bob_preimage_fact(
     }
     let Ok(authority) = file.public.authority() else { return Some(None) };
     for x in &candidates {
-        match check_preimage(x, &file.public.hashlock, &authority, file.public.params.variant) {
+        match check_preimage_for(file.public.params.eth.lock_kind, x, &file.public.hashlock, &authority, file.public.params.variant) {
             Ok(()) => {
                 let on_primary = eth.pending_preimage.as_ref().is_some_and(|p| p.lock_id == lock.lock_id && p.preimage == *x)
+                    || eth.overlong_claim.as_ref().is_some_and(|p| p.lock_id == lock.lock_id && p.preimage == *x)
+                    || eth.reverted_claim.as_ref().is_some_and(|p| p.lock_id == lock.lock_id && p.preimage == *x)
                     || eth.claimed.as_ref().is_some_and(|c| c.lock_id == lock.lock_id && c.preimage == *x);
                 if !on_primary {
                     notes.push(
@@ -1969,8 +2166,14 @@ enum CancelledLock {
 }
 
 fn cancelled_lock(file: &SwapFile) -> CancelledLock {
-    let first = file.cancelled_intents.iter().filter(|i| i.action == "lock_eth").find_map(|i| i.params.get("t_reveal").and_then(Value::as_u64));
-    match first {
+    let recorded: Vec<u64> = file.cancelled_intents.iter().filter(|i| i.action == "lock_eth").filter_map(|i| i.params.get("t_reveal").and_then(Value::as_u64)).collect();
+    // REVIEW-5 R5-6: a cancel from before cancelled intents were recorded sits in the history without an entry. If any cancel is unrecorded,
+    // the lock id it froze is unknown, and a recorded later one (another `T_reveal`) must not stand for both: the file is `Unrecorded`.
+    let cancels_in_history = file.history.iter().filter(|h| h.event == "intent_cancelled:lock_eth").count();
+    if cancels_in_history > recorded.len() {
+        return CancelledLock::Unrecorded;
+    }
+    match recorded.first().copied() {
         Some(t0) => CancelledLock::Known(t0),
         None if file.history.iter().any(|h| h.event == "intent_cancelled:lock_eth") => CancelledLock::Unrecorded,
         None => CancelledLock::None,
@@ -1992,7 +2195,7 @@ fn lock_reuse_safe(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation
 
 /// REVIEW-4 R4-6: why Bob's Ethereum leg is not settled for good yet, or `None` when the lock is closed in a final block (a refund of his, or
 /// Alice's claim).
-fn eth_leg_not_settled(lock: &LockSummary, eth: &EthObservation) -> Option<String> {
+fn eth_leg_not_settled(file: &SwapFile, lock: &LockSummary, eth: &EthObservation) -> Option<String> {
     let Some(l) = eth.find_lock(&lock.lock_id) else {
         return Some("the ETH lock is not visible in this poll".to_string());
     };
@@ -2003,12 +2206,42 @@ fn eth_leg_not_settled(lock: &LockSummary, eth: &EthObservation) -> Option<Strin
         .refunded
         .as_ref()
         .filter(|r| r.lock_id == lock.lock_id)
-        .map(|r| r.block_number)
-        .or_else(|| eth.claimed.as_ref().filter(|c| c.lock_id == lock.lock_id).map(|c| c.block_number));
+        .map(|r| (r.block_number, r.tx_hash == [0u8; 32]))
+        .or_else(|| eth.claimed.as_ref().filter(|c| c.lock_id == lock.lock_id).map(|c| (c.block_number, c.tx_hash == [0u8; 32])));
+    // REVIEW-5 R5-3: a close read only from the `getLock` record carries the poll's head as an upper bound of its block, which moves up with
+    // every poll and so never reaches the finalized block. Count from the head the FIRST such poll saw (`eth_close_record_seen:N`, written by
+    // [`note_record_only_close`]); the close is in a block at or below it.
+    let closed_at = closed_at.map(|(b, from_record)| match (from_record && eth.claim_state_from_record, first_record_close_block(file)) {
+        (true, Some(first)) => first.min(b),
+        _ => b,
+    });
     match (closed_at, eth.finalized_block) {
         (Some(b), Some(f)) if f >= b => None,
         (Some(b), f) => Some(format!("the ETH lock was closed at block {b}, which is not final yet (finalized block {})", f.map_or_else(|| "unknown".to_string(), |f| f.to_string()))),
         (None, _) => Some("the block that closed the ETH lock is unknown".to_string()),
+    }
+}
+
+const CLOSE_RECORD_SEEN: &str = "eth_close_record_seen:";
+
+/// The head block of the first poll that showed Bob's lock closed by the `getLock` record alone (no log), from the history.
+fn first_record_close_block(file: &SwapFile) -> Option<u64> {
+    file.history.iter().find_map(|h| h.event.strip_prefix(CLOSE_RECORD_SEEN).and_then(|n| n.parse::<u64>().ok()))
+}
+
+/// REVIEW-5 R5-3: Bob's file remembers, once, the head block at which his lock was first seen closed by the `getLock` record only (the log
+/// index lagged or the range missed the log). [`eth_leg_not_settled`] counts the finality of that close from there. Log-only.
+fn note_record_only_close(file: &mut SwapFile, eth: &EthObservation, now: u64) {
+    let Phase::Bob(p) = &file.phase else { return };
+    let Some(lock) = p.lock() else { return };
+    if !eth.claim_state_from_record || first_record_close_block(file).is_some() {
+        return;
+    }
+    let record_only = eth.refunded.as_ref().filter(|r| r.lock_id == lock.lock_id && r.tx_hash == [0u8; 32]).map(|r| r.block_number).or_else(|| {
+        eth.claimed.as_ref().filter(|c| c.lock_id == lock.lock_id && c.tx_hash == [0u8; 32]).map(|c| c.block_number)
+    });
+    if let Some(block) = record_only {
+        file.log(format!("{CLOSE_RECORD_SEEN}{block}"), now);
     }
 }
 
@@ -2064,6 +2297,119 @@ fn bob_with_eth_left(base: Action, left: EthLeft, notes: &mut Vec<String>) -> Ac
         }
         (base, _) => base,
     }
+}
+
+/// `poseidon` kind, Bob, before a lock transaction goes out (`None` for the `sha256` kind and when everything holds):
+/// - (only `first`, i.e. the first lock, not a re-send) his client R passed its self-test on this machine for the owner-authorization
+///   version of the next block (review V2-10: with a lock on `Addr(s)` the stock wallet import cannot claim, only client R can);
+/// - the query for `Locked` logs of Bob's own sender (indexed topic; REVIEW-7 R7-1) ran and is complete on every node asked (review V2-8,
+///   REVIEW-6 R6-1: the check is a state of the observation, and a failed or absent one holds the lock back; it never fails a poll). A check
+///   that cannot be trusted is "wait", not "go";
+/// - no `Locked` log with this lock word exists that BOB'S OWN SENDER made, other than his own lock (T9, REVIEW-6 R6-2). A lock by anyone
+///   else on the same word does not block: Bob's lock pays only the fixed receiver, and only for an `x` with `Addr(x) = A`, so a stranger's
+///   earlier lock costs Bob nothing it could not cost him anyway, and blocking would hand every observer of `A` a 1-wei veto. Such locks are
+///   reported in the notes.
+fn poseidon_prelock_blocker(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, first: bool, now: u64, notes: &mut Vec<String>) -> Option<String> {
+    if file.public.params.eth.lock_kind != LockKind::Poseidon {
+        return None;
+    }
+    if first {
+        if let Some(why) = selftest_blocker(file, noid, now) {
+            return Some(why);
+        }
+    }
+    let nodes: Vec<(&str, &EthObservation)> = std::iter::once(("first", eth)).chain(eth.second.as_deref().map(|s| ("second", s))).collect();
+    for (name, e) in &nodes {
+        match &e.word_scan {
+            WordScan::Complete => {}
+            WordScan::NotRun => {
+                return Some(format!(
+                    "the query for Bob's own earlier locks on this word did not run in this poll on the {name} node (it runs only while Bob has not locked yet): no earlier lock on this word is known, so Bob does not lock on a guess; poll again"
+                ))
+            }
+            WordScan::Failed(why) => {
+                return Some(format!(
+                    "the query for Bob's own earlier locks on the {name} node could not be completed, so an earlier lock on this word A could be hidden and Bob does not lock: {why}"
+                ))
+            }
+        }
+    }
+    let own = expected_lock_id(file);
+    let bob = file.public.params.eth.bob_sender;
+    let mut by_bob: Vec<[u8; 32]> = Vec::new();
+    let mut by_others: Vec<[u8; 32]> = Vec::new();
+    for (_, e) in &nodes {
+        for w in e.word_locks.iter().filter(|w| Some(w.lock_id) != own) {
+            let list = if w.sender == bob { &mut by_bob } else { &mut by_others };
+            if !list.contains(&w.lock_id) {
+                list.push(w.lock_id);
+            }
+        }
+    }
+    if !by_others.is_empty() {
+        notes.push(format!(
+            "{} Locked log(s) of other senders already carry this lock word A (not blocking: Bob's lock pays only the fixed receiver for an x with Addr(x) = A, and the NOID lock pays only Bob; REVIEW-6 R6-2)",
+            by_others.len()
+        ));
+    }
+    if !by_bob.is_empty() {
+        return Some(format!(
+            "{} Locked log(s) of the pinned contract made by Bob's own sender already carry this lock word A and are not the lock this file expects: the word has been locked before from Bob's address (T9), so Bob does not lock on it again",
+            by_bob.len()
+        ));
+    }
+    None
+}
+
+/// REVIEW-6 R6-1: should this poll also run the all-`Locked`-logs scan? Only for Bob in a `poseidon` swap and only while he can still decide to
+/// lock: before his lock is seen (`received`, `funded`, `funding_final`) and while a lock he sent may need a re-send (`lock_submitted`). From
+/// `locked` on, and for Alice, nothing depends on the scan, so it is not asked and cannot cost the poll.
+pub fn word_scan_wanted(file: &SwapFile) -> bool {
+    file.role == Role::Bob
+        && file.public.params.eth.lock_kind == LockKind::Poseidon
+        && matches!(&file.phase, Phase::Bob(BobPhase::Received | BobPhase::Funded { .. } | BobPhase::FundingFinal { .. } | BobPhase::LockSubmitted { .. }))
+}
+
+/// How old a client R self-test record may be when Bob decides to lock (REVIEW-6 R6-4).
+pub const SELFTEST_MAX_AGE_S: u64 = 86_400;
+
+/// REVIEW-6 R6-4: the client R self-test record must be a record of THIS swap's check on THIS build: the file's lock word, the contract version
+/// of this swap, the running binary's version string, the owner-authorization version of the next block, and younger than a day. Anything
+/// else is "run `swap-cli self-test FILE` again" (the engine cannot prove, it can only refuse to go on a stale or foreign record).
+fn selftest_blocker(file: &SwapFile, noid: &NoidObservation, now: u64) -> Option<String> {
+    let again = "run `swap-cli self-test FILE` again";
+    let Some(t) = &file.client_r_selftest else {
+        return Some(
+            "the client R self-test has not passed on this machine: run `swap-cli self-test FILE` (it proves and verifies an authorization for a throwaway instance); with a lock on A = Addr(s) only client R can claim the NOID, so Bob must have seen it work before he locks ETH (review V2-10)"
+                .to_string(),
+        );
+    };
+    let want = format!("{:?}", params::auth_version_at(noid.tip.saturating_add(1)));
+    if t.auth_version != want {
+        return Some(format!(
+            "the client R self-test passed for owner-authorization version {} but the next block uses {want}: {again} (review V2-10)",
+            t.auth_version
+        ));
+    }
+    if t.lock_word != hex::encode(file.public.hashlock) {
+        return Some(format!("the client R self-test record is not for this swap (its lock word differs from the file's): {again} (REVIEW-6 R6-4)"));
+    }
+    let version = file.public.params.contract_version.number();
+    if t.contract_version != version {
+        return Some(format!("the client R self-test ran for contract v{} but this swap uses v{version}: {again} (REVIEW-6 R6-4)", t.contract_version));
+    }
+    let build = crate::build_id();
+    if t.build_id != build {
+        return Some(format!("the client R self-test was made by another build ({:?}, this one is {build:?}): {again} (REVIEW-6 R6-4)", t.build_id));
+    }
+    if t.passed_at > now.saturating_add(300) {
+        return Some(format!("the client R self-test record is dated in the future (passed_at {} > now {now}): {again} (REVIEW-6 R6-4)", t.passed_at));
+    }
+    let age = now.saturating_sub(t.passed_at);
+    if age > SELFTEST_MAX_AGE_S {
+        return Some(format!("the client R self-test is {age} s old (limit {SELFTEST_MAX_AGE_S} s): {again} (REVIEW-6 R6-4)"));
+    }
+    None
 }
 
 fn bob_action(
@@ -2151,12 +2497,12 @@ fn bob_action(
                         Ok(t0)
                     } else {
                         Err(format!(
-                            "not locking: the lock of the cancelled lock_eth intent (T_reveal {t0}) is no longer safe to send, and a fresh T_reveal would be a second lock id while the cancelled send may still land; Bob walks away (REVIEW-4 R4-2). If that lock does land, refund it at T_reveal from the wallet"
+                            "not locking: the lock of the cancelled lock_eth intent (T_reveal {t0}) is no longer safe to send, and a fresh T_reveal would be a second lock id while the cancelled send may still land; Bob walks away (REVIEW-4 R4-2). If that lock does land: look at the contract before T_reveal; if a secret was published, claim the NOID before D; refund the ETH at T_reveal only if the lock is still unclaimed"
                         ))
                     }
                 }
                 CancelledLock::Unrecorded => Err(
-                    "not locking: a lock_eth intent was cancelled before this file recorded cancelled intents, so its T_reveal is unknown and a new lock could get a second lock id while the cancelled send may still land; Bob walks away (REVIEW-4 R4-2). If a lock of his lands, refund it at T_reveal from the wallet"
+                    "not locking: a lock_eth intent was cancelled before this file recorded cancelled intents, so its T_reveal is unknown and a new lock could get a second lock id while the cancelled send may still land; Bob walks away (REVIEW-4 R4-2). If a lock of his lands: look at the contract before T_reveal; if a secret was published, claim the NOID before D; refund the ETH at T_reveal only if the lock is still unclaimed"
                         .to_string(),
                 ),
             };
@@ -2164,6 +2510,13 @@ fn bob_action(
                 Ok(t_reveal) => {
                     if noid.instance.as_ref().map(|i| i.creation_id) != Some(instance.creation_id) {
                         return Action::Abort { reason: "instance incarnation changed".into() };
+                    }
+                    // `poseidon` kind (docs/poseidon-leg.md 6 and review V2-8, V2-10): no earlier lock on this A, and Bob's own client R has
+                    // been seen to authorize on his machine. Nothing is locked on a guess. Checked here, after the timing gates, so that a
+                    // Bob who is held back still aborts once the last lock height has passed instead of waiting for ever.
+                    if let Some(why) = poseidon_prelock_blocker(file, noid, eth, true, now, notes) {
+                        notes.push(format!("not lock_eth: {why}"));
+                        return Action::Wait { reason: why };
                     }
                     Action::LockEth {
                         hashlock: file.public.hashlock,
@@ -2189,8 +2542,24 @@ fn bob_action(
                 // would be refundable at once and no longer a swap, so Bob stops (`aborted`) instead of waiting for ever.
                 if !ok && eth_now(eth, now) >= *t_reveal {
                     return Action::Abort {
-                        reason: format!("the lock with T_reveal {t_reveal} was dropped, is not safe to re-send and its T_reveal has passed; if it still lands, refund it from the wallet"),
+                        reason: format!("the lock with T_reveal {t_reveal} was dropped, is not safe to re-send and its T_reveal has passed; if it still lands, look at the contract: claim the NOID before D if a secret was published, refund the ETH only if the lock is unclaimed"),
                     };
+                }
+                // CHAOS (seed 0x5eed0001, scenario 145): the lock was chosen on ONE instance. A re-send that finds several instances of the
+                // agreed amount at the root is no longer a lock on a known instance, and the funding gate (REVIEW-2 F10) says the tool does not
+                // lock on a guess: wait until it clears up (or until the re-send is unsafe on its own terms).
+                if ok {
+                    // `poseidon` kind: a lock of someone else on this A that appeared meanwhile (it is not the one we are re-sending).
+                    if let Some(why) = poseidon_prelock_blocker(file, noid, eth, false, now, notes) {
+                        notes.push(format!("not re-sending the lock: {why}"));
+                        return Action::Wait { reason: format!("the lock was dropped, but {why}") };
+                    }
+                    if let Err(InstanceProblem::Ambiguous(why)) = instance_ok(file, noid) {
+                        notes.push(format!("not re-sending the lock: {why}"));
+                        return Action::Wait {
+                            reason: format!("the lock was dropped, but more than one instance at the contract root fits the agreement: {why}"),
+                        };
+                    }
                 }
                 return if ok {
                     notes.push(format!("the lock transaction was dropped: re-sending the same lock (T_reveal {t_reveal})"));
@@ -2228,7 +2597,7 @@ fn bob_action(
             // the lock is closed (claimed or refunded) in a block that is final. A refund that a reorg can still take back, or a lock this poll
             // does not show, would leave Bob `aborted` over an ETH lock that is open again (scenario 2425 of seed 0xc4a05eed).
             if let Action::Abort { reason } = &action {
-                if let Some(why) = eth_leg_not_settled(lock, eth) {
+                if let Some(why) = eth_leg_not_settled(file, lock, eth) {
                     notes.push(format!("not aborting yet: {why}"));
                     return Action::Wait { reason: format!("{reason}; not aborting yet: {why}") };
                 }
@@ -2315,6 +2684,23 @@ fn intent_effect_seen(file: &SwapFile, intent: &PendingIntent, noid: &NoidObserv
                 .is_some_and(|l| l.refunded || l.claimed);
             return closed || matches!(&file.phase, Phase::Bob(B::RefundSubmitted { .. } | B::RefundMined { .. } | B::Refunded { .. }));
         }
+        // REVIEW-5 R5-7: the reveal is judged by its own lock as well. Once the lock it names is refunded (Bob's refund won the race and the
+        // reveal reverts) or claimed, nothing of it is left to wait for: it must not hold `refund_noid` at D until a cancel that a stuck
+        // claim in the mempool keeps refusing. The phase may stay `lock_final` for ever when Bob never claimed.
+        "reveal_eth" => {
+            let closed = intent
+                .params
+                .get("lock_id")
+                .and_then(Value::as_str)
+                .and_then(|h| hex::decode(h.trim_start_matches("0x")).ok())
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                .and_then(|id| eth.find_lock(&id))
+                .is_some_and(|l| l.refunded || l.claimed);
+            if closed || file.phase.name() != intent.phase_at_decision {
+                return true;
+            }
+            return false;
+        }
         _ => {}
     }
     if file.phase.name() != intent.phase_at_decision {
@@ -2353,11 +2739,15 @@ pub fn tick_apply(
     now: u64,
     record: bool,
 ) -> Result<TickOutcome, InvalidTransition> {
+    // REVIEW-6 R6-3: first, so this very decision already judges a re-send by the late cutoff.
+    note_reverted_reveal(file, eth, now);
     let mut decision = decide(file, noid, eth, now);
     for e in &decision.events {
         file.apply(e, now)?;
     }
     let mut status = IntentStatus::None;
+    note_reveal_pending(file, eth, now);
+    note_record_only_close(file, eth, now);
     if let Some(intent) = file.pending_intent.clone() {
         if intent_effect_seen(file, &intent, noid, eth) {
             file.log(format!("intent_resolved:{}", intent.action), now);
@@ -2386,8 +2776,19 @@ pub fn tick_apply(
                 decision.notes.push(format!(
                     "abort not recorded: a {kind} was decided for this swap and never cancelled, so it may have been sent (a funding or a lock that the chain does not show yet, or that a reorg took back). Look at the wallet / the contract; `swap-cli intent FILE --cancel` records that it was not sent"
                 ));
+            } else if let Some(why) = abort_eth_blocker(file, eth, now) {
+                decision.notes.push(format!("abort not recorded: {why}"));
+                decision.action = Action::Wait { reason: format!("{reason}; abort not recorded yet: {why}") };
             } else {
-                let event = Event::Abort { reason: reason.clone() };
+                let reason = if matches!(&file.phase, Phase::Bob(p) if p.lock().is_none())
+                    && last_history(file, "intent_decided:lock_eth").is_some()
+                    && !reason.contains("claim the NOID before D")
+                {
+                    format!("{reason}{ABORT_LOCK_MAY_LAND}")
+                } else {
+                    reason.clone()
+                };
+                let event = Event::Abort { reason };
                 if file.apply(&event, now).is_ok() {
                     decision.events.push(event);
                     file.pending_action = None;
@@ -2436,6 +2837,9 @@ pub fn tick_apply(
             if let Some(l) = eth.find_lock(lock_id) {
                 params["t_reveal"] = serde_json::json!(l.timelock);
                 params["cutoff"] = serde_json::json!(reveal_cutoff_for(file, l.timelock));
+                // REVIEW-5 R5-1: and the cutoff for a RE-send of this very claim once it is out (`T_reveal - DE`): `live.js claim --replace`
+                // uses it when it finds the pending claim, because a first reveal's intent froze the earlier `M_A` cutoff.
+                params["late_cutoff"] = serde_json::json!(l.timelock.saturating_sub(file.public.params.profile.gates().de_s));
             }
         }
         let intent = PendingIntent {
@@ -2473,18 +2877,69 @@ fn spend_may_be_in_flight(file: &SwapFile, now: u64) -> Option<&'static str> {
         let cancelled = last_history(file, &format!("intent_cancelled:{kind}"));
         // Review M1: a cancel is only as good as the one node's view of the mempool behind it, so a cancelled send keeps the abort
         // back for an hour (the next ticks record it): a transaction still queued elsewhere has landed by then.
-        let recently_cancelled = cancelled.is_some_and(|c| now.saturating_sub(file.history[c].at) < ABORT_AFTER_CANCEL_S);
+        let recently_cancelled = cancelled.is_some_and(|c| now.saturating_sub(file.history[c].at) < file.public.params.profile.gates().abort_after_cancel_s);
         decided.is_some() && (decided > cancelled || recently_cancelled)
     })
 }
 
+/// REVIEW-5 R5-4: may Bob's file say `aborted` over a lock that has not been seen? A file that decided `lock_eth` (the CLI path) and holds no lock
+/// yet ends the watch loop with the abort, so it must know that no lock of his is on its way up the chain:
+/// - the Ethereum head time must be fresh on every node read (the `lock_eth` limit, not under `rehearsal`): a stalled node shows no lock because it
+///   shows nothing;
+/// - where the profile asks for a second node (and `--single-node-ok` was not given) it must be there, readable and fresh, and
+///   - no node, the second one included, shows a lock under the id of any cancelled `lock_eth` intent.
+/// Returns why the abort must wait, or `None`.
+fn abort_eth_blocker(file: &SwapFile, eth: &EthObservation, now: u64) -> Option<String> {
+    let Phase::Bob(p) = &file.phase else { return None };
+    if p.lock().is_some() || last_history(file, "intent_decided:lock_eth").is_none() {
+        return None;
+    }
+    if let Some(alarm) = eth_lag_alarm(file, eth, now) {
+        return Some(format!("the Ethereum node lags, so its empty answer proves nothing about a lock of ours: {alarm}"));
+    }
+    let eth_params = &file.public.params.eth;
+    let ids: Vec<[u8; 32]> = file
+        .cancelled_intents
+        .iter()
+        .filter(|i| i.action == "lock_eth")
+        .filter_map(|i| i.params.get("t_reveal").and_then(Value::as_u64))
+        .map(|t| compute_lock_id(&eth_params.bob_sender, &eth_params.alice_receiver, eth_params.amount_wei, &file.public.hashlock, t))
+        .collect();
+    if let Some(id) = ids.iter().find(|id| eth.find_lock(id).is_some()) {
+        return Some(format!("a lock {} of a cancelled lock_eth intent is on the chain", short_id(id)));
+    }
+    // A second node that was configured but could not be read blocks whatever --single-node-ok says (as for the other steps of F5).
+    if let Some(e) = eth.second_error.as_deref() {
+        return Some(format!("the second Ethereum node could not be read ({e}): it must confirm that no lock of ours exists (REVIEW-5 R5-4)"));
+    }
+    match eth.second.as_deref() {
+        None if file.public.params.profile.requires_second_node() && !eth.single_node_ok => Some(
+            "a second Ethereum node is required to confirm that no lock of ours exists before the file says aborted (REVIEW-5 R5-4); pass --eth-rpc twice, or --single-node-ok to accept the risk"
+                .to_string(),
+        ),
+        None => None,
+        Some(second) => {
+            if let Some(why) = second_stale("eth (second node)", second.observed_at, now) {
+                return Some(why);
+            }
+            ids.iter().find(|id| second.find_lock(id).is_some()).map(|id| format!("the second Ethereum node shows the lock {} of a cancelled lock_eth intent", short_id(id)))
+        }
+    }
+}
+
+/// What the recorded reason of an abort over a lock that never showed says to do if one lands after all (REVIEW-5 R5-4).
+const ABORT_LOCK_MAY_LAND: &str =
+    "; if a lock of Bob's lands later, check it before T_reveal: if a secret was published claim the NOID before D, and refund the ETH at T_reveal only when the lock is still unclaimed";
+
 /// Review M1: how long after `intent --cancel` of a funding or a lock an `abort` is still not recorded.
-pub const ABORT_AFTER_CANCEL_S: u64 = 3_600;
+/// The production value; the profile's own is `Gates::abort_after_cancel_s` (REVIEW-5 R5-5).
+pub const ABORT_AFTER_CANCEL_S: u64 = params::PRODUCTION.abort_after_cancel_s;
 
 /// REVIEW-3 F3: the youngest an intent may be for `intent --cancel` to drop it. A send the operator made a moment ago can
 /// be in a node's mempool where this tool's reads do not see it yet; ten minutes is more than a mempool takes to show it
 /// and far less than any window of the protocol.
-pub const MIN_CANCEL_AGE_S: u64 = 600;
+/// The production value; the profile's own is `Gates::min_cancel_age_s` (REVIEW-5 R5-5).
+pub const MIN_CANCEL_AGE_S: u64 = params::PRODUCTION.min_cancel_age_s;
 
 /// `swap-cli intent FILE --cancel`: drop a pending intent that was never sent. A cancel is the one act that lets a SECOND
 /// lock or funding out, so it fails closed (REVIEW-3 F3). Refused when:
@@ -2523,9 +2978,10 @@ pub fn cancel_intent_checked(
         ));
     }
     let age = now.saturating_sub(intent.decided_at);
-    if age < MIN_CANCEL_AGE_S {
+    let min_age = file.public.params.profile.gates().min_cancel_age_s;
+    if age < min_age {
         return Err(format!(
-            "not cancelling: the {} intent is {age} s old, younger than {MIN_CANCEL_AGE_S} s (REVIEW-3 F3: a send made just now may not show in a mempool yet); look at the chain, wait, and try again",
+            "not cancelling: the {} intent is {age} s old, younger than {min_age} s (REVIEW-3 F3: a send made just now may not show in a mempool yet); look at the chain, wait, and try again",
             intent.action
         ));
     }
@@ -2743,6 +3199,7 @@ impl<E: Executor> Runner<E> {
         // A log-only event (Alice's `eth_refund_mined`) leaves the phase alone and so
         // must not resolve a pending action the way a phase move does.
         let moved = self.file.phase != phase_before;
+        note_record_only_close(&mut self.file, eth, now);
         if !names.is_empty() {
             self.file.save(&self.path)?;
         }
@@ -2826,6 +3283,10 @@ impl<E: Executor> Runner<E> {
             Err(e) => {
                 if let Some(p) = self.file.pending_action.as_mut() {
                     p.maybe_sent = e.maybe_sent;
+                }
+                // REVIEW-5 R5-1: a reveal whose outcome is unknown may be in the mempool: the secret may be public.
+                if e.maybe_sent && matches!(action, Action::RevealEth { .. }) && last_history(&self.file, REVEAL_MAYBE_SENT).is_none() {
+                    self.file.log(REVEAL_MAYBE_SENT, now);
                 }
                 (None, Some(e.to_string()))
             }

@@ -12,6 +12,9 @@
  *   FUZZ_ONLY     run only this sequence index (reproduce a failure)
  *   FUZZ_KIND     with FUZZ_ONLY: "eth" or "tok"
  *   FUZZ_TRACE    "1" prints every step
+ *   FUZZ_ONLY with FUZZ_KIND=pv2 reproduces a sequence of the HTLCPoseidonV2 campaign (FUZZ_MUTANT_P=n plants a bug in it)
+ *   FUZZ_PN       sequences of the HTLCPoseidonV2 campaign, default = FUZZ_N (each claim costs a Poseidon permutation;
+ *                 the chain is recycled between sequences to keep the Hardhat runtime's memory flat)
  *
  * Method: every sequence starts from a fresh chain snapshot. A pure-JS reference model
  * predicts, for every transaction, success or the exact custom error, the exact events and
@@ -22,6 +25,8 @@
 const assert = require("assert");
 const crypto = require("crypto");
 const { ethers } = require("hardhat");
+const PORT = require("../scripts/poseidon/poseidon2b.js");
+const { createChainBudget } = require("./helpers/chain-budget.js");
 
 const N = Number(process.env.FUZZ_N || 200); // default keeps `npx hardhat test` fast; the full campaign is FUZZ_N=2000
 const SEED = process.env.FUZZ_SEED || "noid-swap-fuzz-1";
@@ -35,6 +40,9 @@ const START = Number(process.env.FUZZ_START || 0); // first sequence index (resu
 // (contracts/test/HTLCMutant.sol) instead of the real contracts; the campaign must then FAIL.
 const MUT = process.env.FUZZ_MUTANT ? Number(process.env.FUZZ_MUTANT) : null;
 const MUT_T = process.env.FUZZ_MUTANT_ERC20 ? Number(process.env.FUZZ_MUTANT_ERC20) : null;
+// HTLCPoseidonV2 campaign: FUZZ_MUTANT_P=n deploys HTLCPoseidonV2Mutant(n) (contracts/test/HTLCPoseidonV2Mutant.sol) instead.
+const MUT_P = process.env.FUZZ_MUTANT_P ? Number(process.env.FUZZ_MUTANT_P) : null;
+const PN = Number(process.env.FUZZ_PN || N);
 
 const ZERO = ethers.ZeroAddress;
 const MAXU = (1n << 256n) - 1n;
@@ -90,6 +98,8 @@ class Rng {
 
 // ----------------------------------------------------------------------------- misc helpers
 const sha256Raw = (hex) => "0x" + crypto.createHash("sha256").update(Buffer.from(hex.slice(2), "hex")).digest("hex");
+// Addr(secret) as the HTLCPoseidonV2 model computes it: the JavaScript port, which test/poseidon-vectors.test.js ties to the vendor crate.
+const addrRaw = (hex) => "0x" + PORT.addr(Buffer.from(hex.slice(2), "hex")).toString("hex");
 const lc = (a) => a.toLowerCase();
 const hexcat = (...xs) => "0x" + xs.map((x) => x.slice(2)).join("");
 const toHex = (n, bytes) => "0x" + n.toString(16).padStart(bytes * 2, "0");
@@ -98,7 +108,7 @@ const ERR_IFACE = new ethers.Interface([
   "error ZeroAmount()", "error ZeroReceiver()", "error InvalidReceiver()", "error ZeroToken()", "error TimelockNotInFuture()",
   "error LockAlreadyExists()", "error LockNotFound()", "error InvalidPreimage()", "error TimelockExpired()",
   "error TimelockNotExpired()", "error AlreadyClaimed()", "error AlreadyRefunded()", "error NotSender()",
-  "error TransferFailed()", "error Reentrancy()", "error UnsupportedToken()",
+  "error TransferFailed()", "error Reentrancy()", "error UnsupportedToken()", "error BadCalldataLength()", "error InsufficientGas()",
   "error ERC20InsufficientBalance(address,uint256,uint256)", "error ERC20InsufficientAllowance(address,uint256,uint256)",
   "error SafeERC20FailedOperation(address)", "error AddressEmptyCode(address)",
 ]);
@@ -119,7 +129,7 @@ const TOKEN_IFACE = new ethers.Interface([
 
 // ----------------------------------------------------------------------------- global stats
 const STATS = {
-  seqEth: 0, seqTok: 0, txEth: 0, txTok: 0, outcomes: {}, gas: {}, cover: {}, taint: {}, insolventSeq: {}, stuck: {},
+  seqEth: 0, seqTok: 0, seqP: 0, txEth: 0, txTok: 0, outcomes: {}, gas: {}, cover: {}, taint: {}, insolventSeq: {}, stuck: {},
   reentryAttempts: 0, reentrySuccess: 0, hooksRun: 0, startedAt: Date.now(),
 };
 const bump = (obj, k, n = 1) => { obj[k] = (obj[k] || 0) + n; };
@@ -132,16 +142,46 @@ function recGas(cat, g) {
 
 // ----------------------------------------------------------------------------- environment
 const env = {};
+// Memory budget of the HTLCPoseidonV2 campaign (see test/helpers/chain-budget.js): the Hardhat runtime retains
+// ~30-45 MB per permutation-sized call until the provider is recreated, so the chain is recycled between sequences.
+const PCHAIN = createChainBudget(ethers, {
+  what: "HTLCPoseidonV2 fuzz campaign",
+  marginMB: 500, // a single sequence can make up to FUZZ_STEPS claims before the next recycle check
+  minChunk: 10,
+  maxChunk: 40,
+  onRecycle: () => { for (const k of Object.keys(env)) delete env[k]; },
+  probe: async (n) => {
+    const H = await (await ethers.getContractFactory("Poseidon2bHarness")).deploy();
+    for (let i = 0; i < n; i++) await H.addr("0x" + "00".repeat(31) + "01");
+  },
+});
+/** Before an HTLCPoseidonV2 sequence: recycle the chain if the budget is used up, and (re)deploy the contract. */
+async function pvPrepare() {
+  await PCHAIN.ensure(Math.min(8, MAXSTEPS)); // reserve for one typical sequence; the margin above absorbs the rare long one
+  await setupEnv(["pv2"]);
+}
+let activeEth = null; // the ETH-like environment (env.eth = HTLC, env.pv2 = HTLCPoseidonV2) the running sequence works on
 
 // The in-process Hardhat node keeps memory per mined block; a fresh chain every chunk keeps a long run flat.
-async function freshChain() {
+async function freshChain(parts) {
   await p.send("hardhat_reset", []);
   for (const k of Object.keys(env)) delete env[k];
-  await setupEnv();
+  await setupEnv(parts);
 }
 
-async function setupEnv() {
-  if (env.eth) return;
+/** Same as freshChain() for a chain that was already reset (the memory budget resets it). */
+async function rebuildEnv(parts) {
+  for (const k of Object.keys(env)) delete env[k];
+  await setupEnv(parts);
+}
+
+/**
+ * parts: which sides to deploy. "sha" = HTLC (env.eth), "tok" = HTLCERC20 (env.tok), "pv2" = HTLCPoseidonV2 (env.pv2).
+ * Default: the two sides the original campaign uses.
+ */
+async function setupEnv(parts = ["sha", "tok"]) {
+  const want = (x) => parts.includes(x);
+  if ((!want("sha") || env.eth) && (!want("tok") || env.tok) && (!want("pv2") || env.pv2)) return;
   const signers = await ethers.getSigners();
   env.signers = signers;
   env.op = signers[9];
@@ -163,16 +203,27 @@ async function setupEnv() {
     return out;
   };
 
-  // ETH side
-  const htlc = await HTLC.deploy(...(MUT !== null ? [MUT] : []));
-  await htlc.waitForDeployment();
-  const hAddr = lc(await htlc.getAddress());
-  const actors = await mkActors("actor", hAddr, false);
   const outsiders = [lc("0x00000000000000000000000000000000000d0d0d"), lc("0x0000000000000000000000000000000000000002")];
-  env.eth = {
-    htlc, hAddr, iface: htlc.interface, parties: [...eoas, ...actors], actors, outsiders,
-    recvPool: [...eoas, ...actors].map((x) => x.addr).concat(outsiders),
+
+  // ETH side (HTLC.sol) and the HTLCPoseidonV2 side have the same shape
+  const mkEth = async (Factory, args, extra) => {
+    const htlc = await Factory.deploy(...args);
+    await htlc.waitForDeployment();
+    const hAddr = lc(await htlc.getAddress());
+    const actors = await mkActors(extra.kind === "pv2" ? "pactor" : "actor", hAddr, false);
+    return {
+      ...extra, htlc, hAddr, iface: htlc.interface, parties: [...eoas, ...actors], actors, outsiders,
+      recvPool: [...eoas, ...actors].map((x) => x.addr).concat(outsiders),
+    };
   };
+  if (want("sha")) {
+    env.eth = await mkEth(HTLC, MUT !== null ? [MUT] : [], { kind: "sha", pfx: "", hashOf: sha256Raw, lockField: "hashlock" });
+  }
+  if (want("pv2")) {
+    const PV2 = await ethers.getContractFactory(MUT_P !== null ? "HTLCPoseidonV2Mutant" : "HTLCPoseidonV2");
+    env.pv2 = await mkEth(PV2, MUT_P !== null ? [MUT_P] : [], { kind: "pv2", pfx: "pv2.", hashOf: addrRaw, lockField: "lockAddr" });
+  }
+  if (!want("tok")) return;
 
   // ERC-20 side
   const htlcT = await HTLCERC20.deploy(...(MUT_T !== null ? [MUT_T] : []));
@@ -241,9 +292,11 @@ class Seq {
     assert.strictEqual(blk.timestamp, ts, "block timestamp must be the planned one");
     M.blockNo++; M.t = ts;
     this.kind === "eth" ? STATS.txEth++ : STATS.txTok++;
+    // memory budget: a claim that reached the permutation costs the Hardhat runtime ~30-45 MB of retained trace
+    if (this.E.kind === "pv2" && plan.label.startsWith("claim.") && ["ok", "InvalidPreimage", "TransferFailed"].includes(r.ok ? "ok" : errName(r.data))) PCHAIN.note(1);
 
     const outcome = r.ok ? "ok" : errName(r.data);
-    bump(STATS.outcomes, `${this.kind}:${plan.label}:${outcome}`);
+    bump(STATS.outcomes, `${this.E.pfx || ""}${this.kind}:${plan.label}:${outcome}`);
     this.log(`${plan.label} dt=${dt} ts=${ts} expect=${e.ok ? "ok" : [].concat(e.err).join("|")} got=${outcome}${plan.note ? " (" + plan.note + ")" : ""}`);
 
     if (e.ok) {
@@ -300,8 +353,8 @@ function ethClaimCalldata(iface, id, variant, lockSecret, hashlock, rng) {
     case "hashAsPre": { const h = hashlock || rng.bytes32(); return { data: hexcat(sel, id, h), eff: h }; }
     case "trunc31": return { data: hexcat(sel, id, "0x" + right.slice(2, 2 + 62)), eff: null };
     case "empty": return { data: hexcat(sel, id), eff: null };
-    case "long33": return { data: hexcat(sel, id, right, rb()), eff: right };
-    case "shifted33": { const b = rb(); return { data: hexcat(sel, id, b, right), eff: "0x" + b.slice(2) + right.slice(2, 2 + 62) }; }
+    case "long33": return { data: hexcat(sel, id, right, rb()), eff: right, tail: true };
+    case "shifted33": { const b = rb(); return { data: hexcat(sel, id, b, right), eff: "0x" + b.slice(2) + right.slice(2, 2 + 62), tail: true }; }
     default: throw new Error(variant);
   }
 }
@@ -331,16 +384,24 @@ function ethExpNewLock(E, sender, receiver, amount, hashlock, timelock, meta) {
   };
 }
 
-function ethExpClaim(E, id, eff, label) {
+function ethExpClaim(E, id, eff, label, tail) {
   return (M, ts) => {
     const fail = (err) => ({ ok: false, err });
     if (eff === null) return fail("EMPTY"); // ABI decoder: calldata too short
+    // HTLCPoseidonV2: the secret is exactly 32 bytes (calldata exactly 68 bytes), checked before anything else;
+    // the timelock is checked BEFORE the (expensive) hash, the other way round from HTLC.sol
+    if (E.kind === "pv2" && tail) return fail("BadCalldataLength");
     const l = M.locks.get(id);
     if (!l) return fail("LockNotFound");
     if (l.claimed) return fail("AlreadyClaimed");
     if (l.refunded) return fail("AlreadyRefunded");
-    if (sha256Raw(eff) !== l.hashlock) return fail("InvalidPreimage");
-    if (ts >= l.timelock) return fail("TimelockExpired");
+    if (E.kind === "pv2") {
+      if (ts >= l.timelock) return fail("TimelockExpired");
+      if (E.hashOf(eff) !== l.hashlock) return fail("InvalidPreimage");
+    } else {
+      if (E.hashOf(eff) !== l.hashlock) return fail("InvalidPreimage");
+      if (ts >= l.timelock) return fail("TimelockExpired");
+    }
     if (l.receiver === E.hAddr || ETH_ACTOR_REJECTS(M, l.receiver)) return fail("TransferFailed");
     return {
       ok: true,
@@ -380,7 +441,7 @@ const okExp = (apply) => () => ({ ok: true, events: [], apply });
 
 async function ethInvariants(seq, plan, e) {
   const { M } = seq;
-  const E = env.eth;
+  const E = activeEth;
   // 1. exact balances of every party and of the contract
   for (const q of E.parties) assert.strictEqual(await p.getBalance(q.addr), M.bal[q.addr], `balance of ${q.name} differs from the model`);
   for (const o of E.outsiders) assert.strictEqual(await p.getBalance(o), M.bal[o], `balance of outsider ${o}`);
@@ -402,14 +463,15 @@ async function checkEthLock(E, M, id) {
   }
   const c = await E.htlc.getLock(id);
   assert.strictEqual(lc(c.sender), l.sender); assert.strictEqual(lc(c.receiver), l.receiver);
-  assert.strictEqual(c.amount, l.amount); assert.strictEqual(c.hashlock, l.hashlock); assert.strictEqual(c.timelock, l.timelock);
+  assert.strictEqual(c.amount, l.amount); assert.strictEqual(c[E.lockField], l.hashlock); assert.strictEqual(c.timelock, l.timelock);
   assert.strictEqual(c.claimed, l.claimed); assert.strictEqual(c.refunded, l.refunded); assert.strictEqual(c.preimage, l.pre);
   assert.ok(!(c.claimed && c.refunded), "lock both claimed and refunded");
-  if (c.claimed) assert.strictEqual(sha256Raw(c.preimage), c.hashlock, "stored preimage does not hash to the hashlock");
+  if (c.claimed) assert.strictEqual(E.hashOf(c.preimage), c[E.lockField], "stored preimage does not hash to the lock");
 }
 
-async function ethSequence(idx) {
-  const E = env.eth;
+async function ethSequence(idx, which = "eth") {
+  const E = env[which];
+  activeEth = E;
   const rng = new Rng(`${SEED}:eth:${idx}`);
   const snap = await p.send("evm_snapshot", []);
   let seq;
@@ -424,7 +486,7 @@ async function ethSequence(idx) {
     M.bal[E.hAddr] = await p.getBalance(E.hAddr);
     assert.strictEqual(M.bal[E.hAddr], 0n);
     for (const a of E.actors) M.mode[a.addr] = 0;
-    for (let i = 0; i < rng.range(2, 4); i++) { const s = rng.bytes32(); M.secrets.push({ s, h: sha256Raw(s) }); }
+    for (let i = 0; i < rng.range(2, 4); i++) { const s = rng.bytes32(); M.secrets.push({ s, h: E.hashOf(s) }); }
     seq = new Seq("eth", idx, rng, M, { ...E, invariants: ethInvariants });
     const startBlock = M.blockNo;
     for (const a of E.actors) {
@@ -457,7 +519,7 @@ async function ethSequence(idx) {
 
 async function ethStep(seq, kind, dt, ts) {
   const { M, rng } = seq;
-  const E = env.eth;
+  const E = activeEth;
   const party = () => rng.pick(E.parties);
   const cover = (name) => (ok, outcome) => bump(STATS.cover, `${name}:${ok ? "ok" : outcome}`);
 
@@ -479,7 +541,7 @@ async function ethStep(seq, kind, dt, ts) {
       if (hp === "pool") { const s = rng.pick(M.secrets); hashlock = s.h; secret = s.s; }
       else if (hp === "zero") hashlock = ethers.ZeroHash;
       else if (hp === "reuse" && existing.length) { const l = rng.pick(existing); hashlock = l.hashlock; secret = l.secret; }
-      else { const s = rng.bytes32(); hashlock = sha256Raw(s); secret = s; }
+      else { const s = rng.bytes32(); hashlock = E.hashOf(s); secret = s; }
       const off = rng.weighted([[12, -BigInt(rng.int(10))], [3, 0n], [10, BigInt(rng.range(1, 5))], [75, BigInt(rng.range(6, 3 * 3600))]]);
       timelock = ts + off;
     }
@@ -490,7 +552,7 @@ async function ethStep(seq, kind, dt, ts) {
       label: "newLock", caller: sp, to: E.hAddr, value: amount,
       data: E.iface.encodeFunctionData("newLock", [hashlock, timelock, receiver]),
       exp: ethExpNewLock(E, sender, receiver, amount, hashlock, timelock, { secret }), touched: [id],
-      cat: `eth.newLock${sp.kind === "actor" ? ".viaActor" : ""}`,
+      cat: `${E.pfx}eth.newLock${sp.kind === "actor" ? ".viaActor" : ""}`,
       note: M.locks.has(id) ? "duplicate id" : "",
     }, dt);
     if (M.locks.has(id) && !M.locks.get(id).armed) {
@@ -513,8 +575,8 @@ async function ethStep(seq, kind, dt, ts) {
     const caller = party();
     await seq.tx({
       label: `claim.${variant}`, caller, to: E.hAddr, data: cd.data,
-      exp: ethExpClaim(E, id, cd.eff), touched: [id],
-      cat: l ? `eth.claim.to_${rcvClass(M, E, l.receiver)}` : undefined,
+      exp: ethExpClaim(E, id, cd.eff, undefined, cd.tail), touched: [id],
+      cat: l ? `${E.pfx}eth.claim.to_${rcvClass(M, E, l.receiver)}` : undefined,
       note: l ? `receiver=${rcvClass(M, E, l.receiver)}` : "",
       cover: l ? (ok, o) => { const dtl = BigInt(M.t) - l.timelock; if (dtl >= -1n && dtl <= 0n) bump(STATS.cover, `claim@tl${dtl === -1n ? "-1" : "=0"}(${variant === "right" ? "right" : "other"}):${ok ? "ok" : o}`); } : undefined,
     }, dt);
@@ -529,7 +591,7 @@ async function ethStep(seq, kind, dt, ts) {
     await seq.tx({
       label: "refund", caller, to: E.hAddr, data: E.iface.encodeFunctionData("refund", [id]),
       exp: ethExpRefund(E, id, caller), touched: [id],
-      cat: `eth.refund${caller.kind === "actor" ? ".viaActor" : ""}`,
+      cat: `${E.pfx}eth.refund${caller.kind === "actor" ? ".viaActor" : ""}`,
       cover: (ok, o) => { const dtl = BigInt(M.t) - l.timelock; if (dtl >= -1n && dtl <= 0n && caller.addr === l.sender) bump(STATS.cover, `refund@tl${dtl === -1n ? "-1" : "=0"}:${ok ? "ok" : o}`); },
     }, dt);
     return;
@@ -567,7 +629,7 @@ async function ethStep(seq, kind, dt, ts) {
 
   if (kind === "view") {
     const id = rng.weighted([[70, [...M.locks.keys()][0] || ethers.ZeroHash], [30, rng.bytes32()]]);
-    await checkEthLock(env.eth, M, id);
+    await checkEthLock(activeEth, M, id);
     return;
   }
   throw new Error("unknown step " + kind);
@@ -583,7 +645,7 @@ function rcvClass(M, E, addr) {
 /** Liveness: everyone becomes cooperative, time passes, every sender refunds what is still open. */
 async function ethDrain(seq) {
   const { M, rng } = seq;
-  const E = env.eth;
+  const E = activeEth;
   for (const a of E.actors) if (M.mode[a.addr] !== 0) await seq.tx({ label: "drain.setMode", caller: null, to: a.addr, data: ACTOR_IFACE.encodeFunctionData("setMode", [0]), exp: okExp(() => { M.mode[a.addr] = 0; }), touched: [] }, 1);
   let maxTl = 0n;
   for (const l of M.locks.values()) if (!l.claimed && !l.refunded && l.timelock > maxTl) maxTl = l.timelock;
@@ -591,7 +653,7 @@ async function ethDrain(seq) {
   for (const l of [...M.locks.values()]) {
     if (l.claimed || l.refunded) continue;
     const caller = E.parties.find((x) => x.addr === l.sender);
-    await seq.tx({ label: "drain.refund", caller, to: E.hAddr, data: E.iface.encodeFunctionData("refund", [l.id]), exp: ethExpRefund(E, l.id, caller), touched: [l.id], cat: "eth.refund.drain" }, dt);
+    await seq.tx({ label: "drain.refund", caller, to: E.hAddr, data: E.iface.encodeFunctionData("refund", [l.id]), exp: ethExpRefund(E, l.id, caller), touched: [l.id], cat: `${E.pfx}eth.refund.drain` }, dt);
     dt = 1;
     assert.ok(M.locks.get(l.id).refunded, "drain refund must succeed once everyone accepts ETH");
   }
@@ -601,7 +663,7 @@ async function ethDrain(seq) {
 
 async function ethAudit(seq, startBlock) {
   const { M } = seq;
-  const E = env.eth;
+  const E = activeEth;
   for (const id of M.locks.keys()) await checkEthLock(E, M, id);
   // events vs state: replay the logs independently of the model
   const logs = await p.getLogs({ address: E.hAddr, fromBlock: startBlock + 1, toBlock: "latest" });
@@ -1458,7 +1520,7 @@ describe("fuzz: deterministic reproductions (HTLCERC20)", function () {
 function report() {
   const secs = ((Date.now() - STATS.startedAt) / 1000).toFixed(1);
   console.log(`\n=== FUZZ SUMMARY seed="${SEED}" N=${N}`);
-  console.log(`sequences: eth=${STATS.seqEth} erc20=${STATS.seqTok}; transactions: eth=${STATS.txEth} erc20=${STATS.txTok}; elapsed ${secs}s`);
+  console.log(`sequences: eth=${STATS.seqEth} (of which HTLCPoseidonV2 ${STATS.seqP}) erc20=${STATS.seqTok}; transactions: eth=${STATS.txEth} erc20=${STATS.txTok}; elapsed ${secs}s`);
   console.log(`re-entry attempts by hostile receivers/tokens: ${STATS.reentryAttempts}, successful: ${STATS.reentrySuccess}; receive() hook runs: ${STATS.hooksRun}`);
   console.log("gas (max / avg / n) by category:");
   for (const k of Object.keys(STATS.gas).sort()) { const g = STATS.gas[k]; console.log(`  ${k.padEnd(44)} ${String(g.max).padStart(8)} ${String(g.sum / BigInt(g.n)).padStart(8)} ${g.n}`); }
@@ -1481,11 +1543,14 @@ describe("fuzz campaign", function () {
   after(report);
 
   if (ONLY !== null) {
-    it(`reproduce ${ONLY_KIND} sequence ${ONLY}`, async () => { await (ONLY_KIND === "tok" ? tokSequence(ONLY) : ethSequence(ONLY)); });
+    it(`reproduce ${ONLY_KIND} sequence ${ONLY}`, async () => {
+      if (ONLY_KIND === "pv2") { await PCHAIN.calibrate(); await PCHAIN.recycle(); await pvPrepare(); await ethSequence(ONLY, "pv2"); }
+      else await (ONLY_KIND === "tok" ? tokSequence(ONLY) : ethSequence(ONLY));
+    });
     return;
   }
 
-  for (let c = 0; c < N && MUT_T === null; c += CHUNK) {
+  for (let c = 0; c < N && MUT_T === null && MUT_P === null; c += CHUNK) {
     const hi = Math.min(N, c + CHUNK);
     it(`HTLC (ETH): random sequences ${c}..${hi - 1}`, async () => {
       if (c > 0) await freshChain();
@@ -1493,12 +1558,28 @@ describe("fuzz campaign", function () {
       if (process.env.FUZZ_MEM) console.log(`      rss=${(process.memoryUsage().rss / 1048576) | 0} MB`);
     });
   }
-  for (let c = 0; c < N && MUT === null; c += CHUNK) {
+  for (let c = 0; c < N && MUT === null && MUT_P === null; c += CHUNK) {
     const hi = Math.min(N, c + CHUNK);
     it(`HTLCERC20: random sequences ${c}..${hi - 1}`, async () => {
       await freshChain();
       for (let i = c; i < hi; i++) await tokSequence(START + i);
       if (process.env.FUZZ_MEM) console.log(`      rss=${(process.memoryUsage().rss / 1048576) | 0} MB`);
+    });
+  }
+  // HTLCPoseidonV2: same random sequences, same invariants, model with Addr from the JS port (tied to the vendor
+  // crate by test/poseidon-vectors.test.js); the timelock is checked before the hash and the secret is exactly 32 bytes.
+  for (let c = 0; c < PN && MUT === null && MUT_T === null; c += CHUNK) {
+    const hi = Math.min(PN, c + CHUNK);
+    it(`HTLCPoseidonV2 (ETH): random sequences ${c}..${hi - 1}${MUT_P !== null ? ` [MUTANT ${MUT_P}]` : ""}`, async () => {
+      await PCHAIN.calibrate();
+      await PCHAIN.recycle(); // start the chunk on a clean chain
+      for (let i = c; i < hi; i++) {
+        await pvPrepare();
+        await ethSequence(START + i, "pv2");
+        STATS.seqP++;
+      }
+      if (hi === PN) await PCHAIN.recycle(); // release the retained traces for the test files that run after this one
+      if (c === 0 || hi === PN) console.log(`      HTLCPoseidonV2: chain recycled ${PCHAIN.mem.recycles}x in chunks of ${PCHAIN.mem.chunk} permutation-sized calls (~${Math.round(PCHAIN.mem.perPerm)} MB retained per call)`);
     });
   }
 });

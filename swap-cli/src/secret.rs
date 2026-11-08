@@ -49,6 +49,49 @@ impl fmt::Display for Variant {
     }
 }
 
+/// Which hash the Ethereum lock is keyed on (`docs/poseidon-leg.md`).
+///
+/// Plain words: `Sha256` is today's `HTLC.sol`, locked on `SHA-256(s)`; because Parano1d's own lock is keyed on `Addr(s)`,
+/// Bob then needs the zero-knowledge equivalence proof that both belong to one `s`. `Poseidon` is `HTLCPoseidonV2.sol`, locked on
+/// `A = Addr(s)` itself (the EVM computes `Addr`), so both locks carry the same 32 bytes and no proof is needed. Raw variant only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LockKind {
+    #[default]
+    Sha256,
+    Poseidon,
+}
+
+impl LockKind {
+    pub fn is_sha256(&self) -> bool {
+        *self == LockKind::Sha256
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LockKind::Sha256 => "sha256",
+            LockKind::Poseidon => "poseidon",
+        }
+    }
+}
+
+impl fmt::Display for LockKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for LockKind {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "sha256" => Ok(LockKind::Sha256),
+            "poseidon" => Ok(LockKind::Poseidon),
+            other => Err(format!("unknown lock kind {other:?} (sha256 or poseidon)")),
+        }
+    }
+}
+
 /// The 32-byte swap secret (`s` in the raw variant, `m` in the stock one).
 /// Zeroized on drop; never printed by `Debug`.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -105,6 +148,15 @@ impl Secret {
     /// `H = SHA-256(secret)` over the 32 raw bytes: the Ethereum/Bitcoin hashlock.
     pub fn hashlock(&self) -> [u8; 32] {
         sha256(&self.0)
+    }
+
+    /// The word the Ethereum lock is keyed on: `SHA-256(s)` for the `sha256` kind, `Addr(s)` (the 32 address bytes, the payload of the
+    /// `o1...` string) for the `poseidon` kind. For `poseidon` it is the claim authority of the raw variant by definition.
+    pub fn lock_word(&self, kind: LockKind) -> [u8; 32] {
+        match kind {
+            LockKind::Sha256 => self.hashlock(),
+            LockKind::Poseidon => htlc_harness::addr(self.0).0,
+        }
     }
 
     /// The bytes the Parano1d prover takes as witness: `s` itself (raw) or
@@ -183,8 +235,10 @@ pub fn parse_hex32(text: &str) -> Result<[u8; 32], SecretError> {
 /// Why a preimage seen on the counter-chain is not the one this swap expects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreimageError {
-    /// `SHA-256(preimage) != H`: not this swap's secret at all.
+    /// `SHA-256(preimage) != H` (kind `sha256`) or `Addr(preimage) != lock word` (kind `poseidon`): not this swap's secret at all.
     HashlockMismatch,
+    /// The `poseidon` kind exists for the raw variant only.
+    VariantNotAllowed,
     /// `SHA-256` matched but the Parano1d authority does not: the equivalence
     /// proof was wrong or the variant is wrong. Do not try to claim with it.
     AuthorityMismatch,
@@ -193,7 +247,8 @@ pub enum PreimageError {
 impl fmt::Display for PreimageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PreimageError::HashlockMismatch => write!(f, "SHA-256(preimage) != hashlock"),
+            PreimageError::HashlockMismatch => write!(f, "SHA-256(preimage) != hashlock (poseidon kind: Addr(preimage) != lock word)"),
+            PreimageError::VariantNotAllowed => write!(f, "the poseidon lock kind is for the raw variant only"),
             PreimageError::AuthorityMismatch => {
                 write!(f, "Addr(preimage) != claim_authority (equivalence failure)")
             }
@@ -211,8 +266,32 @@ pub fn check_preimage(
     claim_authority: &Address,
     variant: Variant,
 ) -> Result<(), PreimageError> {
-    if sha256(preimage) != *hashlock {
-        return Err(PreimageError::HashlockMismatch);
+    check_preimage_for(LockKind::Sha256, preimage, hashlock, claim_authority, variant)
+}
+
+/// [`check_preimage`] for a given lock kind. `poseidon`: `Addr(x) == lock word` (never SHA-256), and then, as for every kind, the
+/// Parano1d authority; the raw variant only.
+pub fn check_preimage_for(
+    kind: LockKind,
+    preimage: &[u8; 32],
+    lock_word: &[u8; 32],
+    claim_authority: &Address,
+    variant: Variant,
+) -> Result<(), PreimageError> {
+    match kind {
+        LockKind::Sha256 => {
+            if sha256(preimage) != *lock_word {
+                return Err(PreimageError::HashlockMismatch);
+            }
+        }
+        LockKind::Poseidon => {
+            if variant != Variant::Raw {
+                return Err(PreimageError::VariantNotAllowed);
+            }
+            if Secret::from_bytes(*preimage).lock_word(LockKind::Poseidon) != *lock_word {
+                return Err(PreimageError::HashlockMismatch);
+            }
+        }
     }
     let candidate = Secret::from_bytes(*preimage);
     if candidate.authority(variant) != *claim_authority {
@@ -305,5 +384,41 @@ mod tests {
         let h = [0xabu8; 32];
         assert_eq!(parse_hex32(&hex32(&h)).unwrap(), h);
         assert_eq!(parse_hex32(&hex32(&h)[2..]).unwrap(), h);
+    }
+
+    #[test]
+    fn the_poseidon_lock_word_is_the_address_and_never_sha256() {
+        // docs/poseidon-leg.md section 2: Addr(00 01 .. 1f) = f8183db2...12cf.
+        let s = Secret::from_bytes(htlc_harness::seq_bytes(0));
+        let word = s.lock_word(LockKind::Poseidon);
+        assert_eq!(hex::encode(word), "f8183db204ffb765c7015d851c1754e4974c675b975c6738d9f6d138eb7212cf");
+        assert_eq!(word, s.authority(Variant::Raw).0);
+        assert_ne!(word, s.lock_word(LockKind::Sha256));
+        assert_eq!(s.lock_word(LockKind::Sha256), s.hashlock());
+        // The default kind is today's.
+        assert_eq!(LockKind::default(), LockKind::Sha256);
+        assert_eq!("poseidon".parse::<LockKind>(), Ok(LockKind::Poseidon));
+        assert!("keccak".parse::<LockKind>().is_err());
+    }
+
+    #[test]
+    fn poseidon_preimage_checks_use_addr_and_refuse_the_stock_variant() {
+        let s = Secret::from_bytes(htlc_harness::seq_bytes(0));
+        let word = s.lock_word(LockKind::Poseidon);
+        let a_raw = s.authority(Variant::Raw);
+        assert_eq!(check_preimage_for(LockKind::Poseidon, s.bytes(), &word, &a_raw, Variant::Raw), Ok(()));
+        // The sha256 of the secret is not a poseidon lock word, and the address is not a sha256 one.
+        assert_eq!(check_preimage_for(LockKind::Poseidon, s.bytes(), &s.hashlock(), &a_raw, Variant::Raw), Err(PreimageError::HashlockMismatch));
+        assert_eq!(check_preimage_for(LockKind::Sha256, s.bytes(), &word, &a_raw, Variant::Raw), Err(PreimageError::HashlockMismatch));
+        // Another secret.
+        let other = htlc_harness::seq_bytes(1);
+        assert_eq!(check_preimage_for(LockKind::Poseidon, &other, &word, &a_raw, Variant::Raw), Err(PreimageError::HashlockMismatch));
+        // A word that is right while the authority is another address: the authority check still runs.
+        let b = Secret::from_bytes(htlc_harness::seq_bytes(2)).authority(Variant::Raw);
+        assert_eq!(check_preimage_for(LockKind::Poseidon, s.bytes(), &word, &b, Variant::Raw), Err(PreimageError::AuthorityMismatch));
+        assert_eq!(
+            check_preimage_for(LockKind::Poseidon, s.bytes(), &word, &s.authority(Variant::Stock), Variant::Stock),
+            Err(PreimageError::VariantNotAllowed)
+        );
     }
 }

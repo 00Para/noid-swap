@@ -377,6 +377,14 @@ pub enum Event {
     /// included (`tip + 1 >= D`). From then on its disappearance can only be a RECOVERY close (hers), never Bob's claim, so it is never
     /// `lost`. Written once.
     NoidInstanceAliveAtD,
+    /// CHAOS F-18, Alice, log-only: a poll with `tip < D` did not list the recorded instance (and the second node, if any, did not
+    /// either). Recovery closes are included at `h >= D` only, so whatever removed it is a CLAIM branch close, which pays Bob. This
+    /// is the only positive evidence that the NOID went to Bob, and `lost` needs it. Written when the instance is not already marked
+    /// gone; [`Event::NoidInstanceBackAfterGone`] takes the mark back.
+    NoidInstanceGoneBeforeD,
+    /// CHAOS F-18, Alice, log-only: the recorded instance is listed again after [`Event::NoidInstanceGoneBeforeD`] (a reorg took the
+    /// close back). The earlier absence proves nothing any more.
+    NoidInstanceBackAfterGone,
     // Action outcomes
     FundingSubmitted { txid: Option<String> },
     LockSubmitted {
@@ -553,7 +561,7 @@ fn alice(p: &AlicePhase, e: &Event) -> Option<AlicePhase> {
         // CHAOS F-17: log-only, once.
         (
             A::FundingFinal { .. } | A::LockSeen { .. } | A::LockFinal { .. } | A::RevealSubmitted { .. } | A::Revealed { .. } | A::Done { .. },
-            E::NoidInstanceAliveAtD,
+            E::NoidInstanceAliveAtD | E::NoidInstanceGoneBeforeD | E::NoidInstanceBackAfterGone,
         ) => p.clone(),
         // Log-only fact: Bob's ETH lock was refunded. Alice's phase does not move
         // (she still waits for D and never reveals); the engine emits it once.

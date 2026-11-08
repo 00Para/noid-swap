@@ -771,10 +771,12 @@ describe("live.js gates (REVIEW-2 F1, F3, F4, F7)", function () {
       await expect(live.claim(provider, bob, { ...base(l), dryRun: true, codeHash: ethers.keccak256("0x00") })).to.be.rejectedWith(/not the code hash of this repo's compiled artifact/);
     });
 
-    it("--dry-run with a secret estimates gas, checks the hashlock, and prints neither the secret nor the calldata", async () => {
+    it("--dry-run with a secret uses the fixed gas limit (never an estimate: REVIEW-6 R6-8), checks the hashlock, and prints neither the secret nor the calldata", async () => {
       const l = await newLock();
       const p = await live.claim(provider, bob, { ...base(l), secret: l.preimage, dryRun: true });
-      expect(BigInt(p.gasEstimate)).to.be.gt(0n);
+      expect(p.gasEstimate).to.equal(null);
+      expect(p.gasLimit).to.equal("200000");
+      expect(p.gasEstimateNote).to.match(/fixed gas limit/);
       expect(p.secretProvided).to.equal(true);
       expect(p.data).to.equal(undefined);
       expect(p.dataLength).to.equal(4 + 32 + 32);
@@ -828,16 +830,19 @@ describe("live.js gates (REVIEW-2 F1, F3, F4, F7)", function () {
       const l = await newLock();
       const leaky = {
         getAddress: async () => bobAddr,
-        estimateGas: async (req) => { throw new Error(`cannot estimate gas, data=${req.data}`); },
+        // REVIEW-6 R6-8: the claim is never estimated, so the node's complaint can only come from the send; and an estimate would be a bug.
+        estimateGas: async () => { throw new Error("estimateGas must not be called for a claim"); },
+        sendTransaction: async (req) => { throw new Error(`node refused the transaction, data=${req.data}`); },
       };
       let err;
       try {
-        await live.claim(provider, leaky, { ...base(l), secret: l.preimage, dryRun: true });
+        await live.claim(provider, leaky, { ...base(l), secret: l.preimage });
       } catch (e) {
         err = e;
       }
       expect(err).to.be.instanceOf(live.UserError);
-      expect(err.message).to.match(/cannot estimate gas/);
+      expect(err.message).to.match(/node refused the transaction/);
+      expect(err.message).to.not.match(/estimateGas must not be called/);
       expect(err.message).to.not.include(l.preimage.slice(2));
       expect(live.redact(`x ${l.preimage} y ${l.preimage.slice(2).toUpperCase()}`)).to.equal("x 0x[secret redacted] y [secret redacted]");
     });
@@ -898,7 +903,7 @@ describe("live.js gates (REVIEW-2 F1, F3, F4, F7)", function () {
 
         const dry2 = await cli(["claim", ...flags, "--dry-run", "--secret-stdin"], l.preimage + "\n");
         expect(dry2.code, dry2.err).to.equal(0);
-        expect(BigInt(JSON.parse(dry2.out).gasEstimate)).to.be.gt(0n);
+        expect(JSON.parse(dry2.out).gasLimit).to.equal("200000"); // fixed, not estimated (REVIEW-6 R6-8)
 
         const none = await cli(["claim", ...flags]);
         expect(none.code).to.equal(1);
@@ -1649,7 +1654,9 @@ describe("live.js --mainnet (chain id 1)", function () {
       const l = await makeLock({ ttl: HOUR });
       const clSwap = fileOfLock("reveal_eth", l);
       const cl = await live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, secret: l.preimage, swap: clSwap, dryRun: true, ...m() });
-      expect(cl.worstCaseFeeWei).to.equal(worstOf(cl).toString());
+      // The claim's gas is the fixed limit (REVIEW-6 R6-8), so the worst case is limit x cap.
+      expect(cl.gasEstimate).to.equal(null);
+      expect(cl.worstCaseFeeWei).to.equal((BigInt(cl.gasLimit) * ethers.parseUnits(CAP, "gwei")).toString());
       expect(cl.senderBalanceWei).to.equal((await bal(bobAddr)).toString());
       const clNoSecret = await live.claim(net, bob, { ...tgtMain, contract: htlcAddr, lockId: l.lockId, swap: clSwap, dryRun: true, ...m() });
       expect(clNoSecret.gasEstimate).to.equal(null);
@@ -1834,7 +1841,7 @@ describe("live.js --mainnet (chain id 1)", function () {
 // ===========================================================================
 // REVIEW-4 R4-1 (base fee check, --replace), R4-3 (late re-send cutoff), R4-5 (signer tied to the file)
 // ===========================================================================
-describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
+describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", function () {
   this.timeout(180000);
   const GWEI = 10n ** 9n;
   const amount = ethers.parseEther("0.2");
@@ -1878,7 +1885,8 @@ describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
     return file;
   }
   const wrapIntent = (action, params) => ({ action, params: { action, ...params }, decided_at: 1, phase_at_decision: "x", noid_tip: 1, eth_block: 1 });
-  const revealIntent = (lockId, tReveal, cutoff) => wrapIntent("reveal_eth", { lock_id: lockId, t_reveal: tReveal, cutoff });
+  const revealIntent = (lockId, tReveal, cutoff, lateCutoff) =>
+    wrapIntent("reveal_eth", { lock_id: lockId, t_reveal: tReveal, cutoff, ...(lateCutoff === undefined ? {} : { late_cutoff: lateCutoff }) });
   const refundIntent = (lockId) => wrapIntent("refund_eth", { lock_id: lockId });
   const lockIntent = (tReveal, hash = hashlock) => wrapIntent("lock_eth", { hashlock: hash, t_reveal: tReveal, receiver: aliceAddr.toLowerCase(), amount_wei: amount.toString() });
 
@@ -2021,14 +2029,14 @@ describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
       expect(await nonce(aliceAddr)).to.equal(n0 + 1);
     });
 
-    it("without --replace-tx the old transaction is looked for in the node's pending block; if the node cannot show it the plan says its fee is unknown", async () => {
+    it("without --replace-tx the old transaction is looked for in the node's pending block and pool, and identified (R5-2)", async () => {
       const l = await makeLock();
       const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
       const n0 = await nonce(aliceAddr);
-      await stuckClaim(l);
+      const oldHash = await stuckClaim(l);
+      // (Hardhat's node shows its pool in the pending block; a node that does not is the R5-2 describe below.)
       const dry = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true });
-      expect(dry.replace.nonce).to.equal(n0);
-      if (!dry.replace.oldFeeKnown) expect(dry.replace.note).to.match(/old transaction was not found/);
+      expect(dry.replace).to.include({ nonce: n0, replacesTx: oldHash, oldFeeKnown: true });
       const r = await sendAndMine((o) => live.claim(provider, alice, { swap, secret: preimage, replace: true, ...o }));
       expect((await provider.getTransaction(r.txHash)).nonce).to.equal(n0);
     });
@@ -2110,7 +2118,7 @@ describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
       const weak = swapFile({ intent, history: ["intent_decided:reveal_eth", "lock_final"] });
       await expect(live.claim(provider, alice, { swap: weak, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
       // each of swap-cli's own public-secret events does
-      for (const ev of ["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped"]) {
+      for (const ev of ["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen"]) {
         const swap = swapFile({ intent, history: ["lock_final", ev] });
         const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
         expect(p.revealCutoff, ev).to.equal(String(late));
@@ -2132,6 +2140,272 @@ describe("live.js REVIEW-4 (R4-1, R4-3, R4-5)", function () {
       const r = await live.claim(provider, alice, { swap, secret: preimage });
       expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
       expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+  });
+
+  // ------------------------------------------------------------------ R5-1 and R5-2
+  describe("R5-1: a stuck first reveal is replaceable past the M_A cutoff once its pending claim is identified", () => {
+    const claimData = (lockId) => new ethers.Interface(ABI()).encodeFunctionData("claim", [lockId, preimage]);
+    async function stuckClaim(l) {
+      await provider.send("evm_setAutomine", [false]);
+      return (await alice.sendTransaction({ to: htlcAddr, data: claimData(l.lockId), maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI })).hash;
+    }
+    async function sendAndMine(run) {
+      let sent;
+      const sentP = new Promise((r) => (sent = r));
+      const p = run({ onSent: sent });
+      await Promise.race([sentP, p.catch(() => {})]);
+      await provider.send("evm_mine", []);
+      return p;
+    }
+
+    it("the plan: the late cutoff T_reveal - DE rules without any history marker; a first claim keeps T_reveal - M_A", async () => {
+      const l = await makeLock({ ttl: 1000 }); // already inside the 1800 s margin: a FIRST reveal is refused
+      const late = l.tReveal - 120;
+      const intent = revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, late); // what swap-cli records for a first reveal
+      const swap = swapFile({ intent });
+      // a first claim (nothing pending, no --replace): refused, as before
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff.*whichever is earlier/);
+      const oldHash = await stuckClaim(l);
+      // the claim sits in the pool: --replace finds it, identifies it as this claim, and the late cutoff rules
+      for (const replaceTx of [oldHash, undefined]) {
+        const dry = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true, ...(replaceTx ? { replaceTx } : {}) });
+        expect(dry.revealCutoff).to.equal(String(late));
+        expect(dry.revealCutoffRule).to.match(/pending claim of this lock.*already public.*R5-1/);
+        expect(dry.replace.replacesTx).to.equal(oldHash);
+      }
+      // an explicit --margin-s still tightens it
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true, replaceTx: oldHash, marginS: "900" })).to.be.rejectedWith(/past the reveal cutoff/);
+      // an intent from before REVIEW-5 (no late_cutoff) gets the profile's DE: the same number
+      const old = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      expect((await live.claim(provider, alice, { swap: old, secret: preimage, dryRun: true, replace: true, replaceTx: oldHash })).revealCutoff).to.equal(String(late));
+      await provider.send("evm_mine", []);
+    });
+
+    it("past the late cutoff the replacement is refused too, and an unrelated pending transaction does not relax anything", async () => {
+      const l = await makeLock({ ttl: 100 }); // T_reveal - 120 s is already behind us
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, l.tReveal - 120) });
+      // an unrelated pending transaction of the signer sits at the nonce: never replaced, and it relaxes no cutoff
+      await provider.send("evm_setAutomine", [false]);
+      const other = await alice.sendTransaction({ to: carolAddr, value: 1n, maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true, replaceTx: other.hash })).to.be.rejectedWith(/is not a claim of lock/);
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true })).to.be.rejectedWith(/is not a claim of lock|could not be shown/);
+      await provider.send("evm_mine", []);
+      // the stuck claim itself, but past T_reveal - DE: refused
+      const oldHash = await stuckClaim(l);
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true, replace: true, replaceTx: oldHash })).to.be.rejectedWith(/past the reveal cutoff/);
+      await provider.send("evm_mine", []);
+    });
+
+    it("the replacement sent past M_A is a real, mined one: same nonce, higher fee, one transaction consumed", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, l.tReveal - 120) });
+      const n0 = await nonce(aliceAddr);
+      const oldHash = await stuckClaim(l);
+      const r = await sendAndMine((o) => live.claim(provider, alice, { swap, secret: preimage, replace: true, replaceTx: oldHash, ...o }));
+      expect((await provider.getTransaction(r.txHash)).nonce).to.equal(n0);
+      expect(await provider.getTransactionReceipt(oldHash)).to.equal(null);
+      expect(await nonce(aliceAddr)).to.equal(n0 + 1);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("the history marker reveal_pending_seen with a late_cutoff in the intent allows the plain re-send of a dropped claim; without late_cutoff the frozen cutoff stays", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const late = l.tReveal - 120;
+      const withLate = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, late), history: ["lock_final", "reveal_pending_seen"] });
+      const p = await live.claim(provider, alice, { swap: withLate, secret: preimage, dryRun: true });
+      expect(p.revealCutoff).to.equal(String(late));
+      expect(p.revealCutoffRule).to.match(/late cutoff T_reveal - DE/);
+      const without = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), history: ["reveal_pending_seen"] });
+      await expect(live.claim(provider, alice, { swap: without, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
+    });
+  });
+
+  describe("R5-2: --replace never replaces what it has not identified", () => {
+    /** A provider whose node cannot show a pending transaction by itself: no pending block, no txpool. */
+    const blind = () =>
+      new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "send") {
+            return async (method, params) => {
+              if (method === "eth_getBlockByNumber" && params[0] === "pending") return { transactions: [] };
+              if (method === "txpool_contentFrom") throw new Error("no txpool namespace");
+              return provider.send(method, params);
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+    it("a node that cannot show the old transaction: refused and asked for --replace-tx; with the hash it works (claim and refund)", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await provider.send("evm_setAutomine", [false]);
+      const n0 = await nonce(aliceAddr);
+      const old = await alice.sendTransaction({ to: htlcAddr, data: new ethers.Interface(ABI()).encodeFunctionData("claim", [l.lockId, preimage]), maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      for (const dryRun of [true, false]) {
+        await expect(live.claim(blind(), alice, { swap, secret: preimage, replace: true, dryRun })).to.be.rejectedWith(/could not be shown by this node.*give --replace-tx HASH.*refusing/);
+      }
+      expect(await nonce(aliceAddr, "pending")).to.equal(n0 + 1); // nothing was sent
+      const dry = await live.claim(blind(), alice, { swap, secret: preimage, replace: true, replaceTx: old.hash, dryRun: true });
+      expect(dry.replace).to.include({ nonce: n0, replacesTx: old.hash, oldFeeKnown: true });
+      await provider.send("evm_mine", []);
+      await provider.send("evm_setAutomine", [true]);
+      // refund
+      const h2 = sha256Raw(rand32());
+      const tReveal2 = (await latestTs()) + HOUR;
+      await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: h2, tReveal: String(tReveal2), receiver: aliceAddr, amountWei: amount.toString() });
+      const lockId2 = live.computeLockIdLocal(bobAddr, aliceAddr, amount, h2, BigInt(tReveal2));
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      await provider.send("evm_setAutomine", [false]);
+      const old2 = await bob.sendTransaction({ to: htlcAddr, data: new ethers.Interface(ABI()).encodeFunctionData("refund", [lockId2]), maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      const rswap = swapFile({ intent: refundIntent(lockId2), hash: h2 });
+      await expect(live.refund(blind(), bob, { swap: rswap, replace: true, dryRun: true })).to.be.rejectedWith(/could not be shown by this node.*refusing/);
+      expect((await live.refund(blind(), bob, { swap: rswap, replace: true, replaceTx: old2.hash, dryRun: true })).replace.replacesTx).to.equal(old2.hash);
+      await provider.send("evm_mine", []);
+    });
+
+    it("the txpool of a geth-style node identifies the old transaction when the pending block does not", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await provider.send("evm_setAutomine", [false]);
+      const n0 = await nonce(aliceAddr);
+      const old = await alice.sendTransaction({ to: htlcAddr, data: new ethers.Interface(ABI()).encodeFunctionData("claim", [l.lockId, preimage]), maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      const raw = await provider.send("eth_getTransactionByHash", [old.hash]);
+      const geth = new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "send") {
+            return async (method, params) => {
+              if (method === "eth_getBlockByNumber" && params[0] === "pending") return { transactions: [] };
+              if (method === "txpool_contentFrom") return { pending: { [String(n0)]: raw }, queued: {} };
+              return provider.send(method, params);
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      const dry = await live.claim(geth, alice, { swap, secret: preimage, replace: true, dryRun: true });
+      expect(dry.replace).to.include({ nonce: n0, replacesTx: old.hash, oldFeeKnown: true });
+      await provider.send("evm_mine", []);
+    });
+  });
+
+  // ------------------------------------------------------------------ REVIEW-6 R6-3 and R6-8 (sha256 kind)
+  describe("R6-8: the sha256 claim never sends the secret except in the signed raw transaction", () => {
+    const claimData = (lockId) => new ethers.Interface(ABI()).encodeFunctionData("claim", [lockId, preimage]);
+    function recorder() {
+      const log = [];
+      const wire = {
+        request: async ({ method, params }) => {
+          log.push({ method, params });
+          return hre.network.provider.request({ method, params });
+        },
+      };
+      return { log, rec: new ethers.BrowserProvider(wire, undefined, { cacheTimeout: -1 }) };
+    }
+    async function fundedWalletLock(rec) {
+      const wallet = ethers.Wallet.createRandom().connect(rec);
+      await alice.sendTransaction({ to: wallet.address, value: ethers.parseEther("1") });
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const l = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock, tReveal: String(tReveal), receiver: wallet.address, amountWei: amount.toString() });
+      return { wallet, l: { tReveal, ...l } };
+    }
+    const carrying = (log) => log.filter((q) => JSON.stringify(q.params).toLowerCase().includes(preimage.slice(2).toLowerCase())).map((q) => q.method);
+
+    it("a dry run and a real claim: no eth_estimateGas, no eth_call with the secret; only eth_sendRawTransaction carries it", async () => {
+      const { log, rec } = recorder();
+      const { wallet, l } = await fundedWalletLock(rec);
+      log.length = 0;
+      const dry = await live.claim(rec, wallet, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true });
+      expect(dry.gasEstimate).to.equal(null);
+      expect(dry.gasLimit).to.equal(live.SHA256_CLAIM_GAS_LIMIT.toString());
+      expect(dry.gasLimit).to.equal("200000");
+      expect(carrying(log)).to.deep.equal([]);
+      log.length = 0;
+      const r = await live.claim(rec, wallet, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage });
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(carrying(log)).to.deep.equal(["eth_sendRawTransaction"]);
+      expect(log.some((q) => q.method === "eth_estimateGas")).to.equal(false);
+      const tx = await provider.getTransaction(r.txHash);
+      expect(tx.gasLimit).to.equal(200000n);
+      expect((await provider.getTransactionReceipt(r.txHash)).status).to.equal(1);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("a --replace of a stuck claim also sends the secret only in the signed raw transaction", async () => {
+      const { log, rec } = recorder();
+      const { wallet, l } = await fundedWalletLock(rec);
+      await provider.send("evm_setAutomine", [false]);
+      const old = await wallet.sendTransaction({ to: htlcAddr, data: claimData(l.lockId), gasLimit: 200000n, maxFeePerGas: 3n * GWEI, maxPriorityFeePerGas: GWEI });
+      log.length = 0;
+      let sent;
+      const sentP = new Promise((r) => (sent = r));
+      const p = live.claim(rec, wallet, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, replace: true, replaceTx: old.hash, onSent: sent });
+      await Promise.race([sentP, p.catch(() => {})]);
+      await provider.send("evm_mine", []);
+      const r = await p;
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(carrying(log)).to.deep.equal(["eth_sendRawTransaction"]);
+      expect(log.some((q) => q.method === "eth_estimateGas")).to.equal(false);
+      expect((await provider.getTransaction(r.txHash)).gasLimit).to.equal(200000n);
+    });
+
+    it("a dry run WITH the secret is refused against a node that is not on this machine, for this kind too", async () => {
+      const l = await makeLock();
+      const was = process.env.ETH_RPC_URL;
+      process.env.ETH_RPC_URL = "https://sepolia.example.invalid/KEY";
+      try {
+        await expect(live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true })).to.be.rejectedWith(/--dry-run with the secret against a node that is not on this machine/);
+        // without the secret, every gate runs
+        const p = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, dryRun: true });
+        expect(p.dryRun).to.equal(true);
+        expect(p.gasEstimateNote).to.match(/fixed gas limit \(200000\)/);
+      } finally {
+        if (was === undefined) delete process.env.ETH_RPC_URL;
+        else process.env.ETH_RPC_URL = was;
+      }
+    });
+  });
+
+  describe("R6-3: a claim that is mined and reverts has published the secret, and live.js says so", () => {
+    it("returns reverted: true and secretPublic: true with the transaction hash; the lock stays open and unclaimed", async () => {
+      const l = await makeLock({ ttl: 2 * HOUR });
+      await provider.send("evm_setAutomine", [false]);
+      let sent;
+      const sentP = new Promise((r) => (sent = r));
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const p = live.claim(provider, alice, { swap, secret: preimage, onSent: sent });
+      await Promise.race([sentP, p.catch(() => {})]);
+      // The claim passed every gate on the latest block (before the timelock); the block it is mined in is stamped after the timelock.
+      await provider.send("evm_setNextBlockTimestamp", [l.tReveal + 10]);
+      await provider.send("evm_mine", []);
+      const r = await p;
+      expect(r.reverted).to.equal(true);
+      expect(r.secretPublic).to.equal(true);
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(r.swapCliFlag).to.equal(`--reveal-tx ${r.txHash}`);
+      expect(r.note).to.match(/SECRET IS PUBLIC/);
+      expect(r.lockId).to.equal(l.lockId);
+      const receipt = await provider.getTransactionReceipt(r.txHash);
+      expect(receipt.status).to.equal(0);
+      expect(r.blockNumber).to.equal(receipt.blockNumber);
+      // The calldata really is on chain with the secret, as swap-cli's --reveal-tx expects to find it.
+      const tx = await provider.getTransaction(r.txHash);
+      expect(tx.data.toLowerCase()).to.include(preimage.slice(2).toLowerCase());
+      expect(tx.from).to.equal(aliceAddr);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^expired-unclaimed/);
+      await provider.send("evm_setAutomine", [true]);
+    });
+
+    it("swap-cli's public-secret events include reveal_reverted_seen (the file shows the late cutoff after a reverted claim)", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const late = l.tReveal - 100;
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, late - 500, late), history: ["lock_final", "reveal_reverted_seen"] });
+      const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
+      expect(p.revealCutoff).to.equal(String(late));
+      expect(p.revealCutoffRule).to.match(/may already be public/);
     });
   });
 

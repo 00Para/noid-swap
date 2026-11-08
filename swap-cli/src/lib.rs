@@ -32,3 +32,13 @@ pub mod swapfile;
 pub mod watch;
 
 pub use htlc_harness;
+
+/// The running tool's build string, `swap-cli <crate version>[+<SWAP_CLI_BUILD_ID at compile time>]` (REVIEW-6 R6-4). A client R self-test
+/// record carries it, and the engine accepts the record only from the same string, so a record made by another build (or copied from another
+/// machine's tool) does not unlock `lock_eth`. Set `SWAP_CLI_BUILD_ID` (for example to the commit) when compiling a build you will use.
+pub fn build_id() -> String {
+    match option_env!("SWAP_CLI_BUILD_ID") {
+        Some(b) if !b.is_empty() => format!("swap-cli {}+{b}", env!("CARGO_PKG_VERSION")),
+        _ => format!("swap-cli {}", env!("CARGO_PKG_VERSION")),
+    }
+}

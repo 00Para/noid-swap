@@ -26,7 +26,7 @@ typing anything. Every command that spends is a go-ahead you give yourself.
 - **Real money.** Parano1d has no test network: every NOID amount is mainnet. The ETH side runs on Sepolia or a
   Hardhat chain by default; `live.js` refuses Ethereum mainnet unless the command carries `--mainnet` together with
   `--max-fee-gwei N`, and under `--mainnet` `lock`, `claim` and `refund` also need `--swap FILE` (a chain-1 `production`
-  swap file). See `eth/README.md` ("Mainnet") and `docs/live-run-4.md`. Use amounts you can lose until the external review (M4).
+  swap file). See `eth/README.md` ("Mainnet") and `docs/live-run-mainnet-plan.md`. Use amounts you can lose until the external review (M4).
 
 The five hard rules (`PROJECT.md`):
 1. Never fund `parano1d/contracts/htlc.params.example.json`: its secret is the public test vector `00 01 ... 1f`.
@@ -137,6 +137,23 @@ Bob `bundle.json` and `alice.receipt` (public; the receipt is about 223 KB). `sw
 every close pays exactly `max_fee` (no min-fee stall; `docs/htlc-v2-fixed-fee.md`). Both sides must pass the same value,
 `new-bob` refuses a mismatch, and all live runs so far used version 1. For v2, `alice-params` prints the recovery-close
 command with `--fee` set to `max_fee`; a `--fee 0` close would be rejected.
+
+**Ethereum lock kind `poseidon` (no proof step).** If both sides prefer the Ethereum lock keyed on Parano1d's own address `A = Addr(s)`
+(`docs/poseidon-leg.md`; raw variant only), there is **no equivalence proof, no receipt and no `equiv-prove`** on either machine. Bob deploys
+`HTLCPoseidonV2` instead (`node scripts/live.js deploy --key-file keys/bob.key --contract-kind poseidon`; check `"matchesArtifact": true` and that
+`codeHash` is `0xf510d2a3...3ff3`, the constant compiled into `swap-cli`), and both pass the kind:
+```sh
+$BIN new-alice --out alice.swap.json ... --eth-lock-kind poseidon > bundle.json         # Alice (no `secret | equiv-prove` step)
+$BIN new-bob --bundle bundle.json --out bob.swap.json --bob o1BOB --amount 10000000 \
+   --eth-chain-id 11155111 --eth-contract 0xC --eth-amount-wei 1000000000000000 \
+   --eth-sender 0xBOBETH --eth-lock-kind poseidon                                        # Bob (no --receipt, no --equiv-prove)
+```
+`new-bob` refuses and writes nothing unless the bundle's Ethereum lock word equals the claim authority `A` of the NOID opening it rebuilds byte for byte,
+the V2 code hash is the one pinned, and the **client R self-test passes on Bob's machine** (a throwaway authorization is proved and verified, a few seconds; Bob
+needs client R because the stock wallet import cannot open a lock on `Addr(s)`). `swap-cli self-test bob.swap.json` re-runs it. Everything else in this
+runbook is the same, with three differences to plan for: Alice's reveal costs about 0.5 M gas (`live.js` sends it with a 1,000,000 limit, so her Ethereum address
+must hold `1,000,000 × fee cap`: 0.02 ETH at 20 gwei, not the 0.01 ETH of "gas money" above for a sha256 swap); small swaps are uneconomic on L1 (the reveal fee is about
+half of a 0.001 ETH leg at 1 gwei); and the helper scripts take `LOCK_KIND=poseidon` (`scripts/live/env.sh`, `prepare.sh` skips the proof and the receipt).
 
 **Bob checks. This is the only moment he can say no. He types his own terms; nothing comes from the bundle:**
 ```sh

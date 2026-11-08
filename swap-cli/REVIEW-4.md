@@ -63,7 +63,7 @@ Severity counts: Medium 2, Low-Medium 2, Low 5, Info 3.
 - engine.rs:322-345: `eth_tx_dropped` holds while the signer's pending nonce is above its latest, so the file keeps saying "ETH claim pending" (engine.rs:1489).
 
 **Attack.**
-1. Alice reveals with `--max-fee-gwei 3x` the base fee of that minute, as docs/live-run-4.md:70 advises.
+1. Alice reveals with `--max-fee-gwei 3x` the base fee of that minute, as docs/live-run-mainnet-plan.md:72 advises.
 2. The base fee rises past the cap. It can climb 12.5 % a block, so three times takes about 10 full blocks, about 2 minutes. The claim sits in public mempools with `s` in its calldata.
 3. A Bob who watches the mempool (his tool does this if handed the tx hash with `--pending-tx`, eth.rs:537-561) claims the NOID (`preimage_for` prefers pending calldata, engine.rs:205-211).
 4. At `T_reveal` he refunds his ETH (engine.rs:1866-1867, 1893-1896).
@@ -167,7 +167,7 @@ With a capped log range or a lagging log index, Bob stays in `refund_mined` ("wa
 
 **Code.**
 - `scripts/live/env.sh:52` adds `--single-node-ok` whenever `NOID_RPC2` or `ETH_RPC2` is empty, with one stderr warning. If either one is empty the flag waives the rule for BOTH chains.
-- The owner has one NOID node; run 4 plans `--single-node-ok` (docs/live-run-4.md:103).
+- The owner has one NOID node; the mainnet plan has `--single-node-ok` (docs/live-run-mainnet-plan.md:105).
 - `f5_gate` checks the Ethereum head lag only for `lock_eth` and `reveal_eth` (engine.rs:863-870). Nothing in Bob's `locked` / `refund_*` phases looks at `eth.latest_timestamp` against the clock.
 - The second Ethereum node is never consulted for the secret.
 
@@ -208,7 +208,7 @@ engine.rs:2187-2201 lets a different spend kind pass while an intent is held, an
 
 ### R4-12 (Info) Documentation drift and old files
 
-`PROJECT.md` ("v1 timeouts") still says `D = creation + 725` and lock-by `D - 619`. params.rs, design §9.1 and docs/live-run-4.md:32 say 735 / 629 / 539. A production file created before `2077e78` no longer loads (swapfile.rs:326-334): this fails closed, and an in-flight swap would need the wallet.
+`PROJECT.md` ("v1 timeouts") still says `D = creation + 725` and lock-by `D - 619`. params.rs, design §9.1 and docs/live-run-mainnet-plan.md:34 say 735 / 629 / 539. A production file created before `2077e78` no longer loads (swapfile.rs:326-334): this fails closed, and an in-flight swap would need the wallet.
 
 ## Attacks that failed (REFUTED)
 
@@ -249,7 +249,7 @@ There is no amount cap for production / mainnet anywhere: the amount discipline 
 | rehearsal | 300 >= 180 | 480 >= 420 |
 | sepolia | 1,800 >= 1,500 | 3,360 >= 3,180 |
 
-The engine reads every window from `file.public.params.profile.gates()`. The constants it uses directly (`B_FINAL`, `CLAIM_TARGET_MARGIN`) are 18 in all three profiles. `D_offset` and `lock_by_height` are re-derived and compared at load (swapfile.rs:326-334), so a file and a binary with different budgets refuse to work together. Production 735 / 629 / 539 is consistent in params.rs, the tests and docs/live-run-4.md.
+The engine reads every window from `file.public.params.profile.gates()`. The constants it uses directly (`B_FINAL`, `CLAIM_TARGET_MARGIN`) are 18 in all three profiles. `D_offset` and `lock_by_height` are re-derived and compared at load (swapfile.rs:326-334), so a file and a binary with different budgets refuse to work together. Production 735 / 629 / 539 is consistent in params.rs, the tests and docs/live-run-mainnet-plan.md.
 
 `sepolia` and `rehearsal` keep `B_safety` 5, below the one adversarial NOID reorg the formal model needs (20). That costs only Bob's valueless leg, because the NOID moves to him only after the secret is public. Acceptable for those profiles.
 

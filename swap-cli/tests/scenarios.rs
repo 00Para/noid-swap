@@ -1921,6 +1921,16 @@ fn f10_a_bad_first_lock_does_not_hide_the_correct_second_one() {
     // Bob (or anyone using his address) put a lock with the wrong amount first.
     let wrong = side_lock(&s, T0 + W_A_S, s.public.params.eth.amount_wei + 1);
     s.world.borrow_mut().locks_before.push(wrong.clone());
+    if s.public.params.eth.lock_kind == swap_cli::secret::LockKind::Poseidon {
+        // By design (docs/poseidon-leg.md 6, review V2-8): an earlier lock on the word, by anyone, keeps Bob from locking at all.
+        s.tick_alice();
+        s.world.borrow_mut().advance_noid(1);
+        s.tick_both();
+        s.world.borrow_mut().advance_noid(17);
+        let (_, rb) = s.tick_both();
+        assert_eq!(rb.action.kind(), "wait", "{rb:?}");
+        return;
+    }
     s.run_to_lock_final();
     // Alice recorded the CORRECT lock (the one Bob's tool made), noting why the first one was passed over.
     let w_lock = s.world.borrow().lock.clone().unwrap();
@@ -2833,7 +2843,8 @@ fn m25b_alice_loses_both_legs_when_bob_refunds_and_claims_with_the_exposed_secre
 
     // Alice, first look: the refund is mined but not final, the NOID instance is gone; nothing is declared yet.
     let ra = s.tick_alice();
-    assert_eq!(ra.events, vec!["eth_refund_mined"], "{ra:?}");
+    // (CHAOS F-18: this poll is before D and the instance is gone, which is the evidence `lost` will need.)
+    assert_eq!(ra.events, vec!["eth_refund_mined", "noid_instance_gone_before_d"], "{ra:?}");
     assert_eq!(s.alice_phase(), "reveal_submitted");
     assert!(matches!(&ra.action, Action::Wait { reason } if reason.contains("reveal lost") && reason.contains("not final yet")), "{ra:?}");
     // The refund becomes final, but the tip has not reached D + 18: still not declared.

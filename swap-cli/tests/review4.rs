@@ -299,7 +299,8 @@ fn lost_candidate(last_look: impl FnOnce(&mut World)) -> Scenario {
     s.tick_bob();
     s.world.borrow_mut().advance_eth(6);
     s.tick_bob();
-    s.world.borrow_mut().instance.take().unwrap(); // closed by somebody (her wallet)
+    s.world.borrow_mut().instance.take().unwrap(); // closed before D, so by Bob's claim
+    s.tick_alice(); // CHAOS F-18: the poll before D that records the instance gone
     let d = s.public.params.deadline_height;
     let need = d + 19 - s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(need);

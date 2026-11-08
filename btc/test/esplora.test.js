@@ -153,3 +153,63 @@ test('broadcast: POST /tx with the raw hex; returns the txid; a 400 is reported 
   assert.equal(f.calls.filter((x) => x.method === 'POST').length, 2, 'the rejected POST went to one host only');
   await assert.rejects(() => c.broadcast('zz'), /hex/);
 });
+
+// ---------------------------------------------------------------- chain identity (verifyChain)
+
+const GENESIS = esplora.SIGNET_GENESIS;
+const MAINNET_GENESIS = '000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f';
+const TESTNET3_GENESIS = '000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943';
+
+test('verifyChain: both hosts report the signet genesis; the constant is the public signet genesis', async () => {
+  assert.equal(GENESIS, '00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6');
+  const f = mockFetch({ ...ROUTES, 'GET /block-height/0': { status: 200, body: GENESIS + '\n' } });
+  const c = esplora.createClient({ base: PRIMARY, fallback: FALLBACK, fetch: f });
+  const r = await c.verifyChain();
+  assert.deepEqual(r.verified, [PRIMARY, FALLBACK]);
+  assert.deepEqual(r.dropped, []);
+  assert.equal(r.genesis, GENESIS);
+  assert.deepEqual(c.chainVerified, { genesis: GENESIS, hosts: [PRIMARY, FALLBACK] });
+  assert.deepEqual(f.calls.map((x) => x.host), ['https://mempool.space', 'https://blockstream.info']);
+});
+
+test('verifyChain: a host on another chain is a hard error, whatever its URL says', async () => {
+  for (const g of [MAINNET_GENESIS, TESTNET3_GENESIS]) {
+    // a "signet" URL that really serves mainnet or testnet3 (same tb1 addresses on testnet: only the genesis tells)
+    const f = mockFetch({ ...ROUTES, 'GET /block-height/0': { status: 200, body: g } });
+    const c = esplora.createClient({ base: PRIMARY, fallback: null, fetch: f });
+    await assert.rejects(() => c.verifyChain(), (e) => e instanceof esplora.ApiError && /not Bitcoin signet/.test(e.message) && e.message.includes(g));
+    assert.equal(c.chainVerified, null);
+  }
+  // the fallback on another chain is just as fatal
+  const f2 = async (url, init) => {
+    if (url.endsWith('/block-height/0')) return { ok: true, status: 200, text: async () => (url.startsWith(FALLBACK) ? MAINNET_GENESIS : GENESIS) };
+    return mockFetch(ROUTES)(url, init);
+  };
+  await assert.rejects(() => esplora.createClient({ base: PRIMARY, fallback: FALLBACK, fetch: f2 }).verifyChain(), /not Bitcoin signet/);
+});
+
+test('verifyChain: an unverifiable host is dropped and never used afterwards; none left is an error', async () => {
+  const routes = { ...ROUTES, 'GET /block-height/0': { status: 200, body: GENESIS } };
+  // primary unreachable: only the fallback is verified, and every later request goes to it alone
+  const f1 = mockFetch(routes, { failHosts: [PRIMARY] });
+  const c1 = esplora.createClient({ base: PRIMARY, fallback: FALLBACK, fetch: f1 });
+  const r1 = await c1.verifyChain();
+  assert.deepEqual(r1.verified, [FALLBACK]);
+  assert.equal(r1.dropped.length, 1);
+  assert.equal(r1.dropped[0].host, PRIMARY);
+  assert.deepEqual(c1.hosts, [FALLBACK]);
+  f1.calls.length = 0;
+  assert.equal(await c1.tipHeight(), 329433);
+  assert.deepEqual(f1.calls.map((x) => x.host), ['https://blockstream.info'], 'the dropped host is not tried');
+  // a host whose block 0 answer is not a hash (HTML error page with a 200) is dropped too
+  const f2 = async (url, init) => {
+    if (url.startsWith(PRIMARY) && url.endsWith('/block-height/0')) return { ok: true, status: 200, text: async () => '<html>nope</html>' };
+    return mockFetch(routes)(url, init);
+  };
+  const r2 = await esplora.createClient({ base: PRIMARY, fallback: FALLBACK, fetch: f2 }).verifyChain();
+  assert.deepEqual(r2.verified, [FALLBACK]);
+  assert.match(r2.dropped[0].reason, /not a block hash/);
+  // 404 on the endpoint (an explorer without it) is dropped; nothing verified -> error
+  const f3 = mockFetch(ROUTES); // no route for block-height: 404 everywhere
+  await assert.rejects(() => esplora.createClient({ base: PRIMARY, fallback: FALLBACK, fetch: f3 }).verifyChain(), /no API host could be verified/);
+});

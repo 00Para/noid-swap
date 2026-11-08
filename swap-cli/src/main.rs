@@ -26,7 +26,7 @@ use std::process::exit;
 use std::time::Duration;
 
 use noid_poseidon2b::primitives::Address;
-use swap_cli::client::raw::RawClaimExecutor;
+use swap_cli::client::raw::{client_r_selftest, RawClaimExecutor};
 use swap_cli::client::{IntentSubmitter, RpcSubmitter};
 use swap_cli::contract_params::{alice_commands, check_object_file, contract_params};
 use swap_cli::engine::{
@@ -35,7 +35,7 @@ use swap_cli::engine::{
 };
 use swap_cli::equiv::{verify_receipt, ProcessRunner, VerifyRequest};
 use swap_cli::params::{self, ContractVersion, ProfileName};
-use swap_cli::secret::{parse_hex32, Secret, Variant};
+use swap_cli::secret::{parse_hex32, LockKind, Secret, Variant};
 use swap_cli::state::{BobPhase, Phase, Role};
 use swap_cli::swapfile::{AttestationSource, BobTerms, EquivalenceAttestation, EthParams, HashlockRegistry, KdfParams, Passphrase, SwapFile, SwapLock, SwapPublic};
 use swap_cli::watch::eth::{EthWatcher, LockDiscovery};
@@ -50,7 +50,10 @@ const USAGE: &str = "usage:
                      --h-create HEIGHT --eth-contract 0x.. --eth-chain-id N --eth-amount-wei N
                      --eth-receiver 0x.. --eth-sender 0x.. [--variant raw|stock]
                      [--eth-code-hash 0x..] [--profile production|rehearsal|sepolia] [--contract-version 1|2]
-                     [--floor-seen MICRONOID] [--passphrase-env VAR] [--registry FILE]
+                     [--floor-seen MICRONOID] [--passphrase-env VAR] [--registry FILE] [--eth-lock-kind sha256|poseidon]
+                     (--eth-lock-kind: the Ethereum lock. sha256 (default) = HTLC.sol keyed on SHA-256(s), Bob needs the equivalence proof; poseidon =
+                      HTLCPoseidonV2.sol keyed on A = Addr(s), the raw variant only, NO equivalence proof, the lock word is the NOID claim authority;
+                      the bundle carries a non-default kind and Bob must ask for the same)
                      (--eth-code-hash is optional: the keccak256 of the HTLC runtime code is compiled into this tool; an ETH spend is refused
                       unless the contract on chain has exactly that code; a given value must equal it, no value pins another contract)
                      (contract version 1 = HashTimeLock, a close pays [5,800 .. max_fee], max_fee = max(50,000, 3 x --fee-estimate); 2 =
@@ -61,8 +64,11 @@ const USAGE: &str = "usage:
                       windows long enough for the real Sepolia finality; the bundle carries the profile)
   swap-cli new-bob --bundle FILE --out FILE --bob o1.. --amount MICRONOID --eth-chain-id N --eth-contract 0x..
                    --eth-amount-wei N --eth-sender 0x.. [--eth-code-hash 0x..] [--variant raw|stock]
-                   [--profile production|rehearsal|sepolia] [--contract-version 1|2] [--pinned-image-id HEX]
+                   [--profile production|rehearsal|sepolia] [--contract-version 1|2] [--pinned-image-id HEX] [--eth-lock-kind sha256|poseidon]
                    --receipt FILE --equiv-prove BIN [--registry FILE]
+                   (--eth-lock-kind poseidon: NO --receipt, --equiv-prove, --equiv-*, --pinned-image-id (refused); the tool runs the client R self-test
+                    on this machine before it writes the file (a throwaway authorization, proved and verified); the lock word must be the claim
+                    authority of the opening this tool rebuilds)
                    (this tool runs `BIN verify <variant> <H> <A> FILE` with H and A from the bundle and requires its
                     image id to equal the one compiled into this tool (the local build's until milestone M1.1);
                     --pinned-image-id is optional and, if given, must equal it; --variant defaults to the bundle's;
@@ -70,11 +76,14 @@ const USAGE: &str = "usage:
   swap-cli new-bob ... --equiv-h 0x.. --equiv-a o1.. --equiv-image-id HEX      (REHEARSAL profile only)
                    (typed fallback without --receipt: refused under production and sepolia; with --receipt these three
                     become optional and must agree)
+  swap-cli self-test FILE [--noid-rpc URL | --call-height N] [--transport tcp|curl] [--curl-path PATH] [--rpc-timeout SECS]
+                (Bob, poseidon swaps: proves and verifies a throwaway owner authorization with client R on THIS machine and records it in the file;
+                 the engine does not offer lock_eth without a passed self-test for the version of the next block. Nothing is sent.)
   swap-cli bundle FILE
   swap-cli status FILE
   swap-cli secret FILE [--passphrase-env VAR]   (Alice only: the 32-byte secret as 0x-hex, for equiv-prove and the Ethereum reveal)
   swap-cli tick FILE (--noid-fixture FILE | --noid-rpc URL) (--eth-fixture FILE | --eth-rpc URL)
-                [--record-noid FILE] [--record-eth FILE] [--now UNIX (fixtures only)] [--pending-tx 0x..]... [--apply]
+                [--record-noid FILE] [--record-eth FILE] [--now UNIX (fixtures only)] [--pending-tx 0x..]... [--reveal-tx 0x..] [--apply]
                 [--closed-by TXID]
                 (--closed-by: record a close made OUTSIDE this tool, e.g. the wallet CLI's recovery close. Needs the transaction confirmed on the node and the
                  instance gone; writes only with --apply; refuses otherwise. Alice: recovery close at h >= D, Bob: claim at h < D)
@@ -86,7 +95,7 @@ const USAGE: &str = "usage:
                 (drop an intent that was never sent; refused if the chain already shows its effect. A fund_noid intent needs --i-checked-the-wallet:
                  the node cannot list a funding in its mempool, so you vouch that the wallet shows none pending (CHAOS F-15))
   swap-cli claim FILE (--noid-rpc URL | --noid-fixture FILE) (--eth-rpc URL | --eth-fixture FILE)
-                 [--submit] [--submit-rpc URL]... [--intent-out FILE] [--now UNIX] [--pending-tx 0x..]...
+                 [--submit] [--submit-rpc URL]... [--intent-out FILE] [--now UNIX] [--pending-tx 0x..]... [--reveal-tx 0x..]
                  [--record-noid FILE] [--record-eth FILE] [--eth-from-block N]
                  [--transport tcp|curl] [--curl-path PATH] [--rpc-timeout SECS]
                  (Bob only; dry run unless --submit; --submit needs a live --noid-rpc)
@@ -123,6 +132,7 @@ fn run(args: &[String]) -> Res<()> {
         "bundle" => bundle(positional.first().ok_or(USAGE)?),
         "status" => status(positional.first().ok_or(USAGE)?),
         "secret" => secret(positional.first().ok_or(USAGE)?, &flags),
+        "self-test" => self_test(positional.first().ok_or(USAGE)?, &flags),
         "tick" => tick(positional.first().ok_or(USAGE)?, &flags),
         "intent" => intent(positional.first().ok_or(USAGE)?, &flags),
         "claim" => claim(positional.first().ok_or(USAGE)?, &flags),
@@ -401,19 +411,34 @@ fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, close
     let p = &file.public.params.eth;
     // REVIEW-3 F3: the nonces of the address this role signs with (Bob: lock and refund; Alice: the reveal), for `intent --cancel`.
     let signer = if file.role == Role::Bob { p.bob_sender } else { p.alice_receiver };
+    // REVIEW-6 R6-3: a claim of Alice's that was mined and may have reverted (`live.js claim` prints its hash); both nodes check it.
+    let reveal_tx: Option<[u8; 32]> = match flags.get("reveal-tx") {
+        None => None,
+        Some(v) if v.len() == 1 => Some(parse_hex32(&v[0]).map_err(|e| format!("--reveal-tx: {e}"))?),
+        Some(_) => return Err("--reveal-tx takes exactly one transaction hash".into()),
+    };
+    // REVIEW-6 R6-1: the all-`Locked`-logs scan of the poseidon kind is asked only while Bob can still decide to lock (before his lock is
+    // seen, and for the re-send of a dropped one). After that nothing he does depends on it, so it is not asked and cannot fail a poll.
+    let word_scan = swap_cli::engine::word_scan_wanted(file);
     let eth = EthWatcher::new(&eth_rpc, p.contract, lock_id)
+        .with_lock_kind(p.lock_kind)
         .with_discovery(LockDiscovery { sender: p.bob_sender, receiver: p.alice_receiver, hashlock: file.public.hashlock })
         .with_from_block(from_block)
         .with_pending_txs(pending.clone())
+        .with_word_scan(word_scan)
+        .with_reveal_tx(reveal_tx)
         .with_signer(signer)
         .observe()
         .map_err(|e| format!("eth watcher: {e}"))?;
     let mut eth = eth;
     if let Some((rpc2, _)) = &eth_second {
         let second = EthWatcher::new(rpc2, p.contract, lock_id)
+            .with_lock_kind(p.lock_kind)
             .with_discovery(LockDiscovery { sender: p.bob_sender, receiver: p.alice_receiver, hashlock: file.public.hashlock })
             .with_from_block(from_block)
             .with_pending_txs(pending)
+            .with_word_scan(word_scan)
+            .with_reveal_tx(reveal_tx)
             .observe();
         match second {
             Ok(o) => eth.second = Some(Box::new(o)),
@@ -765,15 +790,24 @@ fn required_u64(flags: &HashMap<String, Vec<String>>, key: &str, why: &str) -> R
 
 /// REVIEW-3 F1: `--eth-code-hash` is optional. Omitted -> the code hash compiled into this build
 /// (`params::HTLC_CODE_HASH`); given -> it must equal that constant, else refused (no override, no escape flag).
-fn eth_code_hash_flag(flags: &HashMap<String, Vec<String>>) -> Res<[u8; 32]> {
+fn eth_code_hash_flag(flags: &HashMap<String, Vec<String>>, kind: LockKind) -> Res<[u8; 32]> {
+    let pin = swap_cli::params::code_hash_for(kind);
     let Some(text) = flags.get("eth-code-hash").and_then(|v| v.first()) else {
-        return Ok(swap_cli::params::HTLC_CODE_HASH);
+        return Ok(pin);
     };
     let given = parse_hex32(text).map_err(|e| format!("--eth-code-hash: {e}"))?;
-    if given != swap_cli::params::HTLC_CODE_HASH {
-        return Err(format!("--eth-code-hash: {}", swap_cli::swapfile::other_contract_message("the given value", &given)));
+    if given != pin {
+        return Err(format!("--eth-code-hash: {}", swap_cli::swapfile::other_contract_message_for(kind, "the given value", &given)));
     }
     Ok(given)
+}
+
+/// `--eth-lock-kind sha256|poseidon`; `sha256` (`HTLC.sol`) when absent.
+fn parse_lock_kind(flags: &HashMap<String, Vec<String>>) -> Res<LockKind> {
+    match flags.get("eth-lock-kind").and_then(|v| v.first()) {
+        None => Ok(LockKind::Sha256),
+        Some(v) => v.parse::<LockKind>().map_err(|e| format!("--eth-lock-kind: {e}")),
+    }
 }
 
 /// The strong KDF, or (test builds only) the fast one. REVIEW-2 F14: a release binary has no fast KDF.
@@ -814,10 +848,15 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     };
     let alice = Address::parse(flag(flags, "alice")?).map_err(|e| format!("--alice: {e}"))?;
     let bob = Address::parse(flag(flags, "bob")?).map_err(|e| format!("--bob: {e}"))?;
+    let lock_kind = parse_lock_kind(flags)?;
+    if lock_kind == LockKind::Poseidon && variant != Variant::Raw {
+        return Err(format!("--eth-lock-kind poseidon: {}", swap_cli::swapfile::poseidon_raw_only_message()));
+    }
     let eth = EthParams {
         chain_id: required_u64(flags, "eth-chain-id", CHAIN_ID_WHY)?,
         contract: addr20(flag(flags, "eth-contract")?)?,
-        code_hash: Some(eth_code_hash_flag(flags)?),
+        code_hash: Some(eth_code_hash_flag(flags, lock_kind)?),
+        lock_kind,
         amount_wei: flag(flags, "eth-amount-wei")?.parse::<u128>().map_err(|e| format!("--eth-amount-wei: {e}"))?,
         alice_receiver: addr20(flag(flags, "eth-receiver")?)?,
         bob_sender: addr20(flag(flags, "eth-sender")?)?,
@@ -862,6 +901,11 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
             file.public.params.bob_payout_for_fee(fee)
         );
     }
+    if file.public.params.eth.lock_kind == LockKind::Poseidon {
+        eprintln!(
+            "ethereum lock kind poseidon (HTLCPoseidonV2): the Ethereum lock word is your NOID address A = Addr(s); Bob needs NO equivalence proof; tell Bob to pass --eth-lock-kind poseidon. Your ETH reveal costs about 0.5 M gas (docs/poseidon-leg.md section 5)"
+        );
+    }
     eprintln!("send Bob the bundle below (it contains no secret):");
     println!("{}", serde_json::to_string_pretty(&file.public).map_err(|e| e.to_string())?);
     Ok(())
@@ -880,7 +924,8 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     let amount_micronoid = flag_u64(flags, "amount")?;
     let eth_chain_id = required_u64(flags, "eth-chain-id", CHAIN_ID_WHY)?;
     let eth_contract = addr20(flag(flags, "eth-contract")?)?;
-    let eth_code_hash = eth_code_hash_flag(flags)?;
+    let lock_kind = parse_lock_kind(flags)?;
+    let eth_code_hash = eth_code_hash_flag(flags, lock_kind)?;
     let eth_amount_wei = flag(flags, "eth-amount-wei")?.parse::<u128>().map_err(|e| format!("--eth-amount-wei: {e}"))?;
     let bob_sender = addr20(flag(flags, "eth-sender")?)?;
     let text = std::fs::read_to_string(flag(flags, "bundle")?).map_err(|e| e.to_string())?;
@@ -893,11 +938,41 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
         None if receipt.is_some() => public.params.variant,
         None => Variant::Raw,
     };
-    let terms = BobTerms { variant, profile, contract_version, bob_noid, amount_micronoid, eth_chain_id, eth_contract, eth_code_hash, eth_amount_wei, bob_sender };
-    let equivalence = equivalence_attestation(flags, &public, terms.variant, receipt.as_deref())?;
+    let terms = BobTerms { variant, profile, contract_version, lock_kind, bob_noid, amount_micronoid, eth_chain_id, eth_contract, eth_code_hash, eth_amount_wei, bob_sender };
+    // Bob names the lock kind himself (like the profile and the contract version); a bundle of another kind is refused before anything
+    // that belongs to either kind (a receipt, a self-test) is looked at.
+    if public.params.eth.lock_kind != lock_kind {
+        return Err(format!(
+            "bundle disagrees with your terms: the bundle locks the Ethereum leg as `{}`, you asked for `{}` (--eth-lock-kind); the two use different contracts, lock words and checks",
+            public.params.eth.lock_kind, lock_kind
+        ));
+    }
+    // The poseidon kind has no equivalence proof: the attestation is ABSENT, not typed (a present one is refused), and every option that
+    // belongs to the proof is refused with it.
+    let equivalence = if lock_kind == LockKind::Poseidon {
+        for f in ["receipt", "equiv-prove", "equiv-h", "equiv-a", "equiv-image-id", "pinned-image-id"] {
+            if flags.contains_key(f) {
+                return Err(format!(
+                    "--{f} belongs to the equivalence proof, which a poseidon swap does not have: both locks carry the same A = Addr(s) (docs/poseidon-leg.md). Drop it, or use --eth-lock-kind sha256"
+                ));
+            }
+        }
+        None
+    } else {
+        Some(equivalence_attestation(flags, &public, terms.variant, receipt.as_deref())?)
+    };
     // Design step 5: rebuild the opening byte-for-byte, run the guard and the gates,
-    // compare with Bob's terms, and tie the verified proof to this bundle.
-    let file = SwapFile::new_bob(public, &terms, &equivalence, now_unix()).map_err(|e| e.to_string())?;
+    // compare with Bob's terms, and tie the verified proof (or, for poseidon, the lock word) to this bundle.
+    let mut file = SwapFile::new_bob_with(public, &terms, equivalence.as_ref(), now_unix()).map_err(|e| e.to_string())?;
+    // Review V2-10: with a lock on A = Addr(s) only client R can claim; Bob sees it work on this machine before the file exists.
+    let mut selftest_note = None;
+    if lock_kind == LockKind::Poseidon {
+        let call_height = file.public.params.deadline_height.saturating_sub(1);
+        eprintln!("client R self-test (a throwaway authorization, proved and verified here; nothing is sent) ...");
+        let rec = client_r_selftest(call_height, now_unix(), &file.public).map_err(|e| format!("the client R self-test failed, so no file is written and Bob must not lock: {e}"))?;
+        selftest_note = Some(format!("{} ms, owner-authorization {}", rec.proof_ms, rec.auth_version));
+        file.record_client_r_selftest(rec, now_unix()).map_err(|e| e.to_string())?;
+    }
     let registry_path = flags
         .get("registry")
         .and_then(|v| v.first())
@@ -906,16 +981,22 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     HashlockRegistry::new(registry_path).register(&file.public.hashlock).map_err(|e| e.to_string())?;
     file.save(&out).map_err(|e| e.to_string())?;
     eprintln!("bundle checked: opening rebuilt byte-for-byte, tool guard and (I5) pass, your terms match,");
-    eprintln!("and the equivalence proof you verified is for this bundle's (variant, H, A) and your pinned image id.");
-    match equivalence.source {
-        AttestationSource::Receipt => eprintln!("The receipt was verified by this tool (equiv-prove exited 0, its image id equals your pinned id); Alice's funding is checked every tick."),
-        AttestationSource::Typed => {
+    if let Some(note) = &selftest_note {
+        eprintln!("and the Ethereum lock word equals the claim authority A of the opening you rebuilt (poseidon lock: no equivalence proof exists or is needed).");
+        eprintln!("client R self-test passed ({note}); re-run it with `swap-cli self-test FILE` if the owner-authorization version changes.");
+    } else {
+        eprintln!("and the equivalence proof you verified is for this bundle's (variant, H, A) and your pinned image id.");
+    }
+    match equivalence.as_ref().map(|e| e.source) {
+        None => {}
+        Some(AttestationSource::Receipt) => eprintln!("The receipt was verified by this tool (equiv-prove exited 0, its image id equals your pinned id); Alice's funding is checked every tick."),
+        Some(AttestationSource::Typed) => {
             eprintln!("REHEARSAL ONLY: the typed form is refused under production and sepolia.");
             eprintln!("NOT checked here: the receipt itself (that is `equiv-prove verify`) and Alice's funding (checked every tick).");
             eprintln!("(You typed the proof values by hand; prefer `--receipt FILE --equiv-prove BIN`, which makes this tool run the verifier.)");
         }
     }
-    eprintln!("The HTLC code hash (compiled into this tool) and the chain id you gave are checked on every poll, before any ETH spend (lock, reveal, refund).");
+    eprintln!("The Ethereum contract code hash (compiled into this tool, per lock kind) and the chain id you gave are checked on every poll, before any ETH spend (lock, reveal, refund).");
     eprintln!("swap file written: {}", out.display());
     println!("{}", summary_json(&file)?);
     Ok(())
@@ -1050,6 +1131,11 @@ fn summary_json(file: &SwapFile) -> Res<String> {
         "lock_by_height": p.lock_by_height,
         "secret_sealed": file.secret.is_some(),
     });
+    if p.eth.lock_kind == LockKind::Poseidon {
+        v["eth_lock_kind"] = serde_json::json!(p.eth.lock_kind.as_str());
+        v["eth_lock_word"] = serde_json::json!(format!("0x{}", hex::encode(file.public.hashlock)));
+        v["client_r_selftest"] = serde_json::json!(file.client_r_selftest);
+    }
     if let Some(fee) = p.fixed_close_fee() {
         // Contract v2: every close pays exactly max_fee, so Bob's payout is known up front. v1 output is unchanged.
         v["close_fee_rule"] = serde_json::json!("fixed: every close (claim and recovery) pays exactly max_fee");
@@ -1073,9 +1159,65 @@ fn secret(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
     let pass = passphrase(flags)?;
     let s = file.decrypt_secret(&pass).map_err(|e| e.to_string())?;
-    eprintln!("WARNING: this is the swap secret. Whoever has it can trigger the Ethereum reveal; give it only to equiv-prove and the reveal command. Pipe it, never paste it into a command line: swap-cli secret FILE | equiv-prove prove raw --secret-stdin OUT.receipt");
+    if file.public.params.eth.lock_kind == LockKind::Poseidon {
+        // REVIEW-6 R6-7: no equivalence proof exists for this kind, so the advice to pipe the secret into `equiv-prove` is not given.
+        eprintln!("poseidon swap: there is no equivalence proof to make; this secret is for the Ethereum reveal only (live.js claim --swap FILE reads it on stdin). Never send it to a remote node before the reveal itself (no eth_call, no estimateGas).");
+        eprintln!("WARNING: this is the swap secret. Whoever has it can trigger the Ethereum reveal; give it only to the reveal command. Pipe it, never paste it into a command line.");
+    } else {
+        eprintln!("WARNING: this is the swap secret. Whoever has it can trigger the Ethereum reveal; give it only to equiv-prove and the reveal command. Pipe it, never paste it into a command line: swap-cli secret FILE | equiv-prove prove raw --secret-stdin OUT.receipt");
+    }
     println!("{}", swap_cli::secret::hex32(s.bytes()));
     Ok(())
+}
+
+/// `self-test FILE`: Bob's check that client R works on this machine (review V2-10). Builds, proves and verifies an owner authorization for a
+/// throwaway lock (nothing is sent, no real secret is read), and records the pass in the swap file. The engine requires the record, for the
+/// owner-authorization version of the next block, before it offers `lock_eth` in a poseidon swap.
+fn self_test(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    let path = PathBuf::from(path);
+    let _lock = lock_swap_file(&path)?;
+    let mut file = SwapFile::load(&path).map_err(|e| e.to_string())?;
+    if file.role != Role::Bob || file.public.params.eth.lock_kind != LockKind::Poseidon {
+        return Err("self-test is for Bob's file of a poseidon swap (--eth-lock-kind poseidon): only there does Bob depend on client R alone".into());
+    }
+    // The height whose owner-authorization version the proof is made for: the live tip + 1 when a node is given, else just before D
+    // (where Bob's claim will be built).
+    let (call_height, from) = if let Some(h) = flags.get("call-height").and_then(|v| v.first()) {
+        (h.replace('_', "").parse::<u64>().map_err(|e| format!("--call-height: {e}"))?, "--call-height".to_string())
+    } else if flags.contains_key("noid-rpc") {
+        let net = net(flags)?;
+        let ((rpc, label), _second, _notes) = chain_source(flags, "noid", &net)?;
+        let obs = NoidWatcher::new(&rpc, file.public.opening_hex.clone()).observe(None).map_err(|e| format!("parano1d watcher: {e}"))?;
+        (obs.tip + 1, format!("the tip of {label} + 1"))
+    } else {
+        (file.public.params.deadline_height.saturating_sub(1), "D - 1 (no node given)".to_string())
+    };
+    // REVIEW-7 R7-2: an earlier passing record is cleared and the file saved BEFORE anything is proved. The passing record is written only on
+    // success, so a self-test that fails (or is interrupted) leaves no valid record: the engine would otherwise keep accepting a pass of up to
+    // 24 hours ago for a client R the operator has just seen fail.
+    if file.clear_client_r_selftest(now_unix()) {
+        file.save(&path).map_err(|e| format!("could not clear the earlier self-test record before proving: {e}"))?;
+        eprintln!("the earlier client R self-test record was cleared; a new pass must be recorded before Bob can lock");
+    }
+    eprintln!("client R self-test for height {call_height} ({from}): a throwaway authorization is built, proved and verified here; nothing is sent ...");
+    let rec = match client_r_selftest(call_height, now_unix(), &file.public) {
+        Ok(rec) => rec,
+        Err(e) => {
+            file.log("client_r_selftest_failed", now_unix());
+            // Best effort: the record is already gone from the file; this only adds the failure to the history.
+            let _ = file.save(&path);
+            return Err(format!("the client R self-test FAILED, so Bob must not lock (no record is kept): {e}"));
+        }
+    };
+    file.record_client_r_selftest(rec.clone(), now_unix()).map_err(|e| e.to_string())?;
+    file.save(&path).map_err(|e| e.to_string())?;
+    print_json(&serde_json::json!({
+        "client_r_selftest": "passed",
+        "auth_version": rec.auth_version,
+        "call_height": rec.call_height,
+        "proof_ms": rec.proof_ms,
+        "recorded_in": path.display().to_string(),
+    }))
 }
 
 fn gates(flags: &HashMap<String, Vec<String>>) -> Res<()> {

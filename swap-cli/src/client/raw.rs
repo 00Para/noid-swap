@@ -23,10 +23,10 @@ use serde_json::Value;
 
 use super::IntentSubmitter;
 use crate::engine::{Action, ExecError, Executor};
-use crate::params::{self, ClaimHeight};
-use crate::secret::{check_preimage, PreimageError, Secret, Variant};
+use crate::params::{self, ClaimHeight, ContractVersion};
+use crate::secret::{check_preimage_for, LockKind, PreimageError, Secret, Variant};
 use crate::state::Event;
-use crate::swapfile::{detect_contract_version, SwapFile};
+use crate::swapfile::{detect_contract_version, ClientRSelfTest, SwapFile, SwapPublic};
 use crate::watch::{JsonRpc, NoidInstance, RpcError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,8 +94,10 @@ pub struct ClaimInputs<'a> {
     pub epoch_anchor: [u8; 32],
     /// `tip + 1`.
     pub call_height: u64,
-    /// The SHA-256 hashlock, to run the full step-11 check again.
+    /// The Ethereum lock word (SHA-256 of the secret, or `Addr(s)` for the `poseidon` kind), to run the full step-11 check again.
     pub hashlock: [u8; 32],
+    /// Which lock the word belongs to.
+    pub lock_kind: LockKind,
     pub variant: Variant,
     /// The revealed secret.
     pub secret: &'a Secret,
@@ -156,7 +158,7 @@ pub fn build_claim(inp: ClaimInputs<'_>) -> Result<ClaimPlan, ClaimError> {
         return Err(ClaimError::Fee { fee: inp.fee_micronoid, min, max });
     }
     // Step 11 again, on the exact bytes we are about to use.
-    check_preimage(inp.secret.bytes(), &inp.hashlock, &opening.claim_authority, inp.variant)
+    check_preimage_for(inp.lock_kind, inp.secret.bytes(), &inp.hashlock, &opening.claim_authority, inp.variant)
         .map_err(ClaimError::Preimage)?;
 
     let input = TxInput {
@@ -193,6 +195,74 @@ pub fn build_claim(inp: ClaimInputs<'_>) -> Result<ClaimPlan, ClaimError> {
         txid,
         intent_bytes,
         fee_micronoid: inp.fee_micronoid,
+    })
+}
+
+/// Review V2-10: does client R work on THIS machine, now? Builds a throwaway lock (a fresh random secret `s`, claim authority
+/// `Addr(s)`, the harness cast as parties, a made-up 10 NOID instance), then builds, proves and self-verifies the claim exactly as
+/// [`build_claim`] does for the real one, and re-verifies the encoded intent the way a node does (`verify_intent_bytes`). Nothing is
+/// sent anywhere and no real secret is touched. `call_height` selects the owner-authorization version (the real tip + 1; the proof of
+/// one version does not do for the other). With the `poseidon` lock only this client can claim, so Bob runs it before he locks ETH.
+///
+/// REVIEW-6 R6-4. The record is bound to what it vouches for: the swap file's lock word, the contract version of THIS swap (the throwaway is
+/// compiled with that version's opening and fee rule, the swap's `max_fee`, and must be recognised as that contract exactly as the real
+/// claim's opening is), the build string of this binary and the time. The submit path is run as far as it goes without a node: the claim is
+/// built by the same `build_claim`, the intent is hex-encoded as `submit_claim` sends it, a mock node decodes it, re-verifies the proof and
+/// answers its txid, and the answer must be the txid we computed.
+pub fn client_r_selftest(call_height: u64, now: u64, public: &SwapPublic) -> Result<ClientRSelfTest, ClaimError> {
+    let started = std::time::Instant::now();
+    let version = public.params.contract_version;
+    let max_fee = public.params.max_fee_micronoid;
+    let secret = Secret::generate().map_err(|e| ClaimError::Guard(e.to_string()))?;
+    let authority = secret.authority(Variant::Raw);
+    let cast = h::Cast::new();
+    let deadline = call_height.checked_add(1_000).ok_or_else(|| ClaimError::Guard("call height overflows".into()))?;
+    let compiled = std::panic::catch_unwind(|| match version {
+        ContractVersion::V1 => h::try_compile_htlc(authority, cast.bob, cast.alice, deadline, max_fee),
+        ContractVersion::V2 => h::try_compile_htlc_v2(authority, cast.bob, cast.alice, deadline, max_fee),
+    });
+    let opening = match compiled {
+        Ok(r) => r.map_err(|e| ClaimError::Guard(format!("{e:?}")))?,
+        Err(_) => return Err(ClaimError::Guard("the contract compiler panicked on the self-test parameters".into())),
+    };
+    if detect_contract_version(&opening) != Some(version) {
+        return Err(ClaimError::UnknownContract);
+    }
+    // The fee the real claim pays: exactly max_fee under v2, the floor (within [MIN, max_fee]) under v1.
+    let (fee_min, fee_max) = version.allowed_fee_range(max_fee);
+    let fee = params::F_MAX_FLOOR_MICRONOID.clamp(fee_min, fee_max);
+    let instance = NoidInstance { slot_index: 11, creation_id: 3, amount_micronoid: 10_000_000 };
+    let plan = build_claim(ClaimInputs {
+        opening: &opening,
+        instance: &instance,
+        output_slot: 2,
+        fee_micronoid: fee,
+        epoch_anchor: [7; 32],
+        call_height,
+        hashlock: secret.lock_word(LockKind::Poseidon),
+        lock_kind: LockKind::Poseidon,
+        variant: Variant::Raw,
+        secret: &secret,
+    })?;
+    // What a node does on `submitTxIntent`: decode, check, verify the proof, at the same height.
+    let (decoded, txid) = verify_intent_bytes(&plan.intent_bytes, call_height)?;
+    if txid != plan.txid || decoded.opening != opening {
+        return Err(ClaimError::SelfVerify("the re-decoded intent has another transaction id or opening".into()));
+    }
+    // And through `submit_claim`, the function the real claim uses: hex on the wire, a node that verifies and answers the txid.
+    let mock = MockSubmitter::new(MockAnswer::VerifyAt(call_height));
+    let report = submit_claim(&plan, &[("self-test", &mock)])?;
+    if report.accepted.len() != 1 || !report.rejected.is_empty() || !report.txid_hex.eq_ignore_ascii_case(&plan.txid_hex()) {
+        return Err(ClaimError::SelfVerify("the mock node did not accept the self-test intent under its own txid".into()));
+    }
+    Ok(ClientRSelfTest {
+        passed_at: now,
+        auth_version: format!("{:?}", plan.version),
+        call_height,
+        proof_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        lock_word: hex::encode(public.hashlock),
+        contract_version: version.number(),
+        build_id: crate::build_id(),
     })
 }
 
@@ -323,6 +393,7 @@ impl<R: JsonRpc> RawClaimExecutor<R> {
             epoch_anchor: self.epoch_anchor().map_err(|e| ExecError::not_sent(e.to_string()))?,
             call_height,
             hashlock: file.public.hashlock,
+            lock_kind: file.public.params.eth.lock_kind,
             variant: file.public.params.variant,
             secret: &secret,
         })

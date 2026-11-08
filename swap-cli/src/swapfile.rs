@@ -27,7 +27,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::params::{self, ContractVersion, ProfileName};
-use crate::secret::{sha256, Secret, Variant};
+use crate::secret::{sha256, LockKind, Secret, Variant};
 use crate::state::{transition, Event, InvalidTransition, Phase, Role};
 use crate::watch::{hexbytes, hexbytes_opt, u128dec};
 
@@ -99,10 +99,16 @@ pub struct EthParams {
     /// Pinned HTLC deployment address.
     #[serde(with = "hexbytes")]
     pub contract: [u8; 20],
-    /// `keccak256(eth_getCode(contract))`. REVIEW-3 F1: always `params::HTLC_CODE_HASH` in a file this build accepts
-    /// (`check` refuses anything else, `None` included; the field stays optional only so an old file still parses).
+    /// `keccak256(eth_getCode(contract))`. REVIEW-3 F1: always the constant of the file's lock kind (`params::HTLC_CODE_HASH` for
+    /// `sha256`, `params::HTLC_POSEIDON_V2_CODE_HASH` for `poseidon`) in a file this build accepts (`check` refuses anything else,
+    /// `None` included; the field stays optional only so an old file still parses).
     #[serde(default, with = "hexbytes_opt")]
     pub code_hash: Option<[u8; 32]>,
+    /// Which Ethereum lock the swap uses (`secret::LockKind`): `sha256` (`HTLC.sol`, the default, not written, so a file without
+    /// the field keeps its digest) or `poseidon` (`HTLCPoseidonV2.sol`, locked on `A = Addr(s)`; raw variant only; no equivalence
+    /// proof). Part of the digested public section: changing or dropping it breaks the digest, like `contract_version`.
+    #[serde(default, skip_serializing_if = "LockKind::is_sha256")]
+    pub lock_kind: LockKind,
     /// The ETH amount Bob locks (JSON: decimal string).
     #[serde(with = "u128dec")]
     pub amount_wei: u128,
@@ -168,6 +174,8 @@ impl SwapParams {
 /// What both parties know: the a2-a7 bundle Alice sends Bob (design step 4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SwapPublic {
+    /// The Ethereum lock word: `SHA-256(s)` for the `sha256` lock kind, the 32 bytes of `A = Addr(s)` for `poseidon` (then it must
+    /// equal the bytes of `claim_authority`). The JSON key stays `hashlock`; `params.eth.lock_kind` says what the word is.
     #[serde(with = "hexbytes")]
     pub hashlock: [u8; 32],
     /// `A`, bech32.
@@ -236,10 +244,15 @@ impl SwapPublic {
         // REVIEW-3 F1: the pin is the constant of this build. A caller that leaves it unset gets the constant; any other
         // value is refused (no override).
         let mut eth = eth;
+        let kind = eth.lock_kind;
+        if kind == LockKind::Poseidon && variant != Variant::Raw {
+            return Err(SwapFileError::Invalid(poseidon_raw_only_message()));
+        }
+        let pin = params::code_hash_for(kind);
         match eth.code_hash {
-            None => eth.code_hash = Some(params::HTLC_CODE_HASH),
-            Some(h) if h == params::HTLC_CODE_HASH => {}
-            Some(h) => return Err(SwapFileError::Invalid(other_contract_message("eth.code_hash", &h))),
+            None => eth.code_hash = Some(pin),
+            Some(h) if h == pin => {}
+            Some(h) => return Err(SwapFileError::Invalid(other_contract_message_for(kind, "eth.code_hash", &h))),
         }
         let d = g.alice_deadline_eth(h_create).map_err(|e| SwapFileError::Invalid(e.to_string()))?;
         g.check_i5(h_create, d).map_err(|e| SwapFileError::Invalid(e.to_string()))?;
@@ -251,7 +264,7 @@ impl SwapPublic {
         let opening = compile_guarded(contract_version, authority, *bob_noid, *alice_noid, d, max_fee)?;
         let bytes = opening.to_bytes().map_err(|e| SwapFileError::Invalid(format!("opening: {e:?}")))?;
         let public = SwapPublic {
-            hashlock: secret.hashlock(),
+            hashlock: secret.lock_word(kind),
             claim_authority: authority.to_bech32(),
             opening_hex: hex::encode(bytes),
             contract_root: opening.root().to_bech32(),
@@ -294,6 +307,22 @@ impl SwapPublic {
         let bob = Address::parse(&p.bob_noid).map_err(|e| inv(format!("bob_noid: {e}")))?;
         if self.hashlock == [0u8; 32] {
             return Err(inv("hashlock is zero".into()));
+        }
+        let kind = p.eth.lock_kind;
+        if kind == LockKind::Poseidon {
+            // docs/poseidon-leg.md sections 4 and 9.1: the raw variant only, and the Ethereum lock word IS the claim authority.
+            if p.variant != Variant::Raw {
+                return Err(inv(poseidon_raw_only_message()));
+            }
+            if self.hashlock != authority.0 {
+                return Err(inv(
+                    "the poseidon lock word (hashlock) is not the claim_authority bytes: the Ethereum lock must sit on the same A = Addr(s) as the NOID lock"
+                        .into(),
+                ));
+            }
+            if opening.claim_authority.0 != self.hashlock {
+                return Err(inv("the poseidon lock word is not the claim_authority of the opening".into()));
+            }
         }
         // Byte-for-byte rebuild (design step 5), which also runs the guard.
         let rebuilt = compile_guarded(p.contract_version, authority, bob, alice, p.deadline_height, p.max_fee_micronoid)
@@ -351,16 +380,24 @@ impl SwapPublic {
         if self.hashlock == PUBLIC_TEST_VECTOR_HASHLOCK || self.hashlock == ZERO_VECTOR_HASHLOCK {
             return Err(inv("hashlock is a public test vector: its secret is known to everyone".into()));
         }
+        // The same vectors as poseidon lock words: Addr(00 01 .. 1f) and Addr(0). Their secrets are known to everyone.
+        if kind == LockKind::Poseidon
+            && (self.hashlock == Secret::from_bytes(htlc_harness::seq_bytes(0)).lock_word(LockKind::Poseidon)
+                || self.hashlock == Secret::from_bytes([0u8; 32]).lock_word(LockKind::Poseidon))
+        {
+            return Err(inv("the poseidon lock word is the address of a public test vector: its secret is known to everyone".into()));
+        }
         if p.eth.amount_wei == 0 || p.eth.alice_receiver == [0u8; 20] || p.eth.bob_sender == [0u8; 20] {
             return Err(inv("eth params incomplete".into()));
         }
         // REVIEW-3 F1: one contract only. The pin must be the code hash compiled into this build (a missing pin included),
         // so a bundle or a file from a counterparty or another build that names a look-alike HTLC is refused here, on
         // `build`, `new-bob` and `load` alike.
+        let pin = params::code_hash_for(kind);
         match p.eth.code_hash {
-            Some(h) if h == params::HTLC_CODE_HASH => {}
-            Some(h) => return Err(inv(other_contract_message("eth.code_hash", &h))),
-            None => return Err(inv(format!("eth.code_hash is not pinned; this build pins 0x{} (REVIEW-3 F1)", hex::encode(params::HTLC_CODE_HASH)))),
+            Some(h) if h == pin => {}
+            Some(h) => return Err(inv(other_contract_message_for(kind, "eth.code_hash", &h))),
+            None => return Err(inv(format!("eth.code_hash is not pinned; this build pins 0x{} for the {kind} lock kind (REVIEW-3 F1)", hex::encode(pin)))),
         }
         if p.eth.alice_receiver == p.eth.bob_sender {
             return Err(inv("A_eth equals B_eth".into()));
@@ -393,6 +430,25 @@ impl SwapPublic {
                 terms.contract_version.contract_name()
             )));
         }
+        if p.eth.lock_kind != terms.lock_kind {
+            return Err(SwapFileError::Invalid(format!(
+                "bundle disagrees with your terms: the bundle locks the Ethereum leg as `{}`, you asked for `{}` (--eth-lock-kind); the two use different contracts, lock words and checks",
+                p.eth.lock_kind, terms.lock_kind
+            )));
+        }
+        if p.eth.lock_kind == LockKind::Poseidon {
+            // The word Bob will pass as `lockAddr` is the `claim_authority` of the opening HE rebuilt (docs/poseidon-leg.md section 6, step 2),
+            // never a value taken on trust from the bundle's other fields.
+            let opening = self.opening()?;
+            if opening.claim_authority.0 != self.hashlock {
+                return Err(SwapFileError::Invalid(
+                    "bundle disagrees with your terms: the Ethereum lock word is not the claim authority A of the NOID opening you rebuilt; locking on it would not tie the two legs together".into(),
+                ));
+            }
+            if terms.variant != Variant::Raw {
+                return Err(SwapFileError::Invalid(poseidon_raw_only_message()));
+            }
+        }
         if p.bob_noid != terms.bob_noid.to_bech32() {
             return Err(bad("bob_noid (your NOID payout address)"));
         }
@@ -406,8 +462,8 @@ impl SwapPublic {
             return Err(bad("eth.contract (pinned HTLC deployment)"));
         }
         // REVIEW-3 F1: Bob's own terms must name the contract compiled into this build, and the bundle must pin the same.
-        if terms.eth_code_hash != params::HTLC_CODE_HASH {
-            return Err(SwapFileError::Invalid(other_contract_message("your eth.code_hash", &terms.eth_code_hash)));
+        if terms.eth_code_hash != params::code_hash_for(p.eth.lock_kind) {
+            return Err(SwapFileError::Invalid(other_contract_message_for(p.eth.lock_kind, "your eth.code_hash", &terms.eth_code_hash)));
         }
         if p.eth.code_hash != Some(terms.eth_code_hash) {
             return Err(bad("eth.code_hash (the bundle pins another contract than the HTLC compiled into this build)"));
@@ -435,6 +491,11 @@ impl SwapPublic {
     /// (`equiv/portable::encode_public`). Bob verifies the receipt against his
     /// own image id with `equiv-prove verify`; this is what that command checked.
     pub fn expected_equivalence_journal(&self) -> Result<[u8; 65], SwapFileError> {
+        if self.params.eth.lock_kind == LockKind::Poseidon {
+            return Err(SwapFileError::Invalid(
+                "a poseidon swap has no equivalence proof: both locks carry the same A = Addr(s), so there is no journal to expect".into(),
+            ));
+        }
         let a = self.authority()?;
         let mut out = [0u8; 65];
         out[0] = self.params.variant.journal_byte();
@@ -446,11 +507,28 @@ impl SwapPublic {
 
 /// REVIEW-3 F1: the refusal for a code hash other than the one compiled into this build.
 pub fn other_contract_message(what: &str, got: &[u8; 32]) -> String {
+    other_contract_message_for(LockKind::Sha256, what, got)
+}
+
+/// [`other_contract_message`] for the code hash of a given lock kind. A poseidon file refuses `HTLC_CODE_HASH` and the reverse.
+pub fn other_contract_message_for(kind: LockKind, what: &str, got: &[u8; 32]) -> String {
+    let (name, pin) = match kind {
+        LockKind::Sha256 => ("HTLC", params::HTLC_CODE_HASH),
+        LockKind::Poseidon => ("HTLCPoseidonV2", params::HTLC_POSEIDON_V2_CODE_HASH),
+    };
     format!(
-        "{what} 0x{} is not the HTLC code hash compiled into this build, 0x{}: a different value means a different contract, and no option accepts one (REVIEW-3 F1)",
+        "{what} 0x{} is not the {name} code hash compiled into this build, 0x{}: a different value means a different contract, and no option accepts one (REVIEW-3 F1; the lock kind of this swap is {kind})",
         hex::encode(got),
-        hex::encode(params::HTLC_CODE_HASH)
+        hex::encode(pin)
     )
+}
+
+/// Why the `poseidon` kind is refused for the stock-wallet variant (docs/poseidon-leg.md section 4).
+pub fn poseidon_raw_only_message() -> String {
+    "the poseidon lock kind needs the raw variant: the stock-wallet variant locks on Addr(Derive(m, 0)) and reveals the master secret m, which \
+     HTLCPoseidonV2 does not check (it checks Addr(preimage) only), and a stock-wallet import cannot claim a lock on Addr(s). Use --variant raw, \
+     or --eth-lock-kind sha256 for the stock variant"
+        .to_string()
 }
 
 /// `SHA-256(00 01 .. 1f)`: the hashlock of the public test vector (design section 0).
@@ -472,12 +550,14 @@ pub struct BobTerms {
     pub profile: ProfileName,
     /// The contract version Bob expects (`--contract-version`, default 1); the bundle must carry the same one.
     pub contract_version: ContractVersion,
+    /// The Ethereum lock kind Bob expects (`--eth-lock-kind`, default `sha256`); the bundle must carry the same one.
+    pub lock_kind: LockKind,
     pub bob_noid: Address,
     pub amount_micronoid: u64,
     pub eth_chain_id: u64,
     pub eth_contract: [u8; 20],
-    /// REVIEW-3 F1: the keccak256 of the HTLC runtime code, never read from the bundle; it must equal
-    /// `params::HTLC_CODE_HASH` (the CLI fills it in when `--eth-code-hash` is omitted).
+    /// REVIEW-3 F1: the keccak256 of the HTLC runtime code, never read from the bundle; it must equal the constant of the lock kind
+    /// (`params::HTLC_CODE_HASH`, or `params::HTLC_POSEIDON_V2_CODE_HASH`; the CLI fills it in when `--eth-code-hash` is omitted).
     pub eth_code_hash: [u8; 32],
     pub eth_amount_wei: u128,
     pub bob_sender: [u8; 20],
@@ -778,9 +858,41 @@ pub struct SwapFile {
     /// Alice only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<EncryptedSecret>,
-    /// Bob only: what equivalence proof was verified before this file was created.
+    /// Bob only: what equivalence proof was verified before this file was created. Absent in a `poseidon` file (no proof is needed, and a
+    /// present one is refused so a file cannot claim a proof it does not use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub equivalence: Option<EquivalenceAttestation>,
+    /// Bob, `poseidon` kind only (review V2-10): his own client R produced and self-verified an owner authorization for a throwaway
+    /// instance on this machine. The engine does not offer `lock_eth` without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_r_selftest: Option<ClientRSelfTest>,
+}
+
+/// The record of a passed client-R self-test (`swap-cli self-test FILE`, also run by `new-bob` for the `poseidon` kind).
+///
+/// Plain words: with the `poseidon` lock Bob can claim the NOID only with his own small prover (client R); the stock wallet import cannot
+/// open a lock on `Addr(s)`. Before he puts ETH into a lock he must therefore have SEEN this prover work on his machine: it built a
+/// throwaway lock on a random secret, proved the claim, and verified its own proof. The record says when, and for which owner-authorization
+/// version (the version switches at a height, and a proof of the old one would not do).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientRSelfTest {
+    /// Unix time the self-test passed.
+    pub passed_at: u64,
+    /// The owner-authorization version the throwaway proof was made and verified for (`{:?}` of `OwnerAuthorizationVersion`, e.g. `V4`).
+    pub auth_version: String,
+    /// The Parano1d height the throwaway claim was built for (selects the version).
+    pub call_height: u64,
+    /// Wall time of build + prove + verify, milliseconds (information; compare with the `P_auth` budget of the design).
+    pub proof_ms: u64,
+    /// REVIEW-6 R6-4: the lock word (hex) of THE swap file the record was made for; a record copied from another file does not match.
+    #[serde(default)]
+    pub lock_word: String,
+    /// REVIEW-6 R6-4: the contract version (1 or 2) of this swap; the throwaway used that version's opening and fee rule. `0` = an older record.
+    #[serde(default)]
+    pub contract_version: u8,
+    /// REVIEW-6 R6-4: the build that ran the check ([`crate::build_id`]); the engine accepts a record only from the same string.
+    #[serde(default)]
+    pub build_id: String,
 }
 
 impl SwapFile {
@@ -796,7 +908,7 @@ impl SwapFile {
         if secret.is_public_test_vector() {
             return Err(SwapFileError::PublicTestVector);
         }
-        if secret.hashlock() != public.hashlock
+        if secret.lock_word(public.params.eth.lock_kind) != public.hashlock
             || secret.authority(public.params.variant).to_bech32() != public.claim_authority
         {
             return Err(SwapFileError::SecretMismatch);
@@ -815,21 +927,44 @@ impl SwapFile {
             history: Vec::new(),
             secret: Some(sealed),
             equivalence: None,
+            client_r_selftest: None,
         })
     }
 
     /// Bob's file: no secret. The bundle must pass the structural checks, agree
     /// with Bob's own terms, and the equivalence proof must have been verified
-    /// for exactly this bundle (design step 5, section 6.3).
+    /// for exactly this bundle (design step 5, section 6.3). The `poseidon` lock kind has no equivalence
+    /// proof: use [`SwapFile::new_bob_with`] with `None`.
     pub fn new_bob(
         public: SwapPublic,
         terms: &BobTerms,
         equivalence: &EquivalenceAttestation,
         now: u64,
     ) -> Result<Self, SwapFileError> {
+        Self::new_bob_with(public, terms, Some(equivalence), now)
+    }
+
+    /// [`SwapFile::new_bob`] for either lock kind. `sha256`: the attestation is required and checked. `poseidon`: the attestation must
+    /// be ABSENT (a present one is refused, so a file cannot claim a proof it does not need); the lock word is compared with the
+    /// claim authority of the opening Bob rebuilt in [`SwapPublic::check_bob_terms`].
+    pub fn new_bob_with(
+        public: SwapPublic,
+        terms: &BobTerms,
+        equivalence: Option<&EquivalenceAttestation>,
+        now: u64,
+    ) -> Result<Self, SwapFileError> {
         public.check()?;
         public.check_bob_terms(terms)?;
-        equivalence.check(&public)?;
+        match (public.params.eth.lock_kind, equivalence) {
+            (LockKind::Sha256, Some(att)) => att.check(&public)?,
+            (LockKind::Sha256, None) => return Err(SwapFileError::Invalid("Bob's file has no equivalence attestation".into())),
+            (LockKind::Poseidon, None) => {}
+            (LockKind::Poseidon, Some(_)) => {
+                return Err(SwapFileError::Invalid(
+                    "a poseidon swap needs no equivalence proof, and a file does not claim one it does not use: drop the receipt and the --equiv-* options".into(),
+                ))
+            }
+        }
         Ok(Self {
             version: SWAP_FILE_VERSION,
             role: Role::Bob,
@@ -842,7 +977,8 @@ impl SwapFile {
             eth_from_block: None,
             history: Vec::new(),
             secret: None,
-            equivalence: Some(equivalence.clone()),
+            equivalence: equivalence.cloned(),
+            client_r_selftest: None,
         })
     }
 
@@ -896,10 +1032,19 @@ impl SwapFile {
             sealed.kdf.check_bounds()?;
         }
         if file.role == Role::Bob {
-            match &file.equivalence {
-                Some(att) => att.check(&file.public)?,
-                None => return Err(SwapFileError::Invalid("Bob's file has no equivalence attestation".into())),
+            match (file.public.params.eth.lock_kind, &file.equivalence) {
+                (LockKind::Sha256, Some(att)) => att.check(&file.public)?,
+                (LockKind::Sha256, None) => return Err(SwapFileError::Invalid("Bob's file has no equivalence attestation".into())),
+                (LockKind::Poseidon, None) => {}
+                (LockKind::Poseidon, Some(_)) => {
+                    return Err(SwapFileError::Invalid(
+                        "a poseidon swap file must not carry an equivalence attestation: no proof is used, and a file does not claim one it does not need".into(),
+                    ))
+                }
             }
+        }
+        if file.client_r_selftest.is_some() && !(file.role == Role::Bob && file.public.params.eth.lock_kind == LockKind::Poseidon) {
+            return Err(SwapFileError::Invalid("a client R self-test record belongs in Bob's poseidon file only".into()));
         }
         Ok(file)
     }
@@ -907,7 +1052,7 @@ impl SwapFile {
     pub fn decrypt_secret(&self, pass: &Passphrase) -> Result<Secret, SwapFileError> {
         let sealed = self.secret.as_ref().ok_or(SwapFileError::NoSecret)?;
         let secret = sealed.open(pass, self.public.digest())?;
-        if secret.hashlock() != self.public.hashlock {
+        if secret.lock_word(self.public.params.eth.lock_kind) != self.public.hashlock {
             return Err(SwapFileError::SecretMismatch);
         }
         Ok(secret)
@@ -934,6 +1079,32 @@ impl SwapFile {
         self.eth_from_block = Some(block);
         self.log(format!("eth_from_block_set:{block}"), now);
         true
+    }
+
+    /// Record a passed client R self-test (Bob, `poseidon` kind only; any other file refuses it).
+    pub fn record_client_r_selftest(&mut self, record: ClientRSelfTest, now: u64) -> Result<(), SwapFileError> {
+        if !(self.role == Role::Bob && self.public.params.eth.lock_kind == LockKind::Poseidon) {
+            return Err(SwapFileError::Invalid("the client R self-test belongs to Bob's file of a poseidon swap".into()));
+        }
+        // REVIEW-6 R6-4: a record is kept only for the swap it was made for (the engine checks the same fields again at the lock decision).
+        if record.lock_word != hex::encode(self.public.hashlock) || record.contract_version != self.public.params.contract_version.number() {
+            return Err(SwapFileError::Invalid("the client R self-test record is for another lock word or contract version than this file's".into()));
+        }
+        self.client_r_selftest = Some(record);
+        self.log("client_r_selftest_passed", now);
+        Ok(())
+    }
+
+    /// REVIEW-7 R7-2: forget the self-test record. `swap-cli self-test` calls this and SAVES before it proves anything, so a run that fails
+    /// (or is killed halfway) leaves no valid record behind: an earlier pass must not vouch for a client R the operator has just seen fail.
+    /// Returns whether a record was removed (that is logged as `client_r_selftest_cleared`).
+    pub fn clear_client_r_selftest(&mut self, now: u64) -> bool {
+        if self.client_r_selftest.take().is_some() {
+            self.log("client_r_selftest_cleared", now);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_pending(&mut self, action: PendingAction) {
@@ -1084,6 +1255,7 @@ pub fn example_public(secret: &Secret, variant: Variant) -> SwapPublic {
 /// that profile allows), production and sepolia on 11155111 (the only chain the sepolia profile allows); all use
 /// 10 NOID and 0.01 ETH, which the caps accept.
 pub fn example_public_with(secret: &Secret, variant: Variant, profile: ProfileName) -> SwapPublic {
+    let lock_kind = LockKind::Sha256;
     let cast = htlc_harness::Cast::new();
     SwapPublic::build_with_profile(
         secret,
@@ -1097,7 +1269,8 @@ pub fn example_public_with(secret: &Secret, variant: Variant, profile: ProfileNa
         EthParams {
             chain_id: if profile == ProfileName::Rehearsal { 31_337 } else { 11_155_111 },
             contract: [0x11; 20],
-            code_hash: Some(params::HTLC_CODE_HASH),
+            code_hash: Some(params::code_hash_for(lock_kind)),
+            lock_kind,
             amount_wei: 10u128.pow(16),
             alice_receiver: [0xa1; 20],
             bob_sender: [0xb0; 20],
@@ -1113,6 +1286,11 @@ pub fn example_public_v(secret: &Secret, variant: Variant, contract_version: Con
 
 /// [`example_public`] under a named profile and contract version.
 pub fn example_public_opts(secret: &Secret, variant: Variant, profile: ProfileName, contract_version: ContractVersion) -> SwapPublic {
+    example_public_kind(secret, variant, profile, contract_version, LockKind::Sha256)
+}
+
+/// [`example_public_opts`] for a given Ethereum lock kind (`poseidon`: raw variant only, the lock word is `Addr(s)`, the pin is the V2 code hash).
+pub fn example_public_kind(secret: &Secret, variant: Variant, profile: ProfileName, contract_version: ContractVersion, lock_kind: LockKind) -> SwapPublic {
     let cast = htlc_harness::Cast::new();
     SwapPublic::build_with_options(
         secret,
@@ -1127,7 +1305,8 @@ pub fn example_public_opts(secret: &Secret, variant: Variant, profile: ProfileNa
         EthParams {
             chain_id: if profile == ProfileName::Rehearsal { 31_337 } else { 11_155_111 },
             contract: [0x11; 20],
-            code_hash: Some(params::HTLC_CODE_HASH),
+            code_hash: Some(params::code_hash_for(lock_kind)),
+            lock_kind,
             amount_wei: 10u128.pow(16),
             alice_receiver: [0xa1; 20],
             bob_sender: [0xb0; 20],
@@ -1142,6 +1321,7 @@ pub fn example_bob_terms(public: &SwapPublic) -> BobTerms {
         variant: public.params.variant,
         profile: public.params.profile,
         contract_version: public.params.contract_version,
+        lock_kind: public.params.eth.lock_kind,
         bob_noid: Address::parse(&public.params.bob_noid).expect("bob address"),
         amount_micronoid: public.params.amount_micronoid,
         eth_chain_id: public.params.eth.chain_id,
@@ -1168,10 +1348,31 @@ pub fn example_attestation(public: &SwapPublic) -> EquivalenceAttestation {
 }
 
 /// Bob's file for tests: terms and attestation derived from the bundle itself.
+/// A `poseidon` bundle has no attestation, and the file carries a client R self-test record (tests only: nothing was proved).
 pub fn example_bob_file(public: SwapPublic, now: u64) -> Result<SwapFile, SwapFileError> {
     let terms = example_bob_terms(&public);
+    if public.params.eth.lock_kind == LockKind::Poseidon {
+        let selftest = example_selftest(&public, now);
+        let mut file = SwapFile::new_bob_with(public, &terms, None, now)?;
+        file.client_r_selftest = Some(selftest);
+        return Ok(file);
+    }
     let att = example_attestation(&public);
     SwapFile::new_bob(public, &terms, &att, now)
+}
+
+/// A self-test record as a passed `swap-cli self-test` would write it for the current owner-authorization version (tests only).
+pub fn example_selftest(public: &SwapPublic, now: u64) -> ClientRSelfTest {
+    let call_height = params::V2_1_ACTIVATION_HEIGHT + 1_000;
+    ClientRSelfTest {
+        passed_at: now,
+        auth_version: format!("{:?}", params::auth_version_at(call_height)),
+        call_height,
+        proof_ms: 1_500,
+        lock_word: hex::encode(public.hashlock),
+        contract_version: public.params.contract_version.number(),
+        build_id: crate::build_id(),
+    }
 }
 
 #[cfg(test)]

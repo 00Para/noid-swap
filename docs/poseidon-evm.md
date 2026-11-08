@@ -219,3 +219,11 @@ per gas for a MUL-heavy transaction; not measured.
 * Karatsuba on the 5-way split with a 6-way spacing: fewer `MUL`s, more XORs; maybe 10 %.
 * 2-bit table lookups for the basis change: ~10 k gas, +8 KB code.
   The multiplication count (448) is the floor for this round structure.
+
+## Update 2026-11-05
+
+The vendor-generated differential file this document lists under "What could not be verified" now exists:
+12,299 vectors from the vendor crate, 0 mismatches against `Poseidon2b.sol` (`eth/test/poseidon-vectors.test.js`,
+`eth/README.md`). The production contract is `eth/contracts/HTLCPoseidonV2.sol`; its protocol delta, measured gas
+(claim 499,288 to 544,584), code-hash pin and the integration spec are in `docs/poseidon-leg.md`. `HTLCPoseidon.sol`
+remains as the prototype.

@@ -13,6 +13,7 @@ cargo test --offline --test chaos                                   # 1,000 scen
 cargo test --offline --test chaos -- --nocapture                    # same, with the seed and the full report printed
 CHAOS_N=10000 CHAOS_SEED=0xdeadbeef cargo test --offline --test chaos -- --nocapture
 CHAOS_SEED=0xc4a05eed CHAOS_ONLY=1639 CHAOS_VERBOSE=1 cargo test --offline --test chaos -- --nocapture   # replay one
+CHAOS_TRACE=1 CHAOS_LOG_LINES=100000 ...                           # with CHAOS_ONLY: one line per tick of every party; the failure log keeps all lines
 CHAOS_STRICT=1 ...                                                  # an OPEN finding (OPEN_FINDINGS in chaos.rs) also fails the run; a FIXED one always does
 ```
 
@@ -139,7 +140,7 @@ tests, which pin what must NOT change, and the F-16 predicate test were not muta
 - *M3 (fixed).* `scripts/live/watch.sh` no longer counts `done` as terminal while the action names a refund or a leftover leg.
 - *M5 (fixed).* When `refund_noid` is held back because the recorded instance is gone, the note lists the other instances at the root (a funding that came back as a new incarnation), to be refunded with the wallet.
 - *M4 (documented, not fixed).* F-3 is fixed for reorgs that a poll observes (absence, or another incarnation). A funding removed and re-included between two polls with the SAME slot and incarnation is invisible; only the inclusion height (`getTx` of the funding txid) would close it, and Bob does not know that txid.
-- *Not changed:* a reveal that was sent, reverted and then cancelled in the ledger counts as no evidence of a reveal (a cancel is allowed once nothing of it is pending or mined), so if Bob took the NOID the file stays `lock_final` (stuck, never wrong); the F-17 marker is taken at a non-final tip (a deep reorg suppresses a true `lost`: the safe direction); a claim recorded from a log and later read from the `getLock` record is not judged as moved (a premature `done` while the log index lags); F-9 reads the reorg without re-checking the chain id (the wrong endpoint recovers with the right one); `lost` can still be declared when Alice's wallet closed the instance while she was not polling around `D`.
+- *Not changed:* a reveal that was sent, reverted and then cancelled in the ledger counts as no evidence of a reveal (a cancel is allowed once nothing of it is pending or mined), so if Bob took the NOID the file stays `lock_final` (stuck, never wrong); the F-17 marker is taken at a non-final tip (a deep reorg suppresses a true `lost`: the safe direction); a claim recorded from a log and later read from the `getLock` record is not judged as moved (a premature `done` while the log index lags); F-9 reads the reorg without re-checking the chain id (the wrong endpoint recovers with the right one); `lost` could still be declared when Alice's wallet closed the instance while she was not polling around `D` (fixed afterwards by F-18).
 
 **Open (not fixed in this round):** F-2, F-6, F-7, F-8, F-10, F-11, F-14 (described below, unchanged). One new finding, F-17, was found by the longer runs and fixed:
 
@@ -295,6 +296,84 @@ reorg -> `funding_final`) where Alice adopted a second matching lock and printed
 open finding closed: the list stays F-2, F-6, F-7, F-8, F-10, F-11, F-14. What the run still cannot show: R4-2's attack needs two nodes that disagree
 about the mempool and the simulator has one (see Limits); the fix holds by construction (the same lock id, so a duplicate reverts) and is tested
 directly in `tests/review4.rs`.
+
+## Base seed `0x5eed0001` (2026-11-05)
+
+Two violations on a seed not run before, both older than the recent work. One was an engine gap and one a harness error.
+
+- **`gate-lock-two-instances`, scenario 145: engine bug, fixed.** Bob locked on one instance, the lock transaction was dropped, a second
+  instance of the agreed amount appeared at the contract root, and the re-send path (`BobPhase::LockSubmitted`, `engine::bob_action`) sent the
+  same lock again. The first-lock path already waits on `InstanceProblem::Ambiguous` (REVIEW-2 F10: the tool does not lock on a guess); the re-send
+  never asked. It now waits with a note ("not re-sending the lock") until the ambiguity clears or the re-send is unsafe on its own terms. A lock
+  that landed anyway is not affected (the same lock id, a duplicate reverts). Test: `a_dropped_lock_is_not_re_sent_while_two_instances_of_the_agreed_amount_sit_at_the_root`
+  in `tests/chaos_fixes.rs`.
+- **`fail-closed`, scenario 613: harness error, fixed in the oracle.** The `EthHeadLag` degradation put the head block 700 s behind the TRUE
+  Ethereum time, while the engine measures the lag against the party's own clock. With the party's clock 100 s slow (skew -100, inside `SKEW_TOL`)
+  it saw exactly 600 s, which is not above `MAX_ETH_HEAD_LAG_S`, and the correct reveal was reported as a violation. The degradation is now 700 s behind
+  the party's clock (like `TipTimeLag`), so the oracle's "blocked" promise holds for every skew. Test: `the_head_lag_degradation_is_beyond_the_engines_limit_for_every_clock_skew`
+  in `tests/chaos.rs`. No engine change.
+
+The default seed and `0x5eed0001` are green after both changes (1,000 scenarios each).
+
+### Longer runs after REVIEW-5 (3,000 scenarios, 2026-11-05): two more, not caused by the changes above or by the lock kind — both FIXED the same day (F-18, F-19)
+
+`CHAOS_N=3000` on `0xdeadbeef` and `0x5eed01` is green. On `0xc4a05eed` and `0x5eed0001` one scenario each failed. Both reproduced with the lock kind forced to `sha256`
+(`CHAOS_LOCK_KIND=sha256`) and with the two changes above switched off (checked by toggling them for the replay), so they came from the engine or the oracle as they were at
+`7c1835d` (REVIEW-5). Diagnosis and fixes are in "F-18" and "F-19" below; the bullets keep the first description. Replay:
+`CHAOS_LOCK_KIND=sha256 CHAOS_SEED=<seed> CHAOS_ONLY=<index> cargo test --offline --test chaos -- --nocapture`
+(add `CHAOS_TRACE=1 CHAOS_LOG_LINES=100000` for a line per tick of every party).
+
+- **`terminal-vs-chain`, `0xc4a05eed` scenario 1259** (hostile, CLI, rehearsal, raw, contract v2). Alice's operator never sends the printed `reveal_eth`; Bob refunds the Ethereum lock;
+  Alice then closes the NOID with her wallet (recovery) **outside the tool** and the tool is not told (`--closed-by`). As far as the log shows, her file then goes to `lost` (M2.5b: reveal
+  evidence, Ethereum refund final, instance gone) although she got her NOID back. The engine cannot tell her own recovery close from a third party's without `--closed-by`; the question is whether `lost`
+  may be declared on that evidence at all while the instance disappeared by a close the file did not record (compare F-17). **Engine bug, fixed: F-18.**
+- **`noid-stuck`, `0x5eed0001` scenario 2792** (hostile, CLI, rehearsal, raw, contract v1). A crash around Alice's `fund_noid` leaves her file in `created` with a pending
+  `fund_noid` of unknown outcome (F-2); the real instance sits at the root, two extra instances of the agreed amount appear, Alice's recovery close is later dropped by a
+  reorg, and the file still believes nothing was funded, so nothing refunds the NOID and it stays at the contract after D. First reading: F-2 with a real consequence. **Not F-2; engine gap
+  (F-7 in the CLI path), fixed: F-19.**
+
+### F-18 (Medium) `lost` declared over a NOID that Alice took back with her own recovery close — **FIXED 2026-11-05**
+Base seed `0xc4a05eed`, scenario 1259 (hostile, CLI, rehearsal, raw, v2; replay with `CHAOS_LOCK_KIND=sha256`). Trace: the operator never sends the printed `reveal_eth`; Bob refunds
+his ETH (final); Alice does not poll between about `D - 1` and her own wallet's recovery close at the first block at or after `D`; a reorg drops that close, her wallet closes again;
+the first poll after all of it sees the instance gone, `tip >= D + B_FINAL`, Bob's refund final, a decided `reveal_eth` intent: `lost`. The chain says the NOID is back with Alice.
+**Engine bug, not an oracle error.** F-17's marker (`noid_instance_alive_at_d`) needs a poll in the one or two blocks between `D - 1` and the recovery close; without it nothing
+separated "Bob's claim took it (included at `h < D`)" from "her recovery took it (`h >= D`)", and the rule declared the first. A terminal state has to be true, so the evidence is
+turned around: `lost` now needs a **positive** fact, and the only one that tells the two closes apart is a poll with `tip < D` that did not list the instance (only the claim branch
+can close it then). New log-only events `noid_instance_gone_before_d` (written by `alice_gone_trace`, only in `lock_final` and `reveal_submitted`, when the recorded instance is absent in such a poll and the second node, if
+there is one, does not list it either; not when the second node could not be read) and `noid_instance_back_after_gone` (written when it is listed again, so an absence a reorg undid
+proves nothing). `alice_both_legs_lost` requires the first and no later second, in addition to everything it required before (Bob's refund final, `tip >= D + B_FINAL`, the second
+node, a reveal on record, no `refund_noid` decided, no `alive_at_d`); F-17's veto stays. Without the evidence the file stays in `lock_final` / `reveal_submitted` and the note says
+what to do: record the close with `tick --closed-by` if the wallet made it, otherwise check the contract receipts (the NOID went to Bob). **Cost:** a genuine loss where Alice
+did not poll once between Bob's claim and `D` also stays non-terminal (stuck, never wrong); the oracle lists that as the F-11 gap (`alice_closed_unrecorded` now also covers "no
+poll before D saw the instance gone"). On the default seed F-11 shows 2 scenarios in 1,000, both Bob's; none is an Alice file waiting for this evidence. Tests: `f18_lost_needs_a_poll_before_d_that_saw_the_instance_gone`,
+`f18_the_note_says_what_to_do_when_the_evidence_is_missing`, `f18_an_absence_that_a_reorg_undid_is_no_evidence` (the existing `lost` tests now poll once before `D`, as the real
+loop does every minute).
+
+### F-19 (Medium) a funding behind a lookalike instance is never taken back — **FIXED 2026-11-05**
+Base seed `0x5eed0001`, scenario 2792 (hostile, CLI, rehearsal, raw, v1). The first diagnosis (an unresolved `fund_noid` hides the instance) was wrong: the tool decided a
+funding, the operator sent it, Alice did not poll for 29 blocks, and in that time a second instance **of the agreed amount** appeared at the root (the oracle's
+`fitting_instance`). With two fitting instances `instance_ok` answers "ambiguous" and the file stays `created` (the phase the CLI path is in until it sees its instance;
+`funding_submitted` on the library path); the action is "too late to fund" (printed as `abort`, not recorded while a decided `fund_noid` is uncancelled, F-1), so `refund_noid` is
+never offered and the NOID stays at the contract after `D`. This is F-7 reached from `created`, which the oracle's F-7 allowance (`funding_submitted` only) did not cover,
+and hence a hard `noid-stuck`. **Engine gap, fixed:** from `tip + 1 >= D`, with her own funding on record (phase `funding_submitted`, a `pending_action` `fund_noid`, or an
+`intent_decided:fund_noid` that was not cancelled), several fitting instances no longer block: the OLDEST (lowest `creation_id`, then slot) is recorded as hers
+(`noid_instance_seen`), with a note that names the others for the wallet. She funded once and an allocation counter orders the deposits; a wrong guess costs nothing, because every
+instance at the root pays Alice on the recovery branch and the gates that protect her stay: Bob does not lock under ambiguity, she never reveals with two fitting instances
+(REVIEW-3 F10, REVIEW-4 R4-4). Before `D` nothing changes, and without a trace of a funding of hers nothing is adopted. Tests: `f19_a_funding_behind_a_lookalike_is_taken_back_at_d`
+(CLI path: decided intent), `f19_the_library_path_with_a_funding_that_was_submitted_ends_the_same_way`, `f19_a_lookalike_is_nobodys_business_without_a_trace_of_alices_funding`.
+F-2 stays open on its own terms (a `pending_action` of unknown outcome with nothing at the root).
+
+Runs after both fixes (2026-11-05): the whole suite is green (452 passed, 1 ignored; it was 446 before the six new tests); the two replays pass; 1,000 scenarios on `0xc4a05eed` and `0x5eed0001`, and 3,000 on `0xc4a05eed`, `0x5eed0001`, `0xdeadbeef`, `0x5eed01`,
+`0xfeed42` are green (no hard failure; only the open findings are recorded).
+
+## The Ethereum lock kind (2026-11-05)
+
+About two in five raw-variant scenarios (about 22 in 100 overall) now run against the `poseidon` lock (`HTLCPoseidonV2`, `docs/poseidon-leg.md`), the rest against `sha256`.
+The kind is drawn from its own generator (`seed ^ 0x504f5345_4944_4f4e`), not from the scenario's `rng`, so every other choice of every scenario and seed is the one it
+was before and the entries above still name the same scenarios. The simulator keeps one lock word (`World.hashlock`; SHA-256 of the secret or `Addr(s)`) and its claim assertion
+is per kind (`watch::eth::lock_word_of`); the oracle's claim gate is per kind too. What changes for a poseidon scenario is exactly what the engine changes: an earlier lock on the word, by
+anyone (the `side_lock` events), keeps Bob from locking (and from re-sending), and Bob's file carries a passed client R self-test (`example_bob_file`). Default seed and `0x5eed0001`
+stay green with the mix; the stats line prints the split (`lock {"poseidon": …, "sha256": …}`).
 
 ## Limits of this test
 

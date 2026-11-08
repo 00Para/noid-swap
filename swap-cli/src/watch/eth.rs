@@ -16,12 +16,17 @@
 //! `eth_chainId` (mandatory: a node that cannot answer fails the poll); `eth_getCode` for the contract, ALWAYS and
 //! right after the chain id (its keccak256 is `contract_code_hash`, read before any lock exists);
 //! with a discovery rule, ONE `eth_getLogs` for every `Locked` event of the agreed parties and hashlock (REVIEW-2 F10:
-//! all of them, also when the lock id is already pinned); then, for the pinned lock first and each other match after
+//! all of them, also when the lock id is already pinned; both lock kinds, through the INDEXED sender and receiver topics, REVIEW-6 R6-1);
+//! then, for the pinned lock first and each other match after
 //! it (up to [`MAX_LOCKS_READ`]): ONE `eth_getLogs` (address = contract, topic0 in {Locked, Claimed, Refunded},
 //! topic1 = that lockId), `eth_call getLock(lockId)` at `"latest"` (cross-checked with the `Locked` event, or expected
 //! to revert `LockNotFound` when no event exists), then `eth_getCode` for the lock's sender and receiver and
 //! `eth_getBlockByNumber` for the block that mined it; `eth_getTransactionByHash` for each pending tx hash
-//! the caller supplied; and, only when the caller named a signer (REVIEW-3 F3), `eth_getTransactionCount`
+//! the caller supplied; with `--reveal-tx` (REVIEW-6 R6-3) `eth_getTransactionByHash`, `eth_getTransactionReceipt` for that one hash and
+//! `eth_getBlockByNumber` for its block, whose hash must equal the receipt's (REVIEW-7 R7-5: the canonical chain) (a note, never an error); only when the caller asked for the `poseidon` word scan (REVIEW-6 R6-1: Bob before his lock), ONE
+//! `eth_getLogs` for the `Locked` logs of Bob's own sender (topics `[Locked, null, sender]`; REVIEW-7 R7-1; in block-range chunks when the
+//! node limits the range), compared with the lock word locally (its failure is [`WordScan::Failed`], never an error of the poll);
+//! and, only when the caller named a signer (REVIEW-3 F3), `eth_getTransactionCount`
 //! at `"latest"` and `"pending"` for it, last of all, with any failure read as "unknown". Logs and `getLock` are read at different instants, so a claim mined
 //! between them shows up as a `Decode` "inconsistent" error; the next poll resolves it.
 
@@ -29,7 +34,8 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 use sha3::{Digest as _, Keccak256};
 
-use super::{EthClaimed, EthLock, EthObservation, EthRefunded, JsonRpc, PendingPreimage, RpcError};
+use super::{EthClaimed, EthLock, EthObservation, EthRefunded, JsonRpc, PendingPreimage, RevertedClaim, RpcError, WordLock, WordScan};
+use crate::secret::{LockKind, Secret};
 
 /// `keccak256(data)`: Ethereum's native hash (NOT the hashlock hash, which is SHA-256).
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
@@ -108,6 +114,20 @@ pub struct LockDiscovery {
     pub hashlock: [u8; 32],
 }
 
+/// The word an Ethereum lock of kind `kind` is keyed on for a given preimage: `SHA-256(x)` (`HTLC.sol`) or `Addr(x)`
+/// (`HTLCPoseidonV2.sol`, `docs/poseidon-leg.md` section 9.4). The watchers use it for every "does this preimage open this lock" test.
+pub fn lock_word_of(kind: LockKind, preimage: &[u8; 32]) -> [u8; 32] {
+    match kind {
+        LockKind::Sha256 => sha256(preimage),
+        LockKind::Poseidon => Secret::from_bytes(*preimage).lock_word(LockKind::Poseidon),
+    }
+}
+
+/// Blocks per `eth_getLogs` request when a node refuses the whole range of the `poseidon` sender query (public Sepolia RPCs cap a request at this
+/// size; REVIEW-7 R7-1). The old rule that read a result of exactly 1,000 / 5,000 / 10,000 / 20,000 logs as truncated is gone: the query is for
+/// Bob's own sender, so its size does not depend on the other users of the contract.
+pub const DEFAULT_LOG_RANGE_MAX: u64 = 50_000;
+
 /// How many matching locks are read in full (events, `getLock`, code, block timestamp) per poll; the rest are only
 /// counted in `EthObservation::lock_count`.
 pub const MAX_LOCKS_READ: usize = 8;
@@ -125,6 +145,19 @@ pub struct EthWatcher<R: JsonRpc> {
     /// `eth_newPendingTransactionFilter` / `eth_getFilterChanges`).
     pub pending_txs: Vec<[u8; 32]>,
     pub discover: Option<LockDiscovery>,
+    /// Which Ethereum contract this watcher reads (`sha256`: `HTLC.sol`, the default; `poseidon`: `HTLCPoseidonV2.sol`). The ABI shape is the
+    /// same, so the kind changes only what a preimage is tested against and how the lock word is scanned.
+    pub lock_kind: LockKind,
+    /// `poseidon` kind (REVIEW-6 R6-1, REVIEW-7 R7-1): also read the `Locked` logs of Bob's own sender (the "has this word been locked before from
+    /// Bob's address" check). Set by the
+    /// caller only while Bob has not locked yet; off, the poll uses the indexed sender/receiver query alone, exactly as the `sha256` kind does,
+    /// and its result depends on nothing else. A failing scan never fails the poll (it becomes [`WordScan::Failed`]).
+    pub word_scan: bool,
+    /// REVIEW-7 R7-1: block span of one `eth_getLogs` request of the sender query, used only after a node refused the whole range.
+    pub log_range_max: u64,
+    /// REVIEW-6 R6-3: the hash of a claim transaction of ours that the operator says was mined (`--reveal-tx`). When the receipt shows it
+    /// REVERTED and it matches the lock, the secret in its calldata is returned as `reverted_claim`.
+    pub reveal_tx: Option<[u8; 32]>,
     /// REVIEW-3 F3: the address this role signs Ethereum transactions with. When set, the poll ends with two
     /// `eth_getTransactionCount` calls (`"latest"`, `"pending"`) for it; a failed call is "unknown", never an error.
     pub signer: Option<[u8; 20]>,
@@ -134,7 +167,25 @@ pub struct EthWatcher<R: JsonRpc> {
 
 impl<R: JsonRpc> EthWatcher<R> {
     pub fn new(rpc: R, contract: [u8; 20], lock_id: [u8; 32]) -> Self {
-        Self { rpc, contract, lock_id, from_block: 0, pending_txs: Vec::new(), discover: None, signer: None, clock: super::system_now }
+        Self { rpc, contract, lock_id, from_block: 0, pending_txs: Vec::new(), discover: None, lock_kind: LockKind::Sha256, word_scan: false, log_range_max: DEFAULT_LOG_RANGE_MAX, reveal_tx: None, signer: None, clock: super::system_now }
+    }
+
+    /// REVIEW-7 R7-1: the block span of one request of the sender query when a node limits the range (default [`DEFAULT_LOG_RANGE_MAX`]).
+    pub fn with_log_range_max(mut self, blocks: u64) -> Self {
+        self.log_range_max = blocks;
+        self
+    }
+
+    /// `poseidon` kind: also run the all-`Locked`-logs scan in this poll (see [`EthWatcher::word_scan`]). Ignored for the `sha256` kind.
+    pub fn with_word_scan(mut self, on: bool) -> Self {
+        self.word_scan = on;
+        self
+    }
+
+    /// REVIEW-6 R6-3: inspect this transaction as a possibly mined-and-reverted claim of our lock.
+    pub fn with_reveal_tx(mut self, hash: Option<[u8; 32]>) -> Self {
+        self.reveal_tx = hash;
+        self
     }
 
     /// REVIEW-3 F3: also read the nonces (`latest`, `pending`) of `signer`, the address the operator signs with.
@@ -156,6 +207,12 @@ impl<R: JsonRpc> EthWatcher<R> {
 
     pub fn with_discovery(mut self, rule: LockDiscovery) -> Self {
         self.discover = Some(rule);
+        self
+    }
+
+    /// The lock kind of the contract (see [`EthWatcher::lock_kind`]).
+    pub fn with_lock_kind(mut self, kind: LockKind) -> Self {
+        self.lock_kind = kind;
         self
     }
 
@@ -192,6 +249,8 @@ impl<R: JsonRpc> EthWatcher<R> {
 
         // REVIEW-2 F10: every matching `Locked` event is found, even when the lock id is already known, so a second
         // lock is never hidden behind the first. The pinned lock (or, without a pin, the first match) comes first.
+        // REVIEW-6 R6-1: both kinds find the swap's own locks the same way, through the INDEXED sender and receiver topics. The poseidon
+        // kind's all-`Locked` scan is separate (below), asked only when the caller says Bob is deciding to lock, and it cannot fail the poll.
         let discovered: Vec<[u8; 32]> = match &self.discover {
             Some(rule) => self.discover_lock_ids(rule)?,
             None => Vec::new(),
@@ -246,8 +305,46 @@ impl<R: JsonRpc> EthWatcher<R> {
                 }
             }
         }
+        let mut overlong_claim = None;
         if let (Some(lock_id), Some(l)) = (lock_id, &lock) {
-            pending_preimage = self.find_pending_claim(lock_id, &l.hashlock)?;
+            let (pending, overlong) = self.find_pending_claim(lock_id, &l.hashlock)?;
+            pending_preimage = pending;
+            overlong_claim = overlong;
+        }
+        // REVIEW-6 R6-3: a claim of ours the operator named, checked against the pinned lock; every outcome is a note, none an error.
+        let (mut reverted_claim, mut reveal_tx_note) = (None, None);
+        if let Some(hash) = self.reveal_tx {
+            match &lock {
+                Some(l) => match self.read_reveal_tx(hash, l) {
+                    Ok((rc, note)) => {
+                        reverted_claim = rc;
+                        reveal_tx_note = Some(note);
+                    }
+                    Err(e) => reveal_tx_note = Some(format!("--reveal-tx could not be read from the node: {e}")),
+                },
+                None => reveal_tx_note = Some("--reveal-tx: no lock of ours is visible yet, so the transaction cannot be checked against it".to_string()),
+            }
+        }
+        // REVIEW-6 R6-1: the all-`Locked` scan, last of the lock reads and only when asked. Its trouble is a state, never an error.
+        let (mut word_locks, mut word_scan): (Vec<WordLock>, WordScan) = (Vec::new(), WordScan::NotRun);
+        if let (true, LockKind::Poseidon, Some(rule)) = (self.word_scan, self.lock_kind, &self.discover) {
+            match self.locked_by_own_sender(rule, latest_block) {
+                Ok(all) => {
+                    // Review V2-8: the sender query must show every lock of the agreed parties that the targeted query found (its sender is the
+                    // same). If it does not, it was cut (a provider limit that answered without an error) and cannot be trusted to show an
+                    // EARLIER lock either.
+                    if let Some(missed) = locks.iter().find(|l| l.hashlock == rule.hashlock && l.sender == rule.sender && !all.iter().any(|w| w.lock_id == l.lock_id)) {
+                        word_scan = WordScan::Failed(format!(
+                            "the query for Bob's own sender does not contain the lock {} that the targeted query found: the node truncated the range (provider limit); lower --eth-from-block or use a node without the cap",
+                            hex0x(&missed.lock_id)
+                        ));
+                    } else {
+                        word_scan = WordScan::Complete;
+                        word_locks = all;
+                    }
+                }
+                Err(e) => word_scan = WordScan::Failed(e.to_string()),
+            }
         }
         // REVIEW-3 F3: asked last, like F5's header time: unknown on any failure, so an ordinary tick never fails on it.
         let (signer_nonce_latest, signer_nonce_pending) = match &self.signer {
@@ -268,6 +365,11 @@ impl<R: JsonRpc> EthWatcher<R> {
             refunded,
             claim_state_from_record,
             pending_preimage,
+            overlong_claim,
+            word_locks,
+            word_scan,
+            reverted_claim,
+            reveal_tx_note,
             signer_nonce_latest,
             signer_nonce_pending,
             second: None,
@@ -339,6 +441,88 @@ impl<R: JsonRpc> EthWatcher<R> {
             }
         }
         Ok(found)
+    }
+
+    /// The `poseidon` word check (review V2-8, REVIEW-6 R6-1, REVIEW-7 R7-1). `Locked` has the lock word in its DATA, not as a topic, but
+    /// the only question left is "has BOB'S OWN SENDER already locked on this word, to anyone" (a lock by another sender costs Bob nothing,
+    /// REVIEW-6 R6-2), and the sender IS an indexed topic. So the node is asked for `[Locked, any lockId, Bob's sender]` only, from
+    /// `from_block`: the answer is bounded by Bob's own activity, not by how busy the shared contract is, and nobody else can pad it (the sender
+    /// topic is `msg.sender`). The lock word is compared here, and every log is re-checked locally (contract, event, sender, lock id
+    /// recomputed). A range-limited node is asked in chunks of [`EthWatcher::log_range_max`] blocks. There is NO "exact provider cap size" rule
+    /// any more: the result does not grow with other people's locks. A node error, a malformed log and a lock id that does not recompute are
+    /// errors (never "no earlier lock" by silence). The CALLER turns an error into [`WordScan::Failed`] (it never fails the poll) and runs
+    /// the check only while Bob is deciding to lock.
+    fn locked_by_own_sender(&self, rule: &LockDiscovery, latest_block: u64) -> Result<Vec<WordLock>, RpcError> {
+        const M: &str = "eth_getLogs";
+        let sender_topic = pad32(&rule.sender);
+        // `HTLCPoseidonV2.sol`: `Locked(bytes32 indexed lockId, address indexed sender, address indexed receiver, uint256 amount, bytes32 lockAddr,
+        // uint256 timelock)` (checked in the contract source, REVIEW-7 R7-1): the sender is an indexed topic, topic2, the lock word is in the data.
+        let query = |from: &str, to: &str| -> Result<Vec<Value>, RpcError> {
+            let filter = json!([{
+                "address": hex0x(&self.contract),
+                "fromBlock": from,
+                "toBlock": to,
+                "topics": [hex0x(&TOPIC_LOCKED), Value::Null, hex0x(&sender_topic)],
+            }]);
+            let logs = self.rpc.call(M, filter)?;
+            logs.as_array().cloned().ok_or_else(|| dec(M, "result is not an array"))
+        };
+        // One call over the whole range first. A node that limits the block range answers it with a JSON-RPC error; only then is the range
+        // cut into chunks of `log_range_max` blocks (a transport error is not retried this way). A chunk that still fails fails the scan.
+        let logs: Vec<Value> = match query(&format!("0x{:x}", self.from_block), "latest") {
+            Ok(l) => l,
+            Err(RpcError::Remote { .. }) => {
+                let step = self.log_range_max.max(1);
+                let mut all = Vec::new();
+                let mut start = self.from_block;
+                while start <= latest_block {
+                    let end = start.saturating_add(step - 1).min(latest_block);
+                    all.extend(query(&format!("0x{start:x}"), &format!("0x{end:x}"))?);
+                    if end == u64::MAX {
+                        break;
+                    }
+                    start = end + 1;
+                }
+                all
+            }
+            Err(e) => return Err(e),
+        };
+        // Every log is checked again here, so a provider that ignores the topic filter cannot slip another sender's lock in.
+        let mut all: Vec<WordLock> = Vec::new();
+        for log in logs {
+            if log.get("removed").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let topics: Vec<[u8; 32]> = field(M, &log, "topics")?
+                .as_array()
+                .ok_or_else(|| dec(M, "topics is not an array"))?
+                .iter()
+                .map(|t| word32(M, t))
+                .collect::<Result<_, _>>()?;
+            let addr = bytes(M, field(M, &log, "address")?)?;
+            if addr != self.contract || topics.len() != 4 || topics[0] != TOPIC_LOCKED || topics[2] != sender_topic {
+                continue;
+            }
+            let data = bytes(M, field(M, &log, "data")?)?;
+            if data.len() != 96 {
+                return Err(dec(M, "malformed Locked event"));
+            }
+            if word_at(M, &data, 1)? != rule.hashlock {
+                continue;
+            }
+            let sender = addr_word(M, &topics[2])?;
+            let receiver = addr_word(M, &topics[3])?;
+            let amount_wei = u128_word(M, &word_at(M, &data, 0)?)?;
+            let timelock = u64_word(M, &word_at(M, &data, 2)?)?;
+            if compute_lock_id(&sender, &receiver, amount_wei, &rule.hashlock, timelock) != topics[1] {
+                return Err(dec(M, "Locked event: lockId does not recompute from its own fields"));
+            }
+            let block_number = quantity(M, field(M, &log, "blockNumber")?)?;
+            if !all.iter().any(|w| w.lock_id == topics[1]) {
+                all.push(WordLock { lock_id: topics[1], sender, receiver, amount_wei, timelock, block_number });
+            }
+        }
+        Ok(all)
     }
 
     fn code(&self, addr: &[u8; 20]) -> Result<Vec<u8>, RpcError> {
@@ -489,7 +673,7 @@ impl<R: JsonRpc> EthWatcher<R> {
             return Err(inconsistent());
         }
         if let Some(c) = &claimed {
-            if c.preimage != stored_preimage || sha256(&c.preimage) != lock.hashlock {
+            if c.preimage != stored_preimage || lock_word_of(self.lock_kind, &c.preimage) != lock.hashlock {
                 return Err(inconsistent());
             }
         }
@@ -497,8 +681,8 @@ impl<R: JsonRpc> EthWatcher<R> {
         let claimed = match claimed {
             Some(c) => Some(c),
             None if lock.claimed => {
-                if sha256(&stored_preimage) != lock.hashlock {
-                    return Err(dec(M, "getLock preimage does not hash to the lock's hashlock"));
+                if lock_word_of(self.lock_kind, &stored_preimage) != lock.hashlock {
+                    return Err(dec(M, "getLock preimage does not hash to the lock's hashlock (lock word)"));
                 }
                 from_record = true;
                 Some(EthClaimed { lock_id: lock.lock_id, preimage: stored_preimage, block_number: latest_block, tx_hash: [0u8; 32] })
@@ -534,8 +718,14 @@ impl<R: JsonRpc> EthWatcher<R> {
 
     /// First still-pending `claim(ourLockId, preimage)` to our contract whose preimage really hashes to `hashlock`.
     /// (Anyone can broadcast a claim with a junk preimage; it would revert, so it must not be mistaken for the secret.)
-    fn find_pending_claim(&self, lock_id: [u8; 32], hashlock: &[u8; 32]) -> Result<Option<PendingPreimage>, RpcError> {
+    ///
+    /// `poseidon` kind: the contract demands exactly 68 bytes of calldata, so a pending claim with a longer tail will REVERT
+    /// (`BadCalldataLength`) and still has shown `s`. It is returned as the second value, never as the first: it is no reveal of
+    /// Alice's (nothing will pay her), but Bob must treat the secret as public and claim the NOID from it (`docs/poseidon-leg.md` 9.4).
+    #[allow(clippy::type_complexity)]
+    fn find_pending_claim(&self, lock_id: [u8; 32], hashlock: &[u8; 32]) -> Result<(Option<PendingPreimage>, Option<PendingPreimage>), RpcError> {
         const M: &str = "eth_getTransactionByHash";
+        let mut overlong: Option<PendingPreimage> = None;
         for hash in &self.pending_txs {
             let tx = self.rpc.call(M, json!([hex0x(hash)]))?;
             if tx.is_null() {
@@ -549,15 +739,106 @@ impl<R: JsonRpc> EthWatcher<R> {
                 _ => continue, // contract creation
             };
             let input = bytes(M, field(M, &tx, "input")?)?;
-            if to != self.contract || input.len() != 68 || input[..4] != SELECTOR_CLAIM || input[4..36] != lock_id {
+            let long_ok = self.lock_kind == LockKind::Poseidon && input.len() > 68;
+            if to != self.contract || (input.len() != 68 && !long_ok) || input[..4] != SELECTOR_CLAIM || input[4..36] != lock_id {
                 continue;
             }
             let preimage = word_at(M, &input[4..], 1)?;
-            if sha256(&preimage) == *hashlock {
-                return Ok(Some(PendingPreimage { lock_id, preimage, tx_hash: *hash }));
+            if lock_word_of(self.lock_kind, &preimage) == *hashlock {
+                let p = PendingPreimage { lock_id, preimage, tx_hash: *hash };
+                if input.len() == 68 {
+                    return Ok((Some(p), overlong));
+                }
+                overlong.get_or_insert(p);
             }
         }
-        Ok(None)
+        Ok((None, overlong))
+    }
+
+    /// REVIEW-6 R6-3. A claim that was MINED and REVERTED (receipt status 0) published the secret in its calldata and paid nobody; no `Claimed`
+    /// event marks it and it is no longer pending, so none of the other reads sees it. The operator names its hash (`--reveal-tx`, printed by
+    /// `live.js claim` when it sees the revert) and this reads the transaction and the receipt from the node. It is accepted only if it is a call
+    /// to OUR contract's `claim` of THIS lock id, sent from the lock's receiver (Alice's), whose preimage opens the lock word of this kind
+    /// (calldata may be longer than 68 bytes: a revert for that very reason is the case for the `poseidon` kind). Any other transaction is
+    /// refused with a note, never trusted because it was typed. REVIEW-7 R7-5: its block must also be on the node's canonical chain (the
+    /// receipt's block hash equals the hash of the node's block at that height); the engine additionally wants a second Ethereum node, when
+    /// one is configured, to read the same. Returns the reverted claim, if it is one, and a note for the operator.
+    fn read_reveal_tx(&self, hash: [u8; 32], lock: &EthLock) -> Result<(Option<RevertedClaim>, String), RpcError> {
+        const M: &str = "eth_getTransactionByHash";
+        let name = hex0x(&hash);
+        let tx = self.rpc.call(M, json!([name]))?;
+        if tx.is_null() {
+            return Ok((None, format!("--reveal-tx {name}: the node does not know this transaction (never sent, dropped, or the node lags); nothing was recorded")));
+        }
+        let refuse = |why: &str| Ok((None, format!("--reveal-tx {name} is not a claim of this lock and is IGNORED: {why}")));
+        if word32(M, field(M, &tx, "hash")?)? != hash {
+            return refuse("the node answered with another transaction");
+        }
+        let to = match tx.get("to") {
+            Some(t @ Value::String(_)) => bytes(M, t)?,
+            _ => return refuse("it is a contract creation"),
+        };
+        if to != self.contract {
+            return refuse("it is not sent to the pinned contract");
+        }
+        let from = bytes(M, field(M, &tx, "from")?)?;
+        let sender_ok = from == lock.receiver && self.discover.as_ref().is_none_or(|d| d.receiver == lock.receiver);
+        if !sender_ok {
+            return refuse("it was not sent by the receiver of the lock (Alice's address)");
+        }
+        let input = bytes(M, field(M, &tx, "input")?)?;
+        if input.len() < 68 || input[..4] != SELECTOR_CLAIM || input[4..36] != lock.lock_id {
+            return refuse("it is not claim(lockId, preimage) for this lock id");
+        }
+        let preimage = word_at(M, &input[4..], 1)?;
+        if lock_word_of(self.lock_kind, &preimage) != lock.hashlock {
+            return refuse("its preimage does not open this lock's word");
+        }
+        let mined_at = match tx.get("blockNumber") {
+            None | Some(Value::Null) => {
+                return Ok((None, format!("--reveal-tx {name}: still pending (not mined). It carries the secret: pass it with --pending-tx as well; nothing was recorded as a revert")));
+            }
+            Some(b) => quantity(M, b)?,
+        };
+        const R: &str = "eth_getTransactionReceipt";
+        let receipt = self.rpc.call(R, json!([name]))?;
+        if receipt.is_null() {
+            return Ok((None, format!("--reveal-tx {name}: mined in block {mined_at} but the node has no receipt for it yet; try again")));
+        }
+        if word32(R, field(R, &receipt, "transactionHash")?)? != hash || quantity(R, field(R, &receipt, "blockNumber")?)? != mined_at {
+            return Err(dec(R, "the receipt does not belong to this transaction (hash or block differ from the transaction)"));
+        }
+        // REVIEW-7 R7-5: the block that holds the transaction must be on the node's CANONICAL chain now. A receipt from a block that a reorg
+        // has dropped (or from a node that serves a fork) proves nothing: the receipt's block hash must equal the hash of the block the node
+        // has at that height, and the transaction's own block hash (when it names one) must be the same block.
+        let block_hash = word32(R, field(R, &receipt, "blockHash")?)?;
+        if let Some(tb) = tx.get("blockHash").filter(|v| !v.is_null()) {
+            if word32(M, tb)? != block_hash {
+                return Err(dec(R, "the receipt's block hash differs from the transaction's block hash"));
+            }
+        }
+        const B: &str = "eth_getBlockByNumber";
+        let canonical = self.rpc.call(B, json!([format!("0x{mined_at:x}"), false]))?;
+        if canonical.is_null() {
+            return Ok((None, format!("--reveal-tx {name}: the node has no block {mined_at} (it lags or the block was reorged out); nothing was recorded, try again")));
+        }
+        if word32(B, field(B, &canonical, "hash")?)? != block_hash {
+            return Ok((
+                None,
+                format!(
+                    "--reveal-tx {name}: its receipt is from block {mined_at} with hash {}, but the node's block {mined_at} has another hash: the block is NOT on the canonical chain (reorged out, or a fork); nothing was recorded, try again later",
+                    hex0x(&block_hash)
+                ),
+            ));
+        }
+        match quantity(R, field(R, &receipt, "status")?)? {
+            1 => Ok((None, format!("--reveal-tx {name}: mined in block {mined_at} and it SUCCEEDED (status 1); the Claimed event covers it"))),
+            0 => Ok((
+                Some(RevertedClaim { lock_id: lock.lock_id, preimage, tx_hash: hash, block_number: mined_at }),
+                format!("--reveal-tx {name}: mined in block {mined_at} and REVERTED (status 0): it paid nobody but its calldata published the secret. The secret is PUBLIC"),
+            )),
+            other => Err(dec(R, format!("receipt status {other} is neither 0 nor 1"))),
+        }
     }
 }
 

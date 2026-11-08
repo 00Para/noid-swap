@@ -5,9 +5,9 @@
 set -u
 . "$(dirname "$0")/env.sh"
 load_passphrase || exit 2
-mapfile -t NODES < <(node_flags); mapfile -t FROM < <(from_block_flags)
+mapfile -t NODES < <(node_flags); mapfile -t FROM < <(from_block_flags); mapfile -t REVEAL < <(reveal_tx_flags)
 N=$(date +%H%M%S); SECONDS=0
-"$BIN" claim "$BOB_FILE" "${NODES[@]}" "${FROM[@]}" \
+"$BIN" claim "$BOB_FILE" "${NODES[@]}" "${FROM[@]}" "${REVEAL[@]}" \
   --record-noid "$L/rec/claim-noid-$N.json" --record-eth "$L/rec/claim-eth-$N.json" --intent-out "$L/claim-intent-$N.hex" "$@" \
   > "$L/claim-$N.out" 2> "$L/claim-$N.err"
 EC=$?

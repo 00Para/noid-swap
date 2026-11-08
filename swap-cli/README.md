@@ -67,8 +67,8 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 (`chacha20poly1305`, `argon2`, `sha3`, `getrandom`) and nothing else. Use `--offline`; the live layer adds no crate.
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
-`client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 404 tests (+1 ignored), was 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored), was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -135,6 +135,7 @@ and `--eth-fixture FILE` / `--eth-rpc URL` (both or neither is an error; each fl
 | `--eth-from-block N` | first block `eth_getLogs` searches. Give it once: `tick --apply` and `claim --submit` store it in the swap file (history entry `eth_from_block_set:N`) and later commands reuse it without the flag; a flag given again wins and replaces the stored value on the next `--apply`. Without the flag and without a stored value the default is 0 on a local chain (31337, 1337) or with a fixture, and a live node on any other chain is refused (REVIEW-3 F7). The tick's `sources.eth_from_block` shows the value used. Public Ethereum nodes cap the range: `ethereum-sepolia-rpc.publicnode.com` answers `exceed maximum block range: 50000`, so pass a block shortly before the lock. A recording pins this value: replay with the same `--eth-from-block` |
 | `--now UNIX` | FIXTURES ONLY (REVIEW-2 F12): refused together with `--noid-rpc` or `--eth-rpc`, because it rewrites both `observed_at` stamps and would switch the staleness rule off |
 | `--pending-tx 0x…` | as before |
+| `--reveal-tx 0x…` | (`tick`, `claim`, `intent --cancel`) one transaction hash: a claim of Alice's that `live.js` reported as mined and REVERTED. The watcher reads it and its receipt from the node (every Ethereum node given) and accepts it only as a call to the pinned contract's `claim` of THIS lock id from `alice_receiver` whose preimage opens the lock word; see "What REVIEW-6 changed" |
 | `--closed-by TXID` | `tick` only (M2.5d). Record a close made OUTSIDE this tool, e.g. Alice's recovery close with the wallet CLI (`contract call --close`): see "Closes made outside the tool" below. Writes only together with `--apply` |
 
 `tick` never executes an action: it prints the facts it would record and the one action the engine
@@ -527,6 +528,152 @@ safe to hand to a stranger. The must-fix list in that file (F3 first: a read-onl
 parameters unrecorded, `intent --cancel` ignores the mempool, `live.js` is not tied to the swap file) is the
 next gate.
 
+## What REVIEW-7 changed (2026-11-05)
+
+`REVIEW-7.md` (independent, read-only, against the REVIEW-6 fixes) closed R6-1, R6-2, R6-3, R6-5 and R6-8 and found two Low and six Info items. The
+four below are fixed in code; R7-3 (the build string), R7-4 (a failed second Ethereum node at the poseidon lock decision), R7-7 and R7-8 are not part
+of this change.
+
+- **R7-1, the pre-lock check no longer reads every `Locked` log of the shared contract.** *Plain words:* after R6-2 the only question left before Bob locks
+  is "has my own address already locked on this word A" (a lock by anyone else costs him nothing). The lock word is in the log's data, but the sender is
+  an indexed topic (checked in `HTLCPoseidonV2.sol`: `Locked(bytes32 indexed lockId, address indexed sender, address indexed receiver, uint256 amount,
+  bytes32 lockAddr, uint256 timelock)`), so the node is now asked for `[Locked, any, bob_sender]` only, from the stored from-block. The answer is bounded by
+  Bob's own activity, so the rule that read a result of exactly 1,000 / 5,000 / 10,000 / 20,000 logs as truncated is **gone** (`SUSPECT_LOG_CAPS` removed):
+  anyone could trip it by padding the contract with locks, without knowing `A`, and hold every poseidon Bob back. One call over the whole range first; a
+  node that refuses it with a JSON-RPC error is asked again in chunks of `DEFAULT_LOG_RANGE_MAX` = 50,000 blocks (`EthWatcher::with_log_range_max`), and a
+  chunk that fails fails the check. Every returned log is re-checked locally (contract, event, sender topic, lock id recomputed from its own fields), so a
+  provider that ignores the topic filter cannot slip another sender's lock in. A node error is still `WordScan::Failed` and holds back `lock_eth` only, never
+  the poll. The cross-check "the sender query contains the lock the targeted query found" stays. `EthObservation.word_locks` now lists Bob's own locks on the
+  word only. `live.js lock` (poseidon kind) does the same with chunks of 50,000 blocks (`lockedEventsBySender`); `foreignLocksSameHashlock` stays `[]` for this kind
+  and the output says `lockedEventsQuery: "sender"`. The sha256 kind's `live.js` check keeps reading every `Locked` log (it never had the cap rule, so it cannot
+  be held back by padding). Tests: `the_poseidon_word_check_asks_the_indexed_sender_topic_and_reports_only_bobs_own_locks_on_the_word`,
+  `a_failed_poseidon_scan_is_a_state_of_the_observation_never_an_error_of_the_poll` (padding of 1,000 / 5,000 foreign locks, a provider that ignores the
+  filter, the chunked fallback with exact ranges, a chunk that still fails); `live-poseidon.test.js`.
+- **R7-2, a failed `self-test` no longer leaves the earlier pass valid.** `swap-cli self-test FILE` clears the record (history `client_r_selftest_cleared`) and
+  **saves the file before it proves anything**; the passing record is written, and saved, only on success. A run that fails (or is killed halfway) leaves no
+  record, and the engine's `lock_eth` waits with "the client R self-test has not passed". A failure also adds `client_r_selftest_failed` to the history.
+  Test: `a_poseidon_swap_is_started_without_any_proof_step` (a passing record, a failing run, no record, a later pass records again).
+- **R7-5, `--reveal-tx` evidence needs the canonical chain and, with two nodes, both nodes.** The watcher compares the receipt's block hash with the hash of
+  the node's block at that height (`eth_getBlockByNumber`), and with the transaction's own block hash when it names one; a block the node does not have, or has
+  with another hash, is a note ("NOT on the canonical chain", nothing recorded). The engine records `reveal_reverted_seen` (Alice's late-cutoff switch) from
+  a single node only when no second Ethereum node is configured; with a second node (answering, or `second_error`) **both must report the same reverted
+  claim** (lock id, preimage, transaction hash, block number), otherwise the tick says why and records nothing; it is re-read on every poll. Bob's use of the
+  preimage is unchanged (it passes the same lock-word check as every other source). Tests: `a_reverted_claim_whose_block_is_not_on_the_canonical_chain_is_not_recorded`,
+  `alices_file_learns_from_a_reverted_claim_that_the_secret_is_public...` (both agree, one only, different transactions, second node failed, single node).
+- **R7-6, a malformed `reveal-reverted-tx.txt` cannot stop a tick or a claim.** `scripts/live/env.sh` `reveal_tx_flags` matches `0x` + exactly 64 hex digits
+  (surrounding whitespace allowed); anything else is ignored with a warning on stderr and no `--reveal-tx` is passed. The binary itself still refuses a malformed
+  `--reveal-tx` typed on the command line (an explicit flag is an explicit mistake). A run directory installed earlier has a frozen `env.sh`: run `install.sh` again.
+
+## What REVIEW-6 changed (2026-11-05)
+
+`REVIEW-6.md` (independent, read-only, against `ef3145f`: the change that added the `poseidon` Ethereum lock kind) refuted every kind-confusion,
+removed-proof and secret-exposure attack and found one Medium, three Low and four Info items. Fix status, finding by finding:
+
+- **R6-1, the full `Locked` scan can no longer stop Bob's tool after the reveal.** *Plain words:* with the `poseidon` kind the lock word is not
+  a searchable field of the `Locked` log, so "was this A locked before" can only be answered by reading every `Locked` log of the contract. That scan
+  used to run on every poll and a hit on a provider's result cap made the whole poll fail, so Bob's `tick` and `swap-cli claim` could be blocked
+  exactly when he has to claim. Now (a) the swap's own locks are found, for both kinds, by the indexed `sender`/`receiver` topics (the sha256
+  kind's query); (b) the all-`Locked` scan is run only when the caller asks (`EthWatcher::with_word_scan`), and `engine::word_scan_wanted` asks
+  only for Bob in a `poseidon` swap before his lock is seen and for the re-send of a dropped lock; (c) its result is `EthObservation.word_scan`
+  (`not_run` / `complete` / `failed(reason)`), and a node error, a suspicious exact count, a malformed log or a lock the targeted query found
+  that the scan misses makes it `failed` and **holds back `lock_eth` only** (action `wait`, with the reason); (d) from `locked` on, and for Alice,
+  the poll depends on the targeted queries alone. A hand-built observation with `not_run` also holds Bob back: no lock on a guess. Tests:
+  `a_failed_poseidon_scan_is_a_state_of_the_observation_never_an_error_of_the_poll` (a failing scan and a pending claim read in the same poll),
+  `the_poseidon_scan_reads_every_locked_log_in_one_call...` (no all-`Locked` request without the flag), `bob_does_not_lock_without_a_complete_scan_on_every_node...`,
+  `after_bobs_lock_a_failed_scan_changes_nothing_in_the_claim_path`, `the_full_scan_is_asked_only_while_bob_can_still_decide_to_lock`.
+- **R6-2, a stranger's 1-wei lock on `A` no longer vetoes the swap.** Bob is blocked only by an earlier `Locked` log with the word made by his OWN
+  sender (`bob_sender`, any receiver) other than the lock this file expects; locks by other senders are counted in the notes ("not blocking"). The
+  reasoning is the sha256 kind's: Bob's lock pays only the fixed receiver, for an `x` with `Addr(x) = A`; the NOID lock pays only Bob. `live.js lock` is
+  the same (own sender refuses; foreign locks go in `foreignLocksSameHashlock` and a stderr note).
+- **R6-3, a mined but reverted claim is no longer invisible.** A reverted claim paid nobody but its calldata published the secret; no `Claimed` event
+  marks it and it is not pending, so no read saw it. `live.js claim` now returns `reverted: true, secretPublic: true`, the `txHash`, a note and
+  `swapCliFlag: "--reveal-tx HASH"`, and exits with status 3 (`reveal.sh` saves the hash in `$L/reveal-reverted-tx.txt`; `tick.sh` and `claim.sh` pass it
+  on). `tick` / `claim` / `intent --cancel` take `--reveal-tx HASH`: the watcher fetches that transaction and its receipt from the node(s) and
+  accepts it only if it is a call to the pinned contract's `claim`, for THIS lock id, from the lock's receiver (`alice_receiver`), with a preimage that
+  opens the lock word of this kind (calldata of 68 bytes or more: the over-long call that reverts is the case for the poseidon kind), and its receipt says
+  status 0. Anything else is **ignored with a note** (`EthObservation.reveal_tx_note`, repeated in the tick's notes); a hash the node does not know, a
+  pending one or a receipt that is not there yet is a note too, never an error. A verified one becomes `EthObservation.reverted_claim` and
+  (a) Alice's `tick --apply` writes the history marker `reveal_reverted_seen` once, which `secret_may_be_public` counts, so a re-send is judged by
+  the late cutoff `T_reveal - DE` and `live.js claim --swap` (which reads the same marker name) agrees; (b) Bob's preimage candidates include it, checked
+  against `H` and `A` like every other (a wrong preimage in it is "rejected" with a note). The marker is Alice's file only.
+- **R6-4, the client R self-test record is bound.** `ClientRSelfTest` now carries `lock_word` (hex, this file's), `contract_version` (this swap's), `build_id`
+  (`swap_cli::build_id()`: `swap-cli <crate version>`, plus `+<SWAP_CLI_BUILD_ID>` if that variable was set when compiling) next to `passed_at`, `auth_version`,
+  `call_height`. `record_client_r_selftest` refuses a record for another lock word or version; the engine (`selftest_blocker`) holds back Bob's FIRST
+  lock unless all of them match, the owner-authorization version is the next block's and the record is at most 24 hours old (`SELFTEST_MAX_AGE_S`;
+  not dated in the future). Records written before this change carry none of the three and are refused: run `swap-cli self-test FILE` again. The
+  throwaway is compiled with the swap's contract version and `max_fee`, recognised by `detect_contract_version` like the real opening, built by
+  `build_claim`, and its intent goes through `submit_claim` to a mock node that decodes it, re-verifies the proof and must answer the txid we
+  computed. The engine cannot re-run the proof itself: a stale record makes Bob `wait` with "run `swap-cli self-test FILE` again".
+- **R6-5 (Info), the advice to raise `--eth-from-block`** is gone from the watcher's cap message and from `live.js`: raising it only hides earlier locks.
+- **R6-6 (Info), the scan and the targeted read both use `latest`.** Not pinned to the block read at the start of the poll: the replayable fixtures
+  (`fixtures/`, recordings) pin the request parameters, `"toBlock": "latest"` included. The cost of the race is now one `wait` of the lock decision
+  (a scan that misses the lock the targeted query found is `failed`), not a failed poll.
+- **R6-7 (Info), documentation drift.** The `overlong_claim` comment no longer says Alice counts a leak; `swap-cli secret` for a poseidon swap no longer
+  advises piping into `equiv-prove`. Not changed: `scripts/live/prepare.sh` passes one `LOCK_KIND` to both roles (fine for the owner in both roles).
+- **R6-8 (Info, pre-existing), the sha256 claim never sends the secret to the node except in the signed transaction.** `live.js claim` sends it with a
+  fixed gas limit of 200,000 (the fuzz maximum in `eth/FUZZ.md` is 120,993) and never calls `eth_estimateGas`; `--replace` and the first send
+  alike. A `--dry-run` with the secret is refused against a node that is not on this machine for both kinds. Test: `R6-8: the sha256 claim never sends the
+  secret except in the signed raw transaction` (every JSON-RPC request recorded; only `eth_sendRawTransaction` carries the secret).
+
+## What REVIEW-5 changed (2026-11-05)
+
+`REVIEW-5.md` (independent, narrow, against `6d9bc3e`: the diff that fixed REVIEW-4) found one Medium, one Low-Medium, two Low and four Info
+items. This section is the fix status, finding by finding; each Rust-side one is pinned by a test in `tests/review5.rs` (14 tests) that fails on the
+code as the review read it, the `live.js` ones by tests in `eth/test/live.test.js` (REVIEW-5 describes), the helper ones by hand-run checks of
+`scripts/live/env.sh`.
+
+- **R5-1, a stuck first reveal can be replaced past the `M_A` cutoff.** *Plain words:* `M_A` (30 minutes before `T_reveal`) is the last moment to
+  PUBLISH the secret for the first time, because a claim needs the time to become final. A claim that is already in the public mempool has
+  published it, so the only thing left is to get a claim mined before `T_reveal`; the cutoff for that is `T_reveal - DE`. But the tool never
+  learned that the claim had been sent (the operator sends it with `live.js`; `tick --apply` only records the intent), so a stuck claim could
+  not be replaced once `M_A` had passed. Three changes:
+  1. *The intent freezes both cutoffs.* Every `reveal_eth` intent carries `cutoff` (`T_reveal - M_A` for a first reveal, as before) and
+     `late_cutoff` (`T_reveal - DE`, the profile's `DE`).
+  2. *The CLI path records that the claim was sent.* While a `reveal_eth` intent is held and the receiver key's pending nonce is above its latest
+     nonce (the signal `intent --cancel` already reads to refuse a cancel), `tick --apply` writes `reveal_pending_seen` once, and
+     `secret_may_be_public` counts it. From then on the file allows the re-send until `T_reveal - DE` and no longer withholds it behind the
+     two-instances rule (R4-4). A reveal that was only decided and never sent leaves no marker: it stays a first publication with the strict cutoff.
+     *Library path:* a `Runner` whose executor reports an unknown outcome for a `reveal_eth` (it may have been sent) writes `reveal_maybe_sent`;
+     that relaxes only the CUTOFF of the re-send (the two-instances rule waits for evidence, not for a crash). A failure the executor knows sent
+     nothing leaves no marker.
+  3. *`live.js claim --replace --swap FILE`* that has found and identified the signer's pending claim of THIS lock uses the intent's
+     `late_cutoff` (an older intent: the profile's `DE`) even with no marker in the history, because the pending transaction itself proves the secret
+     is out. A first claim keeps the strict rule. See `eth/README.md`.
+  Residual: the marker rests on the receiver key having a pending transaction; a key used for something else during the swap could set it wrongly.
+  Use the receiver key for nothing else (the cancel guard already assumes this).
+- **R5-2, `--replace` replaces only what it identified (`live.js`).** The old transaction is looked for with `--replace-tx`, in the node's pending
+  block and in `txpool_contentFrom`; if it cannot be found and shown to be this claim / refund of this lock, the command refuses and asks for
+  `--replace-tx`. `reveal.sh` and `refund-eth.sh` say so.
+- **R5-3, Bob's abort in `secret_seen` no longer waits for ever on a close known only from `getLock`.** The first poll that shows his lock closed
+  by the record alone (zero tx hash, `claim_state_from_record`) writes `eth_close_record_seen:<head>` into the history; `eth_leg_not_settled`
+  counts the finality of that close from that head (the close is in a block at or below it), not from each new poll's head.
+- **R5-4, an abort over a lock that never showed needs a fresh head and the second node (`abort_eth_blocker`).** For a Bob file that decided
+  `lock_eth` and holds no lock, the abort is recorded only when every Ethereum node read has a fresh head (the `lock_eth` limit, 600 s; not under
+  `rehearsal`), a second node that was configured but cannot be read blocks whatever `--single-node-ok` says, where the profile asks for a second
+  node (and the flag was not given) it must be present and fresh, and no node shows a lock under the id of any cancelled `lock_eth` intent. The recorded
+  reason, and the walk-away text, no longer say "refund it at `T_reveal`": they say to look at the contract before `T_reveal`, claim the NOID before
+  `D` if a secret was published, and refund the ETH only if the lock is still unclaimed.
+- **R5-5, the two relations are in `Gates::validate`.** `tx_grace + RA + DE <= M_A` (a reveal sent at the cutoff and dropped can still be re-sent) and
+  `W_A < W_A_min + min_cancel_age + abort_after_cancel` (a lock that lands after a recorded abort fails Alice's (I3)). `MIN_CANCEL_AGE_S` and
+  `ABORT_AFTER_CANCEL_S` are profile values now (`Gates::min_cancel_age_s`, `abort_after_cancel_s`): 600 / 3,600 s for production and sepolia,
+  120 / 600 s for rehearsal, whose whole reveal window is 600 s. The `pub const`s keep the production numbers.
+- **R5-6, an older cancel beside a newer one.** A file with more `intent_cancelled:lock_eth` history entries than recorded cancelled `lock_eth`
+  intents is treated as having an unrecorded cancel: Bob walks away, as for a pre-R4-2 file.
+- **R5-7, a `reveal_eth` intent resolves when its lock is closed.** `intent_effect_seen` judges a `reveal_eth` by its own lock too (refunded or
+  claimed), as it does for `refund_eth`. It no longer holds Alice's `refund_noid` at `D` after Bob's refund won the race and Bob never claimed.
+  *Manual way out of an intent that still never resolves* (the lock is open, the claim neither mined nor dropped): the claim is stuck, so push it
+  through with `reveal.sh --replace 0xHASH` (higher fee, same nonce); or wait until the node no longer holds it (a node may evict a stale pending transaction; this tool
+  cannot make it) and then `swap-cli intent FILE --cancel` (refused while the receiver key's pending nonce is above its latest). The wallet's recovery close at
+  `D` stays available throughout: the recovery branch never expires.
+- **R5-8, helpers.** `lock.sh` and `refund-eth.sh` pass the mainnet / gas-price fee flags like `reveal.sh`; `refund-eth.sh` takes
+  `--replace [TXHASH]`. `lock.sh --replace` is refused with a reason: `live.js` has no `--replace` for a lock, and none was added. "Your claim
+  looks stuck" is the `reveal_pending_seen` marker plus the held intent; the tool still prints no prompt on its own.
+- **The rest of R4-8.** `scripts/live/env.sh` passes `--single-node-ok` only when `SINGLE_NODE_OK=1` is set (in `env.local.sh`); without it and
+  without second nodes the helpers pass nothing and print, on every call, that the engine will wait before Bob's lock and Alice's reveal.
+
+Found while testing, not changed: chaos seed `0x5eed0001` shows two violations (`fail-closed`, `gate-lock-two-instances`) that are identical on the
+code before these fixes; the default seed and `0xbadc0de5` are green.
+
 ## What REVIEW-4 changed (2026-11-05)
 
 `REVIEW-4.md` (independent, 2026-11-05, against `2077e78`) found twelve things around the engine rather than in it. This section is the fix
@@ -561,7 +708,7 @@ through `live.js`, R4-5 the signer check of `claim`) are fixed there, not here.
   Bob waits for the secret every tick compares the Ethereum head time with the clock (the limit `lock_eth` already used, 600 s; not under
   `rehearsal`) and a lagging first or second node puts an `ALARM` in the action reason and the notes. With two Ethereum nodes the secret is read
   from either one; each candidate is checked against the hashlock and the NOID address, so a junk preimage on one node never hides the real one on
-  the other. The helpers still pass `--single-node-ok` when a second node is missing, but `single_node_warning` now prints on every
+  the other. The helpers passed `--single-node-ok` by default when a second node was missing (opt-in since REVIEW-5), and `single_node_warning` now prints on every
   `node_flags` call (every tick, every claim), and the README says a run with a stranger needs BOTH `NOID_RPC2` and `ETH_RPC2`.
 - **R4-9, `lost` needs the second node.** Where the profile asks for a second node (production, sepolia) and `--single-node-ok` was not given,
   `lost` is declared only if the second Parano1d node was read, is fresh, has itself reached `D + 18` and does not list the instance. A second
@@ -944,6 +1091,64 @@ The NOID is locked in one of two Parano1d contracts. Which one is a swap paramet
 - **Not done here.** The 24-hour memory of relay floors: `--floor-seen` is the operator's own input at creation, and the watcher does not record
   floors between ticks (the per-tick note and T5 only see the current reading). The factor 5 should be re-derived once Q6 has two weeks of floor data.
 
+## Ethereum lock kinds (`--eth-lock-kind sha256|poseidon`)
+
+The Ethereum leg is locked in one of two contracts. Which one is a swap parameter, like the profile and the contract version
+(`docs/poseidon-leg.md` section 9 is the spec; this is what exists).
+
+| | `sha256` (default) | `poseidon` |
+|---|---|---|
+| Ethereum contract | `eth/contracts/HTLC.sol` | `eth/contracts/HTLCPoseidonV2.sol` |
+| Code hash pinned in every file | `params::HTLC_CODE_HASH` (`0xa906117f…e2f`) | `params::HTLC_POSEIDON_V2_CODE_HASH` (`0xf510d2a3…3ff3`) |
+| Lock word on Ethereum (the bundle's `hashlock`) | `SHA-256(s)` | `A = Addr(s)`, the 32 bytes of the NOID claim authority |
+| What opens the Ethereum lock | a preimage with `sha256(x) == H` | a preimage with `Addr(x) == A` (computed by `secret::check_preimage_for`, never SHA-256) |
+| Equivalence proof (RISC Zero, 20 to 36 min) | required: Bob verifies a receipt | **none**: the attestation is absent, not typed |
+| Variant | raw or stock | **raw only** (`--variant stock` is refused with a message) |
+| Ethereum reveal | about 89 k gas | about 0.50 to 0.55 M gas; `live.js` sends it with a fixed 1,000,000 limit |
+| Bob claims the NOID with | client R, or client S for the stock variant | client R only (the stock wallet import cannot open a lock on `Addr(s)`) |
+
+- **Flags.** `new-alice --eth-lock-kind poseidon` writes it (`--eth-code-hash`, if given, must equal the V2 constant; the HTLC one is refused).
+  `new-bob --eth-lock-kind poseidon` is Bob's own term: a bundle of the other kind is refused before anything else is looked at. For the poseidon
+  kind `--receipt`, `--equiv-prove`, `--equiv-h`, `--equiv-a`, `--equiv-image-id` and `--pinned-image-id` are refused (`new-bob` needs no proof step).
+  `status` shows `eth_lock_kind`, `eth_lock_word` and the `client_r_selftest` record for a poseidon file. `tick`, `claim`, `intent` and
+  `secret` read the kind from the swap file; they have no flag.
+- **In the file.** `params.eth.lock_kind` (`"sha256"` is the default and is **not written**, so every older file, bundle and digest is
+  unchanged; `"poseidon"` is written and is part of the digested public section). `SwapPublic::check` (run on creation, `new-bob` and every load)
+  requires, for the poseidon kind: the raw variant; the lock word equal to the `claim_authority` bytes **and** to the `claim_authority` of the opening it
+  rebuilds byte for byte; the V2 code hash (and for the sha256 kind the HTLC one: a poseidon file pinning `HTLC_CODE_HASH` and the reverse are
+  refused); a lock word that is not the address of the public test vector or of the zero secret. `SwapFile::new_bob_with(public, terms, None, now)` is
+  Bob's poseidon file: a present attestation is refused at creation and on load. `SwapPublic::check_bob_terms` repeats the "lock word == claim
+  authority of the opening I rebuilt" test on its own, and compares Bob's terms (`BobTerms.lock_kind`, `eth_code_hash`) with the bundle.
+- **The watchers** (`EthWatcher::with_lock_kind`) read the same ABI (event and function shapes are byte-identical; the V2 field is `lockAddr`, the
+  Rust reads words by position). Differences: every "does this preimage open the lock" test is `watch::eth::lock_word_of(kind, x)`; the discovery of
+  the swap's own locks is the sha256 kind's: **one** `eth_getLogs` with the INDEXED sender and receiver topics (REVIEW-6 R6-1). The word is in the event
+  data, not a topic, so "has Bob's address locked on this A before" needs a separate query for the `Locked` logs of **Bob's own sender** (indexed topic2,
+  REVIEW-7 R7-1; the word is compared locally) from the stored from-block; it is asked
+  **only while Bob can still decide to lock** (`engine::word_scan_wanted`: Bob's phases `received`, `funded`, `funding_final`, `lock_submitted`) and its
+  outcome is a state of the observation (`EthObservation.word_scan`: `not_run`, `complete`, `failed(reason)`), never an error of the poll: a node
+  error, a malformed log or a lock the targeted query finds that the sender query does
+  not list makes it `failed`, and Bob's lock waits (there is no provider-cap size rule any more). When complete, Bob's own locks carrying the word are `EthObservation.word_locks`. A pending `claim` with calldata **longer** than 68 bytes will revert (`BadCalldataLength`) but has shown the secret: it is
+  reported as `EthObservation.overlong_claim`, never as Alice's reveal, and Bob claims the NOID from it. `TimelockExpired`, `BadCalldataLength` and
+  `InsufficientGas` reverts all mean "the reveal did not happen, `s` may be public"; the engine learns that from the chain, not from revert names (`live.js`
+  names them).
+- **Bob's pre-lock gates** (`engine::poseidon_prelock_blocker`; `wait`, not `abort`, so a held-back Bob still aborts when the last lock height passes):
+  1. *client R works on this machine* (review V2-10): the file holds a passed `client_r_selftest` for the owner-authorization version of the next block
+     (`params::auth_version_at(tip + 1)`), **bound** (REVIEW-6 R6-4) to this file's lock word, this swap's contract version, this build
+     (`swap_cli::build_id()`) and younger than 24 hours. `new-bob` runs it before it writes the file; `swap-cli self-test FILE [--noid-rpc URL | --call-height N]`
+     re-runs it and records it (`SwapFile::record_client_r_selftest`). It builds a throwaway lock of THIS swap's contract version on a fresh random secret,
+     proves the claim with client R, verifies the proof, re-decodes the encoded intent as a node does and sends it through `submit_claim` to a mock node
+     (`client::raw::client_r_selftest`); nothing is sent to a real node and no real secret is read.
+  2. *the query for Bob's own sender's `Locked` logs is complete on every node asked* (REVIEW-6 R6-1, REVIEW-7 R7-1), and *no earlier lock of Bob's OWN sender on this A* (T9,
+     review V2-8, REVIEW-6 R6-2): a `Locked` log with this word made by `bob_sender` other than his expected lock blocks him; locks of other senders are
+     reported in the notes and do not (a stranger's 1-wei lock would otherwise veto the swap, and it costs Bob nothing: his lock pays only the fixed
+     receiver for an `x` with `Addr(x) = A`). Also applied to the re-send of a dropped lock.
+  The remaining gates (funding final, timing, second Parano1d node, fee T5, one instance, code hash, chain id) are the sha256 kind's, unchanged.
+- **Tests.** `tests/poseidon_kind.rs` (swap file, watcher, engine gates, a whole swap on the simulator), `tests/poseidon_cli.rs` (the binary), `src/params.rs` (the
+  V2 constant against the compiled artifact), `src/secret.rs`. Every raw-variant scenario of the other suites runs against the poseidon kind with
+  `SWAP_TEST_LOCK_KIND=poseidon cargo test --offline --test scenarios --test chaos_fixes --test intents --test review4 --test review5 --test contract_version --test resume`
+  (two tests branch on the kind: an earlier lock on the word keeps Bob from locking at all, by design). The chaos test draws the kind from its own generator
+  (about two in five raw-variant scenarios are poseidon) so the sha256 scenarios of every seed are the ones their `CHAOS.md` entries describe.
+
 ## The rehearsal and sepolia profiles
 
 `production` is today's §9.1 (the default and the only value a file written before profiles can mean). `rehearsal` and `sepolia` run the same
@@ -990,7 +1195,7 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
 - `Gates::validate()` is the one checker of the §4.2/§4.3 relations (non-zero times and `W_A_min ≤ W_A`; `B_final` = Parano1d's 18; `M_A` >
   Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (the per-profile Ethereum inclusion delay `DE` and Alice's rebroadcast time `RA`: one Ethereum reorg of her claim can still be answered); `D_offset` = the formula above; the T6 guard fits in `B_safety`; every non-production
   profile (`rehearsal`, `sepolia`) has all three caps and production none). All three profiles pass it; `params::tests::a_broken_profile_is_rejected`
-  lists twenty hand-made broken ones (the last three are the `DE`/`RA` relations, each failing alone; five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
+  lists twenty-five hand-made broken ones (the last three are the `DE`/`RA` relations, each failing alone; five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
   rehearsal window).
 - Tests: `tests/scenarios.rs` runs, under `rehearsal` and under `sepolia` (`Scenario::with_profile`), the happy path (raw and stock), "Alice never
   reveals, both refund" (the whole abort cycle is `D_offset + 17` blocks from the creation height: 137 and 317), "Bob never locks" and the reveal

@@ -306,6 +306,12 @@ pub struct Gates {
     /// possibly dropped (together with the nonce rule, never the clock alone). 600 s (fifty blocks) on the public chains; 120 s on the
     /// local chain, which mines on demand and whose whole reveal window is 600 s.
     pub tx_grace_s: u64,
+    /// REVIEW-5 R5-5: the youngest a pending intent may be for `intent --cancel` to drop it (seconds): a send made a moment ago can sit in a
+    /// node's mempool where this tool's reads do not show it yet.
+    pub min_cancel_age_s: u64,
+    /// REVIEW-5 R5-5: how long after a cancelled funding or lock an `abort` is still not recorded (seconds). With `min_cancel_age_s` this
+    /// bounds how late a cancelled lock can still land and be accepted: `W_A < W_A_min + min_cancel_age + abort_after_cancel` ([`Gates::validate`]).
+    pub abort_after_cancel_s: u64,
     /// Budget for one epoch-anchor rotation (blocks). The CHAIN's epoch length is [`B_EPOCH`].
     pub b_epoch_budget: u64,
     pub b_fee: u64,
@@ -341,6 +347,8 @@ pub const PRODUCTION: Gates = Gates {
     de_s: 120,
     ra_s: 120,
     tx_grace_s: 600,
+    min_cancel_age_s: 600,
+    abort_after_cancel_s: 3_600,
     b_epoch_budget: 144,
     b_fee: 60,
     b_final: 18,
@@ -367,6 +375,8 @@ pub const REHEARSAL: Gates = Gates {
     de_s: 60,
     ra_s: 60,
     tx_grace_s: 120,
+    min_cancel_age_s: 120,
+    abort_after_cancel_s: 600,
     b_epoch_budget: 0,
     b_fee: 10,
     b_final: 18,
@@ -394,6 +404,8 @@ pub const SEPOLIA: Gates = Gates {
     de_s: 120,
     ra_s: 120,
     tx_grace_s: 600,
+    min_cancel_age_s: 600,
+    abort_after_cancel_s: 3_600,
     b_epoch_budget: 0,
     b_fee: 10,
     b_final: 18,
@@ -475,6 +487,23 @@ pub const HTLC_CODE_HASH: [u8; 32] = [
     0xa9, 0x06, 0x11, 0x7f, 0xc4, 0xe6, 0x04, 0xbd, 0x25, 0xfc, 0xee, 0x2a, 0x6a, 0x41, 0xda, 0x8b,
     0x82, 0x4e, 0xc9, 0xb4, 0xa1, 0x7d, 0x10, 0x13, 0x77, 0x04, 0xe7, 0xda, 0x42, 0x54, 0x5e, 0x2f,
 ];
+
+/// `keccak256` of the runtime code of `eth/contracts/HTLCPoseidonV2.sol` (the artifact's `deployedBytecode`, 15,300 bytes, Hardhat with
+/// solc 0.8.24, optimizer 200, `cancun`; `docs/poseidon-leg.md` section 8.4), `0xf510d2a3..43ff3`. The code hash of the `poseidon`
+/// lock kind, a constant of this build exactly like [`HTLC_CODE_HASH`]; the two are never interchangeable (same ABI shape, so a wrong
+/// pin would not show in the ABI). A unit test compares it with the local artifact whenever `eth/artifacts` has been compiled.
+pub const HTLC_POSEIDON_V2_CODE_HASH: [u8; 32] = [
+    0xf5, 0x10, 0xd2, 0xa3, 0x68, 0xc7, 0x30, 0x33, 0x9f, 0xa7, 0xcf, 0x5e, 0x02, 0x3b, 0xcf, 0x24,
+    0x29, 0xd5, 0x73, 0x27, 0x93, 0xf0, 0x43, 0xe0, 0x30, 0x25, 0x78, 0x0b, 0xb7, 0x04, 0x3f, 0xf3,
+];
+
+/// The code hash a swap file of this lock kind must pin.
+pub fn code_hash_for(kind: crate::secret::LockKind) -> [u8; 32] {
+    match kind {
+        crate::secret::LockKind::Sha256 => HTLC_CODE_HASH,
+        crate::secret::LockKind::Poseidon => HTLC_POSEIDON_V2_CODE_HASH,
+    }
+}
 
 /// REVIEW-3 F2: the image id of the equivalence-proof guest (`equiv/zkvm/methods/guest`), `7e9d8477..6187`: the id of the LOCAL
 /// build at this commit (RISC Zero 3.0.6, WSL), not yet the reproducible docker build (milestone M1.1). It is a constant of
@@ -769,6 +798,8 @@ impl Gates {
     ///    Then a Bob who locks as late as `B_bob` blocks after funding finality still satisfies (I1) with
     ///    `margin` blocks to spare, and the lock-by height is after Alice's funding is final.
     /// 6. The T6 rotation guard fits in `B_safety`.
+    /// 8. (REVIEW-5 R5-5) `tx_grace + RA + DE <= M_A`: a reveal sent at the cutoff and silently dropped can be re-sent in time.
+    /// 9. (REVIEW-5 R5-5) `W_A < W_A_min + min_cancel_age + abort_after_cancel`: a lock that lands after a recorded abort fails Alice's (I3).
     /// 7. Every non-production profile (`rehearsal`, `sepolia`) has all three caps; the production one has none.
     pub fn validate(&self) -> Result<(), GateError> {
         let bad = |why: String| Err(GateError::BadProfile(format!("{}: {why}", self.name)));
@@ -814,6 +845,34 @@ impl Gates {
         // REVIEW-4 R4-11: the drop grace is at least two rebroadcast times (one poll to see the transaction, one to send again).
         if self.tx_grace_s < 2 * self.ra_s {
             return bad(format!("tx_grace {} s < 2*RA {} s: a submitted transaction would be called dropped before two polls could see it", self.tx_grace_s, 2 * self.ra_s));
+        }
+        // REVIEW-5 R5-5: a reveal sent at the `M_A` cutoff and silently dropped is called dropped after `tx_grace`, re-sent after `RA` and mined
+        // within `DE`; all of that must fit in `M_A` so that the re-send is still before `T_reveal`.
+        if self.tx_grace_s + self.ra_s + self.de_s > self.m_a_s {
+            return bad(format!(
+                "(I2) tx_grace {} + RA {} + DE {} = {} s > M_A {} s: a reveal sent at the cutoff and dropped could not be re-sent in time",
+                self.tx_grace_s,
+                self.ra_s,
+                self.de_s,
+                self.tx_grace_s + self.ra_s + self.de_s,
+                self.m_a_s
+            ));
+        }
+        // REVIEW-5 R5-5: a lock that lands after a recorded abort (an hour after the cancel, which is itself at least `min_cancel_age` after the
+        // decision) has at most `W_A - min_cancel_age - abort_after_cancel` left of its window, which must be below `W_A_min` so that Alice's (I3)
+        // check refuses it.
+        if self.min_cancel_age_s == 0 || self.abort_after_cancel_s == 0 {
+            return bad("min_cancel_age and abort_after_cancel must be non-zero".into());
+        }
+        if self.w_a_s >= self.w_a_min_s + self.min_cancel_age_s + self.abort_after_cancel_s {
+            return bad(format!(
+                "(I3) W_A {} s >= W_A_min {} + min_cancel_age {} + abort_after_cancel {} = {} s: a lock that lands after a recorded abort could still pass Alice's (I3) check",
+                self.w_a_s,
+                self.w_a_min_s,
+                self.min_cancel_age_s,
+                self.abort_after_cancel_s,
+                self.w_a_min_s + self.min_cancel_age_s + self.abort_after_cancel_s
+            ));
         }
         let derived = self.d_offset_derived();
         if self.d_offset != derived {
@@ -966,6 +1025,30 @@ mod tests {
         assert_eq!(crate::watch::eth::keccak256(&bytes), HTLC_CODE_HASH, "HTLC_CODE_HASH is stale: eth/contracts/HTLC.sol was recompiled to other code");
     }
 
+    /// The compiled-in code hash of the poseidon lock kind is the keccak256 of the local artifact's `deployedBytecode`
+    /// (`docs/poseidon-leg.md` section 8.4). Skipped (with a note) when `eth/artifacts` has not been compiled on this machine.
+    #[test]
+    fn htlc_poseidon_v2_code_hash_is_the_local_artifacts_runtime_code_hash() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../eth/artifacts/contracts/HTLCPoseidonV2.sol/HTLCPoseidonV2.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            eprintln!("SKIPPED: {} does not exist (run `npx hardhat compile` in eth/)", path.display());
+            return;
+        };
+        let artifact: serde_json::Value = serde_json::from_str(&text).expect("artifact is JSON");
+        let code = artifact["deployedBytecode"].as_str().expect("artifact has deployedBytecode");
+        let bytes = hex::decode(code.trim_start_matches("0x")).expect("deployedBytecode is hex");
+        assert_eq!(bytes.len(), 15_300);
+        assert_eq!(
+            crate::watch::eth::keccak256(&bytes),
+            HTLC_POSEIDON_V2_CODE_HASH,
+            "HTLC_POSEIDON_V2_CODE_HASH is stale: eth/contracts/HTLCPoseidonV2.sol (or Poseidon2b.sol) was recompiled to other code"
+        );
+        assert_eq!(hex::encode(HTLC_POSEIDON_V2_CODE_HASH), "f510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780bb7043ff3");
+        assert_ne!(HTLC_POSEIDON_V2_CODE_HASH, HTLC_CODE_HASH);
+        assert_eq!(code_hash_for(crate::secret::LockKind::Sha256), HTLC_CODE_HASH);
+        assert_eq!(code_hash_for(crate::secret::LockKind::Poseidon), HTLC_POSEIDON_V2_CODE_HASH);
+    }
+
     #[test]
     fn section_9_1_constants() {
         assert_eq!(B_POST, 252);
@@ -1022,6 +1105,10 @@ mod tests {
             ("production with a cap", Gates { max_noid_micro: Some(1), ..PRODUCTION }),
             ("zero tau", Gates { tau_fast_s: 0, ..REHEARSAL }),
             ("tx grace below two rebroadcast times", Gates { tx_grace_s: 119, ..REHEARSAL }),
+            ("R5-5: tx_grace + RA + DE above M_A (production)", Gates { tx_grace_s: 1_561, ..PRODUCTION }),
+            ("R5-5: tx_grace + RA + DE above M_A (rehearsal)", Gates { tx_grace_s: 181, ..REHEARSAL }),
+            ("R5-5: a late lock after the abort still passes (I3) (sepolia)", Gates { abort_after_cancel_s: 700, min_cancel_age_s: 100, ..SEPOLIA }),
+            ("R5-5: cancel constants zero", Gates { min_cancel_age_s: 0, ..SEPOLIA }),
             ("sepolia: M_A not above the ETH finality", Gates { m_a_s: 1_000, ..SEPOLIA }),
             ("sepolia: D_offset one short", Gates { d_offset: 299, ..SEPOLIA }),
             ("sepolia without caps", Gates { max_noid_micro: None, max_eth_wei: None, eth_chain_ids: None, ..SEPOLIA }),

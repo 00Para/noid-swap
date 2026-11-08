@@ -79,3 +79,102 @@ pub fn parse_hex32(s: &str) -> Result<[u8; 32], String> {
 fn _uses() -> Block128 {
     Block128::ZERO
 }
+
+// ---------------------------------------------------------------------------------------------
+// Differential vectors for the EVM contract (eth/contracts/Poseidon2b.sol)
+// ---------------------------------------------------------------------------------------------
+
+/// Default seed of the random part of the vectors file. Changing it changes the file.
+pub const VECTOR_SEED: &str = "noid-swap/poseidon2b/addr-vectors/v1";
+/// Default number of seeded-random secrets.
+pub const VECTOR_RANDOM: usize = 12_000;
+/// Number of structured secrets that start the file (see `structured_secrets`).
+pub const VECTOR_STRUCTURED: usize = 3 + 6 + 2 + 32 + 256;
+
+/// The structured secrets, in file order:
+///   0 all-zero, 1 all-ones, 2 the published vector 00 01 .. 1f,
+///   3..9 every byte equal to 0x80, 0xe0, 0x01, 0x7f, 0xaa, 0x55,
+///   9..11 low lane all-ones / high lane all-ones (the other lane zero),
+///   11..43 byte i = 0xff and every other byte zero (i = 0..31),
+///   43..299 the single-bit secrets: bit k (k = 0..255) is bit (k mod 8) of byte (k div 8).
+pub fn structured_secrets() -> Vec<[u8; 32]> {
+    let mut v: Vec<[u8; 32]> = Vec::with_capacity(VECTOR_STRUCTURED);
+    v.push([0u8; 32]);
+    v.push([0xffu8; 32]);
+    let mut published = [0u8; 32];
+    for (i, b) in published.iter_mut().enumerate() {
+        *b = i as u8;
+    }
+    v.push(published);
+    for b in [0x80u8, 0xe0, 0x01, 0x7f, 0xaa, 0x55] {
+        v.push([b; 32]);
+    }
+    let mut lo = [0u8; 32];
+    lo[..16].fill(0xff);
+    let mut hi = [0u8; 32];
+    hi[16..].fill(0xff);
+    v.push(lo);
+    v.push(hi);
+    for i in 0..32 {
+        let mut s = [0u8; 32];
+        s[i] = 0xff;
+        v.push(s);
+    }
+    for k in 0..256 {
+        let mut s = [0u8; 32];
+        s[k / 8] = 1u8 << (k % 8);
+        v.push(s);
+    }
+    assert_eq!(v.len(), VECTOR_STRUCTURED);
+    v
+}
+
+/// The i-th seeded-random secret: SHA-256 of the ASCII text "<seed>|<i>" (i in decimal).
+pub fn random_secret(seed: &str, i: usize) -> [u8; 32] {
+    sha256(format!("{seed}|{i}").as_bytes())
+}
+
+/// All vector secrets: the structured ones, then `n_random` seeded-random ones.
+pub fn vector_secrets(seed: &str, n_random: usize) -> Vec<[u8; 32]> {
+    let mut v = structured_secrets();
+    v.extend((0..n_random).map(|i| random_secret(seed, i)));
+    v
+}
+
+/// The vectors file: for each secret 64 bytes = secret (32) || Addr(secret) (32), with
+/// `Addr` computed by the VENDOR crate (`noid_poseidon2b::primitives::derive_address`).
+/// Panics if the vendor address of the published vector is not the documented one, or if the
+/// independent portable implementation disagrees on any vector.
+pub fn addr_vectors_bytes(seed: &str, n_random: usize) -> Vec<u8> {
+    const PUBLISHED_ADDR: &str = "f8183db204ffb765c7015d851c1754e4974c675b975c6738d9f6d138eb7212cf";
+    let secrets = vector_secrets(seed, n_random);
+    let mut out = Vec::with_capacity(secrets.len() * 64);
+    for (i, s) in secrets.iter().enumerate() {
+        let a = addr(s);
+        assert_eq!(a, equiv_portable::addr(s), "vendor and portable disagree on vector {i}");
+        if i == 2 {
+            assert_eq!(hex::encode(a), PUBLISHED_ADDR, "published vector");
+        }
+        out.extend_from_slice(s);
+        out.extend_from_slice(&a);
+    }
+    out
+}
+
+#[cfg(test)]
+mod vector_tests {
+    use super::*;
+
+    #[test]
+    fn structured_layout_and_published_vector() {
+        let s = structured_secrets();
+        assert_eq!(s.len(), VECTOR_STRUCTURED);
+        assert_eq!(s[0], [0u8; 32]);
+        assert_eq!(s[1], [0xffu8; 32]);
+        assert_eq!(s[2][31], 31);
+        assert_eq!(s[43][0], 1); // single bit 0
+        assert_eq!(s[43 + 255][31], 0x80); // single bit 255
+        let b = addr_vectors_bytes(VECTOR_SEED, 4);
+        assert_eq!(b.len(), (VECTOR_STRUCTURED + 4) * 64);
+    }
+}

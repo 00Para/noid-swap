@@ -159,15 +159,18 @@ function checkHtlcSpend(txOrHex, inIndex, ctx) {
  * `hashlock` is optional: if omitted, the hashlock inside the witness script is
  * used (then pass `redeemScript`/check the outpoint yourself so you know the
  * tx really spends YOUR lock). The sha256 check is always performed, so a
- * garbage witness can never yield a "preimage".
+ * garbage witness can never yield a "preimage". `inputIndex` restricts the search to the
+ * one input that spends your outpoint (a multi-input tx cannot smuggle another input's witness in).
  * NOTE: signature validity is not needed to learn s, but only trust s from a
  * tx that spends your outpoint; consensus guarantees that tx is valid if confirmed.
  */
-function extractPreimage(txOrHex, { hashlock, redeemScript } = {}) {
+function extractPreimage(txOrHex, { hashlock, redeemScript, inputIndex } = {}) {
   const tx = loadTx(txOrHex);
   const want = hashlock === undefined ? undefined : toBuf(hashlock, 'hashlock', 32);
   const wantScript = redeemScript === undefined ? undefined : toBuf(redeemScript, 'redeemScript');
-  for (const input of tx.ins) {
+  for (let i = 0; i < tx.ins.length; i++) {
+    if (inputIndex !== undefined && i !== inputIndex) continue;
+    const input = tx.ins[i];
     const w = input.witness || [];
     if (w.length !== 4) continue;
     const sel = Buffer.from(w[2]);

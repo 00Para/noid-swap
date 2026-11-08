@@ -13,16 +13,17 @@ in the library, and `scripts/live.js` refuses anything but signet.
 | `src/secret.js` | Mirror of `../eth/scripts/secret.js` (32 random bytes, `sha256` hashlock) |
 | `src/network.js` | Network selection (`testnet` default, `signet`, `regtest`, `mainnet`) |
 | `src/fund.js` | Bob's funding tx: P2WPKH inputs -> P2WSH HTLC output + change; largest-first coin selection; dust handling |
-| `src/esplora.js` | Esplora-style REST client for **signet only** (mempool.space primary, blockstream.info fallback), fee clamp 1..50 sat/vB |
-| `scripts/live.js` | Live-run CLI: `keygen address balance tip lock status claim refund broadcast watch`; see "Live run (signet)" |
-| `test/*.test.js` | 66 tests (`node:test`): 32 script/claim/refund, 4 secret, 7 funding builder, 5 REST client (mocked `fetch`, fixtures recorded from the real signet API), 18 CLI commands against a mocked chain |
+| `src/esplora.js` | Esplora-style REST client for **signet only** (mempool.space primary, blockstream.info fallback), fee clamp 1..50 sat/vB, `verifyChain` (every host must report the signet genesis hash; an unverifiable host is dropped) |
+| `scripts/live.js` | Live-run CLI: `keygen address balance tip lock status claim refund broadcast watch`; see "Live run (signet)" and `SAFETY.md` (gates, what is tested, what is missing) |
+| `SAFETY.md` | The live layer's gates one by one, what the tests cover, what they cannot, and what the Bitcoin leg still needs before a live signet swap |
+| `test/*.test.js` | 91 tests (`node:test`): 32 script/claim/refund, 4 secret, 7 funding builder, 8 REST client (mocked `fetch`, fixtures recorded from the real signet API; 3 for the chain check), 40 CLI commands against a mocked chain (fee ladder, RBF replacement, watcher, swap-file binding, key and secret guards) |
 | `scripts/demo.js` | Prints keys, `s`, `H`, address, and example claim/refund hex. Offline, no broadcast |
 
 ## Install and test
 
 ```sh
 npm install
-npm test            # node --test "test/*.test.js"  (66 passing, offline)
+npm test            # node --test "test/*.test.js"  (91 passing, offline)
 node scripts/demo.js
 node src/secret.js [--json]
 ```
@@ -244,12 +245,14 @@ height, whether the address is funded, and whether (and how) the coins left.
 | `BTC_API_URL` | `https://mempool.space/signet/api` | primary Esplora-style base (must contain `/signet/`) |
 | `BTC_API_FALLBACK_URL` | `https://blockstream.info/signet/api` | used only on transport errors / 5xx (never for a 4xx, so a tx is never posted twice); `""` disables |
 
-Endpoints used (`src/esplora.js`): `GET /blocks/tip/height`, `GET /address/:addr/utxo`,
+Endpoints used (`src/esplora.js`): `GET /block-height/0` (chain identity, below), `GET /blocks/tip/height`, `GET /address/:addr/utxo`,
 `GET /tx/:txid`, `GET /tx/:txid/hex`, `GET /tx/:txid/status`, `GET /tx/:txid/outspend/:vout`,
 `GET /fee-estimates`, `POST /tx` (body = raw hex, answer = txid). Fee rate = the
 API's estimate for a 2-block target, rounded up, **floor 1 sat/vB, cap 50 sat/vB**
 (on 2026-11-04 blockstream's signet `fee-estimates` returned 3,901 sat/vB for
 some targets; the cap is not optional). `--fee-rate N` overrides within the same bounds.
+
+**Chain identity.** A `/signet/` in the URL is only a name. Before its first request every command asks each configured host for block 0 (`GET /block-height/0`) and compares it with the public signet genesis `00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6` (both default hosts answered it on 2026-11-05). A host that reports another genesis (mainnet, testnet3/4) stops the command; a host that cannot be verified is dropped for the rest of the run, so the fallback logic never routes a request to it; no verified host left is an error. A custom (non-default) signet has another genesis and is refused.
 
 Verified live on 2026-11-04 (read-only): tip height, address utxo, tx, tx hex,
 tx status, outspend (spent and unspent), fee-estimates on both hosts, the 404
@@ -272,12 +275,12 @@ from argv (`--secret` / `--preimage` are rejected).
 | `address` | `--hashlock H --alice-pubkey P --bob-pubkey P --locktime N`, or `--witness-script HEX` | `address` (P2WSH), `witnessScript`, `scriptPubKey`, decoded terms |
 | `balance ADDRESS` | | `confirmedSats`, `unconfirmedSats`, `utxos[]`, `tipHeight` |
 | `tip` | | `tipHeight`, `api`, `apiAnswered` |
-| `lock` | `--key-file BOB --hashlock H --alice-pubkey P --locktime N --amount-sats S [--bob-pubkey P] [--fee-rate N] [--allow-unconfirmed] [--send]` | `txid`, `vout`, `outpoint`, `address`, `witnessScript`, `fee`, `feeRate`, `changeSats`, `hex`, `blocksToLocktime`, `claimCutoffHeight`, `warnings[]`, `sent` |
-| `status` | `--txid T --vout V` + script (`--witness-script` or the four terms) | `funded`, `valueSats`, `confirmed`, `confirmations`, `refundableAtTip`, `spent`, `spend{txid, branch, scriptCheck}`, `preimage`, `state` |
-| `claim` | `--key-file ALICE --txid T --vout V --to ADDR [--secret-file F] [--fee-rate N] [--ignore-cutoff] [--allow-unconfirmed] [--send]` + script | `txid`, `outputSats`, `fee`, `nSequence 0xfffffffd`, `hex` (**contains `s`**), `warnings[]`, `sent` |
-| `refund` | `--key-file BOB --txid T --vout V --to ADDR [--fee-rate N] [--send]` + script | `txid`, `nLockTime = T_b`, `nSequence 0xfffffffd`, `hex`, `sent` |
-| `broadcast HEX` | `[--send]` | decoded `txid`, `inputs[]`, `outputs[]`; posts only with `--send` |
-| `watch` | `--txid T --vout V [--interval-seconds 30] [--until-height N] [--max-polls N]` + script | the `status` object plus `watch{polls, stoppedBecause}`; `preimage` once a claim is seen |
+| `lock` | `--key-file BOB --hashlock H --alice-pubkey P --locktime N --amount-sats S [--bob-pubkey P] [--fee-rate N] [--allow-unconfirmed] [--swap FILE] [--send]` | `txid`, `vout`, `outpoint`, `address`, `witnessScript`, `fee`, `feeRate`, `changeSats`, `hex`, `blocksToLocktime`, `claimCutoffHeight`, `warnings[]`, `sent` |
+| `status` | `--lock TXID:VOUT` (or `--txid T --vout V`) `[--swap FILE] [--print-secret]` + script (`--witness-script` or the four terms) | `funded`, `valueSats`, `confirmed`, `confirmations`, `refundableAtTip`, `spent`, `spend{txid, branch, scriptCheck}`, `preimageFound`, `preimageHash`, `preimageMatchesHashlock`, `preimage` (**only with `--print-secret`**, else `null`), `state` |
+| `claim` | `--key-file ALICE --lock TXID:VOUT --to ADDR [--secret-file F or stdin] [--fee-rate N] [--replace] [--min-confirmations N] [--ignore-cutoff] [--allow-unconfirmed] [--swap FILE] [--send]` + script | `txid`, `outputSats`, `fee`, `feeRate`, `feeCheck{estimate, chosen}`, `bip125{replaces, oldFee, minFee}` (with `--replace`), `nSequence 0xfffffffd`, `hex` (**contains `s`**), `swap{}`, `warnings[]`, `sent` |
+| `refund` | `--key-file BOB --lock TXID:VOUT --to ADDR [--fee-rate N] [--replace] [--swap FILE] [--send]` + script | `txid`, `nLockTime = T_b`, `nSequence 0xfffffffd`, `feeCheck`, `bip125`, `hex`, `sent` |
+| `broadcast` | `HEX` or `--hex-file F` or `--hex-stdin`, `[--send]` | decoded `txid`, `inputs[]`, `outputs[]`, `revealsSecret`; posts only with `--send`. A claim hex (it carries the secret) is refused on argv |
+| `watch` | `--lock TXID:VOUT` (or `--txid T --vout V`) `[--swap FILE] [--print-secret] [--interval-seconds 30] [--until-height N] [--max-polls N]` + script | the `status` object plus `watch{polls, stoppedBecause}`; stops on the first spend, **also an unconfirmed one**; `preimageFound` / `preimageHash`, and `preimage` only with `--print-secret` |
 
 Guards built into the commands (design §3.3): `lock` refuses the two public
 test-vector hashlocks, a locktime at or below the tip, a time-based locktime,
@@ -287,6 +290,13 @@ override, with a warning: Bob's refund could confirm first and he would keep
 the BTC *and* learn `s`). `refund` refuses before the tip reaches `T_b`.
 Every spend is re-checked with `checkHtlcSpend` and, for a claim, with
 `extractPreimage`, before the hex is printed.
+
+More guards (all of them also in a dry run; the full list with what is tested is `SAFETY.md`):
+
+* **Fee ladder.** `claim` and `refund` read the explorer's estimate for a 2-block target (clamped to 1..50 sat/vB) every time and refuse a `--fee-rate` below it, or an unreadable estimate. `claim --replace` / `refund --replace` find the pending spend of the outpoint through the explorer and rebuild the SAME spend (same input, same payout script, same locktime, RBF sequence) at a higher fee: the absolute fee must rise by at least 1 sat/vB of the new size and the rate by 1 sat/vB (BIP-125 as policy); with no `--fee-rate` the tool picks the lowest whole rate that does; a too-low explicit rate is refused with the minimum that works. Refused when the outpoint is unspent, the pending spend is confirmed, is not a one-input one-output spend of this branch, pays another script, or does not signal RBF. A claim, replacement included, is refused once the tip is past `T_b - 6`.
+* **Alice's claim** also needs the funding at 3 confirmations (design §3.3 step 9; `--min-confirmations` lowers it for a rehearsal).
+* **Keys.** The key file must be the role's key in the script (claim: Alice, refund and lock: Bob); mainnet and uncompressed keys are refused; term flags given next to `--witness-script` must agree with it.
+* **The secret** is read from `--secret-file` or stdin only (`--secret`, `--preimage`, `--secret=...` are refused). `status`/`watch` hide a revealed preimage unless `--print-secret`; it is never written to a file, and `--print-secret` and `claim` refuse a stdout that is a file. `broadcast` refuses a claim hex on argv.
 
 ### Getting signet coins
 
@@ -338,8 +348,11 @@ node scripts/live.js claim --key-file keys/alice.key --txid TXID --vout 0 --witn
     --to ALICE_PAYOUT_ADDR --secret-file keys/alice.secret            # dry run; the hex IS the reveal
 node scripts/live.js claim --key-file keys/alice.key --txid TXID --vout 0 --witness-script WS \
     --to ALICE_PAYOUT_ADDR --secret-file keys/alice.secret --send     # GO-AHEAD NEEDED
-#    Bob watches and learns s as soon as the claim is in the explorer's mempool:
-node scripts/live.js watch --txid TXID --vout 0 --witness-script WS --until-height T_B   # -> "preimage": "0x..."
+#    Bob watches; the claim shows up as soon as it is in the explorer's mempool:
+node scripts/live.js watch --lock TXID:0 --witness-script WS --until-height T_B   # -> "preimageFound": true, "preimageHash": "0x<H>"
+#    and, only when he asks for the value (pipe it, never redirect it into a file):
+node scripts/live.js watch --lock TXID:0 --witness-script WS --until-height T_B --print-secret   # -> "preimage": "0x..."
+#    if the claim sits unconfirmed, Alice raises its fee: claim --replace (same flags); GO-AHEAD NEEDED for --send
 #    then Bob closes the NOID contract to himself (swap-cli claim) before D - 18.
 
 # 7b. Failure path: nobody claimed. Once tip >= T_b, Bob refunds (refused locally before then).
@@ -358,11 +371,12 @@ Notes:
   A refund says "too early" until the tip is at `T_b`; the node is the judge.
 * The claim hex contains the secret as witness item 2. Treat a dry-run claim
   JSON as the secret itself until you broadcast it.
-* To fee-bump an unconfirmed claim, run `claim` again with a higher
-  `--fee-rate`; the input signals RBF (`0xfffffffd`). (`status` will say the
-  outpoint is "already spent" by the first claim once the explorer sees it, so
-  build the bump with the library if that happens.) The refund signals RBF too
-  (`0xfffffffd`), so Bob can bump a stuck refund the same way.
+* To fee-bump an unconfirmed claim, run `claim --replace` (same flags as the
+  first claim; `--fee-rate` optional): it finds the pending claim, keeps its
+  payout script, and raises the fee by the BIP-125 increment or more. A plain
+  `claim` over a pending one is refused with a pointer to `--replace`. The
+  refund signals RBF too, so Bob bumps a stuck refund with `refund --replace`.
+  The replacement reveals the same `s` the first claim already did.
 * `status` / `watch` need the witness script (or its four terms) so they can
   check that the outpoint really pays *this* HTLC and so `extractPreimage` can
   re-check `sha256(s) == H`; a spend of someone else's script never yields a preimage.
@@ -379,9 +393,10 @@ exactly the §3 artifacts, so the hand-off would be:
   `valueSats`, `confirmations ≥ 3`, `tipHeight ≤ claimCutoffHeight`) is what
   the engine's reveal gate would read, plus equality of her own `address`
   output with Bob's.
-* **Bob's reveal detection** (step 11'): `watch` (or `status` inside his `tick`)
-  returns `preimage` with `preimageMatchesHashlock: true` as soon as the claim
+* **Bob's reveal detection** (step 11'): `watch --lock TXID:VOUT --print-secret` (or `status` inside his `tick`)
+  returns `preimageFound`, `preimageHash` and, when asked, `preimage` with `preimageMatchesHashlock: true` as soon as the claim
   is in the explorer's mempool; that is the value his `claim_noid` step needs.
+* **The swap file.** `--swap FILE` on `lock`, `claim`, `refund`, `status` and `watch` reads the swap-cli swap file (read-only; the sealed secret is never touched) and checks the hashlock, the role and that the swap is not in a finished phase. The current file format has no Bitcoin terms (no BTC pubkeys, locktime, amount or outpoint) and no Bitcoin intent, so none of those can be checked against it; see `SAFETY.md`. The secret still comes from `swap-cli secret FILE | node scripts/live.js claim ...` on stdin.
   A Rust port would call the same six GET endpoints; the fixtures in
   `test/fixtures/signet/` show the exact response shapes.
 * **Abort**: `refund` at `tipHeight ≥ locktime` mirrors `refund_eth`.

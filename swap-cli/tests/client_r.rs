@@ -31,6 +31,7 @@ fn inputs<'a>(s: &'a Secret, p: &'a SwapPublic, opening: &'a noid_tx::experiment
         epoch_anchor: ANCHOR,
         call_height: height,
         hashlock: p.hashlock,
+        lock_kind: p.params.eth.lock_kind,
         variant: p.params.variant,
         secret: s,
     }

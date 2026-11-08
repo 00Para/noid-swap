@@ -66,6 +66,11 @@ function mockClient(state = {}) {
       s.broadcasts.push(h);
       return tx.getId();
     },
+    async verifyChain() {
+      s.verifyCalls = (s.verifyCalls || 0) + 1;
+      if (s.wrongChain) throw new Error('API host https://mock.example/signet/api reports genesis 000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f, not the signet genesis');
+      return { genesis: 'mock', verified: [c.base], dropped: [] };
+    },
   };
   return c;
 }
@@ -282,9 +287,15 @@ test('status: a claim spend is detected, branch = claim, preimage extracted and 
   assert.equal(s.spend.txid, ctxid);
   assert.equal(s.spend.branch, 'claim');
   assert.deepEqual(s.spend.scriptCheck, { ok: true, errors: [] });
-  assert.equal(s.preimage, '0x' + hex(SECRET));
+  // the secret is not in the default output: only that it was found, and its hash
+  assert.equal(s.preimage, null);
+  assert.equal(s.preimageFound, true);
+  assert.equal(s.preimageHash, '0x' + HASHLOCK);
   assert.equal(s.preimageMatchesHashlock, true);
+  assert.ok(!JSON.stringify(s).includes(hex(SECRET)));
   assert.equal(s.state, 'claimed (unconfirmed)');
+  const sp = await live.status({ client: f.c }, { txid: f.txid, vout: '0', printSecret: true, ...scriptArgs });
+  assert.equal(sp.preimage, '0x' + hex(SECRET));
   f.c.state.outspends[`${f.txid}:0`].confirmed = true;
   assert.equal((await live.status({ client: f.c }, { txid: f.txid, vout: '0', ...scriptArgs })).state, 'claimed');
 });
@@ -299,6 +310,7 @@ test('status: a refund spend is detected, branch = refund, no preimage', async (
   assert.equal(s.spend.branch, 'refund');
   assert.equal(s.spend.scriptCheck.ok, true);
   assert.equal(s.preimage, null);
+  assert.equal(s.preimageFound, false);
   assert.equal(s.state, 'refunded');
 });
 
@@ -428,8 +440,12 @@ test('watch: polls until the outpoint is spent (prints the preimage) or until-he
   const r = await live.watch({ client: f.c, sleep, log: (m) => logs.push(m) }, { txid: f.txid, vout: '0', intervalSeconds: '1', ...scriptArgs });
   assert.equal(r.watch.polls, 3);
   assert.equal(r.watch.stoppedBecause, 'spent');
-  assert.equal(r.preimage, '0x' + hex(SECRET));
-  assert.equal(logs.length, 2);
+  assert.equal(r.preimage, null, 'not printed unless asked');
+  assert.equal(r.preimageFound, true);
+  assert.equal(r.preimageHash, '0x' + HASHLOCK);
+  assert.ok(!JSON.stringify(r).includes(hex(SECRET)));
+  assert.equal(logs.length, 3, 'two "next poll" lines and the "spent" line');
+  assert.ok(!logs.join(' | ').includes(hex(SECRET)));
   const g = fundedChain();
   const r2 = await live.watch({ client: g.c, sleep: async () => { g.c.state.tip += 10; }, log: () => {} }, { txid: g.txid, vout: '0', untilHeight: String(TIP + 15), ...scriptArgs });
   assert.equal(r2.watch.stoppedBecause, 'until-height reached');
@@ -444,10 +460,534 @@ test('parseArgs: flags, positionals, dry-run default, and the secret is never ac
   assert.equal(live.parseArgs(['claim', '--secret-file', 's']).args.secretFile, 's');
   assert.equal(live.parseArgs(['balance', 'tb1qx']).args.address, 'tb1qx');
   assert.equal(live.parseArgs(['broadcast', 'deadbeef']).args.hex, 'deadbeef');
-  assert.throws(() => live.parseArgs(['claim', '--secret', 'x']), /unknown flag --secret/);
-  assert.throws(() => live.parseArgs(['claim', '--preimage', 'x']), /unknown flag --preimage/);
+  assert.throws(() => live.parseArgs(['claim', '--secret', 'x']), /never taken from the command line/);
+  assert.throws(() => live.parseArgs(['claim', '--preimage', 'x']), /never taken from the command line/);
+  assert.throws(() => live.parseArgs(['claim', '--secret=' + hex(SECRET)]), /never taken from the command line/);
+  assert.throws(() => live.parseArgs(['watch', '--preimage', 'x']), /never taken from the command line/);
   assert.throws(() => live.parseArgs(['lock', '--dry-run']), /unknown flag/); // dry run is the default, not a flag
   assert.throws(() => live.parseArgs(['nope']), /usage/);
   assert.throws(() => live.parseArgs(['tip', 'extra']), /unexpected argument/);
   assert.throws(() => live.parseArgs(['lock', '--key-file']), /needs a value/);
+});
+
+// ================================================================ safety layer (fee ladder, watcher, swap file, guards)
+
+const sha = sha256;
+const UTXO_VALUE = 100000;
+
+/** An unconfirmed claim of the funded HTLC, in the mock mempool (what `claim --send` would have left there). */
+function pendingClaim(f, { rate = 3, sequence, destination = ALICE_DEST } = {}) {
+  const b = htlc.buildClaimTx({
+    redeemScript: RS, utxo: { txid: f.txid, vout: 0, value: UTXO_VALUE }, destination, network: 'signet',
+    preimage: SECRET, keyPair: H.alice, feeRate: rate, ...(sequence === undefined ? {} : { sequence }),
+  });
+  const id = mine(f.c, b.hex, { confirmed: false });
+  f.c.state.outspends[`${f.txid}:0`] = { spent: true, txid: id, vin: 0, confirmed: false, blockHeight: null };
+  return { ...b, id };
+}
+function pendingRefund(f, { rate = 3, destination = BOB_ADDR } = {}) {
+  const b = htlc.buildRefundTx({ redeemScript: RS, utxo: { txid: f.txid, vout: 0, value: UTXO_VALUE }, destination, network: 'signet', keyPair: H.bob, feeRate: rate });
+  const id = mine(f.c, b.hex, { confirmed: false });
+  f.c.state.outspends[`${f.txid}:0`] = { spent: true, txid: id, vin: 0, confirmed: false, blockHeight: null };
+  return { ...b, id };
+}
+const claimAt = (f, extra = {}) => ({ ...claimArgs, txid: f.txid, vout: '0', ...extra });
+const refundAt = (f, extra = {}) => ({ ...refundArgs, txid: f.txid, vout: '0', ...extra });
+
+// ---------------------------------------------------------------- chain check
+
+test('chain check: every command verifies the chain once per client; another chain is refused before anything else', async () => {
+  const f = fundedChain();
+  await live.watch({ client: f.c, sleep: async () => {}, log: () => {} }, { txid: f.txid, vout: '0', maxPolls: '3', ...scriptArgs });
+  assert.equal(f.c.state.verifyCalls, 1, 'three polls, one chain check');
+  const bad = mockClient({ wrongChain: true });
+  await assert.rejects(() => live.tip({ client: bad }), /chain check failed.*not the signet genesis/s);
+  await assert.rejects(() => live.balance({ client: bad }, { address: BOB_ADDR }), /chain check failed/);
+  await assert.rejects(() => live.lock({ client: bad }, lockArgs), /chain check failed/);
+  await assert.rejects(() => live.claim({ client: bad }, { ...claimArgs, txid: 'ab'.repeat(32), vout: '0' }), /chain check failed/);
+  await assert.rejects(() => live.refund({ client: bad }, { ...refundArgs, txid: 'ab'.repeat(32), vout: '0' }), /chain check failed/);
+  await assert.rejects(() => live.broadcast({ client: bad }, { hex: f.fundingHex, send: true }), /chain check failed/);
+  await assert.rejects(() => live.watch({ client: bad }, { txid: 'ab'.repeat(32), ...scriptArgs }), /chain check failed/);
+  assert.deepEqual(bad.state.broadcasts, []);
+  // a client that cannot prove its chain is refused, never trusted
+  const { verifyChain: _v, ...noVerify } = mockClient();
+  await assert.rejects(() => live.tip({ client: noVerify }), /cannot verify the chain/);
+});
+
+// ---------------------------------------------------------------- keys
+
+test('keys: an uncompressed key, and the wrong role key, are refused for lock, claim and refund', async () => {
+  const unc = htlc.ECPair.fromPrivateKey(Buffer.from('03'.repeat(32), 'hex'), { network: bitcoin.networks.testnet, compressed: false }).toWIF();
+  const uf = path.join(tmp, 'uncompressed.key');
+  fs.writeFileSync(uf, unc + '\n');
+  assert.match(unc, /^9/, 'testnet uncompressed WIF');
+  assert.throws(() => live.loadKey(uf), /UNCOMPRESSED/);
+  const f = fundedChain();
+  // claim needs Alice's key, refund Bob's, lock funds from the key that becomes Bob's refund key
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { keyFile: BOB_KEY })), /not the Alice \(claim\) key/);
+  f.c.state.tip = LOCKTIME;
+  await assert.rejects(() => live.refund({ client: f.c }, refundAt(f, { keyFile: ALICE_KEY })), /not the Bob \(refund\) key/);
+  await assert.rejects(() => live.lock({ client: f.c }, { ...lockArgs, keyFile: ALICE_KEY }), /differ|does not match|insufficient|no confirmed/);
+  await assert.rejects(() => live.lock({ client: f.c }, { ...lockArgs, keyFile: uf }), /UNCOMPRESSED/);
+  // errors never carry key material
+  for (const k of [H.alice.toWIF(), H.bob.toWIF(), unc]) {
+    await live.claim({ client: f.c }, claimAt(f, { keyFile: BOB_KEY })).catch((e) => assert.ok(!e.message.includes(k)));
+  }
+});
+
+test('script terms next to --witness-script must agree with it (never silently ignored)', async () => {
+  const f = fundedChain();
+  const r = await live.status({ client: f.c }, { txid: f.txid, vout: '0', ...scriptArgs, hashlock: HASHLOCK, locktime: String(LOCKTIME) });
+  assert.equal(r.funded, true);
+  await assert.rejects(() => live.status({ client: f.c }, { txid: f.txid, ...scriptArgs, hashlock: 'ee'.repeat(32) }), /--hashlock disagrees with --witness-script/);
+  await assert.rejects(() => live.status({ client: f.c }, { txid: f.txid, ...scriptArgs, locktime: String(LOCKTIME + 1) }), /--locktime disagrees/);
+  await assert.rejects(() => live.status({ client: f.c }, { txid: f.txid, ...scriptArgs, alicePubkey: H.BOB_PUB_HEX }), /--alice-pubkey disagrees/);
+  await assert.rejects(() => live.status({ client: f.c }, { txid: f.txid, ...scriptArgs, bobPubkey: H.ALICE_PUB_HEX }), /--bob-pubkey disagrees/);
+});
+
+// ---------------------------------------------------------------- secret never on argv
+
+test('secret handling: never on argv, and a claim hex (which carries it) is not accepted on argv either', async () => {
+  for (const flag of ['--secret', '--preimage', '--s', '--x']) {
+    assert.throws(() => live.parseArgs(['claim', flag, hex(SECRET)]), /never taken from the command line/);
+  }
+  assert.throws(() => live.parseArgs(['claim', `--secret=${hex(SECRET)}`]), /never taken from the command line/);
+  const f = fundedChain();
+  const c = await live.claim({ client: f.c }, claimAt(f));
+  // positional hex of a claim: refused (process listing / shell history), with a pointer to the safe inputs
+  await assert.rejects(() => live.broadcast({ client: f.c }, { hex: c.hex, send: true }), /publishes a swap secret.*--hex-file.*--hex-stdin/s);
+  assert.deepEqual(f.c.state.broadcasts, []);
+  // the same hex from a file or from stdin goes through
+  const hf = path.join(tmp, 'claim.hex');
+  fs.writeFileSync(hf, c.hex + '\n');
+  const viaFile = await live.broadcast({ client: f.c }, { hexFile: hf });
+  assert.equal(viaFile.txid, c.txid);
+  assert.equal(viaFile.revealsSecret, true);
+  assert.ok(!JSON.stringify(viaFile).includes(hex(SECRET)), 'the decoded view does not print the secret');
+  const viaStdin = await live.broadcast({ client: f.c, stdin: c.hex }, { hexStdin: true, send: true });
+  assert.equal(viaStdin.sent, true);
+  assert.deepEqual(f.c.state.broadcasts, [c.hex]);
+  // exactly one source
+  await assert.rejects(() => live.broadcast({ client: f.c }, { hex: f.fundingHex, hexFile: hf }), /exactly one of/);
+  await assert.rejects(() => live.broadcast({ client: f.c }, {}), /exactly one of/);
+  await assert.rejects(() => live.broadcast({ client: f.c }, { hexFile: path.join(tmp, 'nope.hex') }), /not found/);
+  // a non-claim on argv is still fine (the funding tx in the existing test); and it says it does not reveal
+  assert.equal((await live.broadcast({ client: f.c }, { hex: f.fundingHex })).revealsSecret, false);
+  // stdout that is a file is refused for secret output; a pipe is fine
+  assert.throws(() => live.assertStdoutNotFile({ isFile: () => true }, '--print-secret output'), /stdout is a file/);
+  assert.doesNotThrow(() => live.assertStdoutNotFile({ isFile: () => false }, 'x'));
+  assert.doesNotThrow(() => live.assertStdoutNotFile(null, 'x'));
+});
+
+test('claim: needs 3 confirmations on the funding (design step 9) unless --min-confirmations lowers it', async () => {
+  const f = fundedChain(); // mined at TIP-3, tip TIP: 4 confirmations
+  f.c.state.tip = TIP - 2 + 0; // the funding is at TIP-3: tip TIP-2 gives 2 confirmations
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f)), /2 confirmation\(s\).*wants 3/);
+  assert.equal((await live.claim({ client: f.c }, claimAt(f, { minConfirmations: '2' }))).dryRun, true);
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { minConfirmations: '3' })), /2 confirmation/);
+  f.c.state.tip = TIP - 1;
+  assert.equal((await live.claim({ client: f.c }, claimAt(f))).dryRun, true, '3 confirmations is enough');
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { minConfirmations: '0' })), /--min-confirmations/);
+});
+
+// ---------------------------------------------------------------- fee ladder
+
+test('fee floor: a --fee-rate below the explorer estimate (2-block target) is refused for claim and refund, also in a dry run', async () => {
+  const f = fundedChain();
+  f.c.state.fee = 8;
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { feeRate: '7' })), /below the explorer's estimate of 8 sat\/vB for a 2-block target/);
+  const ok = await live.claim({ client: f.c }, claimAt(f, { feeRate: '8' }));
+  assert.deepEqual(ok.feeCheck, { target: 2, estimate: 8, chosen: 8, ok: true, floor: 'hard' });
+  assert.equal(ok.feeRate, 8);
+  assert.equal(ok.feeRateSource, 'flag');
+  const above = await live.claim({ client: f.c }, claimAt(f, { feeRate: '20' }));
+  assert.equal(above.feeCheck.chosen, 20);
+  assert.equal((await live.claim({ client: f.c }, claimAt(f))).feeCheck.chosen, 8, 'default = the estimate');
+  assert.deepEqual(f.c.state.broadcasts, []);
+  f.c.state.tip = LOCKTIME;
+  await assert.rejects(() => live.refund({ client: f.c }, refundAt(f, { feeRate: '2' })), /below the explorer's estimate of 8/);
+  assert.equal((await live.refund({ client: f.c }, refundAt(f, { feeRate: '9' }))).feeCheck.chosen, 9);
+  // lock only reports (its funding tx is Bob's own risk): a warning, not a refusal
+  const l = await live.lock({ client: mockClient({ fee: 8 }) }, { ...lockArgs, feeRate: '2' });
+  assert.equal(l.feeCheck.ok, false);
+  assert.match(l.warnings.join(' '), /below the explorer's estimate 8/);
+  // the cap still holds: an estimate of 3,901 is clamped to 50, so 50 is the highest rate ever demanded
+  f.c.state.fee = 50;
+  f.c.state.tip = TIP;
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { feeRate: '49' })), /below the explorer's estimate of 50/);
+  assert.equal((await live.claim({ client: f.c }, claimAt(f, { feeRate: '50' }))).dryRun, true);
+});
+
+test('fee floor: an unreadable estimate refuses a claim (no fee chosen blind)', async () => {
+  const f = fundedChain();
+  f.c.feeRate = async () => { throw new Error('HTTP 503'); };
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f)), /cannot read the explorer's fee estimate.*503/);
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { feeRate: '40' })), /cannot read the explorer's fee estimate/);
+});
+
+test('claim --replace: the same spend at a higher fee (BIP-125), found through the explorer', async () => {
+  const f = fundedChain();
+  const old = pendingClaim(f, { rate: 3 });
+  const oldTx = bitcoin.Transaction.fromHex(old.hex);
+  const oldFee = UTXO_VALUE - Number(oldTx.outs[0].value);
+  const r = await live.claim({ client: f.c }, claimAt(f, { replace: true }));
+  assert.equal(r.replace, true);
+  assert.equal(r.dryRun, true);
+  assert.equal(r.sent, false);
+  assert.deepEqual(f.c.state.broadcasts, []);
+  const tx = bitcoin.Transaction.fromHex(r.hex);
+  // the SAME spend: same input, same payout script, same sequence and locktime, same preimage
+  assert.equal(hex(Buffer.from(tx.ins[0].hash).reverse()), f.txid);
+  assert.equal(tx.ins[0].index, 0);
+  assert.equal(hex(tx.outs[0].script), hex(oldTx.outs[0].script));
+  assert.equal(tx.ins[0].sequence, 0xfffffffd);
+  assert.equal(tx.locktime, 0);
+  assert.equal(hex(extractPreimage(r.hex, { hashlock: HASHLOCK })), hex(SECRET));
+  assert.notEqual(r.txid, old.id);
+  // BIP-125: absolute fee up by >= 1 sat/vB of the new size, rate up by >= 1 sat/vB
+  assert.ok(r.fee >= oldFee + Math.ceil(r.vsize), `fee ${r.fee} vs old ${oldFee} + vsize ${r.vsize}`);
+  assert.ok(r.fee / r.vsize >= oldFee / oldTx.virtualSize() + 1);
+  assert.ok(r.feeRate >= 4);
+  assert.match(r.feeRateSource, /raised to .* BIP-125/);
+  assert.equal(r.bip125.replaces, old.id);
+  assert.equal(r.bip125.oldFee, oldFee);
+  assert.equal(r.bip125.incrementSatPerVb, 1);
+  assert.ok(r.fee >= r.bip125.minFee);
+  assert.equal(r.outputSats + r.fee, UTXO_VALUE);
+  // --send broadcasts exactly this hex, once
+  const s = await live.claim({ client: f.c }, claimAt(f, { replace: true, send: true }));
+  assert.equal(s.sent, true);
+  assert.deepEqual(f.c.state.broadcasts, [s.hex]);
+});
+
+test('claim --replace: an explicit --fee-rate must clear the increment; the refusal names the minimum, which then works', async () => {
+  const f = fundedChain();
+  pendingClaim(f, { rate: 10 });
+  f.c.state.fee = 3;
+  const e = await live.claim({ client: f.c }, claimAt(f, { replace: true, feeRate: '10' })).catch((x) => x);
+  assert.ok(e instanceof live.UserError);
+  assert.match(e.message, /does not replace the pending spend.*use at least --fee-rate (\d+)/s);
+  const min = Number(/use at least --fee-rate (\d+)/.exec(e.message)[1]);
+  assert.ok(min >= 11);
+  const ok = await live.claim({ client: f.c }, claimAt(f, { replace: true, feeRate: String(min) }));
+  assert.equal(ok.feeRate, min);
+  assert.equal(ok.feeRateSource, 'flag');
+  // one below the named minimum still fails
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { replace: true, feeRate: String(min - 1) })), /does not replace/);
+  // the estimate floor applies to a replacement too
+  f.c.state.fee = 30;
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { replace: true, feeRate: '25' })), /below the explorer's estimate of 30/);
+  // the default raises to max(estimate, minimum)
+  const auto = await live.claim({ client: f.c }, claimAt(f, { replace: true }));
+  assert.equal(auto.feeRate, 30);
+});
+
+test('claim --replace: refused when nothing is pending, the spend is confirmed, or it is not our claim', async () => {
+  // unspent outpoint
+  const u = fundedChain();
+  await assert.rejects(() => live.claim({ client: u.c }, claimAt(u, { replace: true })), /nothing to replace.*unspent/);
+  // already confirmed
+  const c = fundedChain();
+  const old = pendingClaim(c);
+  c.c.state.outspends[`${c.txid}:0`] = { spent: true, txid: old.id, vin: 0, confirmed: true, blockHeight: TIP };
+  await assert.rejects(() => live.claim({ client: c.c }, claimAt(c, { replace: true })), /already spent by .*confirmed in block \d+; nothing to replace/);
+  assert.deepEqual(c.c.state.broadcasts, []);
+  // a pending REFUND (Bob's) is not a claim to replace
+  const r = fundedChain();
+  r.c.state.tip = LOCKTIME - 7; // inside the claim window, but a refund is in the mempool (e.g. a stale view)
+  pendingRefund(r);
+  await assert.rejects(() => live.claim({ client: r.c }, claimAt(r, { replace: true })), /is a refund spend, not a claim/);
+  // the pending claim pays somebody else: a replacement must pay the same script
+  const d = fundedChain();
+  pendingClaim(d, { destination: 'tb1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3q0sl5k7' });
+  await assert.rejects(() => live.claim({ client: d.c }, claimAt(d, { replace: true })), /pays another destination than --to/);
+  // the pending claim does not signal RBF: it cannot be replaced
+  const n = fundedChain();
+  pendingClaim(n, { sequence: 0xffffffff });
+  await assert.rejects(() => live.claim({ client: n.c }, claimAt(n, { replace: true })), /does not signal RBF/);
+  // the explorer lost the pending tx
+  const g = fundedChain();
+  const gone = pendingClaim(g);
+  delete g.c.state.hexes[gone.id];
+  await assert.rejects(() => live.claim({ client: g.c }, claimAt(g, { replace: true })), /no longer has the pending spend/);
+  // a plain claim (no --replace) over a pending one is refused and points at --replace
+  const p = fundedChain();
+  pendingClaim(p);
+  await assert.rejects(() => live.claim({ client: p.c }, claimAt(p)), /already spent by .*unconfirmed.*--replace/s);
+  // a hex that is not the txid it was asked for is not trusted
+  const w = fundedChain();
+  const real = pendingClaim(w);
+  const other = htlc.buildClaimTx({ redeemScript: RS, utxo: { txid: w.txid, vout: 0, value: UTXO_VALUE }, destination: ALICE_DEST, network: 'signet', preimage: SECRET, keyPair: H.alice, feeRate: 9 });
+  w.c.state.hexes[real.id] = other.hex;
+  await assert.rejects(() => live.claim({ client: w.c }, claimAt(w, { replace: true })), /does not match its txid/);
+});
+
+test('claim --replace: refused past the cutoff (T_b - 6) like any claim; --ignore-cutoff overrides with a warning', async () => {
+  const f = fundedChain();
+  pendingClaim(f);
+  f.c.state.tip = LOCKTIME - 6;
+  assert.equal((await live.claim({ client: f.c }, claimAt(f, { replace: true }))).dryRun, true, 'at the cutoff is still allowed');
+  f.c.state.tip = LOCKTIME - 5;
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { replace: true })), /past the claim cutoff/);
+  const forced = await live.claim({ client: f.c }, claimAt(f, { replace: true, ignoreCutoff: true }));
+  assert.match(forced.warnings[0], /past the claim cutoff/);
+  assert.deepEqual(f.c.state.broadcasts, []);
+});
+
+test('claim --replace: no rate up to the cap can replace a pending spend that already pays the cap', async () => {
+  const f = fundedChain();
+  pendingClaim(f, { rate: 50 });
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { replace: true })), /no fee rate up to the 50 sat\/vB cap/);
+});
+
+test('refund --replace: Bob re-sends the same refund at a higher fee under the same rules', async () => {
+  const f = fundedChain();
+  f.c.state.tip = LOCKTIME;
+  await assert.rejects(() => live.refund({ client: f.c }, refundAt(f, { replace: true })), /nothing to replace/);
+  const old = pendingRefund(f, { rate: 3 });
+  const r = await live.refund({ client: f.c }, refundAt(f, { replace: true }));
+  const tx = bitcoin.Transaction.fromHex(r.hex);
+  assert.equal(tx.locktime, LOCKTIME);
+  assert.equal(tx.ins[0].sequence, 0xfffffffd);
+  assert.equal(r.bip125.replaces, old.id);
+  assert.ok(r.fee > old.fee);
+  assert.equal(extractPreimage(r.hex, { hashlock: HASHLOCK }), null);
+  // an unrelated pending claim is not a refund to replace
+  const g = fundedChain();
+  g.c.state.tip = LOCKTIME;
+  pendingClaim(g);
+  await assert.rejects(() => live.refund({ client: g.c }, refundAt(g, { replace: true })), /is a claim spend, not a refund/);
+});
+
+// ---------------------------------------------------------------- Bob's watcher
+
+test('watch --lock TXID:VOUT: finds the preimage in an UNCONFIRMED claim, checks it against the hashlock, prints it only on request', async () => {
+  const f = fundedChain();
+  const claim = pendingClaim(f);
+  f.c.state.tip = TIP + 1;
+  const lockRef = `${f.txid}:0`;
+  const logs = [];
+  const r = await live.watch({ client: f.c, sleep: async () => {}, log: (m) => logs.push(m) }, { lock: lockRef, ...scriptArgs });
+  assert.equal(r.watch.stoppedBecause, 'spent');
+  assert.equal(r.spend.txid, claim.id);
+  assert.equal(r.spend.confirmed, false, 'seen in the mempool, not waited for a block');
+  assert.equal(r.spend.branch, 'claim');
+  assert.equal(r.preimageFound, true);
+  assert.equal(r.preimageHash, '0x' + HASHLOCK);
+  assert.equal(r.preimageMatchesHashlock, true);
+  assert.equal(r.preimage, null);
+  assert.ok(!JSON.stringify(r).includes(hex(SECRET)));
+  assert.ok(!logs.join(' | ').includes(hex(SECRET)));
+  assert.match(logs.join(' | '), /preimage found, sha256 0x/);
+  // --print-secret: the value, in the JSON result only
+  const p = await live.watch({ client: f.c, sleep: async () => {}, log: (m) => logs.push(m) }, { lock: lockRef, printSecret: true, ...scriptArgs });
+  assert.equal(p.preimage, '0x' + hex(SECRET));
+  assert.equal(sha256(Buffer.from(p.preimage.slice(2), 'hex')).toString('hex'), HASHLOCK);
+  assert.ok(!logs.join(' | ').includes(hex(SECRET)), 'never on stderr');
+  // --lock and --txid/--vout must agree; a malformed outpoint is refused
+  await assert.rejects(() => live.watch({ client: f.c }, { lock: lockRef, txid: 'cd'.repeat(32), ...scriptArgs }), /--txid disagrees with --lock/);
+  await assert.rejects(() => live.watch({ client: f.c }, { lock: lockRef, vout: '1', ...scriptArgs }), /--vout disagrees with --lock/);
+  await assert.rejects(() => live.watch({ client: f.c }, { lock: f.txid, ...scriptArgs }), /--lock must be TXID:VOUT/);
+  await assert.rejects(() => live.watch({ client: f.c }, { lock: `${f.txid}:x`, ...scriptArgs }), /--lock must be TXID:VOUT/);
+});
+
+test('watch: never writes the secret anywhere (no file API is called while the preimage is read and printed)', async () => {
+  const f = fundedChain();
+  pendingClaim(f);
+  const calls = [];
+  const names = ['writeFileSync', 'appendFileSync', 'writeSync', 'createWriteStream', 'openSync', 'writeFile', 'appendFile'];
+  const saved = {};
+  for (const n of names) {
+    saved[n] = fs[n];
+    fs[n] = (...a) => { calls.push(n); return saved[n](...a); };
+  }
+  let r;
+  try {
+    r = await live.watch({ client: f.c, sleep: async () => {}, log: () => {} }, { lock: `${f.txid}:0`, printSecret: true, ...scriptArgs });
+  } finally {
+    for (const n of names) fs[n] = saved[n];
+  }
+  assert.equal(r.preimage, '0x' + hex(SECRET));
+  assert.deepEqual(calls, []);
+});
+
+test('watch: a refund spend yields no preimage; a spend the explorer cannot show yet keeps the watcher polling', async () => {
+  const f = fundedChain();
+  f.c.state.tip = LOCKTIME;
+  pendingRefund(f);
+  const r = await live.watch({ client: f.c, sleep: async () => {}, log: () => {} }, { lock: `${f.txid}:0`, printSecret: true, ...scriptArgs });
+  assert.equal(r.spend.branch, 'refund');
+  assert.equal(r.preimageFound, false);
+  assert.equal(r.preimage, null);
+  // outspend says "spent" but the tx hex is not served yet: that is not "no reveal"
+  const g = fundedChain();
+  const c = pendingClaim(g);
+  const hexKept = g.c.state.hexes[c.id];
+  delete g.c.state.hexes[c.id];
+  let n = 0;
+  const sleep = async () => { n++; if (n === 2) g.c.state.hexes[c.id] = hexKept; };
+  const logs = [];
+  const w = await live.watch({ client: g.c, sleep, log: (m) => logs.push(m) }, { lock: `${g.txid}:0`, ...scriptArgs });
+  assert.equal(w.watch.polls, 3);
+  assert.equal(w.preimageFound, true);
+  // with a polling budget that runs out first, the caller sees spent:true but no branch, and a clear stop reason
+  const h = fundedChain();
+  const c2 = pendingClaim(h);
+  delete h.c.state.hexes[c2.id];
+  const w2 = await live.watch({ client: h.c, sleep: async () => {}, log: () => {} }, { lock: `${h.txid}:0`, maxPolls: '2', ...scriptArgs });
+  assert.equal(w2.watch.stoppedBecause, 'max-polls reached');
+  assert.equal(w2.spend.branch, null);
+  assert.equal(w2.preimageFound, false);
+});
+
+test('watch/status: a transaction the explorer returns for the wrong txid or the wrong input is never read for a preimage', async () => {
+  const f = fundedChain();
+  const c = pendingClaim(f);
+  // a different valid claim hex served under the pending txid
+  const other = htlc.buildClaimTx({ redeemScript: RS, utxo: { txid: f.txid, vout: 0, value: UTXO_VALUE }, destination: ALICE_DEST, network: 'signet', preimage: SECRET, keyPair: H.alice, feeRate: 11 });
+  f.c.state.hexes[c.id] = other.hex;
+  const s = await live.status({ client: f.c }, { lock: `${f.txid}:0`, printSecret: true, ...scriptArgs });
+  assert.equal(s.spend.branch, 'unknown');
+  assert.equal(s.spend.scriptCheck.ok, false);
+  assert.equal(s.preimageFound, false);
+  assert.equal(s.preimage, null);
+  // outspend names input 1 of a one-input tx
+  const g = fundedChain();
+  const c2 = pendingClaim(g);
+  g.c.state.outspends[`${g.txid}:0`] = { spent: true, txid: c2.id, vin: 1, confirmed: false, blockHeight: null };
+  const s2 = await live.status({ client: g.c }, { lock: `${g.txid}:0`, printSecret: true, ...scriptArgs });
+  assert.equal(s2.spend.branch, 'unknown');
+  assert.equal(s2.preimage, null);
+});
+
+test('extractPreimage with inputIndex reads only the input that spends your outpoint', () => {
+  const claim = htlc.buildClaimTx({ redeemScript: RS, utxo: { txid: 'aa'.repeat(32), vout: 0, value: UTXO_VALUE }, destination: ALICE_DEST, network: 'signet', preimage: SECRET, keyPair: H.alice, feeRate: 3 });
+  assert.equal(hex(extractPreimage(claim.hex, { hashlock: HASHLOCK, inputIndex: 0 })), hex(SECRET));
+  assert.equal(extractPreimage(claim.hex, { hashlock: HASHLOCK, inputIndex: 1 }), null);
+  // two inputs: the claim witness sits in input 1 of a bigger tx; asking for input 0 must not find it
+  const tx = bitcoin.Transaction.fromHex(claim.hex);
+  const two = new bitcoin.Transaction();
+  two.version = 2;
+  two.addInput(Buffer.alloc(32, 7), 0, 0xfffffffd);
+  two.addInput(Buffer.from(tx.ins[0].hash), 0, 0xfffffffd);
+  two.addOutput(tx.outs[0].script, tx.outs[0].value);
+  two.setWitness(0, [Buffer.alloc(64, 1), Buffer.alloc(33, 2)]);
+  two.setWitness(1, tx.ins[0].witness.map((w) => Buffer.from(w)));
+  assert.equal(extractPreimage(two, { hashlock: HASHLOCK, inputIndex: 0 }), null);
+  assert.equal(hex(extractPreimage(two, { hashlock: HASHLOCK, inputIndex: 1 })), hex(SECRET));
+  assert.equal(hex(extractPreimage(two, { hashlock: HASHLOCK })), hex(SECRET));
+});
+
+// ---------------------------------------------------------------- swap file
+
+const SEAL_SENTINEL = 'SEALED-SECRET-SENTINEL-do-not-read';
+function writeSwap(name, over = {}) {
+  const role = over.role || 'bob';
+  const j = {
+    version: 1,
+    role,
+    created_at: 1,
+    public: {
+      hashlock: '0x' + (over.hashlock || HASHLOCK),
+      claim_authority: 'o1x',
+      opening_hex: '00',
+      contract_root: 'o1y',
+      params: { variant: 'raw', amount_micronoid: 10000000, deadline_height: 300735, eth: { chain_id: 31337, contract: '0x' + '11'.repeat(20) }, ...(over.params || {}) },
+    },
+    phase: { role, phase: role === 'alice' ? 'lock_final' : 'funding_final' },
+    history: [],
+    ...(role === 'alice' ? { secret: { nonce: SEAL_SENTINEL, ciphertext: SEAL_SENTINEL } } : {}),
+    ...(over.top || {}),
+  };
+  if (over.phase) j.phase = over.phase;
+  const f = path.join(tmp, `${name}.swap.json`);
+  fs.writeFileSync(f, typeof over.raw === 'string' ? over.raw : JSON.stringify(j));
+  return f;
+}
+
+test('swap file: lock takes the hashlock from the file, a given --hashlock must equal it, the role must be Bob', async () => {
+  const bobFile = writeSwap('bob-ok');
+  const c = mockClient();
+  const { hashlock: _h, ...noHash } = lockArgs;
+  const r = await live.lock({ client: c }, { ...noHash, swap: bobFile });
+  assert.equal(r.hashlock, HASHLOCK);
+  assert.equal(r.address, HTLC_ADDR);
+  assert.equal(r.swap.file, path.resolve(bobFile));
+  assert.equal(r.swap.role, 'bob');
+  assert.equal(r.swap.phase, 'funding_final');
+  assert.equal(r.swap.profile, 'production');
+  assert.match(r.swap.warnings.join(' '), /NOID<->ETH file/);
+  assert.match(r.swap.warnings.join(' '), /no Bitcoin terms/);
+  // the same hashlock given explicitly (with or without 0x) is fine
+  assert.equal((await live.lock({ client: c }, { ...lockArgs, hashlock: '0x' + HASHLOCK, swap: bobFile })).dryRun, true);
+  // a different hashlock is refused, with both values in the message
+  const other = hex(sha256(Buffer.from('another secret')));
+  await assert.rejects(() => live.lock({ client: c }, { ...lockArgs, hashlock: other, swap: bobFile }), (e) => /--hashlock disagrees with the swap file/.test(e.message) && e.message.includes(other) && e.message.includes(HASHLOCK));
+  // a file for another hashlock is refused through the flag-less path too (file's hashlock is what gets locked, so the address differs from the expected one)
+  const otherFile = writeSwap('bob-other', { hashlock: other });
+  const lockedOther = await live.lock({ client: c }, { ...noHash, swap: otherFile });
+  assert.equal(lockedOther.hashlock, other);
+  assert.notEqual(lockedOther.address, HTLC_ADDR);
+  // Alice's file cannot be used to lock; neither can a file whose swap is over
+  await assert.rejects(() => live.lock({ client: c }, { ...lockArgs, swap: writeSwap('alice-lock', { role: 'alice' }) }), /lock is bob's command but the swap file is alice's/);
+  for (const phase of ['refunded', 'aborted']) {
+    await assert.rejects(() => live.lock({ client: c }, { ...lockArgs, swap: writeSwap(`bob-${phase}`, { phase: { role: 'bob', phase } }) }), new RegExp(`finished phase "${phase}"`));
+  }
+  assert.deepEqual(c.state.broadcasts, []);
+});
+
+test('swap file: claim needs Alice\'s file and the script\'s hashlock; the sealed secret is never read or printed; refund works after an abort', async () => {
+  const f = fundedChain();
+  const aliceFile = writeSwap('alice-ok', { role: 'alice' });
+  const r = await live.claim({ client: f.c }, claimAt(f, { swap: aliceFile }));
+  assert.equal(r.swap.role, 'alice');
+  assert.ok(!JSON.stringify(r).includes(SEAL_SENTINEL), 'the file\'s secret blob is not touched');
+  assert.deepEqual(f.c.state.broadcasts, []);
+  // role
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { swap: writeSwap('bob-claim') })), /claim is alice's command but the swap file is bob's/);
+  // script bound to another hashlock than the file's
+  await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { swap: writeSwap('alice-other', { role: 'alice', hashlock: 'ee'.repeat(32) }) })), /script's hashlock .* is not the swap file's/);
+  // finished swap (Alice's NOID refunded / secret lost): no new claim
+  for (const phase of ['refunded', 'lost', 'aborted']) {
+    await assert.rejects(() => live.claim({ client: f.c }, claimAt(f, { swap: writeSwap(`alice-${phase}`, { role: 'alice', phase: { role: 'alice', phase } }) })), new RegExp(`finished phase "${phase}"`));
+  }
+  // refund is exactly what a finished Bob needs: allowed under an aborted file
+  f.c.state.tip = LOCKTIME;
+  const bobAborted = writeSwap('bob-aborted2', { phase: { role: 'bob', phase: 'aborted' } });
+  const rf = await live.refund({ client: f.c }, refundAt(f, { swap: bobAborted }));
+  assert.equal(rf.swap.phase, 'aborted');
+  await assert.rejects(() => live.refund({ client: f.c }, refundAt(f, { swap: aliceFile })), /refund is bob's command but the swap file is alice's/);
+  // watch / status take either role, and check the hashlock
+  const w = await live.status({ client: f.c }, { lock: `${f.txid}:0`, ...scriptArgs, swap: aliceFile });
+  assert.equal(w.swap.role, 'alice');
+  await assert.rejects(() => live.status({ client: f.c }, { lock: `${f.txid}:0`, ...scriptArgs, swap: writeSwap('bob-other2', { hashlock: 'ee'.repeat(32) }) }), /script's hashlock .* is not the swap file's/);
+});
+
+test('swap file: unreadable, foreign or inconsistent files are refused', async () => {
+  const c = mockClient();
+  const bad = (raw, re, name) => assert.rejects(() => live.lock({ client: c }, { ...lockArgs, swap: writeSwap(name, { raw }) }), re);
+  await assert.rejects(() => live.lock({ client: c }, { ...lockArgs, swap: path.join(tmp, 'missing.swap.json') }), /swap file not found/);
+  await bad('not json', /not valid JSON/, 'bad1');
+  await bad('{}', /is it a swap-cli swap file/, 'bad2');
+  await bad(JSON.stringify({ version: 2, role: 'bob', public: { hashlock: '0x' + HASHLOCK }, phase: { role: 'bob', phase: 'received' } }), /file version 2/, 'bad3');
+  await bad(JSON.stringify({ version: 1, role: 'carol', public: { hashlock: '0x' + HASHLOCK }, phase: { role: 'bob', phase: 'received' } }), /role "carol"/, 'bad4');
+  await bad(JSON.stringify({ version: 1, role: 'bob', public: { hashlock: '0x' + HASHLOCK }, phase: { role: 'alice', phase: 'created' } }), /phase belongs to alice but the file's role is bob/, 'bad5');
+  await bad(JSON.stringify({ version: 1, role: 'bob', public: { hashlock: '0x1234' }, phase: { role: 'bob', phase: 'received' } }), /swap file hashlock/, 'bad6');
+  const sw = live.readSwapFile(writeSwap('ok-read2', { params: { profile: 'sepolia' } }));
+  assert.deepEqual(Object.keys(sw).sort(), ['file', 'hasBtcTerms', 'hashlock', 'isEthPair', 'phase', 'profile', 'role']);
+  assert.equal(sw.profile, 'sepolia');
+  assert.equal(sw.hasBtcTerms, false);
+});
+
+test('parseArgs: the new flags', () => {
+  assert.deepEqual(live.parseArgs(['claim', '--replace', '--fee-rate', '9', '--swap', 's.json', '--lock', 'a:0', '--min-confirmations', '2']).args, { replace: true, feeRate: '9', swap: 's.json', lock: 'a:0', minConfirmations: '2' });
+  assert.deepEqual(live.parseArgs(['refund', '--replace']).args, { replace: true });
+  assert.deepEqual(live.parseArgs(['watch', '--lock', 'a:0', '--print-secret', '--swap', 's']).args, { lock: 'a:0', printSecret: true, swap: 's' });
+  assert.deepEqual(live.parseArgs(['status', '--print-secret']).args, { printSecret: true });
+  assert.deepEqual(live.parseArgs(['lock', '--swap', 's']).args, { swap: 's' });
+  assert.deepEqual(live.parseArgs(['broadcast', '--hex-stdin', '--send']).args, { hexStdin: true, send: true });
+  assert.deepEqual(live.parseArgs(['broadcast', '--hex-file', 'f']).args, { hexFile: 'f' });
+  assert.throws(() => live.parseArgs(['lock', '--replace']), /unknown flag --replace/);
+  assert.throws(() => live.parseArgs(['claim', '--print-secret']), /unknown flag --print-secret/);
+  assert.throws(() => live.parseArgs(['tip', '--swap', 's']), /unknown flag/);
 });

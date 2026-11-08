@@ -10,7 +10,8 @@ Hardhat project containing the Ethereum half of a cross-chain atomic swap.
 | `test/HTLC.test.js` | Test suite (Hardhat + ethers v6 + chai) |
 | `test/fuzz.test.js`, `contracts/test/Fuzz*.sol`, `FUZZ.md` | Seeded fuzz and invariant campaign for both contracts, with the findings; see "Fuzz campaign" below |
 | `scripts/secret.js` | Generates a 32-byte secret and its SHA-256 hashlock |
-| `scripts/live.js`, `scripts/rpc-proxy.js`, `test/live.test.js` | Live-run CLI for Sepolia and a loopback RPC forwarder; see "Live runs (Sepolia)" below |
+| `contracts/HTLCPoseidonV2.sol`, `contracts/Poseidon2b.sol`, `test/HTLCPoseidonV2.test.js`, `test/poseidon-vectors.test.js`, `test/vectors/` | ETH locked directly on Parano1d's `Addr(s)` (Poseidon2b computed in the EVM), so no equivalence proof is needed on an EVM leg; see "Poseidon2b on the EVM" below and `../docs/poseidon-leg.md` |
+| `scripts/live.js`, `scripts/rpc-proxy.js`, `test/live.test.js`, `test/live-poseidon.test.js` | Live-run CLI for Sepolia and a loopback RPC forwarder; see "Live runs (Sepolia)" below. `live.js` works with both contracts (`--lock-kind sha256|poseidon`); see "The poseidon lock kind in `live.js`" |
 
 ## Install and test
 
@@ -39,6 +40,56 @@ node scripts/secret.js --json
 
 It prints the secret, the hashlock, and runs a self-check that Node `crypto`
 and ethers' `sha256` agree on the same bytes.
+
+## Poseidon2b on the EVM (`HTLCPoseidonV2`)
+
+`contracts/HTLCPoseidonV2.sol` is `HTLC.sol` with the lock word `lockAddr = Addr(s)` (Parano1d's address function, one
+Poseidon2b permutation) in place of `SHA-256(s)`. The protocol delta, gas figures, the code-hash pin and the integration
+spec for `swap-cli` and `live.js` are in `../docs/poseidon-leg.md`. `contracts/HTLCPoseidon.sol` is the earlier prototype
+(kept for reference, not for use). Wired into `swap-cli` (`--eth-lock-kind poseidon`) and `live.js` (`--lock-kind poseidon`): see "The poseidon lock kind in `live.js`".
+
+* Runtime code hash of `HTLCPoseidonV2`: `0xf510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780bb7043ff3`
+  (solc 0.8.24, optimizer 200, `cancun`). Pinned in `test/HTLCPoseidonV2.test.js`.
+* `claim` costs 0.50 to 0.55 M gas; send it with an explicit gas limit of at least 650,000 (`RECOMMENDED_CLAIM_GAS_LIMIT`).
+  There is no `addrOf` view: never send a live secret to a remote node.
+* `Poseidon2b.sol` is generated (`npm run poseidon:gen`, checked by `npm run poseidon:check` and by a test).
+
+### Vendor reference vectors
+
+`test/vectors/addr-vectors.bin` holds 12,299 vectors of 64 bytes each: secret (32) then `Addr(secret)` (32), computed by the
+**vendor** crate (`noid_poseidon2b::primitives::derive_address`) through `equiv-ref`. Layout: 299 structured secrets first
+(index 0 all-zero, 1 all-ones, 2 the published `00 01 .. 1f`, 3 to 10 repeated-byte and lane patterns, 11 to 42 one `0xff` byte,
+43 to 298 the 256 single-bit secrets), then 12,000 seeded-random ones (secret *i* = SHA-256 of the text
+`noid-swap/poseidon2b/addr-vectors/v1|i`). SHA-256 of the file (also in `addr-vectors.bin.sha256`):
+
+```
+09c22287e0fbb205681b0de59fe0282240fa8f09737aebb1ff6e9d76e4a673da
+```
+
+Regenerate it (from the repository root, Linux or WSL with the Rust toolchain; the output must be byte-identical):
+
+```sh
+cd equiv && cargo build --release --offline -p equiv-ref
+./target/release/equiv-ref addr-vectors ../eth/test/vectors/addr-vectors.bin     # --random N and --seed TEXT change the random part
+sha256sum ../eth/test/vectors/addr-vectors.bin                                    # compare with addr-vectors.bin.sha256
+```
+
+(With a shared target directory, `CARGO_TARGET_DIR=... cargo build ...` and run the binary from there.)
+
+```sh
+npx hardhat test test/poseidon-vectors.test.js                       # default: 299 structured + 300 random (every 40th), ~1 minute
+POSEIDON_VECTORS=all POSEIDON_START=0 POSEIDON_COUNT=3100 npx hardhat test test/poseidon-vectors.test.js   # a slice of the whole file
+npx hardhat test test/HTLCPoseidonV2.test.js                         # unit tests, gas report, code-hash pin
+npx hardhat test test/fuzz.test.js --grep HTLCPoseidonV2             # fuzz campaign against HTLCPoseidonV2 (FUZZ_PN sets the count)
+FUZZ_MUTANT_P=3 npx hardhat test test/fuzz.test.js --grep HTLCPoseidonV2   # planted bug 1 to 10: must FAIL
+```
+
+The full set runs in four slices of about 3,100 (`POSEIDON_START` 0, 3100, 6200, 9300), one process each; the Hardhat runtime
+keeps a trace per Poseidon call, so the tests recycle the chain every few dozen calls (`test/helpers/chain-budget.js`) and fail
+with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
+(`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
+segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
+220 passing, 0 failing, about 3 minutes.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -182,6 +233,32 @@ until the first mainnet swap is planned.
 | `scripts/rpc-proxy.js` | Loopback plain-HTTP to HTTPS forwarder, so the Rust `swap-cli` (no TLS) can read Ethereum. |
 | `test/live.test.js` | Tests for both, over Hardhat's in-process network and 127.0.0.1 only. |
 
+### The poseidon lock kind in `live.js` (`docs/poseidon-leg.md` section 9.6)
+
+Every command that talks to a lock contract takes `--lock-kind sha256|poseidon` (`deploy` also reads it as `--contract-kind`; the two names are one
+setting). `sha256` is `HTLC.sol` and the default; `poseidon` is `HTLCPoseidonV2.sol`. With `--swap FILE` the kind is the file's `params.eth.lock_kind` (absent =
+`sha256`): a `--lock-kind` that says otherwise is refused, and the file's `code_hash` must equal the code hash of **that kind's** local artifact
+(`eth/artifacts/contracts/HTLCPoseidonV2.sol/…`; the hash is `0xf510d2a3…3ff3`). The artifact, the ABI (`lockAddr` instead of `hashlock`), the code-hash check against
+`eth_getCode`, the `Locked` scan and the revert decoding all follow the kind.
+
+| Command | What changes for `poseidon` |
+|---------|-----------------------------|
+| `deploy --contract-kind poseidon` | deploys the V2 artifact (about 3.4 M gas, 15,300 bytes); `matchesArtifact` compares with it |
+| `lock` | `--lock-addr 0x…` (the NOID claim authority `A`) replaces `--hashlock`; each is refused for the other kind. REVIEW-7 R7-1: the pre-lock check asks the node only for the `Locked` logs of **your own sender** (`eth_getLogs` with the indexed sender as topic2, in 50,000-block chunks from the from-block; `HTLCPoseidonV2`'s `Locked` has `sender` indexed, the lock word is in the data and is compared locally, every log re-checked locally), and refuses an earlier lock of your own sender on that address (any receiver). It no longer reads every `Locked` log of the shared contract, so there is no provider-cap size rule any more (nobody can hold your lock back by padding the contract). A lock of another sender on the same address does not block (REVIEW-6 R6-2: Bob's lock pays only the fixed receiver, for an `x` with `Addr(x) = A`, so a stranger's 1-wei lock must not be able to veto the swap) and, for this kind, is not read: `foreignLocksSameHashlock` stays `[]`, `lockedEventsQuery` is `"sender"` and `lockedEventsScanned` counts your own sender's logs |
+| `claim` | compares `Addr(secret)` with the lock **locally** (`scripts/poseidon/poseidon2b.js`, the port the vector test ties to the vendor crate); builds the calldata itself and **refuses to sign anything but exactly 68 bytes** that equal selector + lock id + secret (V2-7); sends it with a **fixed gas limit of 1,000,000** (V2-6; the contract's own floor is 540,000 and recommendation 650,000, both read from the pinned contract and checked), and requires the balance to cover `limit × fee cap`; **never simulates**: no `eth_estimateGas`, no `eth_call` carries the secret, only the signed `eth_sendRawTransaction` does (tested by recording every JSON-RPC request); `--dry-run` therefore reports `gasLimit` and `gasEstimate: null`, and a dry run **with** the secret is refused when `ETH_RPC_URL` is not on this machine (run it without `--secret-stdin`: every gate is checked without the secret); `--replace` re-sends with the same limit |
+| `refund` | as before, against the V2 ABI |
+| `status` | detects the kind from the contract's code hash when no flag is given; output keeps the key `hashlock` (it holds the lock word), adds `lockKind`, and `preimageMatchesHashlock` is the local `Addr` comparison |
+
+A claim that reverts (`TimelockExpired`, `BadCalldataLength`, `InsufficientGas`, `TransferFailed`) is decoded by name with a note that the claim transaction carried the secret.
+A claim that is **mined and reverts** (either kind; for example it was mined after the timelock) is no longer a bare "failed" (REVIEW-6 R6-3): `claim` prints a JSON
+result with `reverted: true`, `secretPublic: true`, the `txHash`, `blockNumber`, `lockId`, a note and `swapCliFlag: "--reveal-tx HASH"`, and exits with status 3.
+Give the hash to `swap-cli tick --reveal-tx HASH --apply` (`scripts/live/reveal.sh` saves it for the helpers): swap-cli reads the transaction and its receipt from the
+node, checks that it is this lock's `claim` from `alice_receiver`, and records that the secret is public (the late re-send cutoff `T_reveal - DE` then applies;
+the swap-file history marker is `reveal_reverted_seen`, which `live.js --swap` reads like the other public-secret markers). Bob's `tick` / `claim` can take the secret
+from the same hash. For the poseidon kind the revert is not decoded by name (ethers gives a status-0 receipt no reason), so this result is the only notice.
+Tests: `test/live-poseidon.test.js` (real V2 contract on Hardhat; three real claims, then the chain is reset to give the retained trace memory back).
+Alice's ETH address must hold `1,000,000 × fee cap` at the reveal (0.02 ETH at 20 gwei), not the 89 k of the sha256 kind.
+
 ### Environment
 
 | Variable | Meaning |
@@ -219,20 +296,31 @@ chain, no flag) the node prices the transaction itself and nothing is checked.
 
 `claim --replace` and `refund --replace` re-send the same call when the first one is stuck. They use the signer's **oldest pending
 nonce** (never a second nonce), raise `maxFeePerGas` and the tip by at least 12.5 % over the old transaction and the cap to at
-least 2 x the latest base fee, and estimate gas against the `latest` state (a pool-aware estimate would see the stuck claim and
-revert). On mainnet `--max-fee-gwei` is the new cap and must clear that minimum; on a test chain without a cap the fees are
+least 2 x the latest base fee. A refund replacement estimates gas against the `latest` state (a pool-aware estimate would see the stuck
+refund and revert); a claim replacement uses the claim's fixed gas limit and estimates nothing (R6-8). On mainnet `--max-fee-gwei` is the new cap and must clear that minimum; on a test chain without a cap the fees are
 chosen. Refused: nothing pending for the signer, a pending transaction that is not this very `claim` / `refund` of this lock (it
 would cancel something else), `--replace-tx` naming a mined or foreign transaction, a lock already claimed or refunded.
 The old transaction is found with `--replace-tx HASH` (the hash the command line prints on stderr as `sent: 0x… nonce N …`
-right after sending, before it waits for the receipt) or, if omitted, in the node's pending block; if the node cannot show it the
-plan says `oldFeeKnown: false` and the node itself rejects an underpriced replacement. `--dry-run` shows the plan
-(`replace: { nonce, replacesTx, old/new fee and tip }`) and sends nothing. `--replace` does not exist for `lock`.
+right after sending, before it waits for the receipt) or, if omitted, in the node's pending block and (geth-style nodes) its
+`txpool_contentFrom`. **It must be found and identified** (REVIEW-5 R5-2): a transaction priced under the base fee is usually
+absent from the pending block, and a node that cannot show it makes the command refuse and ask for `--replace-tx`; it never
+replaces whatever sits at the oldest nonce (with a key shared across swaps that could cancel another swap's claim or lock).
+`--dry-run` shows the plan (`replace: { nonce, replacesTx, old/new fee and tip }`) and sends nothing. `--replace` does not exist
+for `lock`.
+
+**A stuck first reveal can be replaced past the `M_A` cutoff** (REVIEW-5 R5-1). A claim in the public mempool has already
+published the secret, so `M_A` (which protects a first publication) no longer applies: with `--swap FILE`, a `claim --replace`
+that found and identified the signer's pending claim of this lock uses the late cutoff `T_reveal - DE` (the intent's
+`late_cutoff`, which `swap-cli` freezes in every `reveal_eth` intent; an older intent gets the profile's `DE`), whether or not the
+file's history has a marker. The plan prints `revealCutoffRule`. A first claim, which has no pending transaction, keeps the strict
+`M_A` rule, and an explicit `--margin-s` still tightens either.
 
 #### Late re-send (REVIEW-4 R4-3)
 
 With `--swap FILE`, the reveal cutoff is the earlier of `timelock - --margin-s` and the cutoff the `reveal_eth` intent froze. One
 exception: when the file's `history` shows the secret may already be public (`reveal_submitted`, `eth_claim_mined`,
-`eth_claim_reorged` or `eth_reveal_dropped`, the same events as `swap-cli`'s `secret_may_be_public`), a re-send publishes nothing
+`eth_claim_reorged`, `eth_reveal_dropped` or, since REVIEW-5, `reveal_pending_seen` (`swap-cli` writes it when it sees the receiver key's
+claim in the mempool while a `reveal_eth` intent is held); the same events as `swap-cli`'s `secret_may_be_public`), a re-send publishes nothing
 new, and the intent's own cutoff (`T_reveal - DE`, which `swap-cli` froze for exactly that case) rules even when it is later than
 `timelock - 1800 s`. An explicit `--margin-s` still tightens it. The plan prints `revealCutoffRule`.
 
@@ -252,8 +340,11 @@ The secret is never accepted on the command line. `claim` reads it as one line o
 stdin (`--secret-stdin`, refused if stdin is a terminal) or from a file (`--secret-file PATH`). It is
 never printed: not in the JSON, not in errors, not in the dry-run calldata (only its length is shown), and any
 error text that happens to contain it is scrubbed. `--dry-run` works without it and prints the plan; it
-then shows `"gasEstimate": null` (gas cannot be estimated without the real preimage, since a wrong one
-reverts). Pipe the secret in for a dry run only if you want the gas figure.
+shows `"gasEstimate": null` and the fixed `gasLimit`. **The claim is never estimated, for either lock kind** (REVIEW-6 R6-8): an `eth_estimateGas`
+request carries the calldata, i.e. the secret, to the node before the claim itself. The sha256 claim is sent with a fixed gas limit of
+200,000 (the fuzz maximum in `FUZZ.md` is 120,993 gas; the balance must cover `limit x fee cap`, unused gas is not charged), the poseidon claim with
+1,000,000. A dry run WITH the secret is refused when `ETH_RPC_URL` is not on this machine, for both kinds (run it without `--secret-stdin`).
+Test: `R6-8` in `test/live.test.js` records every JSON-RPC request.
 
 ### Mainnet
 
@@ -277,7 +368,7 @@ with `--dry-run`, and there is no warn-and-continue path. The swap file must say
 refused when `--mainnet` is not given, so a swap file never unlocks mainnet by itself.
 
 **The first mainnet swap uses 0.001 ETH** (`--amount-wei 1000000000000000`), against 10 NOID, and nothing larger until it has settled
-and been looked at. The plan is in `docs/live-run-4.md`. The production profile of `swap-cli` has no amount cap of its
+and been looked at. The plan is in `docs/live-run-mainnet-plan.md`. The production profile of `swap-cli` has no amount cap of its
 own, so this limit is a rule of the operator, not a gate.
 
 ```sh
@@ -365,7 +456,8 @@ Notes:
   `swap-cli secret` prints the secret to stdout, so run it only in the pipe above, never on its own in a logged terminal.
 * `claim --secret-stdin` has to be the receiving end of a pipe (or `< file`); with a terminal on stdin it refuses.
 * A third party who locks dust under your hashlock does not block `lock` (only your own earlier lock does). It is
-  reported as `foreignLocksSameHashlock`; whoever reveals the secret can claim it too, so treat it as a donation.
+  reported as `foreignLocksSameHashlock` (sha256 kind; the poseidon kind asks the node for your own sender's locks only and does not read it);
+  whoever reveals the secret can claim it too, so treat it as a donation.
 * The ETH receiver must be an EOA (see Hazards above); `keygen` produces one.
 
 ### The proxy for `swap-cli`

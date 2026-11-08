@@ -23,10 +23,10 @@ use common::{SimExecutor, SimKind, SimTx, World, SEPOLIA_FINALITY_LAG_BLOCKS, T0
 use support::{fail, Failure, Rng};
 use swap_cli::engine::{cancel_intent, check_external_close_phase, external_close_event, tick_apply, Action, ExecError, Executor, IntentStatus, Runner, INTENT_KINDS};
 use swap_cli::params::{ContractVersion, Gates, ProfileName};
-use swap_cli::secret::{sha256, Secret, Variant};
+use swap_cli::secret::{LockKind, Secret, Variant};
 use swap_cli::state::{AlicePhase, BobPhase, Event, Phase, Role};
-use swap_cli::swapfile::{example_bob_file, example_public_opts, KdfParams, Passphrase, SwapFile, SwapPublic};
-use swap_cli::watch::eth::compute_lock_id;
+use swap_cli::swapfile::{example_bob_file, example_public_kind, KdfParams, Passphrase, SwapFile, SwapPublic};
+use swap_cli::watch::eth::{compute_lock_id, lock_word_of};
 use swap_cli::watch::{EthLock, EthObservation, NoidInstance, NoidObservation, PendingPreimage};
 
 /// Documented findings (CHAOS.md): a violation with one of these ids is reported and counted but does not fail the
@@ -171,7 +171,9 @@ impl Degrade {
             Degrade::CodeHashWrong => e.contract_code_hash = Some([9; 32]),
             Degrade::TipTimeNone => n.tip_time = None,
             Degrade::TipTimeLag => n.tip_time = Some(now.saturating_sub(400)),
-            Degrade::EthHeadLag => e.latest_timestamp = e.latest_timestamp.saturating_sub(700),
+            // Relative to the party's own clock (like `TipTimeLag`): the engine measures the lag against that clock, so with a clock skewed
+            // by -100 s the old form (700 s behind the true time) showed the engine 600 s, not above its limit, while the oracle expected a block.
+            Degrade::EthHeadLag => e.latest_timestamp = now.saturating_sub(700),
             Degrade::SecondNoidDown => {
                 n.second = None;
                 n.second_error = Some("second node down".into());
@@ -301,6 +303,8 @@ struct Run {
     profile: ProfileName,
     variant: Variant,
     version: ContractVersion,
+    /// The Ethereum lock: `sha256` (`HTLC.sol`) or, for about two in five raw-variant scenarios, `poseidon` (`HTLCPoseidonV2.sol`).
+    lock_kind: LockKind,
     gates: &'static Gates,
     public: SwapPublic,
     secret: Secret,
@@ -396,7 +400,17 @@ impl Run {
         let regime = if rng.chance(450) { Regime::Budgeted } else { Regime::Hostile };
         let mode = if rng.chance(350) { Mode::Cli } else { Mode::Runner };
         let secret = Secret::from_bytes(rng.bytes32());
-        let public = example_public_opts(&secret, variant, profile, version);
+        // The lock kind comes from its OWN generator, not from `rng`: drawing from `rng` would move every other choice of every scenario of
+        // every seed, and the scenario a seed names would no longer be the one its CHAOS.md entry describes.
+        // `CHAOS_LOCK_KIND=sha256` / `poseidon` forces the kind (poseidon only for the raw variant): the way to tell whether a finding belongs to one kind.
+        let lock_kind = match std::env::var("CHAOS_LOCK_KIND").ok().as_deref() {
+            Some("sha256") => LockKind::Sha256,
+            Some("poseidon") if variant == Variant::Raw => LockKind::Poseidon,
+            Some("poseidon") => LockKind::Sha256,
+            _ if variant == Variant::Raw && Rng::new(seed ^ 0x504f_5345_4944_4f4e).below(1000) < 400 => LockKind::Poseidon,
+            _ => LockKind::Sha256,
+        };
+        let public = example_public_kind(&secret, variant, profile, version, lock_kind);
         let world = World::new(&public, 300_001, T0);
         if profile == ProfileName::Sepolia {
             world.borrow_mut().finality_lag = SEPOLIA_FINALITY_LAG_BLOCKS;
@@ -454,6 +468,7 @@ impl Run {
             profile,
             variant,
             version,
+            lock_kind,
             gates,
             public,
             secret,
@@ -1194,6 +1209,10 @@ impl Run {
         self.parties[i].ticks += 1;
         self.parties[i].last_abort = matches!(action, Action::Abort { .. });
         self.parties[i].last_action = format!("{action:?}");
+        // CHAOS_TRACE=1: one line for every tick of every party, with the action (a wait carries its reason), to follow a replay.
+        if std::env::var("CHAOS_TRACE").is_ok() {
+            self.say(format!("{role} tick: phase {} -> {} action {action:?}", before.name(), self.parties[i].runner.file.phase.name()));
+        }
 
         // Effects: every action the executor really performed this tick (read BEFORE any restart replaces the executor).
         let new_actions: Vec<Action> = {
@@ -1565,7 +1584,7 @@ impl Run {
                 if *call_height != s.tip + 1 || s.tip + 1 >= d {
                     return fail("gate-claim", format!("claim_noid at call height {call_height} (tip {}, D {d})", s.tip));
                 }
-                if sha256(preimage) != self.public.hashlock || !s.secret_public {
+                if lock_word_of(self.lock_kind, preimage) != self.public.hashlock || !s.secret_public {
                     return fail("gate-claim", "claim_noid with a secret that is not the published one");
                 }
                 if !range_ok(*fee_micronoid) {
@@ -1805,7 +1824,14 @@ impl Run {
                     // become impossible (F-17); if it was, the close that removed it was a recovery close nobody recorded (`--closed-by`).
                     // A reveal that was sent, reverted and then cancelled in the ledger (the cancel is allowed once nothing of it is
                     // pending or mined) is not counted as evidence either: the file stays `lock_final`, stuck but never wrong.
+                    // CHAOS F-18: and `lost` needs a poll before D that saw the instance gone (only the claim branch closes then); without
+                    // one the file cannot tell Bob's claim from her own recovery and stays where it is, by design.
                     && (!reveal_decided
+                        || !{
+                            let h = &pt.runner.file.history;
+                            let gone = h.iter().rposition(|x| x.event == "noid_instance_gone_before_d");
+                            gone.is_some() && h.iter().rposition(|x| x.event == "noid_instance_back_after_gone") < gone
+                        }
                         || pt.runner.file.history.iter().any(|h| h.event == "noid_instance_alive_at_d")
                         || pt.runner.file.history.iter().rposition(|h| h.event == "intent_cancelled:reveal_eth")
                             > pt.runner.file.history.iter().rposition(|h| h.event == "intent_decided:reveal_eth"))
@@ -1950,6 +1976,7 @@ struct Stats {
     by_profile: BTreeMap<String, u64>,
     by_variant: BTreeMap<String, u64>,
     by_version: BTreeMap<String, u64>,
+    by_lock_kind: BTreeMap<String, u64>,
     events: BTreeMap<&'static str, u64>,
     degrades: BTreeMap<String, u64>,
     actions: BTreeMap<&'static str, u64>,
@@ -2014,6 +2041,7 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
         *stats.by_profile.entry(format!("{:?}", run.profile)).or_insert(0) += 1;
         *stats.by_variant.entry(format!("{:?}", run.variant)).or_insert(0) += 1;
         *stats.by_version.entry(format!("{:?}", run.version)).or_insert(0) += 1;
+        *stats.by_lock_kind.entry(run.lock_kind.to_string()).or_insert(0) += 1;
         for (k, v) in &run.events {
             *stats.events.entry(k).or_insert(0) += *v as u64;
         }
@@ -2066,7 +2094,8 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
                 "scenario {idx} seed {seed:#x} (CHAOS_SEED={base:#x} CHAOS_ONLY={idx}) regime {:?} mode {:?} {:?} {:?} {:?}: [{}] {}",
                 run.regime, run.mode, run.profile, run.variant, run.version, f.id, f.msg
             );
-            let tail: Vec<String> = run.log.iter().rev().take(120).rev().cloned().collect();
+            let keep = std::env::var("CHAOS_LOG_LINES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(120);
+            let tail: Vec<String> = run.log.iter().rev().take(keep).rev().cloned().collect();
             stats.failures.entry(f.id).or_default().push((idx, seed, header, tail));
         }
     }
@@ -2075,7 +2104,7 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
     let elapsed = started.elapsed();
     println!("chaos: {} scenarios, {} ticks, {:.1} s ({:.1} ms per scenario)", stats.scenarios, stats.ticks, elapsed.as_secs_f64(), elapsed.as_secs_f64() * 1000.0 / stats.scenarios.max(1) as f64);
     println!("chaos: regime {:?}", stats.by_regime);
-    println!("chaos: mode {:?} profile {:?} variant {:?} contract {:?}", stats.by_mode, stats.by_profile, stats.by_variant, stats.by_version);
+    println!("chaos: mode {:?} profile {:?} variant {:?} contract {:?} lock {:?}", stats.by_mode, stats.by_profile, stats.by_variant, stats.by_version, stats.by_lock_kind);
     println!("chaos: outcomes {:?}", stats.outcomes);
     println!("chaos: events {:?}", stats.events);
     println!("chaos: degraded observations {:?}", stats.degrades);
@@ -2203,4 +2232,19 @@ fn chaos_oracles_catch_planted_violations() {
     // A terminal phase may not change, except Alice's `done` (REVIEW-2 F9).
     run.parties[ALICE].terminal = Some(Phase::Alice(AlicePhase::Refunded { txid: "x".into(), height: 1 }));
     assert_eq!(run.check_terminal(ALICE, &Phase::Alice(AlicePhase::Created)).unwrap_err().id, "terminal-changed");
+}
+
+#[test]
+fn the_head_lag_degradation_is_beyond_the_engines_limit_for_every_clock_skew() {
+    // Scenario 613 of seed 0x5eed0001: the degradation used to be 700 s behind the TRUE time, so a party whose clock ran 100 s slow saw
+    // exactly 600 s (not above the limit) and the oracle called a correct reveal a fail-closed violation. It is now 700 s behind the
+    // party's own clock; the oracle's promise ("blocked") must hold for the whole skew range.
+    let mut n = NoidObservation::default();
+    for skew in -(SKEW_TOL as i64)..=(SKEW_TOL as i64) {
+        let true_time = 1_800_000_000u64;
+        let now = (true_time as i64 + skew) as u64;
+        let mut e = EthObservation { latest_timestamp: true_time, ..Default::default() };
+        Degrade::EthHeadLag.apply(&mut n, &mut e, now);
+        assert!(swap_cli::engine::eth_head_time_blocker(e.latest_timestamp, now).is_some(), "skew {skew}");
+    }
 }

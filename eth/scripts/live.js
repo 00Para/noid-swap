@@ -17,6 +17,17 @@
  * Encoding (same as HTLC.sol / secret.js): the preimage is exactly 32 raw
  * bytes, hashlock = SHA-256 over those 32 bytes, both 0x-prefixed hex.
  *
+ * Lock kinds (docs/poseidon-leg.md section 9). The tool talks to one of two contracts, chosen per command:
+ *   sha256    HTLC.sol, the default: the lock word is SHA-256(secret); the claim is sent with a FIXED gas limit of 200,000 and is never
+ *             simulated either (REVIEW-6 R6-8: eth_estimateGas would carry the secret to the node; the fuzz maximum is 120,993 gas).
+ *   poseidon  HTLCPoseidonV2.sol: the lock word is lockAddr = Addr(secret), the Parano1d address of the secret (the same 32 bytes as the
+ *             claim authority of the NOID lock). Selected by --lock-kind poseidon (deploy: --contract-kind poseidon) or by the swap
+ *             file's lock_kind. The artifact, its code hash, the ABI (the field is lockAddr, not hashlock) all follow the kind. A claim of this
+ *             kind (a) compares Addr(secret) with the lock LOCALLY (scripts/poseidon/poseidon2b.js), (b) builds its calldata itself and
+ *             refuses to sign anything but exactly 68 bytes (selector, lock id, secret; a suffix would revert and still publish the secret),
+ *             (c) is sent with a FIXED gas limit of 1,000,000 (the contract's own floor is 540,000), and (d) is NEVER simulated: no
+ *             eth_estimateGas, no eth_call carries the secret to the node. Only the signed raw transaction does. Review V2-6, V2-7.
+ *
  * A private key is only ever read from a key file and is never printed.
  * The swap secret is never accepted on the command line: `claim` reads it from
  * stdin (--secret-stdin) or a file (--secret-file) and never prints it.
@@ -33,7 +44,8 @@
  *                        Locked event's block <= the `finalized` block.
  *   lock                 no Locked event with the same hashlock from THIS sender exists in the
  *                        contract's logs, and the lockId itself is unused. Locks by other senders
- *                        under the same hashlock do not block; they are reported (and noted on stderr).
+ *                        under the same hashlock do not block, for either lock kind (REVIEW-6 R6-2);
+ *                        they are reported (and noted on stderr).
  *   refund               the lock is present, unclaimed, unrefunded, and its timelock passed.
  *
  * Mainnet (chain id 1) is refused unless the signing command (deploy, send, lock, claim, refund) is given --mainnet.
@@ -50,8 +62,19 @@
  * fee, lock and refund when cap < base fee; the output carries `feeCheck` (base fee, cap, ratio, minimum). `claim --replace` and
  * `refund --replace` re-send the same call at the signer's oldest pending nonce (never a second nonce) with both fee fields
  * raised by at least 12.5 % and the cap at least 2 x the base fee; refused when nothing is pending, when the pending transaction
- * is not this call (found by --replace-tx HASH or in the node's pending block), or when the lock is claimed / refunded.
+ * is not this call (found by --replace-tx HASH or in the node's pending block / pool), when it cannot be found and identified at all
+ * (REVIEW-5 R5-2: the command then asks for --replace-tx, it never replaces "whatever sits at the oldest nonce"), or when the lock
+ * is claimed / refunded.
  * On the command line the hash of a sent transaction is printed on stderr before the wait.
+ *
+ * A claim that is mined and REVERTS (REVIEW-6 R6-3, for either kind: e.g. it was mined after the timelock) has paid nobody but has put the secret
+ * into a block. `claim` then does not fail with a bare message: it prints a JSON result with `reverted: true`, `secretPublic: true`, the `txHash`
+ * and the flag to give swap-cli (`tick --reveal-tx HASH`), and exits with status 3. swap-cli reads the transaction and its receipt from the node
+ * and records "the secret is public" (the late re-send cutoff then applies); Bob's side can take the secret from the same transaction.
+ *
+ * Stuck first reveal (REVIEW-5 R5-1): a `claim --replace` that has found and identified the signer's pending claim of THIS lock knows
+ * the secret is already in the public mempool, so it uses the late cutoff T_reveal - DE (the intent's `late_cutoff`, or the profile's DE for
+ * an older intent) instead of T_reveal - M_A. A first claim, which has no such transaction, keeps the strict M_A rule.
  *
  * Keys (REVIEW-4 R4-5): with --swap, claim needs the key of the file's alice_receiver, refund and lock that of bob_sender.
  * Late re-send (REVIEW-4 R4-3): with --swap, when the file's history shows the secret may already be public (reveal_submitted,
@@ -75,7 +98,20 @@ const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
 
-const ARTIFACT_PATH = path.join(__dirname, "..", "artifacts", "contracts", "HTLC.sol", "HTLC.json");
+const ARTIFACT_PATHS = {
+  sha256: path.join(__dirname, "..", "artifacts", "contracts", "HTLC.sol", "HTLC.json"),
+  poseidon: path.join(__dirname, "..", "artifacts", "contracts", "HTLCPoseidonV2.sol", "HTLCPoseidonV2.json"),
+};
+const LOCK_KINDS = Object.keys(ARTIFACT_PATHS);
+// Review V2-6: HTLCPoseidonV2.claim needs about 0.50 - 0.55 M gas and refuses below MIN_CLAIM_GAS = 540,000; the tool sends it with a limit well above
+// both, and never estimates (an estimate would send the secret to the node). Unused gas is not charged: only limit x maxFee must be in the balance.
+const POSEIDON_CLAIM_GAS_LIMIT = 1_000_000n;
+// Review V2-7: claim(bytes32,bytes32) calldata = 4 + 32 + 32 bytes; the contract refuses (and the secret is already out) anything longer.
+const POSEIDON_CLAIM_CALLDATA_BYTES = 68;
+// REVIEW-6 R6-8: the sha256 claim is sent with a fixed gas limit too, and never estimated (an estimate would send the secret to the node before the claim
+// itself). HTLC.sol's claim is a hash, a storage write and one ETH transfer: the fuzz run (eth/FUZZ.md) measured at most 120,993 gas, so 200,000 clears it with
+// a wide margin and, like the poseidon limit, costs only what is used (the balance must cover limit x fee cap at signing).
+const SHA256_CLAIM_GAS_LIMIT = 200_000n;
 // Chains on which this tool will send transactions: Sepolia, Holesky, Hardhat/ganache-style local.
 // Ethereum mainnet (1) is refused unless the command carries --mainnet (see mainnetFlags); it is never in this set.
 // Another chain needs an explicit allowChainId.
@@ -85,25 +121,70 @@ const GWEI = 10n ** 9n;
 const LOG_RANGE_MAX = 50000; // blocks per eth_getLogs request: the cap of public Sepolia RPCs
 const DEFAULT_MARGIN_S = 1800; // M_A, docs/protocol-design.md section 4.3
 // REVIEW-4 R4-3: swap-cli history events that show Alice's secret may already be public (engine.rs `secret_may_be_public`).
-const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped"]);
+// (+ REVIEW-6 R6-3 `reveal_reverted_seen`: a claim of this lock was mined and reverted, so its calldata published the secret.)
+const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen"]);
+// REVIEW-5 R5-1: DE (Ethereum inclusion delay, seconds) per swap-cli profile (params.rs `de_s`): the late cutoff is T_reveal - DE. Only the
+// fallback for a --replace of a reveal_eth intent recorded before REVIEW-5, which carries no `late_cutoff` of its own.
+const PROFILE_DE_S = { production: 120n, sepolia: 120n, rehearsal: 60n };
 // REVIEW-4 R4-1: a same-nonce replacement must raise both fee fields by at least 12.5 % (geth requires 10 %).
 const bumped = (v) => (v * 1125n + 999n) / 1000n;
 
 class UserError extends Error {}
 
+/**
+ * REVIEW-6 R6-3: a transaction that WAS sent and mined but reverted (receipt status 0). A reverted claim has still put the secret into a block, so the
+ * caller of `claim` turns this into an explicit result (`reverted: true, secretPublic: true`) instead of a bare failure. `hash` and `blockNumber` are the
+ * transaction's. Its message is the old one ("transaction X failed (status 0)").
+ */
+class RevertedTx extends UserError {
+  constructor(hash, receipt) {
+    super(`transaction ${hash} failed (status ${receipt ? receipt.status : null})`);
+    this.hash = hash;
+    this.blockNumber = receipt ? receipt.blockNumber : null;
+  }
+}
+
 const NO_SWAP_WARNING = "warning: no --swap FILE, the swap file's intent is not checked (REVIEW-3 F3)\n";
 
 // ---------------------------------------------------------------- helpers
-function loadArtifact() {
-  if (!fs.existsSync(ARTIFACT_PATH)) {
-    throw new UserError(`HTLC artifact not found at ${ARTIFACT_PATH}; run "npx hardhat compile" in eth/ first`);
-  }
-  return JSON.parse(fs.readFileSync(ARTIFACT_PATH, "utf8"));
+/** The lock kind of a command: `args.lockKind` (set from --lock-kind / --contract-kind or the swap file), else sha256. */
+function kindOf(args) {
+  const given = args ? (args.lockKind !== undefined && args.lockKind !== null && args.lockKind !== "" ? args.lockKind : args.contractKind) : undefined;
+  const k = given !== undefined && given !== null && given !== "" ? given : "sha256";
+  if (!LOCK_KINDS.includes(k)) throw new UserError(`unknown lock kind "${k}" (${LOCK_KINDS.join(" or ")})`);
+  return k;
 }
-const htlcInterface = () => new ethers.Interface(loadArtifact().abi);
-/** REVIEW-3 F1: keccak256 of the local artifact's runtime code: the one code hash this tool accepts for the HTLC. */
-function artifactCodeHash() {
-  return ethers.keccak256(loadArtifact().deployedBytecode);
+function loadArtifact(kind = "sha256") {
+  const p = ARTIFACT_PATHS[kind];
+  if (!p) throw new UserError(`unknown lock kind "${kind}" (${LOCK_KINDS.join(" or ")})`);
+  if (!fs.existsSync(p)) {
+    throw new UserError(`${kind === "poseidon" ? "HTLCPoseidonV2" : "HTLC"} artifact not found at ${p}; run "npx hardhat compile" in eth/ first`);
+  }
+  return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+const htlcInterface = (kind = "sha256") => new ethers.Interface(loadArtifact(kind).abi);
+/** REVIEW-3 F1: keccak256 of the local artifact's runtime code: the one code hash this tool accepts for the contract of this lock kind. */
+function artifactCodeHash(kind = "sha256") {
+  return ethers.keccak256(loadArtifact(kind).deployedBytecode);
+}
+/** The lock word of a decoded Locked event / getLock record: `lockAddr` for HTLCPoseidonV2, `hashlock` for HTLC.sol. */
+const lockWordOf = (kind, obj) => (kind === "poseidon" ? obj.lockAddr : obj.hashlock);
+/** Addr(secret) as the 0x bytes32 the poseidon contract compares: computed LOCALLY with the JavaScript port (tied to the vendor crate by the vectors test). */
+function localAddr(secretHex) {
+  const { addr } = require("./poseidon/poseidon2b.js");
+  return "0x" + Buffer.from(addr(Buffer.from(secretHex.slice(2), "hex"))).toString("hex");
+}
+/** The word a preimage must produce for a lock of this kind (SHA-256, or Addr). */
+function localLockWord(kind, secretHex) {
+  return kind === "poseidon" ? localAddr(secretHex) : ethers.sha256(secretHex).toLowerCase();
+}
+function isLoopbackUrl(url) {
+  try {
+    const h = new URL(url).hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]" || h.endsWith(".localhost");
+  } catch {
+    return false;
+  }
 }
 
 function need(args, key, flag) {
@@ -230,21 +311,31 @@ async function findPendingTx(provider, args, from, nonce) {
     }
     t = tx;
   } else {
+    const fromRaw = (hit) => ({
+      hash: hit.hash,
+      to: hit.to,
+      data: hit.input !== undefined ? hit.input : hit.data,
+      maxFeePerGas: hit.maxFeePerGas ? BigInt(hit.maxFeePerGas) : null,
+      maxPriorityFeePerGas: hit.maxPriorityFeePerGas ? BigInt(hit.maxPriorityFeePerGas) : null,
+      gasPrice: hit.gasPrice ? BigInt(hit.gasPrice) : null,
+    });
     try {
       const pb = await provider.send("eth_getBlockByNumber", ["pending", true]);
       const hit = pb && Array.isArray(pb.transactions) ? pb.transactions.find((x) => x && typeof x === "object" && sameAddr(x.from, from) && BigInt(x.nonce) === BigInt(nonce)) : null;
-      if (hit) {
-        t = {
-          hash: hit.hash,
-          to: hit.to,
-          data: hit.input !== undefined ? hit.input : hit.data,
-          maxFeePerGas: hit.maxFeePerGas ? BigInt(hit.maxFeePerGas) : null,
-          maxPriorityFeePerGas: hit.maxPriorityFeePerGas ? BigInt(hit.maxPriorityFeePerGas) : null,
-          gasPrice: hit.gasPrice ? BigInt(hit.gasPrice) : null,
-        };
-      }
+      if (hit) t = fromRaw(hit);
     } catch {
-      /* a node without a pending block: the old fee stays unknown */
+      /* a node without a pending block */
+    }
+    if (!t) {
+      // REVIEW-5 R5-2: a transaction priced under the base fee is usually absent from the pending block; geth-style nodes list
+      // the whole pool of one sender under txpool_contentFrom (pending: { "<nonce>": tx }).
+      try {
+        const pool = await provider.send("txpool_contentFrom", [from]);
+        const hit = pool && pool.pending ? pool.pending[String(nonce)] : null;
+        if (hit && typeof hit === "object" && (hit.from === undefined || sameAddr(hit.from, from)) && BigInt(hit.nonce) === BigInt(nonce)) t = fromRaw(hit);
+      } catch {
+        /* no txpool namespace on this node */
+      }
     }
   }
   if (t && t.data === undefined) t.data = "0x";
@@ -252,12 +343,12 @@ async function findPendingTx(provider, args, from, nonce) {
 }
 
 /**
- * REVIEW-4 R4-1: --replace. Re-send the SAME call at the signer's OLDEST pending nonce with both fee fields raised by at
- * least 12.5 % and the cap at least 2 x the latest base fee. Refuses when the signer has nothing pending, or when the pending
- * transaction found there is not this very call (claim / refund of this lock). Never a second nonce. Returns { fees, report }.
+ * REVIEW-5 R5-2: find and identify the transaction a --replace would replace. The signer's OLDEST pending nonce must hold a
+ * pending transaction that is this very call (`name` of this lock at this contract): it is looked for by --replace-tx HASH, else in the
+ * node's pending block and pool. When it cannot be found, or is something else, the command refuses (never "whatever sits at the
+ * oldest nonce": a key shared between swaps could cancel another swap's claim or lock). Returns { from, nonce, old }.
  */
-async function replacePlan(provider, signer, args, { name, contractAddr, lockId }) {
-  const { mainnet } = mainnetFlags(args);
+async function resolveReplaced(provider, signer, args, { name, contractAddr, lockId }) {
   const from = await signer.getAddress();
   const [latestN, pendingN] = await Promise.all([provider.getTransactionCount(from, "latest"), provider.getTransactionCount(from, "pending")]);
   if (pendingN <= latestN) {
@@ -265,23 +356,39 @@ async function replacePlan(provider, signer, args, { name, contractAddr, lockId 
   }
   const nonce = latestN;
   const old = await findPendingTx(provider, args, from, nonce);
-  if (old) {
-    let parsed = null;
-    try {
-      parsed = htlcInterface().parseTransaction({ data: old.data });
-    } catch {
-      /* not an HTLC call */
-    }
-    if (!old.to || !sameAddr(old.to, contractAddr) || !parsed || parsed.name !== name || String(parsed.args[0]).toLowerCase() !== lockId.toLowerCase()) {
-      throw new UserError(`--replace: the pending transaction at nonce ${nonce} is not a ${name} of lock ${lockId} at ${contractAddr}; replacing it would cancel something else; refusing`);
-    }
+  if (!old) {
+    throw new UserError(
+      `--replace: the pending transaction of ${from} at nonce ${nonce} could not be shown by this node (one priced under the base fee is often missing from its pending block), ` +
+        `so it cannot be checked to be this ${name} of lock ${lockId}; give --replace-tx HASH (the hash printed when it was sent); refusing`
+    );
   }
+  let parsed = null;
+  try {
+    parsed = htlcInterface(kindOf(args)).parseTransaction({ data: old.data });
+  } catch {
+    /* not an HTLC call */
+  }
+  if (!old.to || !sameAddr(old.to, contractAddr) || !parsed || parsed.name !== name || String(parsed.args[0]).toLowerCase() !== lockId.toLowerCase()) {
+    throw new UserError(`--replace: the pending transaction at nonce ${nonce} is not a ${name} of lock ${lockId} at ${contractAddr}; replacing it would cancel something else; refusing`);
+  }
+  return { from, nonce, old };
+}
+
+/**
+ * REVIEW-4 R4-1: --replace. Re-send the SAME call at the signer's OLDEST pending nonce with both fee fields raised by at
+ * least 12.5 % and the cap at least 2 x the latest base fee. Refuses when the signer has nothing pending, or when the pending
+ * transaction there is not found and identified as this very call (claim / refund of this lock; R5-2). Never a second nonce.
+ * `resolved` is the result of resolveReplaced when the caller has it already. Returns { fees, report }.
+ */
+async function replacePlan(provider, signer, args, ctx, resolved) {
+  const { mainnet } = mainnetFlags(args);
+  const { nonce, old } = resolved || (await resolveReplaced(provider, signer, args, ctx));
   const blk = await latestBlock(provider);
   const base = blk.baseFeePerGas;
   if ((base === null || base === undefined) && mainnet) throw new UserError("refusing: the latest block carries no baseFeePerGas, so the replacement fee cannot be checked against it");
   const minByBase = 2n * (base || 0n);
-  const oldCap = old ? (old.maxFeePerGas !== null && old.maxFeePerGas !== undefined ? old.maxFeePerGas : old.gasPrice) : null;
-  const oldTip = old ? (old.maxPriorityFeePerGas !== null && old.maxPriorityFeePerGas !== undefined ? old.maxPriorityFeePerGas : old.gasPrice) : null;
+  const oldCap = old.maxFeePerGas !== null && old.maxFeePerGas !== undefined ? old.maxFeePerGas : old.gasPrice;
+  const oldTip = old.maxPriorityFeePerGas !== null && old.maxPriorityFeePerGas !== undefined ? old.maxPriorityFeePerGas : old.gasPrice;
   const minCap = oldCap !== null && bumped(oldCap) > minByBase ? bumped(oldCap) : minByBase;
   const minTip = oldTip !== null ? bumped(oldTip) : 0n;
   const given = feeOverrides(args);
@@ -306,24 +413,23 @@ async function replacePlan(provider, signer, args, { name, contractAddr, lockId 
     feeCheck,
     replace: {
       nonce,
-      replacesTx: old && old.hash ? old.hash : null,
-      oldFeeKnown: old !== null,
+      replacesTx: old.hash ? old.hash : null,
+      oldFeeKnown: true,
       oldMaxFeeGwei: oldCap === null ? null : ethers.formatUnits(oldCap, "gwei"),
       oldTipGwei: oldTip === null ? null : ethers.formatUnits(oldTip, "gwei"),
       newMaxFeeGwei: ethers.formatUnits(cap, "gwei"),
       newTipGwei: ethers.formatUnits(tip, "gwei"),
-      note: old ? undefined : "the old transaction was not found on this node (give --replace-tx HASH): its fee is unknown, so the node itself enforces the replacement bump and rejects an underpriced one",
     },
   };
   return { fees: { maxFeePerGas: cap, maxPriorityFeePerGas: tip, nonce }, report };
 }
 
-/** Fees and report for one signing call: the --replace plan, or the cap checked against the base fee. */
-async function feePlan(provider, signer, args, { name, contractAddr, lockId }) {
+/** Fees and report for one signing call: the --replace plan, or the cap checked against the base fee. `resolved`: see replacePlan. */
+async function feePlan(provider, signer, args, { name, contractAddr, lockId }, resolved) {
   if (args.replaceTx !== undefined && args.replace !== true) throw new UserError("--replace-tx needs --replace; refusing");
   if (args.replace === true) {
     if (name !== "claim" && name !== "refund") throw new UserError("--replace exists for claim and refund only; refusing");
-    return replacePlan(provider, signer, args, { name, contractAddr, lockId });
+    return replacePlan(provider, signer, args, { name, contractAddr, lockId }, resolved);
   }
   if (args.replace !== undefined && args.replace !== false) throw new UserError("--replace is a flag without a value");
   const fees = feeOverrides(args);
@@ -383,22 +489,32 @@ function redact(text) {
 }
 
 /** Decode a revert into something readable, without ever including tx secrets. */
+const SECRET_MAY_BE_OUT = new Set(["BadCalldataLength", "InsufficientGas", "TimelockExpired", "InvalidPreimage", "TransferFailed"]);
 function explain(e) {
-  let iface = null;
-  try {
-    iface = htlcInterface();
-  } catch {
-    /* artifact missing: fall through to the plain message */
+  // HTLCPoseidonV2's errors are those of HTLC.sol plus two, so its interface reads both; HTLC.sol's is the fallback.
+  const ifaces = [];
+  for (const kind of ["poseidon", "sha256"]) {
+    try {
+      ifaces.push(htlcInterface(kind));
+    } catch {
+      /* artifact missing: try the other, then the plain message */
+    }
   }
   const candidates = [e && e.data, e && e.error && e.error.data, e && e.info && e.info.error && e.info.error.data];
   for (const d of candidates) {
     const data = typeof d === "string" ? d : d && typeof d.data === "string" ? d.data : null;
-    if (data && iface) {
-      try {
-        const parsed = iface.parseError(data);
-        if (parsed) return `contract reverted: ${parsed.name}()`;
-      } catch {
-        /* not one of ours */
+    if (data) {
+      for (const iface of ifaces) {
+        try {
+          const parsed = iface.parseError(data);
+          if (parsed) {
+            // A claim that reverted has still put the secret into a transaction the network may have seen: the lock stays claimable, resend.
+            const note = SECRET_MAY_BE_OUT.has(parsed.name) && parsed.name !== "InvalidPreimage" ? " (a claim transaction carries the secret: treat it as possibly public)" : "";
+            return `contract reverted: ${parsed.name}()${note}`;
+          }
+        } catch {
+          /* not one of this interface's */
+        }
       }
     }
   }
@@ -477,6 +593,24 @@ async function mainnetCosts(provider, from, req, gas, capWei) {
   return costs;
 }
 
+/** The balance must cover value + gasLimit x fee cap (the cap given, else the node's suggestion), checked before anything is signed. */
+async function requireFundsFor(provider, from, req, gasLimit) {
+  let cap = req.maxFeePerGas !== undefined ? req.maxFeePerGas : req.gasPrice;
+  if (cap === undefined || cap === null) {
+    const fd = await provider.getFeeData();
+    cap = fd.maxFeePerGas !== null && fd.maxFeePerGas !== undefined ? fd.maxFeePerGas : fd.gasPrice;
+  }
+  if (cap === undefined || cap === null) return;
+  const need = (req.value || 0n) + gasLimit * cap;
+  const bal = await provider.getBalance(from);
+  if (bal < need) {
+    throw new UserError(
+      `refusing: the sender ${from} holds ${ethers.formatEther(bal)} ETH but gas limit ${gasLimit} x fee cap ${ethers.formatUnits(cap, "gwei")} gwei (+ value ${ethers.formatEther(req.value || 0n)} ETH) = ${ethers.formatEther(need)} ETH must be available, ` +
+        `or the claim would not be sent at all (unused gas is not charged)`
+    );
+  }
+}
+
 /**
  * Dry-run or send one transaction. Returns { dry: true, out } or
  * { dry: false, resp, receipt, chainId, from }. Never includes keys.
@@ -488,10 +622,15 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const { mainnet, capWei } = mainnetFlags(args);
   const from = await signer.getAddress();
   const req = { ...tx, ...(opts.fees || feeOverrides(args)) }; // opts.fees: the checked / replacement fees (and nonce) of feePlan
+  // opts.fixedGas (the poseidon claim): the gas limit is chosen by the tool and nothing is ever estimated, because an estimate would send the
+  // calldata (the secret) to the node before the claim itself (review V2-6). The limit is also what the balance must cover at the fee cap.
+  const fixedGas = opts.fixedGas !== undefined && opts.fixedGas !== null ? BigInt(opts.fixedGas) : null;
+  if (fixedGas !== null) req.gasLimit = fixedGas;
   // A replacement is estimated against the LATEST state, without its nonce: the pool state (the pending transaction it
   // replaces, e.g. the very claim) would make a pending-state estimate revert (AlreadyClaimed) on some nodes.
   const replacing = req.nonce !== undefined;
   const estimate = async () => {
+    if (fixedGas !== null) return fixedGas;
     if (!replacing) return signer.estimateGas(req);
     // (ethers' estimateGas sends no block tag, so ask the node directly.)
     const rpcTx = { from, to: req.to, data: req.data || "0x" };
@@ -507,6 +646,7 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   }
   if (replacing && gas === null && !args.dryRun) gas = await estimate();
   if (replacing && gas !== null) req.gasLimit = gas;
+  if (fixedGas !== null && !mainnet) await requireFundsFor(provider, from, req, fixedGas);
   if (args.dryRun) {
     if (gas === null) gas = await estimate();
     const data = req.data || "0x";
@@ -517,7 +657,7 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
       from,
       to: req.to === undefined ? null : req.to,
       valueWei: (req.value || 0n).toString(),
-      gasEstimate: gas.toString(),
+      ...(fixedGas !== null ? { gasLimit: gas.toString(), gasEstimate: null, gasEstimateNote: "not estimated: a fixed gas limit is used and the calldata is never sent to the node before the transaction" } : { gasEstimate: gas.toString() }),
       ...costs,
       ...extra,
     };
@@ -534,8 +674,15 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const resp = await signer.sendTransaction(req);
   // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
   if (typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
-  const receipt = await resp.wait(confirmationsOf(args));
-  if (!receipt || receipt.status !== 1) throw new UserError(`transaction ${resp.hash} failed (status ${receipt && receipt.status})`);
+  let receipt;
+  try {
+    receipt = await resp.wait(confirmationsOf(args));
+  } catch (e) {
+    // ethers 6 turns a status-0 receipt into CALL_EXCEPTION with the receipt attached (`data` is null: the reason is not decoded). Keep the hash.
+    if (e && e.code === "CALL_EXCEPTION" && e.receipt && e.receipt.status === 0) throw new RevertedTx(resp.hash, e.receipt);
+    throw e;
+  }
+  if (!receipt || receipt.status !== 1) throw new RevertedTx(resp.hash, receipt);
   return { dry: false, resp, receipt, chainId, from };
 }
 
@@ -570,6 +717,8 @@ function readSwapFile(file) {
       aliceReceiver: address("swap file alice_receiver", eth.alice_receiver),
       bobSender: address("swap file bob_sender", eth.bob_sender),
       hashlock: hex32("swap file hashlock", j.public.hashlock),
+      // As swap-cli stores it: `public.params.eth.lock_kind`, absent for `sha256` (the default is not written).
+      lockKind: eth.lock_kind === undefined ? "sha256" : String(eth.lock_kind),
       intent: j.pending_intent || null,
       // REVIEW-4 R4-3: swap-cli's own predicate (`secret_may_be_public`): the file shows Alice's claim reached the network.
       secretMayBePublic: Array.isArray(j.history) && j.history.some((h) => h && SECRET_PUBLIC_EVENTS.has(h.event)),
@@ -607,6 +756,13 @@ function bindSwap(args, want) {
   if (args.swap === undefined) return { args, sw: null }; // the CLI wrapper has already warned (main)
   const sw = readSwapFile(need(args, "swap"));
   const merged = { ...args };
+  // The lock kind is the file's; a --lock-kind that says otherwise is refused (the artifact, ABI and checks all follow it).
+  if (!LOCK_KINDS.includes(sw.lockKind)) throw new UserError(`--swap ${sw.file}: unknown lock_kind "${sw.lockKind}"; refusing`);
+  if (args.lockKind !== undefined && args.lockKind !== sw.lockKind) {
+    throw new UserError(`--lock-kind ${args.lockKind} disagrees with the swap file, which is a ${sw.lockKind} swap; refusing`);
+  }
+  merged.lockKind = sw.lockKind;
+  const kind = sw.lockKind;
   if (args.mainnet === true) {
     // Mainnet: the file must be a mainnet production swap, whatever the flags say.
     if (sw.chainId !== 1n) throw new UserError(`--mainnet: the swap file's chain_id is ${sw.chainId}, not 1; refusing`);
@@ -616,8 +772,10 @@ function bindSwap(args, want) {
   merged.contract = agree("--contract", args.contract, sw.contract, sameAddr);
   // REVIEW-3 F1: the file must pin the code of this repo's artifact; a given --code-hash must agree with the file (and so with the artifact).
   if (sw.codeHash === null) throw new UserError(`--swap ${sw.file}: the file pins no code_hash; refusing`);
-  if (sw.codeHash !== artifactCodeHash()) {
-    throw new UserError(`the swap file pins code_hash ${sw.codeHash}, which is not the local artifact's ${artifactCodeHash()} (a different value means a different contract); refusing`);
+  if (sw.codeHash !== artifactCodeHash(kind)) {
+    throw new UserError(
+      `the swap file pins code_hash ${sw.codeHash}, which is not the local ${kind === "poseidon" ? "HTLCPoseidonV2 " : ""}artifact's ${artifactCodeHash(kind)} (a different value means a different contract); refusing`
+    );
   }
   merged.codeHash = agree("--code-hash", args.codeHash, sw.codeHash, sameAddr);
   // REVIEW-3 F7: the log-scan start is stored in the file by `swap-cli tick --apply`; --from-block, when given, wins (no comparison).
@@ -634,7 +792,13 @@ function bindSwap(args, want) {
     if (ip.receiver !== undefined && !sameAddr(ip.receiver, sw.aliceReceiver)) throw new UserError(`the intent's receiver ${ip.receiver} differs from the file's alice_receiver ${sw.aliceReceiver}; refusing`);
     if (ip.amount_wei !== undefined && !sameUint(ip.amount_wei, sw.amountWei)) throw new UserError(`the intent's amount_wei ${ip.amount_wei} differs from the file's amount_wei ${sw.amountWei}; refusing`);
     if (ip.t_reveal === undefined) throw new UserError("the lock_eth intent carries no t_reveal; refusing");
-    merged.hashlock = agree("--hashlock", args.hashlock, sw.hashlock, sameAddr);
+    if (kind === "poseidon") {
+      if (args.hashlock !== undefined) throw new UserError("a poseidon swap locks on a lockAddr: give --lock-addr (or nothing, it is taken from the file), not --hashlock; refusing");
+      merged.lockAddr = agree("--lock-addr", args.lockAddr, sw.hashlock, sameAddr);
+    } else {
+      if (args.lockAddr !== undefined) throw new UserError("--lock-addr belongs to a poseidon swap; this file is a sha256 swap: use --hashlock; refusing");
+      merged.hashlock = agree("--hashlock", args.hashlock, sw.hashlock, sameAddr);
+    }
     merged.receiver = agree("--receiver", args.receiver, sw.aliceReceiver, sameAddr);
     merged.amountWei = agree("--amount-wei", args.amountWei, sw.amountWei.toString(), sameUint);
     merged.tReveal = agree("--t-reveal", args.tReveal, String(ip.t_reveal), sameUint);
@@ -665,7 +829,7 @@ function checkLockAgainstSwap(l, sw) {
  */
 function targetFlags(args) {
   const chainId = uint("--chain-id", need(args, "chainId", "chain-id"));
-  const fromArtifact = artifactCodeHash();
+  const fromArtifact = artifactCodeHash(kindOf(args));
   let codeHash = fromArtifact;
   if (args.codeHash !== undefined && args.codeHash !== null && args.codeHash !== "") {
     codeHash = hex32("--code-hash", args.codeHash);
@@ -703,11 +867,13 @@ async function verifyTarget(provider, args, contractAddr) {
 }
 
 /** eth_getLogs in ranges of at most `maxRange` blocks (inclusive bounds), oldest first. */
-async function getLogsChunked(provider, filter, fromBlock, toBlock, maxRange = LOG_RANGE_MAX) {
+async function getLogsChunked(provider, filter, fromBlock, toBlock, maxRange = LOG_RANGE_MAX, check = null) {
   const out = [];
   for (let start = fromBlock; start <= toBlock; start += maxRange) {
     const end = Math.min(start + maxRange - 1, toBlock);
-    out.push(...(await provider.getLogs({ ...filter, fromBlock: start, toBlock: end })));
+    const part = await provider.getLogs({ ...filter, fromBlock: start, toBlock: end });
+    if (check) check(part, start, end);
+    out.push(...part);
   }
   return out;
 }
@@ -743,13 +909,49 @@ async function resolveFromBlock(provider, contractAddr, args, latest) {
   return b === null ? 0 : b;
 }
 
-/** Every Locked event of the contract, optionally for one lockId, scanned in 50,000-block chunks. */
-async function lockedEvents(provider, contractAddr, lockId, fromBlock, toBlock) {
-  const iface = htlcInterface();
+/**
+ * Every Locked event of the contract, optionally for one lockId, scanned in 50,000-block chunks. `word` is the event's lock word
+ * (`hashlock` or `lockAddr`). (The sha256 kind's pre-lock check still reads every Locked log: it has no provider-cap rule, so nobody can stop it
+ * by padding. The poseidon kind uses `lockedEventsBySender`, REVIEW-7 R7-1.)
+ */
+async function lockedEvents(provider, contractAddr, lockId, fromBlock, toBlock, kind = "sha256") {
+  const iface = htlcInterface(kind);
   const topics = [iface.getEvent("Locked").topicHash];
   if (lockId) topics.push(lockId);
-  const logs = await getLogsChunked(provider, { address: contractAddr, topics }, fromBlock, toBlock);
-  return logs.map((log) => ({ log, args: iface.parseLog(log).args }));
+  const logs = await getLogsChunked(provider, { address: contractAddr, topics }, fromBlock, toBlock, LOG_RANGE_MAX);
+  return logs.map((log) => {
+    const args = iface.parseLog(log).args;
+    return { log, args, word: lockWordOf(kind, args) };
+  });
+}
+
+/**
+ * REVIEW-7 R7-1: the Locked events of ONE sender (all words, all receivers), from the indexed sender topic, in 50,000-block chunks. In
+ * `HTLCPoseidonV2.sol` (and `HTLC.sol`) the event is `Locked(bytes32 indexed lockId, address indexed sender, address indexed receiver, uint256 amount,
+ * bytes32 lockAddr, uint256 timelock)`, so the sender is topic2; the lock word is in the data and is compared by the caller. The answer is bounded by
+ * that sender's own activity, so there is no "exact provider cap size" rule here (the old scan of every Locked log had one, and anyone could trip it
+ * by padding the contract). Every log is checked again locally (contract, event, sender topic, lock id recomputed from its own fields), so a
+ * provider that ignores the topic filter cannot slip another sender's lock in.
+ */
+async function lockedEventsBySender(provider, contractAddr, sender, fromBlock, toBlock, kind = "poseidon") {
+  const iface = htlcInterface(kind);
+  const topic0 = iface.getEvent("Locked").topicHash.toLowerCase();
+  const senderTopic = ethers.zeroPadValue(sender, 32).toLowerCase();
+  const logs = await getLogsChunked(provider, { address: contractAddr, topics: [topic0, null, senderTopic] }, fromBlock, toBlock, LOG_RANGE_MAX);
+  const out = [];
+  for (const log of logs) {
+    if (log.removed) continue;
+    const t = (log.topics || []).map((x) => String(x).toLowerCase());
+    if (String(log.address).toLowerCase() !== String(contractAddr).toLowerCase() || t.length !== 4 || t[0] !== topic0 || t[2] !== senderTopic) continue;
+    const args = iface.parseLog(log).args;
+    const word = lockWordOf(kind, args);
+    const id = computeLockIdLocal(args.sender, args.receiver, args.amount, word, args.timelock);
+    if (id.toLowerCase() !== String(args.lockId).toLowerCase()) {
+      throw new UserError(`refusing: a Locked event (lockId ${args.lockId}, block ${log.blockNumber}) does not recompute its lock id from its own fields; do not trust this node`);
+    }
+    out.push({ log, args, word });
+  }
+  return out;
 }
 
 // -------------------------------------------------------------- commands
@@ -788,7 +990,7 @@ async function balance(provider, _signer, args) {
 async function deploy(provider, signer, args) {
   requireSigner(signer);
   mainnetFlags(args);
-  const artifact = loadArtifact();
+  const artifact = loadArtifact(kindOf(args));
   const factory = new ethers.ContractFactory(artifact.abi, artifact.bytecode, signer);
   const tx = await factory.getDeployTransaction();
   const from = await signer.getAddress();
@@ -816,8 +1018,12 @@ async function lock(provider, signer, args0) {
   mainnetFlags(args0);
   requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "lock_eth");
+  const kind = kindOf(args);
   const contractAddr = address("--contract", need(args, "contract"));
-  const hashlock = hex32("--hashlock", need(args, "hashlock"));
+  // The lock word: --hashlock (SHA-256 of the secret) for sha256, --lock-addr (A = Addr(s), the NOID claim authority) for poseidon.
+  if (kind === "poseidon" && args.hashlock !== undefined) throw new UserError("a poseidon lock is keyed on a lockAddr: give --lock-addr, not --hashlock; refusing");
+  if (kind !== "poseidon" && args.lockAddr !== undefined) throw new UserError("--lock-addr belongs to the poseidon lock kind (--lock-kind poseidon); refusing");
+  const hashlock = kind === "poseidon" ? hex32("--lock-addr", need(args, "lockAddr", "lock-addr")) : hex32("--hashlock", need(args, "hashlock"));
   const tReveal = uint("--t-reveal", need(args, "tReveal", "t-reveal"));
   const receiver = address("--receiver", need(args, "receiver"));
   const amount = uint("--amount-wei", need(args, "amountWei", "amount-wei"));
@@ -829,7 +1035,7 @@ async function lock(provider, signer, args0) {
   if (tReveal <= BigInt(blk.timestamp)) {
     throw new UserError(`--t-reveal ${tReveal} is not after the latest block timestamp ${blk.timestamp}`);
   }
-  const iface = htlcInterface();
+  const iface = htlcInterface(kind);
   const sender = await signer.getAddress();
   if (sw && !sameAddr(sender, sw.bobSender)) {
     throw new UserError(`this key is ${sender} but the swap file's bob_sender is ${sw.bobSender}; refusing`);
@@ -842,8 +1048,15 @@ async function lock(provider, signer, args0) {
   // then the state of the exact lockId.
   const fromBlock = await resolveFromBlock(provider, contractAddr, args, blk.number);
   if (fromBlock > blk.number) throw new UserError(`--from-block ${fromBlock} is beyond the latest block ${blk.number}`);
-  const events = await lockedEvents(provider, contractAddr, null, fromBlock, blk.number);
-  const same = events.filter((e) => e.args.hashlock.toLowerCase() === hashlock);
+  // REVIEW-7 R7-1: the poseidon kind asks the node for the Locked logs of THIS sender only (indexed topic2 of HTLCPoseidonV2's Locked event) and
+  // compares the lock word here. The old scan of every Locked log of the shared contract could be stopped by anyone padding it to a provider cap
+  // count, without knowing the address; and the only thing it still guarded was "an earlier lock of this sender". Locks of other senders are
+  // therefore not read for this kind (`foreignLocksSameHashlock` stays empty; they cannot hurt: the lock pays only the fixed receiver).
+  const events =
+    kind === "poseidon"
+      ? await lockedEventsBySender(provider, contractAddr, sender, fromBlock, blk.number, kind)
+      : await lockedEvents(provider, contractAddr, null, fromBlock, blk.number, kind);
+  const same = events.filter((e) => String(e.word).toLowerCase() === hashlock);
   const own = same.filter((e) => String(e.args.sender).toLowerCase() === sender.toLowerCase());
   const foreignLocksSameHashlock = same
     .filter((e) => String(e.args.sender).toLowerCase() !== sender.toLowerCase())
@@ -855,9 +1068,12 @@ async function lock(provider, signer, args0) {
         `${own.length} found); a second lock under the same hashlock would be locked twice`
     );
   }
-  if (await fetchLock(provider, contractAddr, expectedLockId)) {
+  if (await fetchLock(provider, contractAddr, expectedLockId, kind)) {
     throw new UserError(`refusing: lock ${expectedLockId} already exists at ${contractAddr}`);
   }
+  // Poseidon (review V2-8; REVIEW-6 R6-2): only an earlier lock of THIS sender on the address blocks (the `own` refusal above, any receiver); locks of
+  // other senders are reported like for the sha256 kind. Bob's lock pays only the fixed receiver, for an x with Addr(x) = A, and the NOID lock pays
+  // only Bob, so a stranger's earlier lock on A costs Bob nothing, while blocking on it would give every observer of A a 1-wei veto.
   if (foreignLocksSameHashlock.length > 0) {
     process.stderr.write(
       `note: ${foreignLocksSameHashlock.length} Locked event(s) from other sender(s) already exist under hashlock ${hashlock} ` +
@@ -867,7 +1083,16 @@ async function lock(provider, signer, args0) {
     );
   }
 
-  const checks = { codeHash: target.codeHash, scannedFromBlock: fromBlock, lockedEventsScanned: events.length, foreignLocksSameHashlock };
+  // `lockedEventsScanned` counts the logs the query returned: every Locked log (sha256), or this sender's Locked logs only (poseidon,
+  // `lockedEventsQuery: "sender"`); for that kind `foreignLocksSameHashlock` is always empty because other senders' locks are not read.
+  const checks = {
+    lockKind: kind,
+    codeHash: target.codeHash,
+    scannedFromBlock: fromBlock,
+    lockedEventsScanned: events.length,
+    ...(kind === "poseidon" ? { lockedEventsQuery: "sender" } : {}),
+    foreignLocksSameHashlock,
+  };
   const tx = { to: contractAddr, data: iface.encodeFunctionData("newLock", [hashlock, tReveal, receiver]), value: amount };
   // REVIEW-4 R4-1: the fee cap must clear the latest base fee (also in --dry-run); --replace does not exist for lock.
   const fp = await feePlan(provider, signer, args, { name: "newLock", contractAddr, lockId: expectedLockId });
@@ -902,10 +1127,21 @@ async function lock(provider, signer, args0) {
   };
 }
 
-async function fetchLock(provider, contractAddr, lockId) {
-  const c = new ethers.Contract(contractAddr, htlcInterface(), provider);
+/** getLock as a plain record; `hashlock` is the lock word of either kind (HTLCPoseidonV2 names the field lockAddr). */
+async function fetchLock(provider, contractAddr, lockId, kind = "sha256") {
+  const c = new ethers.Contract(contractAddr, htlcInterface(kind), provider);
   try {
-    return await c.getLock(lockId);
+    const r = await c.getLock(lockId);
+    return {
+      sender: r.sender,
+      receiver: r.receiver,
+      amount: r.amount,
+      hashlock: lockWordOf(kind, r),
+      timelock: r.timelock,
+      claimed: r.claimed,
+      refunded: r.refunded,
+      preimage: r.preimage,
+    };
   } catch (e) {
     if (/LockNotFound/.test(explain(e)) || (e && e.revert && e.revert.name === "LockNotFound")) return null;
     throw e;
@@ -931,6 +1167,16 @@ async function claim(provider, signer, args0) {
   if (secret === null && !args.dryRun) {
     throw new UserError("claim needs the secret: pipe it to --secret-stdin or pass --secret-file PATH (it is never accepted on the command line)");
   }
+  // Both kinds (review V2-6, docs/poseidon-leg.md 6 item 5; REVIEW-6 R6-8 extends it to sha256, which no longer estimates either): this tool never
+  // simulates the real claim, so a dry run sends the node nothing that contains the secret; it is still refused against a node that is not on this
+  // machine, because a dry run has no use for the secret there (every gate runs without it, and the real claim checks it locally). Run the dry run
+  // without --secret-stdin.
+  if (args.dryRun && secret !== null && process.env.ETH_RPC_URL && !isLoopbackUrl(process.env.ETH_RPC_URL)) {
+    throw new UserError(
+      "refusing: --dry-run with the secret against a node that is not on this machine. A poseidon claim is never simulated, so nothing would be sent, but the secret has no business near a remote node before the reveal: " +
+        "run the dry run WITHOUT --secret-stdin (every gate is checked without it)"
+    );
+  }
   try {
     return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw });
   } catch (e) {
@@ -952,12 +1198,24 @@ async function mainnetDryRunNote(provider, signer, args) {
   };
 }
 
+/** Review V2-7: the poseidon claim is exactly selector + lock id + secret. Refuse to sign anything else (the message never shows the secret). */
+function assertPoseidonClaimCalldata(iface, data, lockId, secret) {
+  const n = ethers.getBytes(data).length;
+  if (n !== POSEIDON_CLAIM_CALLDATA_BYTES) {
+    throw new UserError(`refusing to sign: the claim calldata is ${n} bytes, the contract requires exactly ${POSEIDON_CLAIM_CALLDATA_BYTES} (a suffix would revert and still publish the secret)`);
+  }
+  const expected = (iface.getFunction("claim").selector + lockId.slice(2) + secret.slice(2)).toLowerCase();
+  if (data.toLowerCase() !== expected) throw new UserError("refusing to sign: the claim calldata is not selector + lock id + secret");
+}
+
 async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw }) {
+  const kind = kindOf(args);
   const target = await verifyTarget(provider, args, contractAddr);
-  const l = await fetchLock(provider, contractAddr, lockId);
+  const l = await fetchLock(provider, contractAddr, lockId, kind);
   if (!l) throw new UserError(`no such lock ${lockId} at ${contractAddr}`);
   // REVIEW-3 F3: the lock must be the swap file's, and the cutoff the file froze (M_A) can only tighten the flag's.
   let intentCutoff = null;
+  let intentLateCutoff = null; // REVIEW-5 R5-1: T_reveal - DE as the intent froze it (swap-cli records it for every reveal_eth intent)
   if (sw) {
     checkLockAgainstSwap(l, sw);
     const ip = sw.intent.params;
@@ -966,12 +1224,33 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     }
     if (!sameUint(ip.t_reveal, l.timelock)) throw new UserError(`the lock's timelock on chain is ${l.timelock} but the reveal_eth intent froze t_reveal ${ip.t_reveal}; refusing`);
     intentCutoff = uint("intent cutoff", ip.cutoff);
+    if (ip.late_cutoff !== undefined && ip.late_cutoff !== null) intentLateCutoff = uint("intent late_cutoff", ip.late_cutoff);
   }
   if (secret !== null) {
-    const digest = ethers.sha256(secret); // ethers treats a hex string as the raw bytes
-    if (digest.toLowerCase() !== l.hashlock.toLowerCase()) {
-      throw new UserError(`refusing: sha256(secret) = ${digest} but the lock's hashlock is ${l.hashlock}`);
+    // sha256: ethers treats a hex string as the raw bytes. poseidon: Addr(secret) computed LOCALLY (nothing is sent anywhere).
+    const word = localLockWord(kind, secret);
+    if (word.toLowerCase() !== l.hashlock.toLowerCase()) {
+      throw new UserError(
+        kind === "poseidon"
+          ? `refusing: Addr(secret) = ${word} but the lock's lockAddr is ${l.hashlock}`
+          : `refusing: sha256(secret) = ${word} but the lock's hashlock is ${l.hashlock}`
+      );
     }
+  }
+  let claimGas = null;
+  if (kind === "poseidon") {
+    // The contract states its own floor and recommendation (views without the secret). The fixed limit must clear both.
+    const c = new ethers.Contract(contractAddr, htlcInterface(kind), provider);
+    const [minGas, recGas] = await Promise.all([c.MIN_CLAIM_GAS(), c.RECOMMENDED_CLAIM_GAS_LIMIT()]);
+    if (minGas > 540000n || recGas < 650000n || recGas > POSEIDON_CLAIM_GAS_LIMIT) {
+      throw new UserError(
+        `refusing: the contract states MIN_CLAIM_GAS ${minGas} and RECOMMENDED_CLAIM_GAS_LIMIT ${recGas}; this tool expects a floor of at most 540000 and a recommendation between 650000 and ${POSEIDON_CLAIM_GAS_LIMIT} (its fixed gas limit)`
+      );
+    }
+    claimGas = POSEIDON_CLAIM_GAS_LIMIT;
+  } else {
+    // REVIEW-6 R6-8: the sha256 claim never goes through eth_estimateGas either (that request carries the calldata, i.e. the secret).
+    claimGas = SHA256_CLAIM_GAS_LIMIT;
   }
   if (l.claimed) throw new UserError("lock is already claimed");
   if (l.refunded) throw new UserError("lock is already refunded");
@@ -984,13 +1263,28 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   const now = wall > BigInt(blk.timestamp) ? wall : BigInt(blk.timestamp);
   let cutoff = l.timelock - margin;
   let cutoffRule = "timelock - margin";
+  // REVIEW-5 R5-1/R5-2: --replace names a pending transaction of this signer for this very claim (found and identified, or the command
+  // refuses). That transaction is the secret in the mempool: evidence that the secret may be public, with or without the file's history
+  // (swap-cli cannot learn of a claim that was only sent). A FIRST claim never has such a transaction and keeps the strict M_A rule.
+  let replaced = null;
+  if (args.replace === true) replaced = await resolveReplaced(provider, signer, args, { name: "claim", contractAddr, lockId });
+  if (replaced !== null && intentLateCutoff === null && sw && PROFILE_DE_S[sw.profile] !== undefined) {
+    intentLateCutoff = l.timelock - PROFILE_DE_S[sw.profile]; // an intent from before REVIEW-5: the profile's DE gives the same number
+  }
   // REVIEW-4 R4-3: once the file shows the secret may already be public (swap-cli's late re-send, review H1), a re-send
   // publishes nothing new and the cutoff the intent froze (T_reveal - DE) is the authority, not the stricter default margin.
   // An explicit --margin-s still tightens it. Without that evidence the earlier of the two stays the rule.
-  const lateResend = intentCutoff !== null && sw.secretMayBePublic && !marginGiven;
+  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || replaced !== null) && !marginGiven;
   if (lateResend) {
-    cutoff = intentCutoff < l.timelock ? intentCutoff : l.timelock;
-    cutoffRule = "the swap file's frozen cutoff (the file shows the secret may already be public)";
+    // The cutoff the intent froze, or the later T_reveal - DE it froze for exactly this case (a secret that is public already).
+    const late = intentLateCutoff !== null && intentLateCutoff > intentCutoff ? intentLateCutoff : intentCutoff;
+    cutoff = late < l.timelock ? late : l.timelock;
+    cutoffRule =
+      replaced !== null
+        ? "T_reveal - DE: the pending claim of this lock at the signer's oldest nonce shows the secret is already public (REVIEW-5 R5-1)"
+        : late === intentCutoff
+          ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
+          : "the swap file's late cutoff T_reveal - DE (the file shows the secret may already be public)";
   } else if (intentCutoff !== null && intentCutoff < cutoff) {
     cutoff = intentCutoff;
     cutoffRule = "the swap file's frozen cutoff";
@@ -1004,7 +1298,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   }
   // F3: the lock must be final. Find its Locked event and compare its block with the `finalized` block.
   const fromBlock = await resolveFromBlock(provider, contractAddr, args, blk.number);
-  const events = await lockedEvents(provider, contractAddr, lockId, fromBlock, blk.number);
+  const events = await lockedEvents(provider, contractAddr, lockId, fromBlock, blk.number, kind);
   if (events.length !== 1) {
     throw new UserError(
       events.length === 0
@@ -1014,7 +1308,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   }
   const ev = events[0];
   if (
-    ev.args.hashlock.toLowerCase() !== l.hashlock.toLowerCase() ||
+    String(ev.word).toLowerCase() !== l.hashlock.toLowerCase() ||
     ev.args.receiver !== l.receiver ||
     ev.args.sender !== l.sender ||
     ev.args.amount !== l.amount ||
@@ -1036,6 +1330,8 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   }
 
   const plan = {
+    lockKind: kind,
+    ...(claimGas !== null ? { gasLimit: claimGas.toString() } : {}),
     lockId,
     receiver: l.receiver,
     amountWei: l.amount.toString(),
@@ -1053,7 +1349,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     secretProvided: secret !== null,
   };
   // REVIEW-4 R4-1: the fee cap (or the --replace plan) is decided and checked before anything is signed, also without the secret.
-  const fp = await feePlan(provider, signer, args, { name: "claim", contractAddr, lockId });
+  const fp = await feePlan(provider, signer, args, { name: "claim", contractAddr, lockId }, replaced);
   if (secret === null) {
     // --dry-run without the secret: all gates passed, but gas cannot be estimated without the real preimage.
     return {
@@ -1064,14 +1360,39 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       to: contractAddr,
       valueWei: "0",
       gasEstimate: null,
-      gasEstimateNote: "not estimated: the real secret is needed (a wrong preimage would revert)",
+      gasEstimateNote: `not estimated, ever: a ${kind} claim is sent with a fixed gas limit (${claimGas}) and never simulated (the secret would reach the node)`,
       ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args) : {}),
       ...plan,
       ...fp.report,
     };
   }
-  const tx = { to: contractAddr, data: htlcInterface().encodeFunctionData("claim", [lockId, secret]) };
-  const r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees });
+  const iface = htlcInterface(kind);
+  const tx = { to: contractAddr, data: iface.encodeFunctionData("claim", [lockId, secret]) };
+  if (kind === "poseidon") assertPoseidonClaimCalldata(iface, tx.data, lockId, secret);
+  let r;
+  try {
+    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas });
+  } catch (e) {
+    // REVIEW-6 R6-3: a claim that was mined and REVERTED (it came too late, or lost a race with the refund) paid nobody and still published the
+    // secret in its calldata. Say so in the result, with the hash, instead of a bare failure: the caller must treat the secret as public.
+    if (e instanceof RevertedTx) {
+      return {
+        reverted: true,
+        secretPublic: true,
+        txHash: e.hash,
+        blockNumber: e.blockNumber,
+        lockId,
+        lockKind: kind,
+        note:
+          "the claim was mined and REVERTED: it paid nothing, but its calldata is now on chain and the SECRET IS PUBLIC (the counterparty can take the NOID from it). " +
+          `Tell swap-cli: tick FILE ... --reveal-tx ${e.hash} --apply (it checks the transaction on the node, then judges a re-send by the late cutoff T_reveal - DE). ` +
+          "Do not assume the swap is safe; if the lock is still open and the late cutoff has not passed, the claim can be re-sent (live.js claim --swap FILE after that tick)",
+        swapCliFlag: `--reveal-tx ${e.hash}`,
+        ...fp.report,
+      };
+    }
+    throw e;
+  }
   if (r.dry) return r.out;
   return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...fp.report };
 }
@@ -1081,6 +1402,7 @@ async function refund(provider, signer, args0) {
   mainnetFlags(args0);
   requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "refund_eth");
+  const kind = kindOf(args);
   // REVIEW-4 R4-5: the refund is Bob's; the key must be the swap file's bob_sender (checked before the network is touched).
   if (sw) {
     const me = await signer.getAddress();
@@ -1090,7 +1412,7 @@ async function refund(provider, signer, args0) {
   const lockId = hex32("--lock-id", need(args, "lockId", "lock-id"));
   targetFlags(args);
   const target = await verifyTarget(provider, args, contractAddr);
-  const l = await fetchLock(provider, contractAddr, lockId);
+  const l = await fetchLock(provider, contractAddr, lockId, kind);
   if (!l) throw new UserError(`no such lock ${lockId} at ${contractAddr}`);
   if (sw) checkLockAgainstSwap(l, sw);
   const me = await signer.getAddress();
@@ -1104,7 +1426,7 @@ async function refund(provider, signer, args0) {
         `latest block timestamp is ${blk.timestamp}; ${l.timelock - BigInt(blk.timestamp)} s to go`
     );
   }
-  const tx = { to: contractAddr, data: htlcInterface().encodeFunctionData("refund", [lockId]) };
+  const tx = { to: contractAddr, data: htlcInterface(kind).encodeFunctionData("refund", [lockId]) };
   const fp = await feePlan(provider, signer, args, { name: "refund", contractAddr, lockId });
   const r = await execute(provider, signer, args, tx, { lockId, amountWei: l.amount.toString(), codeHash: target.codeHash, ...fp.report }, { fees: fp.fees });
   if (r.dry) return r.out;
@@ -1125,12 +1447,26 @@ async function send(provider, signer, args) {
 async function status(provider, _signer, args) {
   const contractAddr = address("--contract", need(args, "contract"));
   const lockId = hex32("--lock-id", need(args, "lockId", "lock-id"));
-  const iface = htlcInterface();
+  const code = await provider.getCode(contractAddr);
+  // The kind is the flag's; without one, whichever local artifact's code hash the contract has (else sha256, as before).
+  let kind = "sha256";
+  if (args.lockKind !== undefined || args.contractKind !== undefined) kind = kindOf(args);
+  else if (code !== "0x") {
+    const h = ethers.keccak256(code);
+    kind =
+      LOCK_KINDS.find((k) => {
+        try {
+          return artifactCodeHash(k) === h;
+        } catch {
+          return false;
+        }
+      }) || "sha256";
+  }
+  const iface = htlcInterface(kind);
   const blk = await latestBlock(provider);
   const fromBlock = await resolveFromBlock(provider, contractAddr, args, blk.number);
   const chainId = BigInt(await provider.send("eth_chainId", []));
-  const code = await provider.getCode(contractAddr);
-  const l = await fetchLock(provider, contractAddr, lockId);
+  const l = await fetchLock(provider, contractAddr, lockId, kind);
   const topics = ["Locked", "Claimed", "Refunded"].map((n) => iface.getEvent(n).topicHash);
   const logs = await getLogsChunked(provider, { address: contractAddr, topics: [topics, lockId] }, fromBlock, blk.number);
   const events = [];
@@ -1143,7 +1479,7 @@ async function status(provider, _signer, args) {
         sender: p.args.sender,
         receiver: p.args.receiver,
         amountWei: p.args.amount.toString(),
-        hashlock: p.args.hashlock,
+        hashlock: lockWordOf(kind, p.args),
         timelock: p.args.timelock.toString(),
       });
     } else if (p.name === "Claimed") {
@@ -1154,6 +1490,7 @@ async function status(provider, _signer, args) {
   }
   const out = {
     contract: contractAddr,
+    lockKind: kind,
     chainId: chainId.toString(), // copy into --chain-id
     codeHash: code === "0x" ? null : ethers.keccak256(code), // informational: lock/claim/refund compare against the artifact's hash
     lockId,
@@ -1181,7 +1518,8 @@ async function status(provider, _signer, args) {
       preimage: l.claimed ? l.preimage : null,
     };
     if (l.claimed && revealed === null) out.preimage = l.preimage;
-    if (out.preimage) out.preimageMatchesHashlock = ethers.sha256(out.preimage).toLowerCase() === l.hashlock.toLowerCase();
+    // sha256: SHA-256 of the preimage; poseidon: Addr(preimage), computed locally. The output keeps the key `hashlock` for either word.
+    if (out.preimage) out.preimageMatchesHashlock = localLockWord(kind, out.preimage) === l.hashlock.toLowerCase();
   }
   return out;
 }
@@ -1189,21 +1527,23 @@ async function status(provider, _signer, args) {
 // ------------------------------------------------------------------- CLI
 const COMMON = { "confirmations": "v", "dry-run": "b", "gas-price-gwei": "v", "allow-chain-id": "v", "mainnet": "b", "max-fee-gwei": "v" };
 const TARGET = { "chain-id": "v", "code-hash": "v", "from-block": "v" };
+// The Ethereum contract of the swap: `sha256` (HTLC.sol, default) or `poseidon` (HTLCPoseidonV2.sol); with --swap it is the file's.
+const KIND = { "lock-kind": "v", "contract-kind": "v" };
 const SPECS = {
   keygen: { flags: { out: "v" }, signer: false },
   balance: { flags: {}, positional: "address", signer: false },
-  deploy: { flags: { ...COMMON, "key-file": "v" }, signer: true },
+  deploy: { flags: { ...COMMON, ...KIND, "key-file": "v" }, signer: true },
   lock: {
-    flags: { ...COMMON, ...TARGET, "key-file": "v", contract: "v", hashlock: "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v" },
+    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", hashlock: "v", "lock-addr": "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v" },
     signer: true,
   },
   claim: {
-    flags: { ...COMMON, ...TARGET, "key-file": "v", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v", replace: "b", "replace-tx": "v" },
+    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v", replace: "b", "replace-tx": "v" },
     signer: true,
   },
-  refund: { flags: { ...COMMON, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
+  refund: { flags: { ...COMMON, ...KIND, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
   send: { flags: { ...COMMON, "key-file": "v", to: "v", "amount-wei": "v" }, signer: true },
-  status: { flags: { contract: "v", "lock-id": "v", "from-block": "v" }, signer: false },
+  status: { flags: { ...KIND, contract: "v", "lock-id": "v", "from-block": "v" }, signer: false },
 };
 const COMMANDS = { keygen, balance, deploy, lock, claim, refund, send, status };
 
@@ -1240,6 +1580,13 @@ function parseArgs(argv) {
       throw new UserError(/^(0x)?[0-9a-fA-F]{64}$/.test(tok) ? "unexpected argument (a 32-byte hex value; not shown)" : `unexpected argument "${tok}"`);
     }
   }
+  // --contract-kind (deploy's name) and --lock-kind are one setting.
+  if (args.contractKind !== undefined) {
+    if (args.lockKind !== undefined && args.lockKind !== args.contractKind) throw new UserError("--lock-kind and --contract-kind disagree; they are the same setting");
+    args.lockKind = args.contractKind;
+    delete args.contractKind;
+  }
+  if (args.lockKind !== undefined && !LOCK_KINDS.includes(args.lockKind)) throw new UserError(`--lock-kind must be ${LOCK_KINDS.join(" or ")}, got "${args.lockKind}"`);
   return { command, args };
 }
 
@@ -1265,6 +1612,11 @@ async function main(argv) {
     }
     const result = await COMMANDS[command](provider, signer, args);
     process.stdout.write(redact(jsonOut(result)) + "\n");
+    // REVIEW-6 R6-3: a mined, reverted claim is a result (its JSON names the hash and says the secret is public) but not a success.
+    if (result && result.reverted === true) {
+      process.stderr.write(`error: the claim ${result.txHash} was mined and REVERTED; the secret is PUBLIC (see the JSON on stdout, then swap-cli tick --reveal-tx)\n`);
+      process.exitCode = 3;
+    }
   } finally {
     if (provider) provider.destroy();
   }
@@ -1274,6 +1626,7 @@ module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
+  POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 
 if (require.main === module) {

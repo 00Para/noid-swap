@@ -17,12 +17,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use swap_cli::engine::{Action, ExecError, Executor, Runner, TickReport};
-use swap_cli::secret::{sha256, Secret, Variant};
+use swap_cli::secret::{LockKind, Secret, Variant};
 use swap_cli::state::{Event, Phase};
 use swap_cli::params::{ContractVersion, Gates, ProfileName};
-use swap_cli::swapfile::{example_public_opts, KdfParams, Passphrase, SwapFile, SwapPublic};
-use swap_cli::watch::eth::compute_lock_id;
-use swap_cli::watch::{EthClaimed, EthLock, EthObservation, EthRefunded, NoidInstance, NoidInstanceStatus, NoidObservation, PendingCall, PendingPreimage};
+use swap_cli::swapfile::{example_public_kind, KdfParams, Passphrase, SwapFile, SwapPublic};
+use swap_cli::watch::eth::{compute_lock_id, lock_word_of};
+use swap_cli::watch::{EthClaimed, EthLock, EthObservation, EthRefunded, NoidInstance, NoidInstanceStatus, NoidObservation, PendingCall, PendingPreimage, RevertedClaim, WordLock, WordScan};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimKind {
@@ -47,6 +47,14 @@ pub struct World {
     pub bob_noid: String,
     pub alice_noid: String,
     pub hashlock: [u8; 32],
+    /// Which Ethereum contract the swap uses: the lock word is SHA-256 of the secret or `Addr(secret)`.
+    pub lock_kind: LockKind,
+    /// `poseidon` kind: `Locked` logs that carry the lock word and are NOT among the lock lists above (someone else's locks on the same A).
+    pub word_locks_extra: Vec<WordLock>,
+    /// `poseidon` kind: a still-pending over-long claim of our lock (the contract will revert it, the secret is public).
+    pub overlong_claim: Option<PendingPreimage>,
+    /// REVIEW-6 R6-3: a claim of our lock that was mined and reverted (named by `--reveal-tx`); the secret is public.
+    pub reverted_claim: Option<RevertedClaim>,
     pub instance: Option<NoidInstance>,
     pub funding_pending: Option<u64>,
     /// Incarnation counter of the simulated instance (1 for the first funding, one more at every re-inclusion).
@@ -134,6 +142,10 @@ impl World {
             bob_noid: public.params.bob_noid.clone(),
             alice_noid: public.params.alice_noid.clone(),
             hashlock: public.hashlock,
+            lock_kind: public.params.eth.lock_kind,
+            word_locks_extra: Vec::new(),
+            overlong_claim: None,
+            reverted_claim: None,
             instance: None,
             funding_pending: None,
             creation_seq: 0,
@@ -316,8 +328,21 @@ impl World {
             },
             claim_state_from_record: (self.claim_log_lag && self.claimed.is_some()) || (self.refund_log_lag && self.refunded.is_some()),
             pending_preimage: self.claim_pending.clone(),
+            overlong_claim: self.overlong_claim.clone(),
+            word_locks: if self.lock_kind == LockKind::Poseidon {
+                all.iter()
+                    .map(|l| WordLock { lock_id: l.lock_id, sender: l.sender, receiver: l.receiver, amount_wei: l.amount_wei, timelock: l.timelock, block_number: l.block_number })
+                    .chain(self.word_locks_extra.iter().cloned())
+                    .collect()
+            } else {
+                Vec::new()
+            },
             // REVIEW-3 F3: the signer's nonce; a send the operator made that is not mined yet (lock, reveal, refund) is
             // one transaction in the node's mempool, so `pending` is one above `latest`.
+            // REVIEW-6 R6-1: the simulator's scan is always complete (the watcher tests cover the failing ones).
+            word_scan: if self.lock_kind == LockKind::Poseidon { WordScan::Complete } else { WordScan::NotRun },
+            reverted_claim: self.reverted_claim.clone(),
+            reveal_tx_note: None,
             signer_nonce_latest: Some(7),
             signer_nonce_pending: Some(7 + u64::from(self.lock_pending.is_some() || self.claim_pending.is_some() || self.refund_pending)),
             second: None,
@@ -348,7 +373,7 @@ impl World {
                     let inst = self.instance.take().unwrap();
                     let (to, amount) = match tx.kind {
                         SimKind::Claim { preimage } => {
-                            assert_eq!(sha256(&preimage), self.hashlock, "simulator: claim with a wrong preimage");
+                            assert_eq!(lock_word_of(self.lock_kind, &preimage), self.hashlock, "simulator: claim with a wrong preimage");
                             (self.bob_noid.clone(), inst.amount_micronoid - tx.fee)
                         }
                         SimKind::Refund => (self.alice_noid.clone(), inst.amount_micronoid - tx.fee),
@@ -624,6 +649,16 @@ pub struct Scenario {
 
 pub const T0: u64 = 1_794_312_000;
 
+/// The Ethereum lock kind the scenario constructors use when a test does not name one: `sha256`, or `poseidon` for the raw variant when the
+/// environment variable `SWAP_TEST_LOCK_KIND=poseidon` is set. That runs every raw-variant scenario of a suite against the other contract
+/// (`SWAP_TEST_LOCK_KIND=poseidon cargo test --offline --test scenarios`), the cheap way to hold both kinds to the same behaviour.
+pub fn default_lock_kind(variant: Variant) -> LockKind {
+    match std::env::var("SWAP_TEST_LOCK_KIND").ok().as_deref() {
+        Some("poseidon") if variant == Variant::Raw => LockKind::Poseidon,
+        _ => LockKind::Sha256,
+    }
+}
+
 /// The sepolia profile's Ethereum finality (1,140 s) in simulator blocks: the simulator mines an Ethereum
 /// block every 12 s and has no time-based finality, so a lock is "final" once `finality_lag` blocks have
 /// passed after its own, and 95 blocks x 12 s = 1,140 s. Production scenarios keep the short lag of 2.
@@ -646,9 +681,19 @@ impl Scenario {
     }
 
     pub fn with_options(variant: Variant, profile: ProfileName, version: ContractVersion) -> Self {
+        Self::with_kind(variant, profile, version, default_lock_kind(variant))
+    }
+
+    /// The `poseidon` Ethereum lock (raw variant only), production profile, contract v1.
+    pub fn poseidon() -> Self {
+        Self::with_kind(Variant::Raw, ProfileName::Production, ContractVersion::V1, LockKind::Poseidon)
+    }
+
+    /// The simulator for either Ethereum lock kind.
+    pub fn with_kind(variant: Variant, profile: ProfileName, version: ContractVersion, kind: LockKind) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let secret = Secret::generate().unwrap();
-        let public = example_public_opts(&secret, variant, profile, version);
+        let public = example_public_kind(&secret, variant, profile, version, kind);
         let world = World::new(&public, 300_001, T0);
         if profile == ProfileName::Sepolia {
             world.borrow_mut().finality_lag = SEPOLIA_FINALITY_LAG_BLOCKS;

@@ -9,7 +9,7 @@ use swap_cli::engine::{cancel_intent, cancel_intent_checked, tick_apply, Action,
 use swap_cli::secret::Variant;
 use swap_cli::state::{AlicePhase, BobPhase, Event, Phase};
 use swap_cli::swapfile::SwapFile;
-use swap_cli::watch::{EthObservation, NoidObservation, PendingPreimage};
+use swap_cli::watch::{EthObservation, NoidInstance, NoidObservation, PendingPreimage};
 
 fn observe(s: &Scenario) -> (NoidObservation, EthObservation, u64) {
     let w = s.world.borrow();
@@ -148,6 +148,12 @@ fn f5_a_dropped_lock_is_not_called_dropped_while_another_lock_of_bobs_sits_on_ch
     s.world.borrow_mut().advance_eth(ETH_TX_GRACE_S / 12 + 5);
     let r = s.tick_bob();
     assert!(r.events.contains(&"eth_lock_dropped".to_string()), "{r:?}");
+    if s.public.params.eth.lock_kind == swap_cli::secret::LockKind::Poseidon {
+        // By design (docs/poseidon-leg.md 6, review V2-8): a lock of anybody on this A is an earlier use of the word; Bob does not re-send.
+        let r = s.tick_bob();
+        assert_eq!(r.action.kind(), "wait", "{r:?}");
+        return;
+    }
     assert!(matches!(s.tick_bob().action, Action::LockEth { .. }));
 }
 
@@ -261,6 +267,9 @@ fn f12_alice_on_the_cli_path_reaches_lost_without_a_recorded_reveal() {
     s.world.borrow_mut().advance_noid(1);
     s.tick_bob();
     assert_eq!(s.bob_phase(), "claim_included");
+    // CHAOS F-18: Alice looks once while the claim branch is still open and sees the instance gone (the evidence `lost` needs).
+    let r = s.tick_alice();
+    assert!(r.events.contains(&"noid_instance_gone_before_d".to_string()), "{r:?}");
     // The reveal is mined only after T_reveal: it reverts. Bob refunds, the refund becomes final.
     s.world.borrow_mut().warp_eth_to(timelock);
     let r = s.tick_bob();
@@ -283,8 +292,20 @@ fn lock_final_with_bob_refunded_and_instance_gone(logs: &[&str]) -> Scenario {
     lock_final_gone(logs, false)
 }
 
+/// The same end state, but Alice made no poll between the moment the instance went (before D) and D: the file has no positive evidence
+/// that Bob's claim, and not her own recovery, took it (CHAOS F-18).
+fn lock_final_with_bob_refunded_and_instance_gone_unseen(logs: &[&str]) -> Scenario {
+    lock_final_gone_with(logs, false, false)
+}
+
 /// `second_still_lists`: the second Parano1d node still shows the instance (one node lying or lagging).
 fn lock_final_gone(logs: &[&str], second_still_lists: bool) -> Scenario {
+    lock_final_gone_with(logs, second_still_lists, true)
+}
+
+/// `look_before_d`: Alice polls once after the instance went and before D, which is what records that it was gone while only the
+/// claim branch could close it.
+fn lock_final_gone_with(logs: &[&str], second_still_lists: bool, look_before_d: bool) -> Scenario {
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();
     s.alice.executor.offline_for.insert("reveal_eth");
@@ -301,9 +322,12 @@ fn lock_final_gone(logs: &[&str], second_still_lists: bool) -> Scenario {
     s.world.borrow_mut().advance_eth(1);
     s.world.borrow_mut().advance_eth(5);
     s.tick_bob();
-    let inst = s.world.borrow_mut().instance.take().unwrap(); // closed by somebody (her wallet)
+    let inst = s.world.borrow_mut().instance.take().unwrap(); // closed before D, so by Bob's claim
     if second_still_lists {
         s.world.borrow_mut().second_instance = Some(Some(inst));
+    }
+    if look_before_d {
+        s.tick_alice();
     }
     let d = s.public.params.deadline_height;
     let need = d + 19 - s.world.borrow().tip;
@@ -370,6 +394,142 @@ fn f17_an_instance_that_was_alive_when_bobs_claim_branch_closed_is_never_called_
     let r = s.tick_alice();
     assert_eq!(s.alice_phase(), "lock_final", "{r:?}");
     assert!(r.notes.iter().any(|n| n.contains("F-17")), "{:?}", r.notes);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ F-18
+
+#[test]
+fn f18_lost_needs_a_poll_before_d_that_saw_the_instance_gone() {
+    // Chaos base seed 0xc4a05eed, scenario 1259: the reveal was decided but never sent, Bob refunded his ETH, and Alice's wallet closed the
+    // NOID with the RECOVERY branch at the first block at or after D, before any poll of the tool. From a poll after D the instance is
+    // simply gone, which Bob's claim would also explain; the file said `lost` over a NOID that had come back. It now stays where it is
+    // and says why.
+    let s = lock_final_with_bob_refunded_and_instance_gone_unseen(&["intent_decided:reveal_eth"]);
+    assert_eq!(s.alice_phase(), "lock_final", "{:?}", s.alice.file.history.last());
+    let history: Vec<&str> = s.alice.file.history.iter().map(|h| h.event.as_str()).collect();
+    assert!(!history.contains(&"both_legs_lost"), "{history:?}");
+    // The same ending with one poll before D is `lost` (Bob's claim is the only close that can have happened then).
+    let s = lock_final_gone(&["intent_decided:reveal_eth"], false);
+    assert_eq!(s.alice_phase(), "lost");
+}
+
+#[test]
+fn f18_the_note_says_what_to_do_when_the_evidence_is_missing() {
+    let mut s = lock_final_with_bob_refunded_and_instance_gone_unseen(&["intent_decided:reveal_eth"]);
+    let r = s.tick_alice();
+    assert!(r.notes.iter().any(|n| n.contains("F-18") && n.contains("closed-by")), "{:?}", r.notes);
+}
+
+#[test]
+fn f18_an_absence_that_a_reorg_undid_is_no_evidence() {
+    // The instance is missing in a poll before D (a close of Bob's, say), then listed again (a reorg dropped it), then Alice's wallet
+    // closes it after D. The first absence was real at its tip but proves nothing about the second disappearance.
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    s.alice.executor.offline_for.insert("reveal_eth");
+    s.tick_alice();
+    let now = s.now();
+    s.alice.file.log("intent_decided:reveal_eth", now);
+    s.alice.file.save(&s.alice.path).unwrap();
+    let (_, timelock) = lock_of(&s);
+    s.world.borrow_mut().warp_eth_to(timelock);
+    s.tick_bob();
+    s.world.borrow_mut().advance_eth(6);
+    s.tick_bob();
+    let inst = s.world.borrow_mut().instance.take().unwrap();
+    let r = s.tick_alice();
+    assert!(r.events.contains(&"noid_instance_gone_before_d".to_string()), "{r:?}");
+    s.world.borrow_mut().instance = Some(inst);
+    let r = s.tick_alice();
+    assert!(r.events.contains(&"noid_instance_back_after_gone".to_string()), "{r:?}");
+    // Her wallet closes it after D; nobody looked while it was alive at D.
+    let d = s.public.params.deadline_height;
+    let need = d + 1 - s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(need);
+    s.world.borrow_mut().close_outside(true, None);
+    let need = d + 19 - s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(need);
+    s.tick_alice();
+    assert_eq!(s.alice_phase(), "lock_final");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ F-19
+
+#[test]
+fn f19_a_funding_behind_a_lookalike_is_taken_back_at_d() {
+    // Chaos base seed 0x5eed0001, scenario 2792: the funding Alice's tool decided was sent, Alice did not poll for a long while, and in
+    // that time someone deposited a second instance of the agreed amount. The file stayed `created` (two instances fit, the tool does not
+    // guess), printed `abort` for ever and never offered the recovery: the NOID stayed at the contract after D.
+    // The CLI path: the tool decides, the operator sends (the executor is "offline"), the file only has the decided intent.
+    let mut s = Scenario::new(Variant::Raw);
+    s.alice.executor.offline_for.insert("fund_noid");
+    s.tick_alice();
+    assert_eq!(s.alice_phase(), "created");
+    let now = s.now();
+    s.alice.file.log("intent_decided:fund_noid", now);
+    s.alice.file.save(&s.alice.path).unwrap();
+    let amount = s.public.params.amount_micronoid;
+    s.world.borrow_mut().funding_pending = Some(amount);
+    s.world.borrow_mut().advance_noid(1);
+    f19_the_rest(&mut s, amount);
+}
+
+#[test]
+fn f19_the_library_path_with_a_funding_that_was_submitted_ends_the_same_way() {
+    let mut s = Scenario::new(Variant::Raw);
+    assert_eq!(s.tick_alice().action.kind(), "fund_noid");
+    assert_eq!(s.alice_phase(), "funding_submitted");
+    s.world.borrow_mut().advance_noid(1);
+    let amount = s.public.params.amount_micronoid;
+    f19_the_rest(&mut s, amount);
+}
+
+fn f19_the_rest(s: &mut Scenario, amount: u64) {
+    s.world.borrow_mut().advance_noid(30);
+    let hers = s.world.borrow().instance.clone().unwrap();
+    s.world.borrow_mut().instances_after.push(NoidInstance { slot_index: 21, creation_id: 701, amount_micronoid: amount });
+    // Until D: nothing is guessed, nothing is offered.
+    let before = s.alice_phase();
+    let r = s.tick_alice();
+    assert_eq!(s.alice_phase(), before, "{r:?}");
+    assert!(r.events.is_empty(), "{r:?}");
+    // At D the NOID is hers to take back: the oldest instance is taken as hers and the other one is named for the wallet.
+    let d = s.public.params.deadline_height;
+    let need = d - 1 - s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(need);
+    let r = s.tick_alice();
+    assert_eq!(s.alice_phase(), "funded", "{r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("F-19") && n.contains("slot 21")), "{:?}", r.notes);
+    match &s.alice.file.phase {
+        Phase::Alice(AlicePhase::Funded { instance, .. }) => assert_eq!(instance, &hers),
+        other => panic!("{other:?}"),
+    }
+    s.world.borrow_mut().advance_noid(18);
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "refund_noid", "{r:?}");
+    s.world.borrow_mut().advance_noid(1);
+    s.world.borrow_mut().advance_noid(18);
+    s.tick_alice();
+    assert_eq!(s.alice_phase(), "refunded");
+}
+
+#[test]
+fn f19_a_lookalike_is_nobodys_business_without_a_trace_of_alices_funding() {
+    // No funding of hers on record (never decided, never sent): two instances of the agreed amount at her root are someone else's.
+    let mut s = Scenario::new(Variant::Raw);
+    let amount = s.public.params.amount_micronoid;
+    s.world.borrow_mut().funding_pending = Some(amount);
+    s.world.borrow_mut().advance_noid(1);
+    s.world.borrow_mut().instances_after.push(NoidInstance { slot_index: 21, creation_id: 701, amount_micronoid: amount });
+    let d = s.public.params.deadline_height;
+    let need = d - 1 - s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(need);
+    // (The library path records the abort of a file that is too late to fund; nothing is adopted and nothing is sent.)
+    let executed_before = s.alice.executor.executed.len();
+    let r = s.tick_alice();
+    assert_eq!(s.alice_phase(), "aborted", "{r:?}");
+    assert!(!r.notes.iter().any(|n| n.contains("F-19")), "{:?}", r.notes);
+    assert_eq!(s.alice.executor.executed.len(), executed_before);
 }
 
 // ------------------------------------------------------------------------------------------------------------------------ F-13
@@ -626,4 +786,31 @@ fn h1_a_mined_claim_that_a_reorg_dropped_without_a_trace_is_re_sent_at_once() {
     let r = s.tick_alice();
     assert!(r.events.contains(&"eth_claim_reorged".to_string()) && r.events.contains(&"eth_reveal_dropped".to_string()), "{r:?}");
     assert_eq!(r.action.kind(), "reveal_eth", "{r:?}");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ CHAOS seed 0x5eed0001
+
+#[test]
+fn a_dropped_lock_is_not_re_sent_while_two_instances_of_the_agreed_amount_sit_at_the_root() {
+    // Scenario 145 of seed 0x5eed0001: Bob locked on ONE instance, the lock was dropped, and before the re-send a second instance of
+    // the agreed amount appeared. The funding gate refuses to lock on a guess (REVIEW-2 F10); the re-send must obey the same rule.
+    let mut s = bob_lock_submitted();
+    let original = match &s.bob.file.phase {
+        Phase::Bob(BobPhase::LockSubmitted { t_reveal, .. }) => *t_reveal,
+        other => panic!("{other:?}"),
+    };
+    s.world.borrow_mut().lock_pending = None;
+    s.world.borrow_mut().advance_eth(ETH_TX_GRACE_S / 12 + 5);
+    let r = s.tick_bob();
+    assert!(r.events.contains(&"eth_lock_dropped".to_string()), "{r:?}");
+    // A second instance with the agreed amount appears.
+    let amount = s.public.params.amount_micronoid;
+    s.world.borrow_mut().instances_after.push(swap_cli::watch::NoidInstance { slot_index: 21, creation_id: 701, amount_micronoid: amount });
+    let r = s.tick_bob();
+    assert_eq!(r.action.kind(), "wait", "{r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("not re-sending the lock")), "{:?}", r.notes);
+    // It clears up: the same lock (same T_reveal) goes out again.
+    s.world.borrow_mut().instances_after.clear();
+    let r = s.tick_bob();
+    assert!(matches!(r.action, Action::LockEth { t_reveal, .. } if t_reveal == original), "{r:?}");
 }

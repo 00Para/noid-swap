@@ -13,7 +13,8 @@
  *   GET  /tx/:txid/hex                 -> raw transaction hex              (text)
  *   GET  /tx/:txid/status              -> {confirmed, block_height, block_hash, block_time}
  *   GET  /tx/:txid/outspend/:vout      -> {spent:false} | {spent:true, txid, vin, status:{...}}
- *   GET  /fee-estimates                -> {"1": 1, "2": 1, "3": 0.5, ...}  sat/vB per confirmation target
+ *   GET  /block-height/0               -> genesis block hash (text); the chain identity check (verifyChain)
+ *   GET  /fee-estimates               -> {"1": 1, "2": 1, "3": 0.5, ...}  sat/vB per confirmation target
  *   POST /tx  (body = raw hex)         -> txid                             (text); 400 + message on rejection
  *
  * CHAIN GUARD: every base URL must contain "/signet/". A mainnet base
@@ -33,6 +34,9 @@ const DEFAULT_FALLBACK = 'https://blockstream.info/signet/api';
 const FEE_RATE_FLOOR = 1;
 const FEE_RATE_CAP = 50;
 const DEFAULT_FEE_TARGET = 2; // confirmation target in blocks
+
+/** Genesis block hash of the default public signet (same on mempool.space and blockstream.info; read from both on 2026-11-05). */
+const SIGNET_GENESIS = '00000008819873e925422c1ff0f99f7cc9bbb232af63a077a480a3633bee1ef6';
 
 class ApiError extends Error {
   constructor(message, { status, url, body } = {}) {
@@ -123,6 +127,7 @@ function createClient(opts = {}) {
     fallback,
     hosts: hosts.slice(),
     lastHost: null,
+    chainVerified: null,
 
     async tipHeight() {
       const t = (await getText('/blocks/tip/height')).trim();
@@ -217,6 +222,48 @@ function createClient(opts = {}) {
       return clampFeeRate(pickEstimate(m, target));
     },
 
+    /**
+     * Chain identity check: every host must report `expected` (default: the public signet genesis) as block 0.
+     * A "/signet/" in the URL is a naming convention, not proof; this reads the chain itself. A host that answers
+     * with another genesis is a hard error (a mainnet or testnet explorer behind a signet-looking URL). A host that
+     * cannot be verified (transport error, 4xx/5xx, not a block hash) is DROPPED from this client, so the fallback
+     * logic can never route a request to an unverified host; no verified host left is an error.
+     * Call once before any other request. Returns { genesis, verified: [host], dropped: [{host, reason}] }.
+     */
+    async verifyChain(expected = SIGNET_GENESIS) {
+      const want = String(expected).toLowerCase();
+      const verified = [];
+      const dropped = [];
+      for (const host of hosts.slice()) {
+        let t;
+        try {
+          t = (await once(host, '/block-height/0', { method: 'GET' })).trim().toLowerCase();
+        } catch (e) {
+          dropped.push({ host, reason: e.message });
+          continue;
+        }
+        if (!/^[0-9a-f]{64}$/.test(t)) {
+          dropped.push({ host, reason: `block 0 is not a block hash: ${t.slice(0, 50)}` });
+          continue;
+        }
+        if (t !== want) {
+          throw new ApiError(
+            `API host ${host} reports genesis ${t}, not the signet genesis ${want}: it is not Bitcoin signet. ` +
+              'This tool is signet-only; refusing to use it.',
+            { url: host }
+          );
+        }
+        verified.push(host);
+      }
+      if (!verified.length) {
+        throw new ApiError(`no API host could be verified as signet (${dropped.map((d) => `${d.host}: ${d.reason}`).join('; ')})`, {});
+      }
+      hosts.splice(0, hosts.length, ...verified);
+      client.hosts = hosts.slice();
+      client.chainVerified = { genesis: want, hosts: verified.slice() };
+      return { genesis: want, verified, dropped };
+    },
+
     /** POST raw hex. Returns the txid the explorer reports. Never retried on 4xx. */
     async broadcast(hex) {
       if (typeof hex !== 'string' || !/^([0-9a-f]{2})+$/i.test(hex)) throw new Error('broadcast: not a hex string');
@@ -259,4 +306,5 @@ module.exports = {
   FEE_RATE_FLOOR,
   FEE_RATE_CAP,
   DEFAULT_FEE_TARGET,
+  SIGNET_GENESIS,
 };

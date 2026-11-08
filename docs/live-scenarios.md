@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-05. Plan only: nothing here was run, funded or sent. Parano1d mainnet (tiny NOID) against public
+Status 2026-11-05. Plan, except scenario 1+2, which was run as live run 4 and settled (section 1+2, `live-run-4.md`); the rest was not run, funded or sent. Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -47,7 +47,12 @@ Concurrency: proofs strictly one at a time (8 GB RAM; no argv listing, no cargo 
 5 blocks apart and Bob's locks at least a minute apart (one wallet UTXO set, one Sepolia nonce). Different runs have
 different swap files, passphrases, secrets and contract roots, so they can overlap freely after the proof.
 
-## 1+2. Alice-abort before Bob locks, and Bob-abort after funding (merged): run 4
+## 1+2. Alice-abort before Bob locks, and Bob-abort after funding (merged): run 4 — DONE 2026-11-05
+
+**Result (`live-run-4.md`).** Settled 20:41:43 UTC: 10 NOID funded 17:49:49, no Bob, no Sepolia transaction; `refund_noid` offered at tip 284,173
+(`D` = 284,172), chained preview and send, recovery close confirmed at 284,179, receipt verified, Alice's file `refunded` at 284,197 (18 blocks
+later); cost 14,800 μNOID (9,000 + 5,800), exactly the bound below. The Bob-side checks of this section (`lock_eth` refused after `h_create` + 49,
+`lock.sh --dry-run` refusing after `+91`, Bob's file reaching `aborted`) were not run, because Bob never appeared: they remain open.
 
 - **Merge.** From the chain's view both are "NOID funded, no Sepolia lock": Alice does nothing until `D`. The only
   difference is a person's intent, so one run covers both. Extra check for Bob's side: his engine must stop offering
@@ -69,6 +74,12 @@ different swap files, passphrases, secrets and contract roots, so they can overl
 - **If it goes wrong.** Close dropped ("no longer pending", tip passed the call height): preview again, chained. Wrong
   active address: refused by the node, switch and retry. Funds are never stuck: the recovery branch is open from `D`
   with no dependency on Bob. Loss bound: 14,800 μNOID.
+
+## 2b. Happy path with the proof-free lock kind (`poseidon`): DONE 2026-11-05
+
+Not part of the plan above: the first swap with `HTLCPoseidonV2` locked on `A = Addr(s)` (no equivalence proof, raw v1, `sepolia`
+profile, owner in both roles, one node per chain) settled in about 47 minutes (`live-run-5.md`); the contract-version-2 and
+stock scenarios below stay open, and the abort paths and two nodes with this lock kind were not run.
 
 ## 3. Alice never reveals after Bob's lock on Sepolia: run 5 (overlaps run 4)
 
