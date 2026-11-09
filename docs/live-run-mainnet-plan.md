@@ -4,7 +4,9 @@
 
 > Clock times in this document are UTC. Before the run they are offsets (`T0` = the moment of the go-ahead, `F` = the moment the NOID funding is submitted); the log gets real UTC times when the run happens.
 
-Prepared 2026-11-05 (UTC). This is the plan only; nothing in it has been sent. Same shape as run 3
+> **Executed 2026-11-06 as run 8** (`docs/live-run-8.md`); see "What differed from the plan" at the end.
+
+Prepared 2026-11-05 (UTC). This is the plan only; nothing in it had been sent when it was written. Same shape as run 3
 (`docs/live-run-3.md`): the happy path, raw variant, contract v1 (`HashTimeLock`), the owner in both roles on one
 machine. **One new variable: the chain.** Bob's leg moves from Sepolia (chain id 11155111) to Ethereum mainnet
 (chain id 1), so the ETH is real, the gas price is real, and the Ethereum network is the one the product will
@@ -201,3 +203,20 @@ roughly 20 of them waiting for Ethereum finality; Alice's file reaches `done` ab
 - `PROJECT.md` allows testnets, signet and tiny amounts only until the external review (M4). This run is a tiny amount on a real
   network; whether that fits is the owner's call at the go-ahead.
 - The NOID side has a single node (`--single-node-ok`); only the Ethereum side gets the two-node cross-check.
+
+## What differed from the plan (run 8, 2026-11-06)
+
+The mainnet happy path was executed as run 8 (`docs/live-run-8.md`). Only differences the log supports:
+
+- **Amount and lock kind.** 5 NOID against 0.001 ETH instead of 10 NOID (a run at 10 NOID was prepared as run 7 and never funded), and the
+  proof-free `poseidon` lock kind (contract `HTLCPoseidonV2`, no equivalence proof) instead of the SHA-256 lock with the proof. The
+  plan's code hash and gas figures for the SHA-256 contract therefore did not apply; the `poseidon` contract's code hash is the pin
+  `0xf510d2a3…3ff3`, and the reveal cost 517,084 gas.
+- **Second node.** The plan asked for two Ethereum endpoints. The run used one public endpoint and one Parano1d node with
+  `SINGLE_NODE_OK=1`, as the owner in both roles.
+- **Fee caps.** Lock: 0.12 gwei. Reveal: the first dry run at 0.12 gwei passed, but the base fee ranged from 0.052 to 0.066 gwei over
+  20 blocks, so the cap was raised to 0.2 gwei (ratio 3.35 against the latest base fee), which meets the plan's "at least three times the
+  day's base fee" for the time-critical steps; the first cap (ratio 2.15) did not, and passing the 2 x gate was not enough.
+- **Key files.** The helpers had `keys/bob.key` and `keys/alice.key` hard-coded; the run folder's copies were patched by hand. The
+  helpers now read `BOB_KEY` / `ALICE_KEY` from `env.local.sh`.
+- **Timing.** 54 minutes from funding to both sides final, inside the plan's 45 to 60 minutes.

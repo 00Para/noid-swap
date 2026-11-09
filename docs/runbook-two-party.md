@@ -67,9 +67,11 @@ The five hard rules (`PROJECT.md`):
    should say 3.0.x. You still need it because building `equiv-prove` compiles the proof program, and its **image id**
    (the fingerprint of that program) is what the tool compares against (it is compiled into `swap-cli`, REVIEW-3 F2). Bob never runs `prove`, only `equiv-prove verify`. Print your
    build's id with `cd equiv/zkvm && cargo run --release -p equiv-host -- image-id`. Alice's local-build id on
-   2026-11-04 was `7e9d8477...6187`, and that is the id compiled into `swap-cli` until the reproducible build exists. Untested: that a Mac build gives the same id as Alice's WSL build. If it
-   differs, `new-bob` refuses (fail closed) and nothing is lost; the fix is the reproducible docker build
-   (`EQUIV_REPRODUCIBLE=1`), which does not exist yet (M1.1). Stop and tell Alice.
+   2026-11-04 was `7e9d8477...6187`, and that is the id compiled into `swap-cli` until the reproducible build exists. Tested 2026-11-06: a second
+   machine's local build gives a **different** id, because the proof program carries paths under the builder's home
+   folder (`docs/mac-setup.md` 3.4). So for the `sha256` lock kind `new-bob` refuses on a second machine (fail closed,
+   nothing is lost) until the reproducible docker build (`EQUIV_REPRODUCIBLE=1`, M1.1) exists. The `poseidon` lock kind
+   needs no proof and no `equiv-prove` on Bob's side, so this whole step can be skipped for it.
 6. Bob's **own** Parano1d node, and a second one if he can: since 2026-11-04 `swap-cli` takes `--noid-rpc` and `--eth-rpc` twice and
    requires the two nodes to agree before `lock_eth` and `reveal_eth`; under `production` and `sepolia` a single node is refused unless
    `--single-node-ok` (a stranger's swap on Sepolia has real value on the NOID side), under `rehearsal` it is accepted with a note. The two

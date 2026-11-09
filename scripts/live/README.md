@@ -65,7 +65,8 @@ healthy node when you see it.
 - **Fee cap.** `live.js claim` reads the latest base fee before it signs (also in `--dry-run`) and refuses a cap below 2 x that
   base fee; the dry run prints `feeCheck` (base fee, cap, ratio). On mainnet put `MAX_FEE_GWEI=N` in `$L/env.local.sh`:
   `reveal.sh` then adds `--mainnet --max-fee-gwei N` (without it a chain-1 file is refused; on a test chain `GAS_PRICE_GWEI` does
-  the same for `--gas-price-gwei`). Look at the base fee in the minute before the reveal and use at least 3 x.
+  the same for `--gas-price-gwei`). Look at the base fee in the minute before the reveal and use at least 3 x. For mainnet also set
+  `BOB_KEY` / `ALICE_KEY` in `env.local.sh` to the mainnet key files.
 - **Stuck claim.** A claim that sits in the mempool has already published the secret, and only Bob can use it. `live.js` prints
   `sent: 0x… nonce N …` on stderr (in `$L/eth-claim.err`) the moment it sends, before it waits for the receipt. If the claim does
   not get mined, run `reveal.sh --replace 0xHASH` with a higher `MAX_FEE_GWEI`: the same call is re-sent at the SAME nonce, both
@@ -83,8 +84,9 @@ healthy node when you see it.
 - **Late re-send.** No margin flag is needed or passed. When the swap file's history shows the secret may already be public (a
   mined, reorged or dropped claim, or `reveal_pending_seen`), `live.js claim --swap` takes the late cutoff (`T_reveal - DE`) and not
   the stricter `T_reveal - 1800 s`, so `swap-cli`'s late re-send can actually be sent. Without that evidence the earlier cutoff rules.
-- **Keys.** With `--swap`, `claim` needs the key of the file's `alice_receiver` (`keys/alice.key`), `refund` and `lock` that of
-  `bob_sender` (`keys/bob.key`); another key is refused.
+- **Keys.** With `--swap`, `claim` needs the key of the file's `alice_receiver` (`ALICE_KEY`, default `keys/alice.key`), `refund` and
+  `lock` that of `bob_sender` (`BOB_KEY`, default `keys/bob.key`; both paths are relative to `eth/`); another key is refused. For mainnet
+  set `BOB_KEY` / `ALICE_KEY` in `env.local.sh` to the mainnet key files.
 
 ## What changed since run 3's helpers
 

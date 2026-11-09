@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # usage: refund-eth.sh [--dry-run] [--replace [TXHASH]]   Bob's Ethereum refund after T_reveal (abort path), from the intent his swap file recorded.
 # live.js refund --swap FILE checks the lock against the file. REAL transaction without --dry-run: owner's go-ahead first.
+# Key file: BOB_KEY (default keys/bob.key, relative to eth/); for mainnet set BOB_KEY in env.local.sh to the mainnet key file.
 # Fee flags and --replace as in reveal.sh (REVIEW-5 R5-8): MAX_FEE_GWEI (mainnet) or GAS_PRICE_GWEI in env.local.sh; --replace re-sends a STUCK
 # refund at the same nonce with a fee raised by >= 12.5 % and >= 2 x the base fee. Give the hash live.js printed ("sent: 0x...") as TXHASH:
 # without it the node's pending block and pool are searched, and if the node cannot show the old transaction the command refuses (R5-2).
@@ -19,7 +20,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 mapfile -t FEES < <(fee_flags)
-ARGS=(scripts/live.js refund --swap "$(win_path "$BOB_FILE")" --key-file keys/bob.key --chain-id "$CHAIN" "${FEES[@]}")
+ARGS=(scripts/live.js refund --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" "${FEES[@]}")
 if [ "$REPLACE" = 1 ]; then
   ARGS+=(--replace)
   if [ -n "$TXHASH" ]; then ARGS+=(--replace-tx "$TXHASH"); fi

@@ -74,7 +74,7 @@ Commands (as run): `RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=~/noid-swap/target 
 in `equiv/` (add `--release` for the 1,000-case parity tests to finish in ~1 s instead of ~20 s; set
 `EQUIV_PARITY_N=<n>` to change the Addr/Derive/statement case count, see below).
 
-Results: 22 tests, all pass (re-run 2026-11-04 on the owner's PC after the M1.3 change below: 7 + 15).
+Results: 23 tests, all pass (re-run 2026-11-04 on the owner's PC after the M1.3 change below: 7 + 15; the 23rd, `structured_layout_and_published_vector` in `reference`, came with the Poseidon vectors, and a second machine counted 23).
 
 **Large differential run (M1.3).** The `Addr`, `Derive` and statement tests use `EQUIV_PARITY_N` random inputs
 (default 1,000; fixed seed; each iteration draws a fresh random 32-byte `m`, and `Derive` is checked both at index 0 and

@@ -45,6 +45,10 @@ CONTRACT_VERSION=${CONTRACT_VERSION:-1}
 # HTLCPoseidonV2 deployment (node scripts/live.js deploy --contract-kind poseidon). The reveal then costs about 0.5 M gas: Alice's ETH
 # address must hold 1,000,000 x the fee cap (docs/poseidon-leg.md section 5).
 LOCK_KIND=${LOCK_KIND:-sha256}
+# Ethereum key files for live.js --key-file (lock.sh and refund-eth.sh: Bob; reveal.sh: Alice), paths relative to eth/.
+# For mainnet set BOB_KEY / ALICE_KEY in env.local.sh to the mainnet key files.
+BOB_KEY=${BOB_KEY:-keys/bob.key}
+ALICE_KEY=${ALICE_KEY:-keys/alice.key}
 ALICE_FILE="$L/alice.swap.json"; BOB_FILE="$L/bob/bob.swap.json"
 [ -f "$L/env.local.sh" ] && . "$L/env.local.sh"
 export WSLENV="ETH_RPC_URL${WSLENV:+:$WSLENV}"     # live.js reads ETH_RPC_URL; WSLENV carries it into Windows node

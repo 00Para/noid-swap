@@ -1,6 +1,6 @@
 # Live run 2 — the refund paths (Alice never reveals), 2026-11-04
 
-> Clock times in this log are UTC (converted from the operator's local clock); an entry after 00:00 falls on the calendar day after the one in the title.
+> Clock times in this log are UTC; an entry after 00:00 falls on the calendar day after the one in the title.
 
 Same setup as `live-run-1.md` (Parano1d mainnet, 10 NOID, local Hardhat chain for the ETH leg, raw variant, owner in
 both roles), but after Bob's ETH lock **Alice never publishes the secret**. Expected: Bob's engine waits until

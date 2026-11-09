@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-220 passing, 0 failing, about 3 minutes.
+247 passing, 0 failing, about 3 minutes.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 

@@ -4,6 +4,7 @@
 # against the file and refuses a duplicate hashlock. Without --dry-run REAL ETH is locked: owner's go-ahead first.
 # Fee flags as in reveal.sh (REVIEW-5 R5-8): MAX_FEE_GWEI (mainnet: --mainnet --max-fee-gwei) or GAS_PRICE_GWEI in env.local.sh; a chain-1 file
 # needs MAX_FEE_GWEI. live.js refuses a cap below 1 x the latest base fee for a lock (R4-1).
+# Key file: BOB_KEY (default keys/bob.key, relative to eth/); for mainnet set BOB_KEY in env.local.sh to the mainnet key file.
 # There is no --replace for a lock, on purpose: live.js has none (a replaced lock is a second look at one the node may already have
 # mined, and `swap-cli intent --cancel` is the tool's way out of a lock that never lands). --replace here is refused with that explanation.
 set -u
@@ -19,7 +20,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 mapfile -t FEES < <(fee_flags)
-"$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file keys/bob.key --chain-id "$CHAIN" "${FEES[@]}" $MODE \
+"$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" "${FEES[@]}" $MODE \
   > "$L/eth-lock-$N.json" 2> "$L/eth-lock-$N.err"; EC=$?
 echo "lock ${MODE:-SEND} exit $EC at $(date +%T)"; head -c 800 "$L/eth-lock-$N.err"; echo; head -c 1200 "$L/eth-lock-$N.json"; echo
 [ -z "$MODE" ] && cp "$L/eth-lock-$N.json" "$PUB/eth-lock.json" 2>/dev/null

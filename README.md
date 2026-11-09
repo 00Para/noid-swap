@@ -4,7 +4,7 @@ Atomic swaps between **Parano1d (NOID)** and **Ethereum or Bitcoin**, with a has
 on each chain and nothing in between: no bridge, no custodian, no multisig, no wrapped token. Either both
 sides settle or both sides get their own coins back after a deadline, provided each party stays online and
 acts before its own deadline: a party that goes offline after the reveal can lose its side (design §8). The design, four component
-prototypes, a command-line swap tool and the logs of three real runs are in this repository.
+prototypes, a command-line swap tool and the logs of seven real runs, one of them on Ethereum mainnet, are in this repository.
 
 ## Why Parano1d makes this cheap, and why it decides who goes first
 
@@ -35,15 +35,19 @@ chain needs nothing more than a hashlock and a timelock, which is why the same d
 (`HTLC.sol`) and Bitcoin (a P2WSH script, `btc/`). Not a market: the two parties find each other and
 agree on a price elsewhere.
 
-## Proof that it works: three runs on 4–5 November 2026 (UTC)
+## Proof that it works: seven runs on 4–6 November 2026 (UTC)
 
 | Run | What | Result |
 |---|---|---|
 | 1 | 10 NOID on Parano1d mainnet against 0.001 ETH on a local Hardhat chain, happy path, the raw-secret variant | settled on both legs; the NOID close receipt verified ([`docs/live-run-1.md`](docs/live-run-1.md)) |
 | 2 | same amounts, the abort path: the NOID holder never reveals | both refunds settled (ETH refund at `T_reveal`, NOID recovery at `D`), nobody lost funds ([`docs/live-run-2.md`](docs/live-run-2.md)) |
 | 3 | 10 NOID on mainnet against 0.001 ETH on **public Sepolia**, happy path | settled; 44 minutes from funding to final NOID, Ethereum finality (about 19 minutes) included ([`docs/live-run-3.md`](docs/live-run-3.md)) |
+| 4 | 10 NOID against 0.001 ETH on Sepolia, the abort path before any Ethereum lock (Bob never appears) | the NOID recovered at `D`, cost 14,800 μNOID ([`docs/live-run-4.md`](docs/live-run-4.md)) |
+| 5 | 10 NOID against 0.001 ETH on Sepolia, happy path with the proof-free `poseidon` lock kind (no equivalence proof) | settled; about 47 minutes from funding to both sides final ([`docs/live-run-5.md`](docs/live-run-5.md)) |
+| 6 | the abort path after Bob's lock on Sepolia, `poseidon` lock kind: the NOID holder never reveals | both refunds settled, Bob's file `refunded` only at Ethereum finality ([`docs/live-run-6.md`](docs/live-run-6.md)) |
+| 8 | 5 NOID against 0.001 ETH on **Ethereum mainnet**, happy path, `poseidon` lock kind, `production` profile (there is no run 7 log: it was never funded) | settled; 54 minutes from funding to both sides final ([`docs/live-run-8.md`](docs/live-run-8.md)) |
 
-All three were played by the author in both roles on one machine; no swap between two separate people
+All seven were played by the author in both roles on one machine; no swap between two separate people
 has run yet. The amounts are trial amounts.
 
 > **Optional block: on-chain pointers.** Publishing them ties the handle "00" to the NOID wallet that funded
@@ -61,14 +65,14 @@ has run yet. The amounts are trial amounts.
 | `docs/runbook-two-party.md` | How two people on two machines run a swap with today's tools | written, untested between two people |
 | `docs/review-1.md`, `docs/poseidon-evm-review.md`, `swap-cli/REVIEW-1.md`, `-2.md`, `-3.md` | Independent adversarial reviews of the design, the Poseidon2b Solidity port and the swap tool | done; see "Status" |
 | `docs/q2-history-step.md` | Does Parano1d's block proof force a close to pay the committed recipient? Constraint path with citations and a negative test | confirmed |
-| `docs/live-run-1.md`, `-2.md`, `-3.md` | Logs of the three runs | done |
+| `docs/live-run-1.md` to `-6.md`, `-8.md` | Logs of the seven runs (there is no run 7 log: it was prepared and never funded) | done |
 | `docs/htlc-v2-fixed-fee.md`, `docs/poseidon-evm.md`, `docs/ideas.md` | A fixed-fee contract variant, `Addr(s)` on the EVM (an alternative hashlock), ranked improvements | notes |
-| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 131 tests |
-| `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 66 tests; nothing broadcast on signet yet |
-| `parano1d/` | `contracts/htlc.pruv` (`HashTimeLock`), the v2 fixed-fee variant, example params (never fund them), a Rust harness that builds, proves and verifies real calls against the vendored node code | 35 tests, `pruv verify` passes |
-| `equiv/` | The equivalence proof: `portable/` (no_std Poseidon2b + Derive + SHA-256, the zkVM guest code), `reference/` (parity against the vendored code, 100,000 inputs), `zkvm/` (RISC Zero guest and host, `equiv-prove`) | 22 + 3 + 14 tests; receipts proved and verified |
-| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | about 350 tests; drove all three runs |
-| `scripts/live/` | The versioned live-run helpers (setup, prepare, tick, watch, lock, reveal, claim, refund): one script per step, nothing sent without an explicit flag | used read-only against the run-3 files |
+| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 247 tests |
+| `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 91 tests; nothing broadcast on signet yet |
+| `parano1d/` | `contracts/htlc.pruv` (`HashTimeLock`), the v2 fixed-fee variant, example params (never fund them), a Rust harness that builds, proves and verifies real calls against the vendored node code | 37 tests (+1 ignored benchmark), `pruv verify` passes |
+| `equiv/` | The equivalence proof: `portable/` (no_std Poseidon2b + Derive + SHA-256, the zkVM guest code), `reference/` (parity against the vendored code, 100,000 inputs), `zkvm/` (RISC Zero guest and host, `equiv-prove`) | 23 + 3 + 14 tests; receipts proved and verified |
+| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | about 460 tests; drove all seven runs |
+| `scripts/live/` | The versioned live-run helpers (setup, prepare, tick, watch, lock, reveal, claim, refund): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 |
 | `scripts/` | `setup.sh` / `setup.ps1` (build and test everything), `fetch-vendor.sh` | — |
 | `ui/` | A design system and a read-only swap console prototype | prototype; not in the first public copy |
 | `vendor/parano1d` | Unmodified copy of the Parano1d source at commit `d29b801` (Apache-2.0, see `THIRD-PARTY-NOTICES.md`) | read-only |
@@ -98,15 +102,15 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 131 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
-cd btc && npm install && npm test              # 66 passing (node --test)
+cd eth && npm install && npx hardhat test      # 247 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd btc && npm install && npm test              # 91 passing (node --test)
 ```
 
 Rust parts (Linux or WSL2; the vendored code pins Rust 1.96.0 in `vendor/parano1d/rust-toolchain.toml`):
 
 ```sh
-cd parano1d/harness && cargo test                                   # 35 tests, ~2 min first build
-cd equiv && cargo test --release                                     # 22 tests; EQUIV_PARITY_N=100000 for the big parity run
+cd parano1d/harness && cargo test                                   # 37 tests (+1 ignored), ~2 min first build
+cd equiv && cargo test --release                                     # 23 tests; EQUIV_PARITY_N=100000 for the big parity run
 cd equiv/zkvm && cargo test -p equiv-guest-core                      # 3 tests; proving needs rzup, see equiv/README.md
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=~/zkvm-out cargo test --release -p equiv-host   # 14 host tests on real receipts
 cd swap-cli && cargo test                                            # the swap tool
@@ -125,7 +129,7 @@ To run a swap for real, read `docs/runbook-two-party.md` first, then `swap-cli/R
 2. [`docs/runbook-two-party.md`](docs/runbook-two-party.md) for what a swap looks like with the tools.
 3. [`docs/review-1.md`](docs/review-1.md), [`swap-cli/REVIEW-2.md`](swap-cli/REVIEW-2.md) and
    [`swap-cli/REVIEW-3.md`](swap-cli/REVIEW-3.md) for what can go wrong and what was fixed.
-4. [`docs/live-run-3.md`](docs/live-run-3.md) for a real run, minute by minute.
+4. [`docs/live-run-3.md`](docs/live-run-3.md) or [`docs/live-run-8.md`](docs/live-run-8.md) (mainnet) for a real run, minute by minute.
 
 ## License and reporting
 

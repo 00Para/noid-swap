@@ -1,6 +1,6 @@
 # Live run 1 — first real NOID ↔ ETH swap (Sepolia + mainnet-tiny), 2026-11-04
 
-> Clock times in this log are UTC (converted from the operator's local clock); an entry after 00:00 falls on the calendar day after the one in the title.
+> Clock times in this log are UTC; an entry after 00:00 falls on the calendar day after the one in the title.
 
 Runbook and log for milestone M2.7's first scenario ("happy, raw variant"), played by the owner
 in both roles on one machine. Nothing here is sent to a chain without the owner's go-ahead in

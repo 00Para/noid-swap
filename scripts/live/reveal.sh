@@ -7,6 +7,7 @@
 # below 2 x the latest base fee (R4-1); set MAX_FEE_GWEI (mainnet) or GAS_PRICE_GWEI (test chains) in env.local.sh if you use one.
 # --replace re-sends a STUCK claim at the same nonce with a fee raised by >= 12.5 % and >= 2 x the base fee (never a second nonce);
 # give the hash live.js printed ("sent: 0x...") as TXHASH, or leave it out and the node's pending block is searched.
+# Key file: ALICE_KEY (default keys/alice.key, relative to eth/); for mainnet set ALICE_KEY in env.local.sh to the mainnet key file.
 # --dry-run needs no secret and sends nothing. A REAL reveal otherwise: owner's go-ahead first.
 # A claim that is MINED AND REVERTED (live.js exits 3 and prints reverted/secretPublic) has paid nobody but published the secret: this script
 # saves its hash in $L/reveal-reverted-tx.txt and tick.sh / claim.sh pass it on as `--reveal-tx HASH` from then on (REVIEW-6 R6-3).
@@ -24,7 +25,7 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-ARGS=(scripts/live.js claim --swap "$(win_path "$ALICE_FILE")" --key-file keys/alice.key --chain-id "$CHAIN")
+ARGS=(scripts/live.js claim --swap "$(win_path "$ALICE_FILE")" --key-file "$ALICE_KEY" --chain-id "$CHAIN")
 if [ -n "${MAX_FEE_GWEI:-}" ]; then ARGS+=(--mainnet --max-fee-gwei "$MAX_FEE_GWEI"); fi
 if [ -z "${MAX_FEE_GWEI:-}" ] && [ -n "${GAS_PRICE_GWEI:-}" ]; then ARGS+=(--gas-price-gwei "$GAS_PRICE_GWEI"); fi
 if [ "$REPLACE" = 1 ]; then

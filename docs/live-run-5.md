@@ -1,6 +1,6 @@
 # Live run 5 — happy path with the proof-free Ethereum lock kind (`poseidon`), 2026-11-05
 
-> Clock times in this log are UTC (converted from the loop files' local clock with the offset of five hours confirmed in run 4; the Sepolia block timestamp of Bob's lock, 1793913228 = 21:13:48, agrees with it).
+> Clock times in this log are UTC; the Sepolia block timestamp of Bob's lock, 1793913228 = 21:13:48, agrees with them.
 
 First swap with the `poseidon` lock kind (`docs/poseidon-leg.md`): the Ethereum side is `HTLCPoseidonV2`, locked directly on the
 Parano1d claim authority `A = Addr(s)`, so the contract itself checks the secret against the address that the NOID lock commits

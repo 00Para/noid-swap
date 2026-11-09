@@ -1,6 +1,6 @@
 # Live run 4 — Alice aborts before any Ethereum lock (Bob never locks), 2026-11-05
 
-> Clock times in this log are UTC (converted from the operator's local clock with the anchor "funding submitted 17:49:49" and checked against the Ethereum block timestamps in the recordings: the offset is exactly five hours).
+> Clock times in this log are UTC, checked against the Ethereum block timestamps in the recordings.
 
 Scenario 1+2 of `docs/live-scenarios.md` (Alice-abort before Bob locks, merged with "Bob never locks"): the owner as Alice
 funds 10 NOID into a `HashTimeLock`, **Bob never appears** (no Bob file, no Sepolia transaction at all), and Alice takes the

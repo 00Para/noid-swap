@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-05. Plan, except scenario 1+2, which was run as live run 4 and settled (section 1+2, `live-run-4.md`); the rest was not run, funded or sent. Parano1d mainnet (tiny NOID) against public
+Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6) and the mainnet happy path (run 8, section 2c), which were run and settled; the rest was not run, funded or sent. Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -81,7 +81,16 @@ Not part of the plan above: the first swap with `HTLCPoseidonV2` locked on `A = 
 profile, owner in both roles, one node per chain) settled in about 47 minutes (`live-run-5.md`); the contract-version-2 and
 stock scenarios below stay open, and the abort paths and two nodes with this lock kind were not run.
 
-## 3. Alice never reveals after Bob's lock on Sepolia: run 5 (overlaps run 4)
+## 2c. Happy path on Ethereum mainnet (`production` profile, `poseidon` lock): DONE 2026-11-06
+
+Not part of the plan above: the mainnet happy path of `live-run-mainnet-plan.md` was executed as run 8 (5 NOID ↔ 0.001 ETH, raw v1,
+proof-free `poseidon` lock, owner in both roles, one node per chain) and settled in 54 minutes (`live-run-8.md`). The abort paths on
+mainnet, two nodes and the other scenarios below stay open. The run numbers given to those scenarios below are out of date: run 7 was
+never funded and run 8 is the mainnet run, so the next free number is 9.
+
+## 3. Alice never reveals after Bob's lock on Sepolia: run 6 — DONE 2026-11-06
+
+Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` profile (`live-run-6.md`). Bob's refund was offered after `T_reveal` and was `refund_mined` for about 14 minutes before `refunded` at Sepolia finality; Alice's engine kept the secret after the cutoff and her recovery close was confirmed at 284,644 (cost 14,800 μNOID). The plan below is kept as written.
 
 - **Proves (new).** Run 2 on a public chain with Sepolia finality, and the M2.5b change: Bob's refund is `refund_mined`
   first and `refunded` only after Sepolia finalizes the block (and falls back to `locked` on a reorg); Alice's engine

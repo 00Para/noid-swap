@@ -13,7 +13,7 @@
  *   const b = createChainBudget(ethers, { probe: async (n) => { ...n permutation-sized calls... }, onRecycle: () => { H = null; } });
  *   await b.budget(k);   // before k permutation-sized calls; may recycle the chain (then onRecycle ran)
  */
-const os = require("os");
+const { availableMemBytes } = require("./free-mem.js");
 const v8 = require("v8");
 const vm = require("vm");
 
@@ -52,7 +52,7 @@ function createChainBudget(ethers, opts) {
     await probe(2);
     mem.perPerm = Math.max(5, (process.memoryUsage().rss - before) / 2 / 1e6);
     mem.used = 3;
-    const freeMB = os.freemem() / 1e6;
+    const freeMB = availableMemBytes() / 1e6;
     mem.chunk = Math.min(maxChunk, Math.floor((freeMB - marginMB) / mem.perPerm));
     if (mem.chunk < minChunk) {
       mem.chunk = 0; // make the next call fail again with the same message

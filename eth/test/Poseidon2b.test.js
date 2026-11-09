@@ -25,6 +25,7 @@ const { ethers } = require("hardhat");
 const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
+const { availableMemBytes } = require("./helpers/free-mem.js");
 const path = require("path");
 const v8 = require("v8");
 const vm = require("vm");
@@ -229,7 +230,7 @@ async function calibrate() {
   await H.addr(arg);
   mem.perPerm = Math.max(5, (process.memoryUsage().rss - before) / 2 / 1e6);
   mem.used = 3;
-  const freeMB = os.freemem() / 1e6;
+  const freeMB = availableMemBytes() / 1e6;
   mem.chunk = Math.min(MAX_CHUNK, Math.floor((freeMB - MARGIN_MB) / mem.perPerm));
   if (mem.chunk < MIN_CHUNK) {
     mem.chunk = 0; // make the next test fail again with the same message

@@ -1,6 +1,6 @@
 # Live run 3 — NOID ↔ ETH with the Ethereum leg on Sepolia (`sepolia` profile)
 
-> Clock times in this log are UTC (converted from the operator's local clock); an entry after 00:00 falls on the calendar day after the one in the title.
+> Clock times in this log are UTC; an entry after 00:00 falls on the calendar day after the one in the title.
 
 Planned and run 2026-11-05 (UTC). Same shape as run 1 (`docs/live-run-1.md`): the happy
 path, raw variant, the owner in both roles on one machine (Alice in WSL, Bob's Ethereum commands on
