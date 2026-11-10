@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-247 passing, 0 failing, about 3 minutes.
+265 passing, 0 failing, about 3 minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -268,7 +268,8 @@ Alice's ETH address must hold `1,000,000 × fee cap` at the reveal (0.02 ETH at 
 Run everything from `eth/`. The HTLC artifact must exist: `npx hardhat compile` once.
 Common flags on every state-changing command: `--confirmations N` (default 1),
 `--dry-run` (run every check below, estimate gas where possible, print what would be sent, send nothing),
-`--gas-price-gwei X` (sets `maxFeePerGas` to X gwei, tip capped at 1 gwei).
+`--gas-price-gwei X` (sets `maxFeePerGas` to X gwei, tip capped at 1 gwei),
+`--priority-fee-gwei N` (optional: the tip, see "The tip" below).
 Keys live in `eth/keys/` (git-ignored at the repo root). `live.js` never prints a private key;
 back the key files up yourself. A lost key file means lost testnet funds, nothing more.
 
@@ -293,6 +294,31 @@ base fee is read before signing, **also under `--dry-run`**. A `claim` is refuse
 secret, so it must not get stuck when the base fee climbs 12.5 % a block); `lock` and `refund` are refused when `cap < base fee`.
 The output carries `feeCheck`: `baseFeeGwei`, `maxFeeGwei`, `ratio` (cap / base fee) and `minRatio`. With no cap chosen (test
 chain, no flag) the node prices the transaction itself and nothing is checked.
+
+**The tip (`--priority-fee-gwei N`, optional).** Without it the tip is `min(cap, 1 gwei)`. On a cheap chain that can be most or all of
+the cap: the base fee is burned, the tip is paid on top, so a cap of 0.2 gwei with a base fee of 0.06 gwei still pays the whole 0.2
+gwei per gas. With `--priority-fee-gwei N` (decimal gwei, up to 9 decimals, above 0) the tip is `N` and `maxFeePerGas` is still the
+cap. One gas then costs `min(cap, base fee + N)`. Worked example (mainnet numbers): cap 0.2 gwei, base fee 0.06 gwei, tip 0.01 gwei
+costs about 0.07 gwei per gas, not 0.2. The advice: cap at 3 to 4 x the base fee (the check above keeps a claim at 2 x or more, so a
+rising base fee cannot strand it), tip small. `N` above the cap is refused, and so is `N` with no cap flag (`--max-fee-gwei` with
+`--mainnet`, or `--gas-price-gwei`); it works on all five signing commands. The output carries `priorityFeeGwei` and, in `feeCheck`,
+`expectedGasPriceGwei` (`min(cap, base fee + tip)`, the cost of one gas at the latest base fee); the worst case and the balance check
+still use the cap, and the `sent:` line shows both fee fields.
+
+*Floor.* On `lock`, `claim` and `refund` (also with `--dry-run`) a given `N` below one tenth of the latest block's base fee, rounded up
+to a whole wei, is refused: `--priority-fee-gwei … is below a tenth of the latest base fee (X gwei): such a tip can leave the transaction
+pending; give at least Y gwei or drop the flag; refusing`. It uses the base fee the cap check already reads (no extra call), and
+`feeCheck.minPriorityFeeGwei` reports Y. Example: base fee 0.06 gwei gives a floor of 0.006 gwei; 0.0059 is refused, 0.006 is taken.
+The floor is never above `min(cap, 1 gwei)`, the tip used without the flag, so at a base fee above 10 gwei a typed 1 gwei stays allowed.
+There is no floor without the flag, on a chain whose latest block has no base fee, or for `deploy` and `send` (they read no base fee).
+A lock cannot be replaced, so give the lock a generous tip, for example half the base fee.
+
+*Stuck and replaced.* A tip below what block builders take can leave the transaction pending; `live.js` does not look that up, it
+prints one warning line on stderr. The remedy is `--replace` (claim, refund) with a higher cap. A replacement never tips less than the
+rule that applies without the flag: its tip is the larger of `max(N if given, min(cap, 1 gwei))` and the old tip + 12.5 % (rounded up),
+and the command refuses if that is above the cap (a valid pending transaction cannot reach that refusal). So the small tip is not used for a
+replacement; with a cap below 1 gwei it pays up to the whole new cap. Example: new cap 0.5 gwei, `N` 0.001 gwei, old tip 0.01 gwei: the
+replacement tips `max(0.001, min(0.5, 1) = 0.5, 0.01125)` = 0.5 gwei. The floor is not applied to a replacement.
 
 `claim --replace` and `refund --replace` re-send the same call when the first one is stuck. They use the signer's **oldest pending
 nonce** (never a second nonce), raise `maxFeePerGas` and the tip by at least 12.5 % over the old transaction and the cap to at
@@ -354,7 +380,8 @@ commands only (`deploy`, `send`, `lock`, `claim`, `refund`); `balance`, `status`
 | Flag | Rule |
 |------|------|
 | `--mainnet` | Chain 1 is accepted, and **only** chain 1: a node on any other chain is refused (no mixing), `--chain-id` must be `1` (lock, claim, refund), and `--allow-chain-id` is refused. The command line prints one warning line on stderr. |
-| `--max-fee-gwei N` | **Required with `--mainnet`, refused without it.** `N` is the `maxFeePerGas` of the transaction (decimal gwei, up to 9 decimals; the tip is at most 1 gwei and never above `N`). `--gas-price-gwei` is refused with `--mainnet`: the cap is the only fee setting. |
+| `--max-fee-gwei N` | **Required with `--mainnet`, refused without it.** `N` is the `maxFeePerGas` of the transaction (decimal gwei, up to 9 decimals; the tip is at most 1 gwei and never above `N`, unless `--priority-fee-gwei` sets it). `--gas-price-gwei` is refused with `--mainnet`: the cap is the only fee setting. |
+| `--priority-fee-gwei N` | Optional. The tip, in decimal gwei (up to 9 decimals, above 0); a tip above `--max-fee-gwei` is refused. Use it to keep a cap well above the base fee without paying all of it: cap 0.2 gwei, base fee 0.06 gwei, tip 0.01 gwei costs about 0.07 gwei per gas. See "The tip" above. |
 
 `--dry-run` prints, besides the usual plan, `maxFeeGwei`, the worst-case cost (`worstCaseFeeWei` / `worstCaseFeeEth` =
 gas estimate x cap), `requiredWei` / `requiredEth` (value + worst case) and the sender's balance

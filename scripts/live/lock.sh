@@ -9,7 +9,7 @@
 # mined, and `swap-cli intent --cancel` is the tool's way out of a lock that never lands). --replace here is refused with that explanation.
 set -u
 . "$(dirname "$0")/env.sh"
-cd "$ETH_DIR" || exit 2
+enter_eth_dir || exit 2
 N=$(date +%H%M%S); MODE=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -19,9 +19,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-mapfile -t FEES < <(fee_flags)
-"$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" "${FEES[@]}" $MODE \
+check_fee_settings || exit 2   # a tip with no cap stops here (env.sh)
+read_lines FEES fee_flags
+"$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" ${FEES[@]+"${FEES[@]}"} $MODE \
   > "$L/eth-lock-$N.json" 2> "$L/eth-lock-$N.err"; EC=$?
 echo "lock ${MODE:-SEND} exit $EC at $(date +%T)"; head -c 800 "$L/eth-lock-$N.err"; echo; head -c 1200 "$L/eth-lock-$N.json"; echo
-[ -z "$MODE" ] && cp "$L/eth-lock-$N.json" "$PUB/eth-lock.json" 2>/dev/null
+if [ -z "$MODE" ]; then ensure_pub; cp "$L/eth-lock-$N.json" "$PUB/eth-lock.json" 2>/dev/null; fi
 exit $EC

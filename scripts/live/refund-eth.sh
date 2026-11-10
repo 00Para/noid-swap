@@ -7,7 +7,7 @@
 # without it the node's pending block and pool are searched, and if the node cannot show the old transaction the command refuses (R5-2).
 set -u
 . "$(dirname "$0")/env.sh"
-cd "$ETH_DIR" || exit 2
+enter_eth_dir || exit 2
 N=$(date +%H%M%S)
 DRY=0; REPLACE=0; TXHASH=""
 while [ $# -gt 0 ]; do
@@ -19,8 +19,9 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
-mapfile -t FEES < <(fee_flags)
-ARGS=(scripts/live.js refund --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" "${FEES[@]}")
+check_fee_settings || exit 2   # a tip with no cap stops here (env.sh)
+read_lines FEES fee_flags
+ARGS=(scripts/live.js refund --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" ${FEES[@]+"${FEES[@]}"})
 if [ "$REPLACE" = 1 ]; then
   ARGS+=(--replace)
   if [ -n "$TXHASH" ]; then ARGS+=(--replace-tx "$TXHASH"); fi

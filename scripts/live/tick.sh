@@ -9,9 +9,9 @@ ROLE=${1:?alice|bob}; shift
 F=$(swap_file "$ROLE") || exit 2
 load_passphrase || exit 2
 mkdir -p "$L/rec"
-mapfile -t NODES < <(node_flags); mapfile -t FROM < <(from_block_flags); mapfile -t REVEAL < <(reveal_tx_flags)
+read_lines NODES node_flags; read_lines FROM from_block_flags; read_lines REVEAL reveal_tx_flags
 N=$(date +%H%M%S)
-"$BIN" tick "$F" "${NODES[@]}" "${FROM[@]}" "${REVEAL[@]}" \
+"$BIN" tick "$F" ${NODES[@]+"${NODES[@]}"} ${FROM[@]+"${FROM[@]}"} ${REVEAL[@]+"${REVEAL[@]}"} \
   --record-noid "$L/rec/$ROLE-noid-$N.json" --record-eth "$L/rec/$ROLE-eth-$N.json" "$@" \
   > "$L/last-tick-$ROLE.json" 2> "$L/last-tick-$ROLE.err"
 EC=$?

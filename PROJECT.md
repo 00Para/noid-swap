@@ -85,7 +85,7 @@ commit of this tree without the `ui/` prototype.
 | `docs/protocol-design.md` | Protocol design v1: roles, ETH and BTC flows with Mermaid diagrams, timeout inequalities with worked examples, equivalence proof, lock contract, claim tooling, threat model, parameters, open questions Q1–Q15, milestones M0–M4 | Done, nothing measured yet |
 | `docs/review-1.md` | Independent adversarial review of the report + harness: 10 claims CONFIRMED, 0 refuted, citation fixes, additional risks | Done; "Applied 2026-11-04" note at the end |
 | `docs/q2-history-step.md` | Q2 finding: does the block proof force a close to pay the committed recipient? Constraint path with citations, Rust-only checks, negative-test spec N1/N2 | CONFIRMED by source reading and by the component test N2 (2 passed, forged openings rejected by the side-proof verifier; test kept as `parano1d/patches/q2-n2-tests.patch`); N1 full-block and N3 devnet not run |
-| `eth/` | Hardhat project. `contracts/HTLC.sol` (ETH) and `HTLCERC20.sol`; `scripts/secret.js`; `test/HTLC.test.js` | **247 passing** tests (HTLC, `live.js` incl. the mainnet gate, and the fuzz campaign at its default size; `FUZZ_N=2000` for the full one). solc falls back to the npm `solc@0.8.24` package if the binary download is blocked |
+| `eth/` | Hardhat project. `contracts/HTLC.sol` (ETH) and `HTLCERC20.sol`; `scripts/secret.js`; `test/HTLC.test.js` | **265 passing** tests (HTLC, `live.js` incl. the mainnet gate, and the fuzz campaign at its default size; `FUZZ_N=2000` for the full one). solc falls back to the npm `solc@0.8.24` package if the binary download is blocked |
 | `parano1d/` | `contracts/htlc.pruv` (HashTimeLock), `htlc.params.example.json`, `htlc.definition.json` (pruv build output); `harness/` Rust crate with path deps on vendor | Compiles to **1/16 instructions**; `pruv verify` passed (1 postcondition, z3 from the `z3-solver` wheel); harness **37/37 passing** (9 of them for `htlc_v2.pruv`, the fixed-fee v2) with real `noid_gkr` proofs (stock-wallet path, V3/V4 + cross-version rejection, verifier-side rejection of tampered/replayed proofs, `check_swap_params` guard) plus an ignored `P_auth` benchmark |
 | `btc/` | Node library: `src/htlc.js` (P2WSH script, address, claim/refund tx builders), `src/verify.js` (minimal script checker + `extractPreimage`), `src/secret.js`, `scripts/demo.js` | **91 passing** `node:test` tests; cross-checked against the eth hashlock encoding; `scripts/live.js` signet live layer over the Esplora REST API (2026-11-04, nothing broadcast yet; script aligned with design §3.1: `OP_SIZE 32`, RBF refund) |
 | `equiv/` | Equivalence-proof groundwork: `portable/` (no_std, zero-dep Poseidon2b + Derive + SHA-256, the future zkVM guest code), `reference/` (`equiv-ref` CLI + vendor parity tests), `zkvm/` (RISC Zero guest/host, separate workspace) | **23 passing** (portable + parity; 100,000-input release run: 0 mismatches) + 3 in `zkvm/core` + 14 host tests (remote-prover refusal, 138 negative cases on the real receipts). Raw and stock receipts proved and verified 2026-11-03 in WSL (ImageID `7e9d8477…6187`, local build; the reproducible docker ImageID of M1.1 needs Docker) |
@@ -154,7 +154,7 @@ commit of this tree without the `ui/` prototype.
 
 Node parts (any OS, Node ≥ 21; tested on 22):
 ```sh
-cd eth && npm install && npx hardhat test      # 247 passing; solc download falls back to npm solc@0.8.24
+cd eth && npm install && npx hardhat test      # 265 passing; solc download falls back to npm solc@0.8.24
 cd btc && npm install && npm test              # 91 passing (node --test)
 node eth/scripts/secret.js                     # generate s + sha256 hashlock
 ```
@@ -169,7 +169,7 @@ PAUTH_BENCH_N=30 cargo test --release --test pauth_bench -- --ignored --nocaptur
 cd equiv && cargo test --release                                     # 23 tests; EQUIV_PARITY_N=100000 for the big parity run
 cd equiv/zkvm && cargo test -p equiv-guest-core                      # 3 tests; proving needs rzup — see equiv/README.md §5
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=~/zkvm-out cargo test --release -p equiv-host   # 14 host tests incl. negatives on real receipts
-cd swap-cli && cargo test --offline                                  # 460 tests (+1 ignored); eth/ (live scripts included): cd eth && npx hardhat test (247)
+cd swap-cli && cargo test --offline                                  # 460 tests (+1 ignored); eth/ (live scripts included): cd eth && npx hardhat test (265)
 # Pruv (run from the vendor workspace):
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   check parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json

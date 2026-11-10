@@ -5,12 +5,12 @@
 set -u
 . "$(dirname "$0")/env.sh"
 load_passphrase || exit 2
-mapfile -t NODES < <(node_flags); mapfile -t FROM < <(from_block_flags); mapfile -t REVEAL < <(reveal_tx_flags)
+read_lines NODES node_flags; read_lines FROM from_block_flags; read_lines REVEAL reveal_tx_flags
 N=$(date +%H%M%S); SECONDS=0
-"$BIN" claim "$BOB_FILE" "${NODES[@]}" "${FROM[@]}" "${REVEAL[@]}" \
+"$BIN" claim "$BOB_FILE" ${NODES[@]+"${NODES[@]}"} ${FROM[@]+"${FROM[@]}"} ${REVEAL[@]+"${REVEAL[@]}"} \
   --record-noid "$L/rec/claim-noid-$N.json" --record-eth "$L/rec/claim-eth-$N.json" --intent-out "$L/claim-intent-$N.hex" "$@" \
   > "$L/claim-$N.out" 2> "$L/claim-$N.err"
 EC=$?
 echo "claim exit $EC in ${SECONDS}s at $(date +%T) (${1:-dry-run})"; head -c 700 "$L/claim-$N.err"; echo
-grep -vE '^\s+"(opening_hex|intent_hex)"' "$L/claim-$N.out" | head -40
+grep -vE '^[[:space:]]+"(opening_hex|intent_hex)"' "$L/claim-$N.out" | head -40
 exit $EC

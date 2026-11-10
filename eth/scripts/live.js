@@ -67,6 +67,26 @@
  * is claimed / refunded.
  * On the command line the hash of a sent transaction is printed on stderr before the wait.
  *
+ * Tip (optional --priority-fee-gwei N, decimal gwei, at most 9 decimals, > 0). Without it the tip is min(cap, 1 gwei), which on a
+ * cheap chain can be most of the cap: a block builder is paid the tip first, so the whole cap is spent although the base fee needed a
+ * fraction of it. With it the tip is N and maxFeePerGas stays the cap; N above the cap is refused, and so is N with no cap flag
+ * (--max-fee-gwei with --mainnet, or --gas-price-gwei). One gas then costs min(cap, base fee + tip): the report shows it as
+ * `expectedGasPriceGwei` next to `priorityFeeGwei`; the balance check still uses the cap. Example (mainnet): cap 0.2 gwei, base fee
+ * 0.06 gwei, tip 0.01 gwei -> about 0.07 gwei per gas instead of 0.2. Advice: cap at 3-4 x the base fee (the check above keeps a
+ * claim at 2 x or more), tip small. A tip below what block builders take can leave the transaction pending; the tool does not look
+ * that up. Two guards and one remedy:
+ *   - Floor (lock, claim, refund; read from the latest block the cap check already reads, so no extra call; also in --dry-run): a given
+ *     N below one tenth of the latest base fee, rounded up to a whole wei, is refused. Example: base fee 0.06 gwei -> floor 0.006 gwei,
+ *     so 0.0059 is refused and 0.006 is taken. The floor is never above min(cap, 1 gwei), the tip used without the flag (it matters
+ *     only at a base fee above 10 gwei). The report carries `feeCheck.minPriorityFeeGwei`. No floor on a chain without a base fee,
+ *     and none for deploy and send (they read no base fee and have no cap check). A lock cannot be replaced, so give the lock a
+ *     generous tip, for example half the base fee.
+ *   - Warning: one line on stderr whenever the flag is given.
+ *   - Remedy, `--replace` (claim, refund): a replacement never tips less than the rule that applies without the flag. Its tip is the
+ *     larger of max(N if given, min(cap, 1 gwei)) and the old tip + 12.5 % (rounded up), and is refused above the cap. The small N is
+ *     therefore not used for a replacement: with the new cap 0.5 gwei, N 0.001 gwei and an old tip of 0.01 gwei the replacement tips
+ *     max(0.001, min(0.5, 1) = 0.5, 0.01125) = 0.5 gwei, that is up to the whole cap. The floor above is not applied to it.
+ *
  * A claim that is mined and REVERTS (REVIEW-6 R6-3, for either kind: e.g. it was mined after the timelock) has paid nobody but has put the secret
  * into a block. `claim` then does not fail with a bare message: it prints a JSON result with `reverted: true`, `secretPublic: true`, the `txHash`
  * and the flag to give swap-cli (`tick --reveal-tx HASH`), and exits with status 3. swap-cli reads the transaction and its receipt from the node
@@ -145,6 +165,8 @@ class RevertedTx extends UserError {
 }
 
 const NO_SWAP_WARNING = "warning: no --swap FILE, the swap file's intent is not checked (REVIEW-3 F3)\n";
+const PRIORITY_FEE_WARNING =
+  "warning: --priority-fee-gwei is in effect: a tip below what block builders take can leave the transaction pending; --replace then re-sends it with a higher cap and pays up to the whole cap (the small tip is not used for a replacement)\n";
 
 // ---------------------------------------------------------------- helpers
 /** The lock kind of a command: `args.lockKind` (set from --lock-kind / --contract-kind or the swap file), else sha256. */
@@ -228,9 +250,13 @@ function marginOf(args) {
  */
 function mainnetFlags(args) {
   if (args.mainnet !== undefined && args.mainnet !== true && args.mainnet !== false) throw new UserError("--mainnet is a flag without a value");
+  const tipWei = priorityFlag(args);
   if (args.mainnet !== true) {
     if (args.maxFeeGwei !== undefined) throw new UserError("--max-fee-gwei is only accepted together with --mainnet (a test network does not take a fee cap); refusing");
-    return { mainnet: false, capWei: null };
+    if (tipWei !== null && args.gasPriceGwei === undefined) {
+      throw new UserError("--priority-fee-gwei needs a fee cap to sit under (--max-fee-gwei with --mainnet, or --gas-price-gwei on a test network); refusing");
+    }
+    return { mainnet: false, capWei: null, tipWei };
   }
   if (args.allowChainId !== undefined) throw new UserError("--mainnet cannot be combined with --allow-chain-id (mainnet and other chains are never mixed); refusing");
   if (args.gasPriceGwei !== undefined) throw new UserError("--mainnet cannot be combined with --gas-price-gwei; --max-fee-gwei is the only fee setting on mainnet; refusing");
@@ -238,7 +264,21 @@ function mainnetFlags(args) {
   if (!/^\d+(\.\d{1,9})?$/.test(s)) throw new UserError("--max-fee-gwei must be a positive decimal number of gwei (at most 9 decimals)");
   const capWei = ethers.parseUnits(s, "gwei");
   if (capWei === 0n) throw new UserError("--max-fee-gwei must be > 0");
-  return { mainnet: true, capWei };
+  if (tipWei !== null && tipWei > capWei) throw tipAboveCap(tipWei, capWei);
+  return { mainnet: true, capWei, tipWei };
+}
+
+/** --priority-fee-gwei (optional): the tip in wei, or null when absent. Same strictness as --max-fee-gwei. */
+function priorityFlag(args) {
+  if (args.priorityFeeGwei === undefined) return null;
+  const s = String(args.priorityFeeGwei);
+  if (!/^\d+(\.\d{1,9})?$/.test(s)) throw new UserError("--priority-fee-gwei must be a positive decimal number of gwei (at most 9 decimals)");
+  const tipWei = ethers.parseUnits(s, "gwei");
+  if (tipWei === 0n) throw new UserError("--priority-fee-gwei must be > 0");
+  return tipWei;
+}
+function tipAboveCap(tipWei, capWei) {
+  return new UserError(`--priority-fee-gwei ${ethers.formatUnits(tipWei, "gwei")} gwei is above the fee cap ${ethers.formatUnits(capWei, "gwei")} gwei; the tip cannot exceed the cap; refusing`);
 }
 
 /** Under --mainnet, lock / claim / refund must be tied to a swap file; there is no fallback to bare flags. */
@@ -249,16 +289,18 @@ function requireSwapOnMainnet(args) {
 }
 
 function feeOverrides(args) {
-  const { mainnet, capWei } = mainnetFlags(args);
-  // On mainnet the cap is the maxFeePerGas; the tip is at most 1 gwei and never above the cap.
-  if (mainnet) return { maxFeePerGas: capWei, maxPriorityFeePerGas: capWei < GWEI ? capWei : GWEI };
+  const { mainnet, capWei, tipWei } = mainnetFlags(args);
+  // On mainnet the cap is the maxFeePerGas; the tip is --priority-fee-gwei when given (never above the cap, checked by mainnetFlags),
+  // else at most 1 gwei and never above the cap.
+  if (mainnet) return { maxFeePerGas: capWei, maxPriorityFeePerGas: tipWei !== null ? tipWei : capWei < GWEI ? capWei : GWEI };
   if (args.gasPriceGwei === undefined) return {};
   const s = String(args.gasPriceGwei);
   if (!/^\d+(\.\d+)?$/.test(s)) throw new UserError("--gas-price-gwei must be a positive decimal number");
   const max = ethers.parseUnits(s, "gwei");
   if (max === 0n) throw new UserError("--gas-price-gwei must be > 0");
-  // EIP-1559 fields: the override is the max fee; the tip is capped at 1 gwei.
-  return { maxFeePerGas: max, maxPriorityFeePerGas: max < GWEI ? max : GWEI };
+  if (tipWei !== null && tipWei > max) throw tipAboveCap(tipWei, max);
+  // EIP-1559 fields: the override is the max fee; the tip is --priority-fee-gwei when given, else capped at 1 gwei.
+  return { maxFeePerGas: max, maxPriorityFeePerGas: tipWei !== null ? tipWei : max < GWEI ? max : GWEI };
 }
 
 /**
@@ -267,7 +309,7 @@ function feeOverrides(args) {
  * printed ({ baseFeeGwei, maxFeeGwei, ratio, minRatio }), or null when no cap was chosen (the node then prices the
  * transaction itself at 2 x base fee + tip) or the chain has no base fee and is not mainnet.
  */
-async function checkFeeCap(provider, fees, mult, mainnet, why) {
+async function checkFeeCap(provider, fees, mult, mainnet, why, flagTip = null) {
   const cap = fees.maxFeePerGas;
   if (cap === undefined) return null;
   const blk = await latestBlock(provider);
@@ -285,11 +327,34 @@ async function checkFeeCap(provider, fees, mult, mainnet, why) {
     ratio: base === 0n ? "n/a (base fee 0)" : (Number((cap * 100n) / base) / 100).toFixed(2),
     minRatio: mult.toString(),
   };
+  // The tip that will be used, and what one gas will really cost at this base fee: min(cap, base fee + tip). The balance check stays at the cap.
+  const tip = fees.maxPriorityFeePerGas;
+  if (tip !== undefined && tip !== null) {
+    report.priorityFeeGwei = ethers.formatUnits(tip, "gwei");
+    report.expectedGasPriceGwei = ethers.formatUnits(base + tip < cap ? base + tip : cap, "gwei");
+  }
   if (cap < mult * base) {
     throw new UserError(
       `refusing: the fee cap ${report.maxFeeGwei} gwei is below ${mult} x the latest base fee (base fee ${report.baseFeeGwei} gwei in block ${blk.number}; ` +
         `cap / base fee = ${report.ratio}, the minimum is ${mult}): ${why}. Give a higher --max-fee-gwei (mainnet) or --gas-price-gwei`
     );
+  }
+  // Floor for a typed tip (flagTip is the --priority-fee-gwei value, null without the flag): a tenth of the base fee, rounded up to a whole
+  // wei. A mistyped tip (0.0001 for 0.01) would leave the transaction pending, and a lock cannot be replaced. Not applied to the tip a
+  // replacement chooses (replacePlan passes no flagTip: it never tips less than min(cap, 1 gwei)), nor to deploy and send, which read no base fee.
+  // The floor is never above the tip the tool would use without the flag, min(cap, 1 gwei): at a base fee above 10 gwei a typed 1 gwei
+  // stays allowed, so the floor only ever stops a tip smaller than the default.
+  if (flagTip !== null) {
+    const tenth = (base + 9n) / 10n;
+    const noFlagTip = cap < GWEI ? cap : GWEI;
+    const floor = tenth < noFlagTip ? tenth : noFlagTip;
+    report.minPriorityFeeGwei = ethers.formatUnits(floor, "gwei");
+    if (flagTip < floor) {
+      throw new UserError(
+        `refusing: --priority-fee-gwei ${ethers.formatUnits(flagTip, "gwei")} gwei is below a tenth of the latest base fee (${report.baseFeeGwei} gwei in block ${blk.number}): ` +
+          `such a tip can leave the transaction pending; give at least ${report.minPriorityFeeGwei} gwei or drop the flag; refusing`
+      );
+    }
   }
   return report;
 }
@@ -392,23 +457,31 @@ async function replacePlan(provider, signer, args, ctx, resolved) {
   const minCap = oldCap !== null && bumped(oldCap) > minByBase ? bumped(oldCap) : minByBase;
   const minTip = oldTip !== null ? bumped(oldTip) : 0n;
   const given = feeOverrides(args);
+  const { tipWei: flagTip } = mainnetFlags(args);
   let cap;
   let tip;
   if (given.maxFeePerGas !== undefined) {
     cap = given.maxFeePerGas;
-    tip = given.maxPriorityFeePerGas > minTip ? given.maxPriorityFeePerGas : minTip;
+    // A replacement is a rescue, so it never tips less than the rule that applies without the flag, min(cap, 1 gwei): a small
+    // --priority-fee-gwei is not used here. The tip is the larger of (the flag, if given, and that rule) and the old tip + 12.5 %.
+    // Both the flag (checked in mainnetFlags / feeOverrides) and the rule are at most the cap. The old tip + 12.5 % cannot pass the
+    // cap either: a pending transaction has old tip <= old cap, and the cap was already required to be >= old cap + 12.5 % (below).
+    // So the last refusal in this branch is a safeguard that no valid pending transaction reaches.
+    const rule = cap < GWEI ? cap : GWEI;
+    const asked = flagTip !== null && flagTip > rule ? flagTip : rule;
+    tip = asked > minTip ? asked : minTip;
     if (cap < minCap) {
       throw new UserError(
         `--replace: the new fee cap ${ethers.formatUnits(cap, "gwei")} gwei is below the minimum ${ethers.formatUnits(minCap, "gwei")} gwei ` +
           `(the larger of 2 x the latest base fee ${ethers.formatUnits(base || 0n, "gwei")} gwei and the old cap ${oldCap === null ? "unknown" : ethers.formatUnits(oldCap, "gwei") + " gwei"} + 12.5 %); refusing`
       );
     }
-    if (tip > cap) throw new UserError(`--replace: the replacement tip ${ethers.formatUnits(tip, "gwei")} gwei (old tip + 12.5 %) is above the fee cap ${ethers.formatUnits(cap, "gwei")} gwei; give a higher cap; refusing`);
+    if (tip > cap) throw new UserError(`--replace: the replacement tip ${ethers.formatUnits(tip, "gwei")} gwei (the larger of min(cap, 1 gwei), the given tip and the old tip + 12.5 %) is above the fee cap ${ethers.formatUnits(cap, "gwei")} gwei; give a higher cap; refusing`);
   } else {
     tip = minTip > GWEI ? minTip : GWEI;
     cap = minCap > minByBase + tip ? minCap : minByBase + tip;
   }
-  const feeCheck = await checkFeeCap(provider, { maxFeePerGas: cap }, 2n, mainnet, FEE_WHY.claim);
+  const feeCheck = await checkFeeCap(provider, { maxFeePerGas: cap, maxPriorityFeePerGas: tip }, 2n, mainnet, FEE_WHY.claim);
   const report = {
     feeCheck,
     replace: {
@@ -433,7 +506,8 @@ async function feePlan(provider, signer, args, { name, contractAddr, lockId }, r
   }
   if (args.replace !== undefined && args.replace !== false) throw new UserError("--replace is a flag without a value");
   const fees = feeOverrides(args);
-  const feeCheck = await checkFeeCap(provider, fees, name === "claim" ? 2n : 1n, mainnetFlags(args).mainnet, name === "claim" ? FEE_WHY.claim : FEE_WHY.other);
+  const { mainnet, tipWei } = mainnetFlags(args);
+  const feeCheck = await checkFeeCap(provider, fees, name === "claim" ? 2n : 1n, mainnet, name === "claim" ? FEE_WHY.claim : FEE_WHY.other, tipWei);
   return { fees, report: feeCheck ? { feeCheck } : {} };
 }
 
@@ -577,6 +651,7 @@ async function mainnetCosts(provider, from, req, gas, capWei) {
   const balanceWei = await provider.getBalance(from);
   const costs = {
     maxFeeGwei: ethers.formatUnits(capWei, "gwei"),
+    ...(req.maxPriorityFeePerGas !== undefined && req.maxPriorityFeePerGas !== null ? { priorityFeeGwei: ethers.formatUnits(req.maxPriorityFeePerGas, "gwei") } : {}),
     worstCaseFeeWei: worst.toString(),
     worstCaseFeeEth: ethers.formatEther(worst),
     requiredWei: required.toString(),
@@ -1186,11 +1261,12 @@ async function claim(provider, signer, args0) {
 }
 
 /** claim --dry-run without the secret on mainnet: no gas estimate, so no worst case; the cap and the balance are shown. */
-async function mainnetDryRunNote(provider, signer, args) {
+async function mainnetDryRunNote(provider, signer, args, fees) {
   const { capWei } = mainnetFlags(args);
   const balanceWei = await provider.getBalance(await signer.getAddress());
   return {
     maxFeeGwei: ethers.formatUnits(capWei, "gwei"),
+    ...(fees && fees.maxPriorityFeePerGas !== undefined && fees.maxPriorityFeePerGas !== null ? { priorityFeeGwei: ethers.formatUnits(fees.maxPriorityFeePerGas, "gwei") } : {}),
     worstCaseFeeWei: null,
     worstCaseFeeNote: "not computed without the real secret (no gas estimate); the balance check runs on the real claim",
     senderBalanceWei: balanceWei.toString(),
@@ -1361,7 +1437,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       valueWei: "0",
       gasEstimate: null,
       gasEstimateNote: `not estimated, ever: a ${kind} claim is sent with a fixed gas limit (${claimGas}) and never simulated (the secret would reach the node)`,
-      ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args) : {}),
+      ...(mainnetFlags(args).mainnet ? await mainnetDryRunNote(provider, signer, args, fp.fees) : {}),
       ...plan,
       ...fp.report,
     };
@@ -1525,7 +1601,7 @@ async function status(provider, _signer, args) {
 }
 
 // ------------------------------------------------------------------- CLI
-const COMMON = { "confirmations": "v", "dry-run": "b", "gas-price-gwei": "v", "allow-chain-id": "v", "mainnet": "b", "max-fee-gwei": "v" };
+const COMMON = { "confirmations": "v", "dry-run": "b", "gas-price-gwei": "v", "allow-chain-id": "v", "mainnet": "b", "max-fee-gwei": "v", "priority-fee-gwei": "v" };
 const TARGET = { "chain-id": "v", "code-hash": "v", "from-block": "v" };
 // The Ethereum contract of the swap: `sha256` (HTLC.sol, default) or `poseidon` (HTLCPoseidonV2.sol); with --swap it is the file's.
 const KIND = { "lock-kind": "v", "contract-kind": "v" };
@@ -1595,6 +1671,7 @@ const jsonOut = (obj) => JSON.stringify(obj, (_k, v) => (typeof v === "bigint" ?
 async function main(argv) {
   const { command, args } = parseArgs(argv);
   if (args.mainnet === true) process.stderr.write(MAINNET_WARNING);
+  if (args.priorityFeeGwei !== undefined) process.stderr.write(PRIORITY_FEE_WARNING);
   // Under --mainnet a missing --swap is a refusal (requireSwapOnMainnet), not a warning.
   if (["lock", "claim", "refund"].includes(command) && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_WARNING);
   const provider = command === "keygen" ? null : new ethers.JsonRpcProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545", undefined, { cacheTimeout: -1 });
@@ -1605,6 +1682,7 @@ async function main(argv) {
       args.onSent = (s) =>
         process.stderr.write(
           `sent: ${s.hash} nonce ${s.nonce} maxFeePerGas ${s.maxFeePerGas === null || s.maxFeePerGas === undefined ? "?" : ethers.formatUnits(s.maxFeePerGas, "gwei")} gwei ` +
+          `maxPriorityFeePerGas ${s.maxPriorityFeePerGas === null || s.maxPriorityFeePerGas === undefined ? "?" : ethers.formatUnits(s.maxPriorityFeePerGas, "gwei")} gwei ` +
             (command === "claim" || command === "refund"
               ? `(waiting for the receipt; if it stays pending: ${command} --replace --replace-tx ${s.hash} with a higher --max-fee-gwei)\n`
               : "(waiting for the receipt)\n")

@@ -97,7 +97,9 @@ Preparation had no proof step, so `prepare.sh` finished in seconds.
 ## Findings
 
 1. **`live.js` pays the whole fee cap.** Its priority fee is the cap minus the base fee, so a reveal at a 0.2 gwei cap cost about three
-   times what the base fee alone required. A separate, small priority-fee setting would fix it. Not done.
+   times what the base fee alone required. Fixed after the run: `live.js` takes `--priority-fee-gwei` (the helpers: `PRIORITY_FEE_GWEI` in `env.local.sh`), so a send pays about
+   the base fee plus that tip. The tip must be at least a tenth of the base fee, and a `--replace` ignores a small tip and pays up to
+   the whole cap, so a stuck reveal can always be rescued (`eth/README.md`). Not yet used on a live run.
 2. **The rule "claim cap ≥ 2 × base fee" is tight on mainnet when the cap is set close to the base fee.** The base fee moved by about a
    quarter within minutes (0.052 to 0.066 gwei over 20 blocks). Set the cap at 3 to 4 times the base fee seen at preparation, or the
    send is refused (safely) and time is lost.

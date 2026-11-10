@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# usage: reveal.sh [--dry-run] [--replace [TXHASH]]     Alice's reveal = her claim of the ETH. The secret goes from the sealed file (WSL)
-# over a pipe into Windows node (live.js claim --secret-stdin); never argv, never a terminal, never a file.
+# usage: reveal.sh [--dry-run] [--replace [TXHASH]]     Alice's reveal = her claim of the ETH. The secret goes from the sealed file
+# over a pipe into node (Windows node under WSL; live.js claim --secret-stdin); never argv, never a terminal, never a file.
 # live.js claim --swap FILE checks receiver, sender, amount, hashlock, the signing key (alice_receiver) and the cutoff: the earlier of
 # (T_reveal - margin) and the cutoff the intent froze, except that once the file shows the secret may already be public (a mined or
 # reorged claim) the intent's own cutoff rules (REVIEW-4 R4-3) -- so no margin flag is passed here, ever. It also refuses a fee cap
-# below 2 x the latest base fee (R4-1); set MAX_FEE_GWEI (mainnet) or GAS_PRICE_GWEI (test chains) in env.local.sh if you use one.
+# below 2 x the latest base fee (R4-1); set MAX_FEE_GWEI (mainnet) or GAS_PRICE_GWEI (test chains) in env.local.sh if you use one, and optionally PRIORITY_FEE_GWEI (the tip; env.sh).
 # --replace re-sends a STUCK claim at the same nonce with a fee raised by >= 12.5 % and >= 2 x the base fee (never a second nonce);
 # give the hash live.js printed ("sent: 0x...") as TXHASH, or leave it out and the node's pending block is searched.
 # Key file: ALICE_KEY (default keys/alice.key, relative to eth/); for mainnet set ALICE_KEY in env.local.sh to the mainnet key file.
@@ -13,7 +13,7 @@
 # saves its hash in $L/reveal-reverted-tx.txt and tick.sh / claim.sh pass it on as `--reveal-tx HASH` from then on (REVIEW-6 R6-3).
 set -u
 . "$(dirname "$0")/env.sh"
-cd "$ETH_DIR" || exit 2
+enter_eth_dir || exit 2
 N=$(date +%H%M%S)
 DRY=0; REPLACE=0; TXHASH=""
 while [ $# -gt 0 ]; do
@@ -25,9 +25,10 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+check_fee_settings || exit 2   # a tip with no cap stops here (env.sh)
 ARGS=(scripts/live.js claim --swap "$(win_path "$ALICE_FILE")" --key-file "$ALICE_KEY" --chain-id "$CHAIN")
-if [ -n "${MAX_FEE_GWEI:-}" ]; then ARGS+=(--mainnet --max-fee-gwei "$MAX_FEE_GWEI"); fi
-if [ -z "${MAX_FEE_GWEI:-}" ] && [ -n "${GAS_PRICE_GWEI:-}" ]; then ARGS+=(--gas-price-gwei "$GAS_PRICE_GWEI"); fi
+read_lines FEES fee_flags   # MAX_FEE_GWEI (--mainnet --max-fee-gwei) or GAS_PRICE_GWEI, then PRIORITY_FEE_GWEI (--priority-fee-gwei)
+if [ ${#FEES[@]} -gt 0 ]; then ARGS+=("${FEES[@]}"); fi
 if [ "$REPLACE" = 1 ]; then
   ARGS+=(--replace)
   if [ -n "$TXHASH" ]; then ARGS+=(--replace-tx "$TXHASH"); fi
@@ -53,5 +54,5 @@ if d.get("reverted") is True and isinstance(d.get("txHash"), str):
     print("!!! THE CLAIM", d["txHash"], "WAS MINED AND REVERTED: THE SECRET IS PUBLIC. Saved to", sys.argv[2], "; the next tick.sh / claim.sh pass --reveal-tx for it.")
     print("!!! Run tick.sh alice --apply now (it records that the secret is public, so a re-send is judged by the late cutoff), then decide on a re-send.")
 PY
-cp "$L/eth-claim.json" "$PUB/eth-claim.json" 2>/dev/null
+ensure_pub; cp "$L/eth-claim.json" "$PUB/eth-claim.json" 2>/dev/null
 exit $EC

@@ -1,9 +1,10 @@
 # Live-run helpers (`scripts/live/`)
 
 The shell helpers the owner's machine used for live runs 1–3 (`~/live3-tick.sh`, `~/reveal3.sh`, `~/claim3.sh`, …)
-lived only in WSL home. This folder is the versioned version, adapted to the REVIEW-3 fixes of 2026-11-05. They
-run in WSL, drive `swap-cli` for the NOID side and Windows `node` + `eth/scripts/live.js` for the
-Ethereum side through WSL interop, exactly as run 3 did (`docs/live-run-3.md`).
+lived only in WSL home. This folder is the versioned version, adapted to the REVIEW-3 fixes of 2026-11-05. Under WSL they
+drive `swap-cli` for the NOID side and Windows `node` + `eth/scripts/live.js` for the
+Ethereum side through WSL interop, exactly as run 3 did (`docs/live-run-3.md`). On macOS and Linux they run natively
+(section "On macOS or Linux (native mode)" below).
 
 **They never move funds by themselves.** Every spend is a separate command with an explicit `--submit` or a missing
 `--dry-run`, and each one needs the owner's go-ahead (`PROJECT.md`, hard rules). What runs unattended is `watch.sh`,
@@ -11,7 +12,8 @@ which only observes and records (`tick --apply` writes events and intents into t
 
 | script | role | what it does | sends anything? |
 |---|---|---|---|
-| `env.sh` | — | run number, paths, nodes, amounts; the four party addresses and the HTLC contract address have no default and come from `$L/env.local.sh` (also second nodes, another RPC) | no |
+| `env.sh` | — | run number, platform (`LIVE_PLATFORM`), paths, nodes, amounts, fee settings; the four party addresses and the HTLC contract address have no default and come from `$L/env.local.sh` (also second nodes, another RPC) | no |
+| `selftest.sh` | — | no-network self-test of the shell layer (`env.sh`: fee flags, node flags, `read_lines`, platform choice, frozen copy) in a temporary folder; prints `ok` / `FAIL` per case, exits non-zero on a failure | no |
 | `install.sh [RUN]` | — | freezes a copy of this folder under `$L/bin` (run 3 lesson: never edit a helper while a loop calls it) | no |
 | `setup.sh` | — | `$L` with a fresh passphrase (kept if present), `bob/`, `rec/`, the HTLC deployment block for `--eth-from-block` | no |
 | `prepare.sh` | both | `new-alice`, the equivalence proof (secret over a pipe), `new-bob --receipt`, the contract definition; copies the bundle and definition to `$PUB` for the owner. With `LOCK_KIND=poseidon` (`env.sh`; raw variant only; `CONTRACT` must be a `HTLCPoseidonV2` deployment) it skips the proof and the receipt, passes `--eth-lock-kind poseidon` to both tools, and `new-bob` runs the client R self-test | no |
@@ -44,6 +46,36 @@ bash ~/live-run-4/bin/watch.sh both 30 &  # both files, every 30 s, until both a
 Send the owner, at every run: the Parano1d contract root (`o1…`, printed by `prepare.sh` and in `$PUB/alice.bundle.json`),
 the Sepolia contract link, the bundle and the object file.
 
+## On macOS or Linux (native mode)
+
+**How the mode is chosen.** `env.sh` sets `LIVE_PLATFORM` to `wsl` when `wslpath` exists and `/mnt/c` is a folder, else to `native`. Force it
+with `LIVE_PLATFORM=wsl|native` in the environment or as a plain `LIVE_PLATFORM=...` line in `$L/env.local.sh` (that one line is read as text, early; the file is run once, last, as before; if the run then changes the platform, `env.sh` exits 2 instead of mixing two sets of defaults). Under `wsl` every default is the run-3 one. The helpers run under the macOS `/bin/bash` 3.2 (no `mapfile`; `env.sh` has `read_lines`).
+
+**Run `bash scripts/live/selftest.sh` first**; on a Mac this is the check under the system bash 3.2 (it prints the bash version it ran under). It needs no network, no node and no keys, and removes its temporary folder.
+
+**What differs in native mode.**
+
+| setting | wsl | native |
+|---|---|---|
+| `CURL` | `/mnt/c/Windows/System32/curl.exe` | `curl`; `node_flags` also passes `--curl-path "$CURL"` to `swap-cli` (its own default is the WSL curl.exe if that file exists, else `curl`) |
+| `NODE` | Windows `node.exe` | `node` |
+| `ETH_DIR` | `/mnt/c/Users/00/Documents/noid-swap/eth` | the repository's `eth/`, found from `env.sh`'s own place (`REPO_DIR`); a frozen copy under `$L/bin` reads `$L/repo-dir.txt`, which `install.sh` writes |
+| `PUB` | a Windows folder | `$L/pub`, plain local copies (made when a script first copies into it) |
+| `win_path` | `wslpath -w` | the path unchanged (give an absolute `L`; it is made absolute if relative) |
+| `BIN`, `EQ` | `$HOME/noid-target/release/...` | the same if present, else `swap-cli/target/release/swap-cli` and `equiv/zkvm/target/release/equiv-prove` under the repository |
+
+The object file of the Parano1d wallet CLI (`prepare.sh` end, `check-object.sh`) is made by hand: `prepare.sh` prints the instruction, and
+`check-object.sh` takes the file's path (or finds it in `$PUB`). No helper calls a Windows-only program in native mode.
+
+**Bob's side needs only** `tick.sh bob`, `watch.sh bob`, `lock.sh`, `claim.sh` and `refund-eth.sh`, plus a `bob.swap.json` made with
+`swap-cli new-bob` from Alice's bundle (put it at `$L/bob/bob.swap.json`; `prepare.sh` is Alice's script and makes both files). For
+`--transport curl` over https the Ethereum endpoint needs curl, which macOS has.
+
+**Verified so far** (2026-11-05, no network, nothing sent): `bash -n` on every script; `selftest.sh` (59 cases) from Git Bash with bash 5.3; the settings above printed from Git Bash with
+`LIVE_PLATFORM=native` (flags, paths, empty-array expansions under `set -u`); the same settings under WSL printed identically to the
+previous `env.sh`. **Not verified:** a run on a Mac, bash 3.2 itself (only bash 5 was available), the BSD tool behaviours (`base64`, `head -c`,
+`grep -E`), and any native-mode live swap.
+
 ## Two nodes (REVIEW-3 F5)
 
 Under `sepolia` and `production`, Bob's lock and Alice's reveal wait for a second, distinct node per chain unless
@@ -67,6 +99,9 @@ healthy node when you see it.
   `reveal.sh` then adds `--mainnet --max-fee-gwei N` (without it a chain-1 file is refused; on a test chain `GAS_PRICE_GWEI` does
   the same for `--gas-price-gwei`). Look at the base fee in the minute before the reveal and use at least 3 x. For mainnet also set
   `BOB_KEY` / `ALICE_KEY` in `env.local.sh` to the mainnet key files.
+- **Tip.** `PRIORITY_FEE_GWEI` (optional; `lock.sh`, `reveal.sh`, `refund-eth.sh` add `--priority-fee-gwei` after the cap) sets the priority fee, so a send
+  pays about the base fee plus the tip instead of the whole cap. On mainnet set the cap at 3–4 × the base fee and the tip small, e.g. `0.01`. It needs
+  `MAX_FEE_GWEI` or `GAS_PRICE_GWEI`; alone, `lock.sh`, `reveal.sh` and `refund-eth.sh` stop with exit 2 before `live.js` runs (`check_fee_settings`). `live.js` refuses a tip below a tenth of the latest base fee, and a lock cannot be replaced: give the lock a generous tip, for example half the base fee. It needs a `live.js` that knows the flag.
 - **Stuck claim.** A claim that sits in the mempool has already published the secret, and only Bob can use it. `live.js` prints
   `sent: 0x… nonce N …` on stderr (in `$L/eth-claim.err`) the moment it sends, before it waits for the receipt. If the claim does
   not get mined, run `reveal.sh --replace 0xHASH` with a higher `MAX_FEE_GWEI`: the same call is re-sent at the SAME nonce, both

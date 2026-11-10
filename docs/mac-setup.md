@@ -116,7 +116,7 @@ Run each from the repo root in a Terminal with the same `RUSTUP_TOOLCHAIN`. Coun
 
 | Command (folder) | Expect |
 |---|---|
-| `cd eth && npx hardhat test` | `247 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; the 4 tests of the macOS memory helper were added after it and are not yet re-run on a Mac) |
+| `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it and are not yet re-run on a Mac) |
 | `cd btc && npm ci && npm test` | 91 pass (Bitcoin is not used by an ETH swap; optional) |
 | `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 460 passing, 1 ignored |
 | `cd equiv && cargo test --release --locked` | 23 pass |
@@ -192,19 +192,28 @@ the operator key does not cover them, and `swap-cli` has no way to send a key (`
 
 ## 7. What changes in the helper scripts (`scripts/live/`)
 
-They were written for WSL: nothing in them is Mac-ready. Defaults to override, in `$L/env.local.sh`
-(`L` defaults to `$HOME/live-run-N`; `env.sh` sources that file last):
+The helpers have a native mode (`scripts/live/README.md`, section "On macOS or Linux"). `env.sh` picks it by itself when `wslpath` or
+`/mnt/c` is missing; to force it put `LIVE_PLATFORM=native` in `$L/env.local.sh` (`L` defaults to `$HOME/live-run-N`; that file is
+sourced last and overrides any setting). In native mode the defaults are:
 
-- `CURL=curl` (macOS ships `/usr/bin/curl`; with `--transport tcp` against the local node curl is not needed at all,
-  so on the Mac use `--transport tcp` for `http://127.0.0.1:9601` and `--transport curl` only for https Ethereum endpoints).
-  `env.sh` hard-codes `--transport curl` in `node_flags`; either edit your own copy or call `$BIN` directly.
-- `NODE=$(command -v node)`, `ETH_DIR=$HOME/noid-swap/eth`, `PUB=$HOME/live-run-N-public` (any folder you may share).
-- `BIN` and `EQ` to the paths of section 3. `NOID_RPC=http://127.0.0.1:9601`.
-- `win_path()` uses `wslpath -w`, which does not exist on a Mac. `lock.sh`, `reveal.sh`, `refund-eth.sh` call `live.js --swap FILE`
-  through it. Replace the function body with `echo "$1"` in your `env.local.sh` (a plain path is right for a native node; `live.js` reads it directly).
-- `WSLENV` lines are harmless. `mapfile` (used in `tick.sh`) needs bash 4; macOS bash is 3.2. Install `brew install bash`
-  and run the helpers with it (`/opt/homebrew/bin/bash` or `/usr/local/bin/bash`). `python3` is used by `tick.sh`; `python3 --version` should work after the Xcode tools.
-- Everything above is **UNVERIFIED**: the scripts were only run under WSL. If one stops with `command not found` or `bad substitution`, it is almost always bash 3.2.
+- `CURL=curl` (macOS ships `/usr/bin/curl`). `node_flags` keeps `--transport curl` (it also does https, which the Ethereum endpoint needs) and adds
+  `--curl-path "$CURL"`; `swap-cli` would pick plain `curl` on its own when the WSL curl.exe path does not exist.
+- `NODE=node` (Homebrew), `ETH_DIR` = the repository's `eth/` (found from `env.sh`'s own place; the copy that `install.sh` freezes under
+  `$L/bin` reads `$L/repo-dir.txt`), `PUB=$L/pub` (a plain local folder, made on first use).
+- `BIN` and `EQ` are `$HOME/noid-target/release/...` when those exist, else the section 3 paths `swap-cli/target/release/swap-cli` and
+  `equiv/zkvm/target/release/equiv-prove` inside the repository. `NOID_RPC=http://127.0.0.1:9601` is the default and stays.
+- `win_path` returns the path unchanged (a native node reads it directly), so `lock.sh`, `reveal.sh`, `refund-eth.sh` work with `live.js --swap FILE`.
+- The scripts avoid `mapfile`, `grep -P`, `ls --time-style` and the other bash 4 / GNU-only forms, and expand possibly empty arrays in the
+  bash 3.2 safe way, so the macOS `/bin/bash` works; `brew install bash` is no longer needed. `python3` is used by `setup.sh`, `prepare.sh`, `tick.sh`,
+  `reveal.sh`; `python3 --version` should work after the Xcode tools. `WSLENV` lines are harmless.
+- Bob needs only `tick.sh bob`, `watch.sh bob`, `lock.sh`, `claim.sh`, `refund-eth.sh`, plus a `bob.swap.json` made with `swap-cli new-bob` from
+  Alice's bundle (put it at `$L/bob/bob.swap.json`). `prepare.sh` is Alice's script. The wallet CLI step (`contract create`) is not run by any helper:
+  `prepare.sh` prints it as a by-hand step in native mode, and `check-object.sh` takes the path of the object file.
+- Optional `PRIORITY_FEE_GWEI` (the tip) next to `MAX_FEE_GWEI`: on mainnet set the cap at 3–4 x the base fee and the tip small, e.g. `0.01`.
+- **UNVERIFIED on a Mac.** What was checked, off the Mac and without any network: `bash -n` on every script, and the printed settings under bash 5 in
+  native mode (Git Bash on Windows) and in WSL mode (identical to the earlier `env.sh`). Not checked: bash 3.2 itself, the BSD versions of
+  `base64`, `head -c`, `grep -E`, and any run of a helper on the Mac. If one stops with `command not found`, `bad substitution` or `unbound variable`, it is almost
+  always bash 3.2 or a missing tool.
 - Public Ethereum endpoints and the Sepolia key steps are in `runbook-two-party.md` section 2, Bob steps 7 and 8, and `eth/README.md`.
 
 ## 8. Ready check (read-only)

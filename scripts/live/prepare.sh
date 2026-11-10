@@ -16,7 +16,7 @@ case "$LOCK_KIND" in sha256|poseidon) ;; *) echo "LOCK_KIND must be sha256 or po
 [ -f "$ALICE_FILE" ] && { echo "$ALICE_FILE exists; refusing"; exit 3; }
 load_passphrase || exit 2
 require_parties || exit 2
-rpc() { echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" | $CURL -s -m 10 -X POST "$NOID_RPC" -H 'content-type: application/json' --data-binary @- | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"])'; }
+rpc() { echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$1\",\"params\":$2}" | "$CURL" -s -m 10 -X POST "$NOID_RPC" -H 'content-type: application/json' --data-binary @- | python3 -c 'import sys,json;print(json.load(sys.stdin)["result"])'; }
 TIP=$(rpc paranoid_blockCount '[]') || { echo "node not answering at $NOID_RPC"; exit 5; }
 FEE=$(rpc paranoid_estimateFee '[1,1]'); [ "$FEE" -ge 5800 ] 2>/dev/null || FEE=5800
 HC=$((TIP+HC_LEAD))
@@ -26,7 +26,7 @@ echo "tip $TIP, fee estimate $FEE, planned h_create $HC"
   --eth-receiver "$ALICE_ETH" --eth-sender "$BOB_ETH" --profile "$PROFILE" --variant "$VARIANT" --contract-version "$CONTRACT_VERSION" \
   --eth-lock-kind "$LOCK_KIND" > "$L/alice.bundle.json" 2> "$L/new-alice.err"; echo "new-alice exit $?"; head -3 "$L/new-alice.err"
 [ -s "$L/alice.bundle.json" ] || { echo "no bundle; stop"; exit 6; }
-cp "$L/alice.bundle.json" "$PUB/alice.bundle.json" 2>/dev/null && echo "bundle copied to $PUB (send it to the owner)"
+ensure_pub; cp "$L/alice.bundle.json" "$PUB/alice.bundle.json" 2>/dev/null && echo "bundle copied to $PUB (send it to the owner)"
 python3 - "$L/alice.bundle.json" <<'PY'
 import sys, json; b = json.load(open(sys.argv[1]))
 print("hashlock:", b["hashlock"]); print("claim_authority:", b["claim_authority"]); print("contract_root:", b["contract_root"])
@@ -52,7 +52,7 @@ fi
 echo "== $BOB_NOTE"
 "$BIN" new-bob --bundle "$L/alice.bundle.json" --out "$BOB_FILE" --bob "$BOB_NOID" --amount "$AMOUNT" \
   --eth-chain-id "$CHAIN" --eth-contract "$CONTRACT" --eth-amount-wei "$WEI" --eth-sender "$BOB_ETH" \
-  --profile "$PROFILE" --contract-version "$CONTRACT_VERSION" "${PROOF_ARGS[@]}" \
+  --profile "$PROFILE" --contract-version "$CONTRACT_VERSION" ${PROOF_ARGS[@]+"${PROOF_ARGS[@]}"} \
   2>&1 | grep -E 'bundle checked|receipt|self-test|swap file written|error|refus' | head -8
 echo "new-bob exit ${PIPESTATUS[0]}"
 "$BIN" status "$BOB_FILE" | grep -E '"(phase|profile|deadline_height|lock_by_height)"'
@@ -60,5 +60,9 @@ echo "== definition"
 "$BIN" alice-params "$ALICE_FILE" --definition-out "$L/swap.def.json" --params-out "$L/swap.params.json" 2>&1 | grep -E 'written|^Fund|^Before' | head -4
 cp "$L/swap.def.json" "$PUB/swap.def.json" 2>/dev/null && echo "def copied to $PUB"
 echo "tip now $(rpc paranoid_blockCount '[]') (planned h_create $HC)"
-echo "== next (Windows): parano1d-cli contract create swap.def.json --out swap.object.json; then check-object.sh; the funding needs the owner's go-ahead"
+if [ "$LIVE_PLATFORM" = native ]; then
+  echo "== next (by hand, on the machine that holds the wallet): with the Parano1d wallet CLI run 'parano1d-cli contract create swap.def.json --out swap.object.json' on $PUB/swap.def.json, put swap.object.json in $PUB, then check-object.sh; the funding needs the owner's go-ahead"
+else
+  echo "== next (Windows): parano1d-cli contract create swap.def.json --out swap.object.json; then check-object.sh; the funding needs the owner's go-ahead"
+fi
 echo "== end $(date +%T)"

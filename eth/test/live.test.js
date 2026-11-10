@@ -2105,6 +2105,463 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
     });
   });
 
+  // ------------------------------------------------------------------ the tip: --priority-fee-gwei
+  describe("--priority-fee-gwei: the tip is chosen by the operator, the cap stays the cap", () => {
+    const MAIN = { mainnet: true };
+    const TIP = "0.01";
+    const tipWei = ethers.parseUnits(TIP, "gwei");
+    const BASE = 60_000_000n; // 0.06 gwei: the base fee of the first mainnet run
+    const gwei = (s) => ethers.parseUnits(s, "gwei");
+    const setBaseWei = async (wei) => {
+      await provider.send("hardhat_setNextBlockBaseFeePerGas", ["0x" + BigInt(wei).toString(16)]);
+      await provider.send("evm_mine", []);
+    };
+    /** [maxFeePerGas, maxPriorityFeePerGas] of a mined transaction. */
+    const feesOf = async (hash) => {
+      const tx = await provider.getTransaction(hash);
+      return [tx.maxFeePerGas, tx.maxPriorityFeePerGas];
+    };
+    const sendTo = (node, extra) => live.send(node, alice, { to: carolAddr, amountWei: "1", ...extra });
+    beforeEach(async () => {
+      await setBaseWei(BASE); // a cap below 1 gwei must clear the base fee for the node to take the transaction
+    });
+
+    it("is applied by lock, claim, refund and send on chain 1: maxPriorityFeePerGas is the flag, maxFeePerGas the cap", async () => {
+      const net = asChain1();
+      const flags = { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: TIP };
+      const cap = gwei("0.2");
+      // lock
+      const t1 = (await latestTs()) + 2 * HOUR;
+      const h2 = sha256Raw(rand32());
+      const lk = await live.lock(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...flags });
+      expect(await feesOf(lk.txHash)).to.deep.equal([cap, tipWei]);
+      expect(lk.feeCheck).to.include({ priorityFeeGwei: TIP, maxFeeGwei: "0.2" });
+      // claim
+      const l = await makeLock();
+      await setBaseWei(BASE);
+      const c = await live.claim(net, alice, { swap: swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) }), secret: preimage, ...flags });
+      expect(await feesOf(c.txHash)).to.deep.equal([cap, tipWei]);
+      expect(c.feeCheck.priorityFeeGwei).to.equal(TIP);
+      // refund (a plain test-chain lock made by bob, aged past its timelock)
+      const h3 = sha256Raw(rand32());
+      const t3 = (await latestTs()) + HOUR;
+      const l3 = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: h3, tReveal: String(t3), receiver: aliceAddr, amountWei: amount.toString() });
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await setBaseWei(BASE);
+      const rf = await live.refund(net, bob, { swap: swapFile({ chain: 1, hash: h3, intent: refundIntent(l3.lockId) }), ...flags });
+      expect(await feesOf(rf.txHash)).to.deep.equal([cap, tipWei]);
+      expect(rf.feeCheck.priorityFeeGwei).to.equal(TIP);
+      // send (no base-fee check, same fee fields)
+      expect(await feesOf((await sendTo(net, flags)).txHash)).to.deep.equal([cap, tipWei]);
+      // a tip equal to the cap is allowed
+      expect(await feesOf((await sendTo(net, { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.2" })).txHash)).to.deep.equal([cap, cap]);
+    });
+
+    it("is applied with --gas-price-gwei on a test chain, and the flag is on exactly deploy, send, lock, claim and refund", async () => {
+      expect(await feesOf((await sendTo(provider, { gasPriceGwei: "2", priorityFeeGwei: TIP })).txHash)).to.deep.equal([gwei("2"), tipWei]);
+      const l = await makeLock();
+      await setBaseWei(BASE);
+      const c = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, gasPriceGwei: "2", priorityFeeGwei: TIP });
+      expect(await feesOf(c.txHash)).to.deep.equal([gwei("2"), tipWei]);
+      for (const cmd of ["deploy", "send", "lock", "claim", "refund"]) {
+        expect(live.parseArgs([cmd, "--priority-fee-gwei", "0.5"]).args, cmd).to.deep.equal({ priorityFeeGwei: "0.5" });
+        expect(() => live.parseArgs([cmd, "--priority-fee-gwei"]), cmd).to.throw(/needs a value/);
+      }
+      for (const cmd of ["balance", "status", "keygen"]) expect(() => live.parseArgs([cmd, "--priority-fee-gwei", "0.5"]), cmd).to.throw(/unknown flag --priority-fee-gwei/);
+    });
+
+    it("a tip above the cap is refused (every signing command, dry run or not), nothing is sent", async () => {
+      const net = asChain1();
+      const re = /--priority-fee-gwei 0\.3 gwei is above the fee cap 0\.2 gwei; the tip cannot exceed the cap; refusing/;
+      const n = await nonce(aliceAddr, "pending");
+      const bad = { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.3" };
+      await expect(sendTo(net, bad)).to.be.rejectedWith(re);
+      await expect(live.deploy(net, alice, { ...bad, dryRun: true })).to.be.rejectedWith(re);
+      const l = await makeLock();
+      const nb = await nonce(bobAddr, "pending"); // after Bob's own lock
+      for (const dryRun of [true, false]) {
+        await expect(live.claim(net, alice, { swap: swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) }), secret: preimage, dryRun, ...bad }), `claim ${dryRun}`).to.be.rejectedWith(re);
+        await expect(live.refund(net, bob, { swap: swapFile({ chain: 1, intent: refundIntent(l.lockId) }), dryRun, ...bad }), `refund ${dryRun}`).to.be.rejectedWith(re);
+        const h2 = sha256Raw(rand32());
+        await expect(live.lock(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent((await latestTs()) + 2 * HOUR, h2) }), dryRun, ...bad }), `lock ${dryRun}`).to.be.rejectedWith(re);
+      }
+      // on a test chain the cap is --gas-price-gwei
+      await expect(sendTo(provider, { gasPriceGwei: "2", priorityFeeGwei: "3" })).to.be.rejectedWith(/--priority-fee-gwei 3\.0 gwei is above the fee cap 2\.0 gwei/);
+      await expect(live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true, gasPriceGwei: "2", priorityFeeGwei: "3" })).to.be.rejectedWith(/is above the fee cap 2\.0 gwei/);
+      expect(await nonce(aliceAddr, "pending")).to.equal(n);
+      expect(await nonce(bobAddr, "pending")).to.equal(nb); // the lock and refund refusals sent nothing from Bob either
+    });
+
+    it("a malformed tip is refused like a malformed cap: 0, negative, 10 decimals, text, empty", async () => {
+      const net = asChain1();
+      const n = await nonce(aliceAddr, "pending");
+      for (const zero of ["0", "0.0", "0.000000000"]) {
+        await expect(sendTo(net, { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: zero }), zero).to.be.rejectedWith(/--priority-fee-gwei must be > 0/);
+      }
+      for (const bad of ["-1", "-0.01", "0.0000000001", "abc", "1e3", "0x10", ".5", "1.", "5 gwei", ""]) {
+        for (const flags of [{ ...MAIN, maxFeeGwei: "0.2" }, { gasPriceGwei: "2" }]) {
+          await expect(sendTo(flags.mainnet ? net : provider, { ...flags, priorityFeeGwei: bad }), `${JSON.stringify(bad)} ${JSON.stringify(flags)}`).to.be.rejectedWith(/--priority-fee-gwei must be a positive decimal number of gwei \(at most 9 decimals\)/);
+        }
+      }
+      // nine decimals are fine
+      await sendTo(net, { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.000000001" });
+      expect(await nonce(aliceAddr, "pending")).to.equal(n + 1);
+    });
+
+    it("is refused without a cap flag: on a test chain without --gas-price-gwei, and under --mainnet without --max-fee-gwei", async () => {
+      const n = await nonce(aliceAddr, "pending");
+      const re = /--priority-fee-gwei needs a fee cap to sit under \(--max-fee-gwei with --mainnet, or --gas-price-gwei on a test network\); refusing/;
+      await expect(sendTo(provider, { priorityFeeGwei: TIP })).to.be.rejectedWith(re);
+      await expect(live.deploy(provider, alice, { priorityFeeGwei: TIP, dryRun: true })).to.be.rejectedWith(re);
+      const l = await makeLock();
+      await expect(live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true, priorityFeeGwei: TIP })).to.be.rejectedWith(re);
+      await expect(live.refund(provider, bob, { ...tgt, contract: htlcAddr, lockId: l.lockId, dryRun: true, priorityFeeGwei: TIP })).to.be.rejectedWith(re);
+      await expect(sendTo(asChain1(), { ...MAIN, priorityFeeGwei: TIP })).to.be.rejectedWith(/missing required --max-fee-gwei/);
+      // --max-fee-gwei without --mainnet keeps its own refusal
+      await expect(sendTo(provider, { maxFeeGwei: "1", priorityFeeGwei: TIP })).to.be.rejectedWith(/--max-fee-gwei is only accepted together with --mainnet/);
+      expect(await nonce(aliceAddr, "pending")).to.equal(n);
+    });
+
+    it("without the flag the tip is exactly min(cap, 1 gwei): a cap below 1 gwei is the tip, a cap above it gets 1 gwei", async () => {
+      const net = asChain1();
+      for (const [cap, tip] of [["0.5", "0.5"], ["0.2", "0.2"], ["1", "1"], ["1.5", "1"], ["5", "1"]]) {
+        expect(await feesOf((await sendTo(net, { ...MAIN, maxFeeGwei: cap })).txHash), `mainnet cap ${cap}`).to.deep.equal([gwei(cap), gwei(tip)]);
+      }
+      for (const [cap, tip] of [["0.5", "0.5"], ["5", "1"]]) {
+        expect(await feesOf((await sendTo(provider, { gasPriceGwei: cap })).txHash), `test chain cap ${cap}`).to.deep.equal([gwei(cap), gwei(tip)]);
+      }
+      // lock and claim go through feePlan: the same tip, and the report names it
+      const t1 = (await latestTs()) + 2 * HOUR;
+      const h2 = sha256Raw(rand32());
+      const lk = await live.lock(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...MAIN, maxFeeGwei: "5" });
+      expect(await feesOf(lk.txHash)).to.deep.equal([gwei("5"), gwei("1")]);
+      expect(lk.feeCheck.priorityFeeGwei).to.equal("1.0");
+      const l = await makeLock();
+      await setBaseWei(BASE);
+      const dry = await live.claim(net, alice, { swap: swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) }), secret: preimage, dryRun: true, ...MAIN, maxFeeGwei: "0.2" });
+      expect(dry.feeCheck.priorityFeeGwei).to.equal("0.2");
+      expect(dry.priorityFeeGwei).to.equal("0.2");
+    });
+
+    it("the dry run reports the tip and what one gas will cost: min(cap, base fee + tip); the worst case stays cap x gas", async () => {
+      const net = asChain1();
+      const l = await makeLock();
+      const h2 = sha256Raw(rand32());
+      const t1 = (await latestTs()) + 2 * HOUR;
+      const lockSwap = swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) });
+      const claimSwap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      // the first mainnet run: cap 0.2, base fee 0.06, tip 0.01 -> 0.07 per gas
+      await setBaseWei(BASE);
+      const flags = { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: TIP, dryRun: true };
+      const cl = await live.claim(net, alice, { swap: claimSwap, secret: preimage, ...flags });
+      expect(cl.feeCheck).to.include({ baseFeeGwei: "0.06", maxFeeGwei: "0.2", priorityFeeGwei: "0.01", expectedGasPriceGwei: "0.07", minRatio: "2" });
+      expect(cl.priorityFeeGwei).to.equal("0.01");
+      expect(cl.maxFeeGwei).to.equal("0.2");
+      expect(cl.worstCaseFeeWei).to.equal((BigInt(cl.gasLimit) * gwei("0.2")).toString());
+      const lk = await live.lock(net, bob, { swap: lockSwap, ...flags });
+      expect(lk.feeCheck).to.include({ priorityFeeGwei: "0.01", expectedGasPriceGwei: "0.07" });
+      expect(lk.priorityFeeGwei).to.equal("0.01");
+      expect(lk.worstCaseFeeWei).to.equal((BigInt(lk.gasEstimate) * gwei("0.2")).toString());
+      // the claim dry run without the secret carries the tip too
+      const noSecret = await live.claim(net, alice, { swap: claimSwap, ...flags });
+      expect(noSecret.priorityFeeGwei).to.equal("0.01");
+      expect(noSecret.feeCheck.expectedGasPriceGwei).to.equal("0.07");
+      // the same call without the flag pays the whole cap (the tip is min(cap, 1 gwei) = 0.2): the old behaviour, now visible
+      const old = await live.claim(net, alice, { swap: claimSwap, secret: preimage, ...MAIN, maxFeeGwei: "0.2", dryRun: true });
+      expect(old.feeCheck).to.include({ priorityFeeGwei: "0.2", expectedGasPriceGwei: "0.2" });
+      // when base fee + tip is above the cap, one gas costs the cap
+      await setBaseWei(190_000_000n); // 0.19 gwei
+      const capped = await live.lock(net, bob, { swap: lockSwap, ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.05", dryRun: true });
+      expect(capped.feeCheck).to.include({ baseFeeGwei: "0.19", priorityFeeGwei: "0.05", expectedGasPriceGwei: "0.2" });
+      // a test chain with a cap reports it too; with no cap there is no fee report
+      await setBaseWei(BASE);
+      const tc = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true, gasPriceGwei: "2", priorityFeeGwei: TIP });
+      expect(tc.feeCheck).to.include({ priorityFeeGwei: "0.01", expectedGasPriceGwei: "0.07" });
+    });
+
+    // ---- --replace: a replacement is a rescue. Its tip is max(max(flag, min(cap, 1 gwei)), old tip x 1.125), never above the cap.
+    const claimData = (lockId) => new ethers.Interface(ABI()).encodeFunctionData("claim", [lockId, preimage]);
+    const refundData = (lockId) => new ethers.Interface(ABI()).encodeFunctionData("refund", [lockId]);
+    /** Leave a transaction in the node's pool: automine off, then send. */
+    const stuck = async (signer, data, maxFee, tip) => {
+      await provider.send("evm_setAutomine", [false]);
+      return signer.sendTransaction({ to: htlcAddr, data, maxFeePerGas: maxFee, maxPriorityFeePerGas: tip });
+    };
+    /** Run a real send while automine is off: wait until it has been sent (onSent), mine one block, return its result. */
+    const sendAndMine = async (run) => {
+      let sent;
+      const sentP = new Promise((r) => (sent = r));
+      const p = run({ onSent: sent });
+      await Promise.race([sentP, p.catch(() => {})]);
+      await provider.send("evm_mine", []);
+      return p;
+    };
+
+    /** A second lock of Bob (own hashlock) with a one-hour timelock: it is made refundable by moving the clock past it. */
+    const refundableLock = async () => {
+      const hash = sha256Raw(rand32());
+      const t = (await latestTs()) + HOUR;
+      const lk = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: hash, tReveal: String(t), receiver: aliceAddr, amountWei: amount.toString() });
+      return { hash, ...lk };
+    };
+
+    it("--replace, cap below 1 gwei, small flag: the replacement tips min(cap, 1 gwei) = the whole cap, not the flag (claim)", async () => {
+      const net = asChain1();
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBaseWei(BASE);
+      const n0 = await nonce(aliceAddr);
+      // the first claim: cap 0.3, tip 0.01 (an operator's tip too small to be taken)
+      const old = await stuck(alice, claimData(l.lockId), gwei("0.3"), tipWei);
+      const rep = { swap, secret: preimage, replace: true, replaceTx: old.hash, ...MAIN, maxFeeGwei: "0.5", priorityFeeGwei: "0.001" };
+      // dry run: the report shows the same tip everywhere
+      const dry = await live.claim(net, alice, { ...rep, dryRun: true });
+      expect(dry.replace).to.include({ nonce: n0, oldTipGwei: "0.01", newMaxFeeGwei: "0.5", newTipGwei: "0.5" });
+      expect(dry.feeCheck).to.include({ priorityFeeGwei: "0.5", expectedGasPriceGwei: "0.5", maxFeeGwei: "0.5" });
+      expect(dry.feeCheck).to.not.have.property("minPriorityFeeGwei"); // the floor is not applied to a replacement (0.001 is below it)
+      expect(dry.priorityFeeGwei).to.equal("0.5");
+      // the real replacement, read back from the chain
+      const r = await sendAndMine((o) => live.claim(net, alice, { ...rep, ...o }));
+      const mined = await provider.getTransaction(r.txHash);
+      expect([mined.maxFeePerGas, mined.maxPriorityFeePerGas]).to.deep.equal([gwei("0.5"), gwei("0.5")]);
+      expect(mined.nonce).to.equal(n0);
+      expect(await provider.getTransactionReceipt(old.hash)).to.equal(null);
+      expect(r.replace).to.include({ newTipGwei: "0.5" });
+      expect(await nonce(aliceAddr)).to.equal(n0 + 1);
+    });
+
+    it("--replace, cap below 1 gwei, small flag: the same for a refund", async () => {
+      const net = asChain1();
+      const l = await makeLock({ ttl: HOUR });
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      await setBaseWei(BASE);
+      const n0 = await nonce(bobAddr);
+      const old = await stuck(bob, refundData(l.lockId), gwei("0.3"), tipWei);
+      const swap = swapFile({ chain: 1, intent: refundIntent(l.lockId) });
+      const rep = { swap, replace: true, replaceTx: old.hash, ...MAIN, maxFeeGwei: "0.5", priorityFeeGwei: "0.001" };
+      const dry = await live.refund(net, bob, { ...rep, dryRun: true });
+      expect(dry.replace).to.include({ nonce: n0, newMaxFeeGwei: "0.5", newTipGwei: "0.5" });
+      expect(dry.feeCheck).to.include({ priorityFeeGwei: "0.5", expectedGasPriceGwei: "0.5" });
+      const r = await sendAndMine((o) => live.refund(net, bob, { ...rep, ...o }));
+      const mined = await provider.getTransaction(r.txHash);
+      expect([mined.maxFeePerGas, mined.maxPriorityFeePerGas]).to.deep.equal([gwei("0.5"), gwei("0.5")]);
+      expect(mined.nonce).to.equal(n0);
+      expect(await provider.getTransactionReceipt(old.hash)).to.equal(null);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("refunded");
+    });
+
+    it("--replace, cap above 1 gwei: the tip is max(flag, 1 gwei, old tip + 12.5 %); a flag above 1 gwei is used, a smaller one is not", async () => {
+      const net = asChain1();
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBaseWei(BASE);
+      const n0 = await nonce(aliceAddr);
+      const old = await stuck(alice, claimData(l.lockId), 3n * GWEI, gwei("0.1"));
+      const rep = { swap, secret: preimage, replace: true, replaceTx: old.hash, ...MAIN, maxFeeGwei: "4" };
+      // a flag below the rule min(4, 1) = 1 gwei (and below old tip + 12.5 % = 0.1125 for the first two): the rule rules
+      for (const f of ["0.001", "0.05", "0.5"]) {
+        const dry = await live.claim(net, alice, { ...rep, dryRun: true, priorityFeeGwei: f });
+        expect(dry.replace, f).to.include({ nonce: n0, oldTipGwei: "0.1", newMaxFeeGwei: "4.0", newTipGwei: "1.0" });
+        expect(dry.feeCheck, f).to.include({ priorityFeeGwei: "1.0", expectedGasPriceGwei: "1.06" });
+      }
+      // no flag: the same rule
+      expect((await live.claim(net, alice, { ...rep, dryRun: true })).replace).to.include({ newTipGwei: "1.0" });
+      // a flag above 1 gwei: the flag
+      const dry = await live.claim(net, alice, { ...rep, dryRun: true, priorityFeeGwei: "2" });
+      expect(dry.replace).to.include({ newMaxFeeGwei: "4.0", newTipGwei: "2.0" });
+      expect(dry.feeCheck).to.include({ priorityFeeGwei: "2.0", expectedGasPriceGwei: "2.06" });
+      // a flag above the cap is refused, dry run or not, and nothing is sent
+      for (const dryRun of [true, false]) {
+        await expect(live.claim(net, alice, { ...rep, dryRun, priorityFeeGwei: "4.5" })).to.be.rejectedWith(/--priority-fee-gwei 4\.5 gwei is above the fee cap 4\.0 gwei/);
+      }
+      expect(await nonce(aliceAddr, "pending")).to.equal(n0 + 1);
+      // the real replacement carries the flag's tip and the new cap
+      const r = await sendAndMine((o) => live.claim(net, alice, { ...rep, priorityFeeGwei: "2", ...o }));
+      const mined = await provider.getTransaction(r.txHash);
+      expect([mined.maxFeePerGas, mined.maxPriorityFeePerGas]).to.deep.equal([4n * GWEI, 2n * GWEI]);
+      expect(mined.nonce).to.equal(n0);
+      expect(await provider.getTransactionReceipt(old.hash)).to.equal(null);
+      expect(await nonce(aliceAddr)).to.equal(n0 + 1);
+    });
+
+    it("--replace: old tip + 12.5 % still rules when it is the largest", async () => {
+      const net = asChain1();
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBaseWei(BASE);
+      // old tip 2 gwei under cap 3: the bump 2.25 beats the rule (1) and a small flag
+      const old = await stuck(alice, claimData(l.lockId), 3n * GWEI, 2n * GWEI);
+      const rep = { swap, secret: preimage, replace: true, replaceTx: old.hash, ...MAIN, maxFeeGwei: "4", dryRun: true };
+      const dry = await live.claim(net, alice, { ...rep, priorityFeeGwei: "0.001" });
+      expect(dry.replace).to.include({ oldTipGwei: "2.0", newMaxFeeGwei: "4.0", newTipGwei: "2.25" });
+      expect(dry.feeCheck).to.include({ priorityFeeGwei: "2.25" });
+      // a flag above the bump beats it
+      expect((await live.claim(net, alice, { ...rep, priorityFeeGwei: "3" })).replace).to.include({ newTipGwei: "3.0" });
+    });
+
+    it("--replace: the replacement tip may equal the cap (old tip = old cap, new cap = old cap + 12.5 %); the 'tip above the cap' refusal is not reachable from a valid pending transaction", async () => {
+      // The flag and min(cap, 1 gwei) are at most the cap by construction, and old tip <= old cap, so old tip + 12.5 % <= old cap + 12.5 %,
+      // which the cap check enforces first. The boundary is the nearest case: it is accepted, and one wei less is refused on the cap.
+      const net = asChain1();
+      const l = await makeLock();
+      const swap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBaseWei(BASE);
+      const old = await stuck(alice, claimData(l.lockId), gwei("0.4"), gwei("0.4"));
+      const rep = { swap, secret: preimage, replace: true, replaceTx: old.hash, ...MAIN, maxFeeGwei: "0.45", dryRun: true };
+      const dry = await live.claim(net, alice, rep);
+      expect(dry.replace).to.include({ oldMaxFeeGwei: "0.4", oldTipGwei: "0.4", newMaxFeeGwei: "0.45", newTipGwei: "0.45" });
+      expect(dry.feeCheck).to.include({ priorityFeeGwei: "0.45", expectedGasPriceGwei: "0.45" });
+      await expect(live.claim(net, alice, { ...rep, maxFeeGwei: "0.449999999" })).to.be.rejectedWith(/--replace: the new fee cap 0\.449999999 gwei is below the minimum 0\.45 gwei/);
+    });
+
+    // ---- the floor: a typed tip below a tenth of the latest base fee is refused (lock, claim, refund)
+    it("floor: a tip below base fee / 10 (rounded up to a wei) is refused on lock, claim and refund, dry run or real; nothing is sent", async () => {
+      const net = asChain1();
+      const l = await makeLock(); // for the claims (two hours)
+      const rl = await refundableLock(); // for the refunds (one hour)
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      const h2 = sha256Raw(rand32());
+      const lockSwap = swapFile({ chain: 1, hash: h2, intent: lockIntent((await latestTs()) + 2 * HOUR, h2) });
+      const claimSwap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const refundSwap = swapFile({ chain: 1, hash: rl.hash, intent: refundIntent(rl.lockId) });
+      await setBaseWei(BASE); // floor 0.006 gwei
+      const [na, nb] = [await nonce(aliceAddr, "pending"), await nonce(bobAddr, "pending")];
+      const re = /refusing: --priority-fee-gwei 0\.005999999 gwei is below a tenth of the latest base fee \(0\.06 gwei in block \d+\): such a tip can leave the transaction pending; give at least 0\.006 gwei or drop the flag; refusing/;
+      const bad = { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.005999999" };
+      for (const dryRun of [true, false]) {
+        await expect(live.lock(net, bob, { swap: lockSwap, dryRun, ...bad }), `lock ${dryRun}`).to.be.rejectedWith(re);
+        await expect(live.claim(net, alice, { swap: claimSwap, secret: preimage, dryRun, ...bad }), `claim ${dryRun}`).to.be.rejectedWith(re);
+        if (dryRun) await expect(live.claim(net, alice, { swap: claimSwap, dryRun, ...bad }), "claim without secret").to.be.rejectedWith(re); // a real claim needs the secret first
+        await expect(live.refund(net, bob, { swap: refundSwap, dryRun, ...bad }), `refund ${dryRun}`).to.be.rejectedWith(re);
+      }
+      // the same on a test chain with --gas-price-gwei
+      await expect(live.refund(provider, bob, { ...tgt, contract: htlcAddr, lockId: rl.lockId, gasPriceGwei: "2", priorityFeeGwei: "0.005999999" })).to.be.rejectedWith(re);
+      expect([await nonce(aliceAddr, "pending"), await nonce(bobAddr, "pending")]).to.deep.equal([na, nb]);
+    });
+
+    it("floor: a tip exactly at base fee / 10 is accepted and reported as feeCheck.minPriorityFeeGwei; the floor rounds up; the real transactions carry the tip", async () => {
+      const net = asChain1();
+      const l = await makeLock(); // for the claims (two hours)
+      const rl = await refundableLock(); // for the refunds (one hour)
+      await provider.send("evm_increaseTime", [HOUR + 5]);
+      await provider.send("evm_mine", []);
+      const h2 = sha256Raw(rand32());
+      const lockSwap = swapFile({ chain: 1, hash: h2, intent: lockIntent((await latestTs()) + 2 * HOUR, h2) });
+      const claimSwap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const refundSwap = swapFile({ chain: 1, hash: rl.hash, intent: refundIntent(rl.lockId) });
+      const at = { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.006" };
+      // rounding: base fee 60,000,005 wei -> floor 6,000,001 wei, so 6,000,000 wei is refused and the message names the rounded-up floor
+      await setBaseWei(60_000_005n);
+      await expect(live.lock(net, bob, { swap: lockSwap, dryRun: true, ...at })).to.be.rejectedWith(/is below a tenth of the latest base fee \(0\.060000005 gwei in block \d+\).*give at least 0\.006000001 gwei/);
+      expect((await live.lock(net, bob, { swap: lockSwap, dryRun: true, ...at, priorityFeeGwei: "0.006000001" })).feeCheck.minPriorityFeeGwei).to.equal("0.006000001");
+      // exactly at the floor: dry runs of all three
+      await setBaseWei(BASE);
+      for (const [cmd, run] of [
+        ["lock", () => live.lock(net, bob, { swap: lockSwap, dryRun: true, ...at })],
+        ["claim", () => live.claim(net, alice, { swap: claimSwap, secret: preimage, dryRun: true, ...at })],
+        ["claim without secret", () => live.claim(net, alice, { swap: claimSwap, dryRun: true, ...at })],
+        ["refund", () => live.refund(net, bob, { swap: refundSwap, dryRun: true, ...at })],
+      ]) {
+        const r = await run();
+        expect(r.feeCheck, cmd).to.include({ baseFeeGwei: "0.06", priorityFeeGwei: "0.006", minPriorityFeeGwei: "0.006", expectedGasPriceGwei: "0.066" });
+      }
+      // real ones, read back from the chain (the lock first, the base fee set again before each)
+      const lk = await live.lock(net, bob, { swap: lockSwap, ...at });
+      expect(await feesOf(lk.txHash)).to.deep.equal([gwei("0.2"), gwei("0.006")]);
+      expect(lk.feeCheck.minPriorityFeeGwei).to.equal("0.006");
+      await setBaseWei(BASE);
+      const rf = await live.refund(net, bob, { swap: refundSwap, ...at });
+      expect(await feesOf(rf.txHash)).to.deep.equal([gwei("0.2"), gwei("0.006")]);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: rl.lockId })).state).to.equal("refunded");
+    });
+
+    it("floor: never above the tip used without the flag, min(cap, 1 gwei): at a base fee above 10 gwei a typed 1 gwei is taken, less is refused", async () => {
+      const net = asChain1();
+      const h2 = sha256Raw(rand32());
+      const lockSwap = swapFile({ chain: 1, hash: h2, intent: lockIntent((await latestTs()) + 2 * HOUR, h2) });
+      const at = { ...MAIN, maxFeeGwei: "60" };
+      await setBaseWei(gwei("20"));
+      const ok = await live.lock(net, bob, { swap: lockSwap, dryRun: true, ...at, priorityFeeGwei: "1" });
+      expect(ok.feeCheck).to.include({ baseFeeGwei: "20.0", priorityFeeGwei: "1.0", minPriorityFeeGwei: "1.0", expectedGasPriceGwei: "21.0" });
+      await setBaseWei(gwei("20"));
+      await expect(live.lock(net, bob, { swap: lockSwap, dryRun: true, ...at, priorityFeeGwei: "0.999999999" })).to.be.rejectedWith(
+        /is below a tenth of the latest base fee \(20\.0 gwei in block \d+\).*give at least 1\.0 gwei/
+      );
+      await setBaseWei(BASE);
+    });
+
+    it("floor: a claim at the floor is mined with that tip; there is no floor without the flag, and none on a chain without a base fee or for send", async () => {
+      const net = asChain1();
+      const l = await makeLock();
+      const claimSwap = swapFile({ chain: 1, intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      await setBaseWei(BASE);
+      // without the flag: tip min(cap, 1 gwei) = 0.2, no minPriorityFeeGwei in the report
+      const noFlag = await live.claim(net, alice, { swap: claimSwap, secret: preimage, dryRun: true, ...MAIN, maxFeeGwei: "0.2" });
+      expect(noFlag.feeCheck).to.include({ priorityFeeGwei: "0.2" });
+      expect(noFlag.feeCheck).to.not.have.property("minPriorityFeeGwei");
+      // a chain whose latest block has no base fee: no floor, no feeCheck (a one-wei tip passes); the cap is --gas-price-gwei
+      const noBase = new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "getBlock") {
+            return async (tag, ...rest) => {
+              const b = await t.getBlock(tag, ...rest);
+              return tag === "latest" && b ? Object.create(b, { baseFeePerGas: { value: null } }) : b;
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      const r = await live.claim(noBase, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage, dryRun: true, gasPriceGwei: "2", priorityFeeGwei: "0.000000001" });
+      expect(r).to.not.have.property("feeCheck");
+      // send reads no base fee: a tiny tip is not refused there
+      const n = await nonce(aliceAddr);
+      expect(await feesOf((await sendTo(net, { ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.000000001" })).txHash)).to.deep.equal([gwei("0.2"), 1n]);
+      expect(await nonce(aliceAddr)).to.equal(n + 1);
+      // the real claim at the floor
+      await setBaseWei(BASE);
+      const c = await live.claim(net, alice, { swap: claimSwap, secret: preimage, ...MAIN, maxFeeGwei: "0.2", priorityFeeGwei: "0.006" });
+      expect(await feesOf(c.txHash)).to.deep.equal([gwei("0.2"), gwei("0.006")]);
+      expect(c.feeCheck.minPriorityFeeGwei).to.equal("0.006");
+    });
+
+    it("lock with --gas-price-gwei and the flag on a test chain: the mined transaction carries cap and tip, and the report shows both", async () => {
+      const hl = sha256Raw(rand32());
+      const tr = (await latestTs()) + 2 * HOUR;
+      const dry = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: hl, tReveal: String(tr), receiver: aliceAddr, amountWei: amount.toString(), gasPriceGwei: "2", priorityFeeGwei: TIP, dryRun: true });
+      expect(dry.feeCheck).to.include({ maxFeeGwei: "2.0", priorityFeeGwei: "0.01", minPriorityFeeGwei: "0.006", expectedGasPriceGwei: "0.07" });
+      const nb = await nonce(bobAddr);
+      const lk = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: hl, tReveal: String(tr), receiver: aliceAddr, amountWei: amount.toString(), gasPriceGwei: "2", priorityFeeGwei: TIP });
+      expect(await feesOf(lk.txHash)).to.deep.equal([gwei("2"), tipWei]);
+      expect((await provider.getTransaction(lk.txHash)).nonce).to.equal(nb);
+      expect(lk.feeCheck.priorityFeeGwei).to.equal("0.01");
+    });
+
+    it("the command line prints one warning line on stderr when the flag is given, and none without it", async () => {
+      const keyFile = path.join(dir, "k.key");
+      await live.keygen(null, null, { out: keyFile });
+      const run = (args) =>
+        new Promise((resolve) => {
+          const child = spawn(process.execPath, [path.join(__dirname, "..", "scripts", "live.js"), ...args], { env: { ...process.env, ETH_RPC_URL: "http://127.0.0.1:9" } });
+          let err = "";
+          child.stderr.on("data", (d) => (err += d));
+          child.on("close", (code) => resolve({ code, err }));
+          child.stdin.end("");
+        });
+      const send = ["send", "--key-file", keyFile, "--to", carolAddr, "--amount-wei", "1"];
+      const withFlag = await run([...send, "--priority-fee-gwei", "0.01"]); // refused (no cap) before the dead endpoint is touched
+      expect(withFlag.code).to.equal(1);
+      expect(withFlag.err.split("warning: --priority-fee-gwei is in effect: a tip below what block builders take can leave the transaction pending; --replace then re-sends it with a higher cap and pays up to the whole cap (the small tip is not used for a replacement)\n")).to.have.length(2);
+      expect(withFlag.err).to.match(/error: --priority-fee-gwei needs a fee cap to sit under/);
+      const bad = await run([...send, "--mainnet", "--max-fee-gwei", "0.2", "--priority-fee-gwei", "0.3"]);
+      expect(bad.err).to.match(/error: --priority-fee-gwei 0\.3 gwei is above the fee cap 0\.2 gwei/);
+      const without = await run([...send, "--max-fee-gwei", "5"]);
+      expect(without.err).to.not.include("--priority-fee-gwei is in effect");
+    });
+  });
+
   // ------------------------------------------------------------------ R4-3
   describe("R4-3: the late re-send uses the cutoff the intent froze, when the file shows the secret may be public", () => {
     it("with history showing a public secret, a cutoff later than timelock - 1800 s rules; without it the earlier of the two stays the rule", async () => {
