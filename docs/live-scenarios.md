@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6) and the mainnet happy path (run 8, section 2c), which were run and settled; the rest was not run, funded or sent. Parano1d mainnet (tiny NOID) against public
+Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d), which were run and settled; the rest was not run, funded or sent. **The next free run number is 11.** Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -32,7 +32,8 @@ bash ~/live-run-N/bin/watch.sh both 30 > /dev/null 2>&1 &     # then: tail -f ~/
 Send the owner at every run the contract root (`o1...`) and the Sepolia contract link (memory rule). Never edit a
 helper after `install.sh`. Keep `swap.object.json` and both swap files: the opening cannot be recovered from the chain.
 
-Alice's recovery close (the one command used by scenarios 1, 3 and as the fallback elsewhere; not a helper). Only at
+Alice's recovery close (the one command used by scenarios 1, 3 and as the fallback elsewhere; since runs 9 and 10 `scripts/live/recover-noid.sh`
+does the same for every instance at the root, not yet run live in that form). Only at
 tip + 1 >= `D`; her index-0 address must be the active one (`parano1d-cli address --use INDEX`); S and C come from
 `parano1d-cli contract instances swap.object.json`. Preview and send chained in ONE command (run 2 lost 20 s between
 two; the `--json` key `txid` is assumed from the run-2 text, check it on the first preview):
@@ -86,7 +87,23 @@ stock scenarios below stay open, and the abort paths and two nodes with this loc
 Not part of the plan above: the mainnet happy path of `live-run-mainnet-plan.md` was executed as run 8 (5 NOID ↔ 0.001 ETH, raw v1,
 proof-free `poseidon` lock, owner in both roles, one node per chain) and settled in 54 minutes (`live-run-8.md`). The abort paths on
 mainnet, two nodes and the other scenarios below stay open. The run numbers given to those scenarios below are out of date: run 7 was
-never funded and run 8 is the mainnet run, so the next free number is 9.
+never funded and run 8 is the mainnet run, so the next free number was 9; runs 9 and 10 have since been used (section 2d), so it is now 11.
+
+## 2d. Two machines, two abort cases: runs 9 and 10 — DONE 2026-11-06
+
+Not part of the plan above: the first runs with the roles on two machines (Alice on the Windows PC under WSL, Bob on an Apple Silicon Mac with
+the helpers in native mode), 5 NOID against 0.001 Sepolia ETH, `poseidon` lock kind, raw v1, `sepolia` profile (`live-run-9-10.md`). Both ended on
+an abort path and both aborts were clean:
+
+- **The more-than-one-instance case (run 9).** The contract was funded three times by mistake before any lock. Neither side went on (Bob did not lock,
+  Alice did not reveal, her file ended `aborted`), and all three instances were recovered at `D`. The fix for the double click is
+  `scripts/live/fund.sh`. Covered: the F10 rule on real chains. Not covered: a rival instance made by someone else.
+- **The abort after Bob's lock on two machines (run 10).** Alice's reveal was not sent before the cutoff; the engine kept the secret, Bob refunded
+  from the Mac after `T_reveal`, and Alice recovered at `D`. This is scenario 3 with Bob on a second machine, but with the late reveal as the cause
+  and not a deliberate silence. Covered: the cutoff gate, the refund and the recovery across two machines. Both files ended `refunded`
+  (Bob's as reported from the Mac).
+
+Still open: the happy path across two machines (scenario 8 below), two nodes per chain (both runs used `SINGLE_NODE_OK=1`), and `claim.sh` on the Mac.
 
 ## 3. Alice never reveals after Bob's lock on Sepolia: run 6 — DONE 2026-11-06
 
@@ -191,7 +208,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   **Recover.** If (b) is not included within a few blocks, Bob's own close (a higher fee is NOT possible: first seen) waits
   for the anchor rotation (up to 144 blocks) or `D`; record the wait, it is the measurement Q1 wants.
 
-## 8. Two-node run: run 9 (any happy path once the Mac node is synced)
+## 8. Two-node run: run 11 or later (any happy path once the Mac node is synced; the number 9 was used, see section 2d)
 
 - **Setup.** `docs/mac-setup.md` 5-8: node synced, `ssh -N -L 127.0.0.1:19601:127.0.0.1:9601 USER@MACADDR` running on
   Windows (loopback only; never expose 9601), a second distinct Sepolia RPC. Put `NOID_RPC2=http://127.0.0.1:19601` and

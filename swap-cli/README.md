@@ -1252,3 +1252,4 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
 - Bob's refund of ETH uses the latest block timestamp; it does not wait for finality of
   Alice's non-claim (the HTLC's `refund` reverts if she claimed first, so nothing is lost).
 - `PROJECT.md`'s repository map does not list this crate yet.
+- **Several instances at the contract root after an abort (runs 9 and 10, low).** With more than one fitting instance the engine waits and, once the lock-by has passed, aborts from `created`; the reason shown before `h_create` is "node is behind H_create" (the several instances are only in the notes), and nothing offers `refund_noid` at `D` for the instances that sit at the root. Wanted: name the instances in the reason and offer the recovery at `D` for every one. Today `scripts/live/recover-noid.sh` does it outside the tool (`docs/live-run-9-10.md`, finding 2).

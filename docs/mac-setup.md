@@ -116,7 +116,7 @@ Run each from the repo root in a Terminal with the same `RUSTUP_TOOLCHAIN`. Coun
 
 | Command (folder) | Expect |
 |---|---|
-| `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it and are not yet re-run on a Mac) |
+| `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it. Of those, the macOS memory fix was re-run on a Mac 2026-11-06: `npx hardhat test test/free-mem.test.js test/Poseidon2b.test.js` gave `28 passing` without any workaround; the full suite was not re-run there) |
 | `cd btc && npm ci && npm test` | 91 pass (Bitcoin is not used by an ETH swap; optional) |
 | `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 460 passing, 1 ignored |
 | `cd equiv && cargo test --release --locked` | 23 pass |
@@ -210,10 +210,14 @@ sourced last and overrides any setting). In native mode the defaults are:
   Alice's bundle (put it at `$L/bob/bob.swap.json`). `prepare.sh` is Alice's script. The wallet CLI step (`contract create`) is not run by any helper:
   `prepare.sh` prints it as a by-hand step in native mode, and `check-object.sh` takes the path of the object file.
 - Optional `PRIORITY_FEE_GWEI` (the tip) next to `MAX_FEE_GWEI`: on mainnet set the cap at 3–4 x the base fee and the tip small, e.g. `0.01`.
-- **UNVERIFIED on a Mac.** What was checked, off the Mac and without any network: `bash -n` on every script, and the printed settings under bash 5 in
-  native mode (Git Bash on Windows) and in WSL mode (identical to the earlier `env.sh`). Not checked: bash 3.2 itself, the BSD versions of
-  `base64`, `head -c`, `grep -E`, and any run of a helper on the Mac. If one stops with `command not found`, `bad substitution` or `unbound variable`, it is almost
-  always bash 3.2 or a missing tool.
+- **Checked on a Mac (2026-11-06):** `/bin/bash scripts/live/selftest.sh` printed `60 ok, 0 failed (bash 3.2.57(1)-release)`, so the settings
+  layer (`env.sh`: platform choice, fee and node flags, `read_lines`, frozen copy) works under the system bash. Off the Mac: `bash -n` on every
+  script, and the printed settings under bash 5 in native mode and in WSL mode (identical to the earlier `env.sh`).
+  **Run live on a Mac (2026-11-06, runs 9 and 10, `docs/live-run-9-10.md`):** the native helpers ran Bob's side of two live runs under the
+  system bash 3.2: `install.sh`, `setup.sh`, `watch.sh` / `tick.sh` (about 400 ticks), `lock.sh` and `refund-eth.sh`, each dry run and send,
+  with no helper error, and `new-bob` rebuilt Alice's opening byte for byte. **Still not run on a Mac:** `claim.sh` (there was no reveal),
+  `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh`. If one stops with `command not found`, `bad substitution` or
+  `unbound variable`, it is almost always bash 3.2 or a missing tool.
 - Public Ethereum endpoints and the Sepolia key steps are in `runbook-two-party.md` section 2, Bob steps 7 and 8, and `eth/README.md`.
 
 ## 8. Ready check (read-only)

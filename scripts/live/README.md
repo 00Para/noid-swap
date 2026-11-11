@@ -18,15 +18,21 @@ which only observes and records (`tick --apply` writes events and intents into t
 | `setup.sh` | — | `$L` with a fresh passphrase (kept if present), `bob/`, `rec/`, the HTLC deployment block for `--eth-from-block` | no |
 | `prepare.sh` | both | `new-alice`, the equivalence proof (secret over a pipe), `new-bob --receipt`, the contract definition; copies the bundle and definition to `$PUB` for the owner. With `LOCK_KIND=poseidon` (`env.sh`; raw variant only; `CONTRACT` must be a `HTLCPoseidonV2` deployment) it skips the proof and the receipt, passes `--eth-lock-kind poseidon` to both tools, and `new-bob` runs the client R self-test | no |
 | `check-object.sh [OBJ]` | Alice | `alice-params --check-object`: the object `parano1d-cli contract create` wrote must be byte-for-byte the swap file's opening | no |
+| `fund.sh [--dry-run]` | Alice | the funding, **exactly once**: runs `check-object.sh`, refuses a second run for the same run folder (marker file) and a contract that already has an instance, then calls the wallet CLI's `contract fund` (run 9: a double click funded the contract twice and the swap had to stop) | **REAL NOID** without `--dry-run` |
 | `tick.sh ROLE [--apply]` | either | one tick; read-only without `--apply` (then a spend's parameters are withheld, REVIEW-3 F3); records every node answer | no |
 | `watch.sh [alice\|bob\|both] [s]` | either | `tick --apply` loop, one summary line per tick in `$L/loop-ROLE.txt`; stops when every watched file is terminal | no |
 | `lock.sh [--dry-run]` | Bob | `live.js lock --swap bob.swap.json`: the lock Bob's file recorded as `lock_eth`; passes the mainnet / gas-price fee flags (`MAX_FEE_GWEI`, `GAS_PRICE_GWEI`); no `--replace` (live.js has none for a lock) | **yes** without `--dry-run` |
 | `reveal.sh [--dry-run] [--replace [TXHASH]]` | Alice | `swap-cli secret \| live.js claim --swap alice.swap.json --secret-stdin`: the reveal; `--replace` re-sends a stuck claim (see below) | **yes** without `--dry-run` |
 | `claim.sh [--submit]` | Bob | `swap-cli claim`: proves and prints the close; `--submit` sends it to the node | **yes** with `--submit` |
 | `refund-eth.sh [--dry-run] [--replace [TXHASH]]` | Bob | `live.js refund --swap bob.swap.json` after `T_reveal` (abort path); the same fee flags and `--replace` as `reveal.sh` | **yes** without `--dry-run` |
+| `recover-noid.sh [--dry-run]` | Alice | the NOID recovery after `D` (abort path), for every instance at the contract root: preview, check, send chained with `--expected-txid`, a marker per instance; txids in `$L/recovered-txids.txt`, then `tick.sh alice --closed-by TXID --apply`. Not yet run live in this form | **REAL NOID** without `--dry-run` |
 
-Alice's NOID recovery at `D` is not a helper: it is `parano1d-cli contract call --close` on Windows with `--preview` and
-`--expected-txid` chained in one command (run 2 lesson), then `tick.sh alice --closed-by TXID --apply`.
+Alice's NOID recovery at `D` (the abort path) is `recover-noid.sh`: for every instance of the contract it previews the recovery close,
+checks the preview (a recovery, terminal, paying Alice's own address the amount minus the close fee) and sends it with `--expected-txid`
+chained to that preview (run 2 lesson), then `tick.sh alice --closed-by TXID --apply` for each txid in `$L/recovered-txids.txt`. It was a
+scratch script until runs 9 and 10 (four recovery closes). The wallet's active address must be Alice's. **The helper form has not been run
+live; the scratch version, with the same checks, was.** A swap with one instance can also be recovered by hand with
+`parano1d-cli contract call --close --preview` and `--expected-txid` in one command, as in runs 2, 4 and 6.
 
 ## A run, step by step (owner in both roles, `sepolia` profile)
 
@@ -36,11 +42,12 @@ bash ~/live-run-4/bin/setup.sh            # passphrase, folders, eth-deploy-bloc
 bash ~/live-run-4/bin/prepare.sh          # Alice's file + proof (20–36 min) + Bob's file + swap.def.json → copied to C:\Users\00\Documents\live-run-4
 # Windows:  parano1d-cli contract create swap.def.json --out swap.object.json   (local, no fee)
 bash ~/live-run-4/bin/check-object.sh     # "object file OK: … fund exactly this address"
-# GO / NO-GO, then the owner's go-ahead:  parano1d-cli contract fund swap.object.json 10.000000
+# GO / NO-GO, then the owner's go-ahead:  bash $L/bin/fund.sh     (not `parano1d-cli contract fund` by hand: twice makes two instances)
 bash ~/live-run-4/bin/watch.sh both 30 &  # both files, every 30 s, until both are terminal (tail -f ~/live-run-4/loop-*.txt)
 # when Bob's loop says lock_eth:   lock.sh --dry-run, go-ahead, lock.sh
 # when Alice's loop says reveal_eth: reveal.sh --dry-run, go-ahead, reveal.sh
 # when Bob's loop says claim_noid:   claim.sh (dry run), go-ahead, claim.sh --submit
+# abort path, Alice, after D:        recover-noid.sh --dry-run, go-ahead, recover-noid.sh; then tick.sh alice --closed-by TXID --apply
 ```
 
 Send the owner, at every run: the Parano1d contract root (`o1…`, printed by `prepare.sh` and in `$PUB/alice.bundle.json`),
@@ -73,8 +80,12 @@ The object file of the Parano1d wallet CLI (`prepare.sh` end, `check-object.sh`)
 
 **Verified so far** (2026-11-05, no network, nothing sent): `bash -n` on every script; `selftest.sh` (59 cases) from Git Bash with bash 5.3; the settings above printed from Git Bash with
 `LIVE_PLATFORM=native` (flags, paths, empty-array expansions under `set -u`); the same settings under WSL printed identically to the
-previous `env.sh`. **Not verified:** a run on a Mac, bash 3.2 itself (only bash 5 was available), the BSD tool behaviours (`base64`, `head -c`,
-`grep -E`), and any native-mode live swap.
+previous `env.sh`. On a Mac (2026-11-06): `/bin/bash scripts/live/selftest.sh` printed `60 ok, 0 failed (bash 3.2.57(1)-release)`.
+**Run live on a Mac (2026-11-06, runs 9 and 10, `docs/live-run-9-10.md`):** `install.sh`, `setup.sh`, `watch.sh` / `tick.sh` (about 400 ticks),
+`lock.sh` and `refund-eth.sh`, each dry run and send, under the system bash 3.2, with no helper error. The abort path after Bob's lock
+was settled that way; the BSD tool calls inside those scripts worked.
+**Still not run on a Mac:** `claim.sh` (there was no reveal), `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh` (these are Alice's scripts;
+her side ran on the other machine, under WSL).
 
 ## Two nodes (REVIEW-3 F5)
 

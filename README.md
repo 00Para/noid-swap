@@ -4,7 +4,7 @@ Atomic swaps between **Parano1d (NOID)** and **Ethereum or Bitcoin**, with a has
 on each chain and nothing in between: no bridge, no custodian, no multisig, no wrapped token. Either both
 sides settle or both sides get their own coins back after a deadline, provided each party stays online and
 acts before its own deadline: a party that goes offline after the reveal can lose its side (design §8). The design, four component
-prototypes, a command-line swap tool and the logs of seven real runs, one of them on Ethereum mainnet, are in this repository.
+prototypes, a command-line swap tool and the logs of nine real runs, one of them on Ethereum mainnet, are in this repository.
 
 ## Why Parano1d makes this cheap, and why it decides who goes first
 
@@ -35,7 +35,7 @@ chain needs nothing more than a hashlock and a timelock, which is why the same d
 (`HTLC.sol`) and Bitcoin (a P2WSH script, `btc/`). Not a market: the two parties find each other and
 agree on a price elsewhere.
 
-## Proof that it works: seven runs on 4–6 November 2026 (UTC)
+## Proof that it works: nine runs on 4–6 November 2026 (UTC)
 
 | Run | What | Result |
 |---|---|---|
@@ -46,9 +46,12 @@ agree on a price elsewhere.
 | 5 | 10 NOID against 0.001 ETH on Sepolia, happy path with the proof-free `poseidon` lock kind (no equivalence proof) | settled; about 47 minutes from funding to both sides final ([`docs/live-run-5.md`](docs/live-run-5.md)) |
 | 6 | the abort path after Bob's lock on Sepolia, `poseidon` lock kind: the NOID holder never reveals | both refunds settled, Bob's file `refunded` only at Ethereum finality ([`docs/live-run-6.md`](docs/live-run-6.md)) |
 | 8 | 5 NOID against 0.001 ETH on **Ethereum mainnet**, happy path, `poseidon` lock kind, `production` profile (there is no run 7 log: it was never funded) | settled; 54 minutes from funding to both sides final ([`docs/live-run-8.md`](docs/live-run-8.md)) |
+| 9 | 5 NOID against 0.001 ETH on Sepolia, `poseidon` lock kind, the first run with the two roles on two machines: the contract was funded three times by mistake before any lock | neither side went on, as designed; all three NOID instances recovered at `D` ([`docs/live-run-9-10.md`](docs/live-run-9-10.md)) |
+| 10 | the same, funded once: the abort after Bob's lock, Alice's reveal not sent before its cutoff | Bob refunded his ETH, Alice recovered her NOID at `D`, the secret never published ([`docs/live-run-9-10.md`](docs/live-run-9-10.md)) |
 
-All seven were played by the author in both roles on one machine; no swap between two separate people
-has run yet. The amounts are trial amounts.
+Runs 1–8 were played by the author in both roles on one machine. Runs 9 and 10 used two machines (the roles on different computers with
+different Parano1d nodes), but both were still played by the same person, and both ended as aborts. No swap between two separate people
+has run yet, and no happy path has run across two machines. The amounts are trial amounts.
 
 > **Optional block: on-chain pointers.** Publishing them ties the handle "00" to the NOID wallet that funded
 > the runs. Deleting these lines stops advertising the link but does not remove it: the recorded test fixtures
@@ -65,14 +68,14 @@ has run yet. The amounts are trial amounts.
 | `docs/runbook-two-party.md` | How two people on two machines run a swap with today's tools | written, untested between two people |
 | `docs/review-1.md`, `docs/poseidon-evm-review.md`, `swap-cli/REVIEW-1.md`, `-2.md`, `-3.md` | Independent adversarial reviews of the design, the Poseidon2b Solidity port and the swap tool | done; see "Status" |
 | `docs/q2-history-step.md` | Does Parano1d's block proof force a close to pay the committed recipient? Constraint path with citations and a negative test | confirmed |
-| `docs/live-run-1.md` to `-6.md`, `-8.md` | Logs of the seven runs (there is no run 7 log: it was prepared and never funded) | done |
+| `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md` | Logs of the nine runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
 | `docs/htlc-v2-fixed-fee.md`, `docs/poseidon-evm.md`, `docs/ideas.md` | A fixed-fee contract variant, `Addr(s)` on the EVM (an alternative hashlock), ranked improvements | notes |
 | `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 265 tests |
 | `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 91 tests; nothing broadcast on signet yet |
 | `parano1d/` | `contracts/htlc.pruv` (`HashTimeLock`), the v2 fixed-fee variant, example params (never fund them), a Rust harness that builds, proves and verifies real calls against the vendored node code | 37 tests (+1 ignored benchmark), `pruv verify` passes |
 | `equiv/` | The equivalence proof: `portable/` (no_std Poseidon2b + Derive + SHA-256, the zkVM guest code), `reference/` (parity against the vendored code, 100,000 inputs), `zkvm/` (RISC Zero guest and host, `equiv-prove`) | 23 + 3 + 14 tests; receipts proved and verified |
-| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | about 460 tests; drove all seven runs |
-| `scripts/live/` | The versioned live-run helpers (setup, prepare, tick, watch, lock, reveal, claim, refund): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 |
+| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | about 460 tests; drove all nine runs |
+| `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6, 8, 9 and 10 (on a Mac in native mode for Bob's side in 9 and 10) |
 | `scripts/` | `setup.sh` / `setup.ps1` (build and test everything), `fetch-vendor.sh` | — |
 | `ui/` | A design system and a read-only swap console prototype | prototype; not in the first public copy |
 | `vendor/parano1d` | Unmodified copy of the Parano1d source at commit `d29b801` (Apache-2.0, see `THIRD-PARTY-NOTICES.md`) | read-only |
