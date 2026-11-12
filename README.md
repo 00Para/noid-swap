@@ -35,7 +35,7 @@ chain needs nothing more than a hashlock and a timelock, which is why the same d
 (`HTLC.sol`) and Bitcoin (a P2WSH script, `btc/`). Not a market: the two parties find each other and
 agree on a price elsewhere.
 
-## Proof that it works: nine runs on 4–6 November 2026 (UTC)
+## Proof that it works: ten runs on 4–6 November 2026 (UTC)
 
 | Run | What | Result |
 |---|---|---|
@@ -48,10 +48,11 @@ agree on a price elsewhere.
 | 8 | 5 NOID against 0.001 ETH on **Ethereum mainnet**, happy path, `poseidon` lock kind, `production` profile (there is no run 7 log: it was never funded) | settled; 54 minutes from funding to both sides final ([`docs/live-run-8.md`](docs/live-run-8.md)) |
 | 9 | 5 NOID against 0.001 ETH on Sepolia, `poseidon` lock kind, the first run with the two roles on two machines: the contract was funded three times by mistake before any lock | neither side went on, as designed; all three NOID instances recovered at `D` ([`docs/live-run-9-10.md`](docs/live-run-9-10.md)) |
 | 10 | the same, funded once: the abort after Bob's lock, Alice's reveal not sent before its cutoff | Bob refunded his ETH, Alice recovered her NOID at `D`, the secret never published ([`docs/live-run-9-10.md`](docs/live-run-9-10.md)) |
+| 11 | the retry of runs 9 and 10: 5 NOID against 0.001 ETH on Sepolia, happy path, `poseidon` lock kind, the two roles on two machines | settled; 44 minutes from funding to both sides final, Bob's claim sent from the Mac ([`docs/live-run-11.md`](docs/live-run-11.md)) |
 
-Runs 1–8 were played by the author in both roles on one machine. Runs 9 and 10 used two machines (the roles on different computers with
-different Parano1d nodes), but both were still played by the same person, and both ended as aborts. No swap between two separate people
-has run yet, and no happy path has run across two machines. The amounts are trial amounts.
+Runs 1–8 were played by the author in both roles on one machine. Runs 9, 10 and 11 used two machines (the roles on different computers with
+different Parano1d nodes), but all three were still played by the same person; runs 9 and 10 ended as aborts and run 11 as a settled swap.
+No swap between two separate people has run yet. The amounts are trial amounts.
 
 > **Optional block: on-chain pointers.** Publishing them ties the handle "00" to the NOID wallet that funded
 > the runs. Deleting these lines stops advertising the link but does not remove it: the recorded test fixtures
@@ -68,7 +69,7 @@ has run yet, and no happy path has run across two machines. The amounts are tria
 | `docs/runbook-two-party.md` | How two people on two machines run a swap with today's tools | written, untested between two people |
 | `docs/review-1.md`, `docs/poseidon-evm-review.md`, `swap-cli/REVIEW-1.md`, `-2.md`, `-3.md` | Independent adversarial reviews of the design, the Poseidon2b Solidity port and the swap tool | done; see "Status" |
 | `docs/q2-history-step.md` | Does Parano1d's block proof force a close to pay the committed recipient? Constraint path with citations and a negative test | confirmed |
-| `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md` | Logs of the nine runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
+| `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md`, `-11.md` | Logs of the ten runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
 | `docs/htlc-v2-fixed-fee.md`, `docs/poseidon-evm.md`, `docs/ideas.md` | A fixed-fee contract variant, `Addr(s)` on the EVM (an alternative hashlock), ranked improvements | notes |
 | `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 265 tests |
 | `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 91 tests; nothing broadcast on signet yet |
@@ -95,7 +96,7 @@ Each component's `README.md` is the source of truth for that component.
 - **Hard rules** (details in `SECURITY.md`): never fund the example params; never use Parano1d's stock
   `refundable_payment` template for a swap; one fresh secret per swap, sealed, never on a command line;
   `max_fee` at least 5,800 μNOID; the NOID claim must be *final* before the deadline.
-- **Still to run**: the stock-wallet variant, the abort paths on Sepolia, a swap across two machines,
+- **Still to run**: the stock-wallet variant, the two-node check live, two separate people,
   the Bitcoin leg on signet, an epoch rotation inside a swap window.
 - Commit hashes quoted in the documents (review fix-status tables, `TASKS.md`) refer to the private
   development history and will not resolve in this repository.

@@ -90,7 +90,7 @@ Preparation had no proof step, so `prepare.sh` finished in seconds.
 - The mainnet gate of `live.js` worked as designed: `--mainnet`, `--max-fee-gwei` and `--swap FILE` were all required, and every check
   passed before each send (code hash against the pin, no other lock with the same lock word, fee cap against the base fee, balance).
 - Fee gates fail closed, and a send below the 2 × base fee rule would have been refused, not sent cheaply.
-- A `poseidon` claim costs 517,084 gas on mainnet (about 500,000 on Sepolia in run 5, where the figure is stated as "about"), because
+- A `poseidon` claim costs 517,084 gas on mainnet (689,324 on Sepolia in runs 5 and 11; the "about 500,000" in the run 5 log was never measured, see `docs/live-run-11.md`), because
   the Poseidon permutation runs in the EVM. At the 0.2 gwei cap it was 0.0001034 ETH.
 - The whole swap cost 0.0148 NOID and 0.0001207 ETH in fees.
 

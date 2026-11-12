@@ -153,7 +153,7 @@ $BIN new-bob --bundle bundle.json --out bob.swap.json --bob o1BOB --amount 10000
 `new-bob` refuses and writes nothing unless the bundle's Ethereum lock word equals the claim authority `A` of the NOID opening it rebuilds byte for byte,
 the V2 code hash is the one pinned, and the **client R self-test passes on Bob's machine** (a throwaway authorization is proved and verified, a few seconds; Bob
 needs client R because the stock wallet import cannot open a lock on `Addr(s)`). `swap-cli self-test bob.swap.json` re-runs it. Everything else in this
-runbook is the same, with three differences to plan for: Alice's reveal costs about 0.5 M gas (`live.js` sends it with a 1,000,000 limit, so her Ethereum address
+runbook is the same, with three differences to plan for: Alice's reveal costs about 0.5 M gas (517,084 on mainnet in run 8, 689,324 on Sepolia in runs 5 and 11; `live.js` sends it with a 1,000,000 limit, so her Ethereum address
 must hold `1,000,000 × fee cap`: 0.02 ETH at 20 gwei, not the 0.01 ETH of "gas money" above for a sha256 swap); small swaps are uneconomic on L1 (the reveal fee is about
 half of a 0.001 ETH leg at 1 gwei); and the helper scripts take `LOCK_KIND=poseidon` (`scripts/live/env.sh`, `prepare.sh` skips the proof and the receipt).
 

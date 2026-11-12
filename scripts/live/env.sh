@@ -98,7 +98,7 @@ VARIANT=${VARIANT:-raw}
 CONTRACT_VERSION=${CONTRACT_VERSION:-1}
 # The Ethereum lock (swap-cli --eth-lock-kind): sha256 = HTLC.sol keyed on SHA-256(s), Bob needs the equivalence receipt; poseidon =
 # HTLCPoseidonV2.sol keyed on A = Addr(s), raw variant only, NO proof and NO receipt (prepare.sh skips both), CONTRACT must be a
-# HTLCPoseidonV2 deployment (node scripts/live.js deploy --contract-kind poseidon). The reveal then costs about 0.5 M gas: Alice's ETH
+# HTLCPoseidonV2 deployment (node scripts/live.js deploy --contract-kind poseidon). The reveal then costs about 0.5 M gas (517,084 on mainnet, 689,324 on Sepolia): Alice's ETH
 # address must hold 1,000,000 x the fee cap (docs/poseidon-leg.md section 5).
 LOCK_KIND=${LOCK_KIND:-sha256}
 # Ethereum key files for live.js --key-file (lock.sh and refund-eth.sh: Bob; reveal.sh: Alice), paths relative to eth/.

@@ -10,7 +10,7 @@ Status 2026-11-05. Contract: `eth/contracts/HTLCPoseidonV2.sol` (production cand
 For an EVM pair the Ethereum lock can sit directly on Parano1d's address `A = Addr(s)`. Claiming on
 Ethereum then proves knowledge of the same `s` that unlocks the NOID, with nothing in between: **the
 equivalence proof (20 to 36 minutes of RISC Zero proving per swap, plus trusting the zkVM) is not needed on
-an EVM leg.** The price is gas: a reveal costs 0.50 to 0.55 M gas instead of 89 k, and the swap now rests on
+an EVM leg.** The price is gas: a reveal costs 0.50 to 0.55 M gas on Hardhat (517,084 on mainnet in run 8, 689,324 on Sepolia in runs 5 and 11) instead of 89 k, and the swap now rests on
 one claim that is easy to state and test: *the EVM computes the same `Addr` as the Parano1d node for every
 32-byte secret*. That claim has been compared with the vendor crate on 12,299 vectors with 0 mismatches
 (section 7). Bitcoin is not covered (Script has no Poseidon); a BTC leg still needs `sha256(s)` and the proof.
@@ -110,7 +110,7 @@ Measured on Hardhat (solc 0.8.24, optimizer 200, `cancun`; `test/HTLCPoseidonV2.
 Gas limit rules the contract publishes as constants: `MIN_CLAIM_GAS = 540,000` (gas that must still be left when
 `claim` reaches the permutation; the work after the check needs at most about 510,000) and
 `RECOMMENDED_CLAIM_GAS_LIMIT = 650,000` (floor plus about 34,000 of intrinsic cost, calldata and cold reads, plus
-margin). A test finds the lowest gas limit at which a claim succeeds (574,008 in the worst case) and shows that
+margin). Live figures differ from Hardhat's: a claim used 517,084 gas on mainnet (run 8) and 689,324 on Sepolia (runs 5 and 11), a lock 144,129 on mainnet and 583,841 on Sepolia (`docs/live-run-11.md`, finding 2). A test finds the lowest gas limit at which a claim succeeds (574,008 in the worst case) and shows that
 every smaller limit fails with the named `InsufficientGas`, never with an out-of-gas in the middle. Re-measure the
 floor after any fork that reprices storage or account creation.
 

@@ -50,7 +50,7 @@ spec for `swap-cli` and `live.js` are in `../docs/poseidon-leg.md`. `contracts/H
 
 * Runtime code hash of `HTLCPoseidonV2`: `0xf510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780bb7043ff3`
   (solc 0.8.24, optimizer 200, `cancun`). Pinned in `test/HTLCPoseidonV2.test.js`.
-* `claim` costs 0.50 to 0.55 M gas; send it with an explicit gas limit of at least 650,000 (`RECOMMENDED_CLAIM_GAS_LIMIT`).
+* `claim` costs 0.50 to 0.55 M gas on Hardhat (517,084 on mainnet in run 8, 689,324 on Sepolia in runs 5 and 11); send it with an explicit gas limit of at least 650,000 (`RECOMMENDED_CLAIM_GAS_LIMIT`).
   There is no `addrOf` view: never send a live secret to a remote node.
 * `Poseidon2b.sol` is generated (`npm run poseidon:gen`, checked by `npm run poseidon:check` and by a test).
 

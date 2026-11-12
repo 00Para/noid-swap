@@ -1104,7 +1104,7 @@ The Ethereum leg is locked in one of two contracts. Which one is a swap paramete
 | What opens the Ethereum lock | a preimage with `sha256(x) == H` | a preimage with `Addr(x) == A` (computed by `secret::check_preimage_for`, never SHA-256) |
 | Equivalence proof (RISC Zero, 20 to 36 min) | required: Bob verifies a receipt | **none**: the attestation is absent, not typed |
 | Variant | raw or stock | **raw only** (`--variant stock` is refused with a message) |
-| Ethereum reveal | about 89 k gas | about 0.50 to 0.55 M gas; `live.js` sends it with a fixed 1,000,000 limit |
+| Ethereum reveal | about 89 k gas | about 0.50 to 0.55 M gas on Hardhat, 517,084 on mainnet (run 8), 689,324 on Sepolia (runs 5 and 11); `live.js` sends it with a fixed 1,000,000 limit |
 | Bob claims the NOID with | client R, or client S for the stock variant | client R only (the stock wallet import cannot open a lock on `Addr(s)`) |
 
 - **Flags.** `new-alice --eth-lock-kind poseidon` writes it (`--eth-code-hash`, if given, must equal the V2 constant; the HTLC one is refused).

@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d), which were run and settled; the rest was not run, funded or sent. **The next free run number is 11.** Parano1d mainnet (tiny NOID) against public
+Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d) and the two-machine happy path (run 11, section 2e), which were run and settled; the rest was not run, funded or sent. **The next free run number is 12.** Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -87,7 +87,7 @@ stock scenarios below stay open, and the abort paths and two nodes with this loc
 Not part of the plan above: the mainnet happy path of `live-run-mainnet-plan.md` was executed as run 8 (5 NOID ↔ 0.001 ETH, raw v1,
 proof-free `poseidon` lock, owner in both roles, one node per chain) and settled in 54 minutes (`live-run-8.md`). The abort paths on
 mainnet, two nodes and the other scenarios below stay open. The run numbers given to those scenarios below are out of date: run 7 was
-never funded and run 8 is the mainnet run, so the next free number was 9; runs 9 and 10 have since been used (section 2d), so it is now 11.
+never funded and run 8 is the mainnet run, so the next free number was 9; runs 9 and 10 have since been used (section 2d), and run 11 as well (section 2e), so it is now 12.
 
 ## 2d. Two machines, two abort cases: runs 9 and 10 — DONE 2026-11-06
 
@@ -103,7 +103,17 @@ an abort path and both aborts were clean:
   and not a deliberate silence. Covered: the cutoff gate, the refund and the recovery across two machines. Both files ended `refunded`
   (Bob's as reported from the Mac).
 
-Still open: the happy path across two machines (scenario 8 below), two nodes per chain (both runs used `SINGLE_NODE_OK=1`), and `claim.sh` on the Mac.
+Still open after these two: the happy path across two machines (done as run 11, section 2e), two nodes per chain (both runs used `SINGLE_NODE_OK=1`), and `claim.sh` on the Mac (run in run 11).
+
+## 2e. Two machines, happy path: run 11 — DONE 2026-11-06
+
+The retry of section 2d: the same parties and setting (Alice on the Windows PC under WSL, Bob on the Apple Silicon Mac with the native helpers, 5 NOID
+against 0.001 Sepolia ETH, `poseidon` lock kind, raw v1, `sepolia` profile, `SINGLE_NODE_OK=1` on both sides), funded once with `scripts/live/fund.sh`. It
+**settled** in 44 minutes from funding to both sides final (`live-run-11.md`): Bob locked from the Mac, Alice revealed 21 minutes before her cutoff, and
+Bob's `claim.sh` (dry run and `--submit`) ran on macOS. Covered: the full swap across two machines and two independent Parano1d nodes, `fund.sh` live, a damaged
+hand-carried bundle refused before anything was sent. **Still open:** two nodes per chain (the two-node check F5 did not run), a hostile counterparty, the
+actions mode of the `ui/` console prototype, and the other scenarios below (the number 11 of section 8 is taken; the next free number is 12). Open items from the run: a safer carrier for
+the bundle than copy and paste, and the Sepolia-versus-mainnet gas difference (finding 2 of `live-run-11.md`).
 
 ## 3. Alice never reveals after Bob's lock on Sepolia: run 6 — DONE 2026-11-06
 
@@ -208,7 +218,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   **Recover.** If (b) is not included within a few blocks, Bob's own close (a higher fee is NOT possible: first seen) waits
   for the anchor rotation (up to 144 blocks) or `D`; record the wait, it is the measurement Q1 wants.
 
-## 8. Two-node run: run 11 or later (any happy path once the Mac node is synced; the number 9 was used, see section 2d)
+## 8. Two-node run: run 12 or later (any happy path once the Mac node is synced; the numbers 9 to 11 were used, see sections 2d and 2e)
 
 - **Setup.** `docs/mac-setup.md` 5-8: node synced, `ssh -N -L 127.0.0.1:19601:127.0.0.1:9601 USER@MACADDR` running on
   Windows (loopback only; never expose 9601), a second distinct Sepolia RPC. Put `NOID_RPC2=http://127.0.0.1:19601` and

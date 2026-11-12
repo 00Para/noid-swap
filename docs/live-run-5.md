@@ -71,6 +71,8 @@ Operational notes from the run:
 
 - No proof step: the equivalence proof of run 3 (about 25 minutes of the owner's laptop, one heavy job at a time) is gone from
   the critical path; the lock-by margin (`D − 251`, here 284,289) was never under pressure, Bob locked at 284,258.
+- *Note added 2026-11-06: the "about 500,000" below was not measured. The receipt of the reveal transaction shows 689,324 gas (see
+  `docs/live-run-11.md`, finding 2).*
 - The claim on Sepolia costs about 500,000 gas because the Poseidon permutation runs in the EVM; hence the fixed 1,000,000 gas
   limit and no estimate (an estimate would be a simulation that carries the secret). At Sepolia prices this is nothing; on
   mainnet it is a real cost and the reason the kind is for the testnet until it is priced.
@@ -93,7 +95,7 @@ Operational notes from the run:
 
 - Two nodes per chain (`SINGLE_NODE_OK=1`, one node each), a hostile counterparty (the operator played both roles), the abort
   paths with this lock kind (Alice never reveals, Bob never locks, a foreign dust lock on the contract), a reorg or an eviction.
-- Mainnet gas: a claim at about 500,000 gas has not been priced against real fees; the kind stays a testnet kind for now.
+- Mainnet gas: a claim at about 500,000 gas (689,324 on Sepolia by the receipt; 517,084 on mainnet in run 8) has not been priced against real fees; the kind stays a testnet kind for now.
 - The stock variant, contract version 2, the `production` profile, the rotation case and the conflicting-close case.
 - The four findings of `swap-cli/REVIEW-6.md` that are open (the full-log scan stopping Bob's tool after the reveal, a foreign
   dust lock blocking Bob, a mined-but-reverted claim going unseen, the unbound self-test record) were not triggered by this run.

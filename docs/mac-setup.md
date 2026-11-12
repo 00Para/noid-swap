@@ -213,10 +213,10 @@ sourced last and overrides any setting). In native mode the defaults are:
 - **Checked on a Mac (2026-11-06):** `/bin/bash scripts/live/selftest.sh` printed `60 ok, 0 failed (bash 3.2.57(1)-release)`, so the settings
   layer (`env.sh`: platform choice, fee and node flags, `read_lines`, frozen copy) works under the system bash. Off the Mac: `bash -n` on every
   script, and the printed settings under bash 5 in native mode and in WSL mode (identical to the earlier `env.sh`).
-  **Run live on a Mac (2026-11-06, runs 9 and 10, `docs/live-run-9-10.md`):** the native helpers ran Bob's side of two live runs under the
-  system bash 3.2: `install.sh`, `setup.sh`, `watch.sh` / `tick.sh` (about 400 ticks), `lock.sh` and `refund-eth.sh`, each dry run and send,
-  with no helper error, and `new-bob` rebuilt Alice's opening byte for byte. **Still not run on a Mac:** `claim.sh` (there was no reveal),
-  `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh`. If one stops with `command not found`, `bad substitution` or
+  **Run live on a Mac (2026-11-06, runs 9, 10 and 11, `docs/live-run-9-10.md`, `docs/live-run-11.md`):** the native helpers ran Bob's side of three live runs under the
+  system bash 3.2: `install.sh`, `setup.sh`, `watch.sh` / `tick.sh` (about 400 ticks in runs 9 and 10, 64 in run 11), `lock.sh` and `refund-eth.sh`, each dry run and send,
+  with no helper error, and `new-bob` rebuilt Alice's opening byte for byte (in run 11 it refused a hand-copied bundle that had lost three characters, before anything was sent). **`claim.sh` has now run on a Mac** (run 11: dry run and `--submit`, both exit 0, the claim was final 18 blocks later). **Still not run on a Mac:**
+  `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh` (Alice's scripts; `fund.sh` has run live under WSL, in run 11). If one stops with `command not found`, `bad substitution` or
   `unbound variable`, it is almost always bash 3.2 or a missing tool.
 - Public Ethereum endpoints and the Sepolia key steps are in `runbook-two-party.md` section 2, Bob steps 7 and 8, and `eth/README.md`.
 
