@@ -903,7 +903,7 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     if file.public.params.eth.lock_kind == LockKind::Poseidon {
         eprintln!(
-            "ethereum lock kind poseidon (HTLCPoseidonV2): the Ethereum lock word is your NOID address A = Addr(s); Bob needs NO equivalence proof; tell Bob to pass --eth-lock-kind poseidon. Your ETH reveal costs about 0.5 M gas (docs/poseidon-leg.md section 5)"
+            "ethereum lock kind poseidon (HTLCPoseidonV2): the Ethereum lock word is your NOID address A = Addr(s); Bob needs NO equivalence proof; tell Bob to pass --eth-lock-kind poseidon. Your ETH reveal costs about 517,000 gas on Ethereum mainnet (run 8) and about 689,000 on Sepolia (runs 5 and 11), as measured live (docs/poseidon-leg.md section 5)"
         );
     }
     eprintln!("send Bob the bundle below (it contains no secret):");

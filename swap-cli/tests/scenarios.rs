@@ -1915,6 +1915,272 @@ fn f10_two_instances_that_both_fit_make_bob_refuse_to_lock_until_one_is_left() {
     assert_eq!(rb.action.kind(), "lock_eth", "{rb:?}");
 }
 
+// ---- live run 9: Alice funded more than once; the reason and the note say where the NOID is and how to take it back
+
+/// Two instances of the agreed amount at Alice's root, before she has recorded any funding of her own.
+fn two_fitting_at_alice_root(s: &Scenario) {
+    let amount = s.public.params.amount_micronoid;
+    let mut w = s.world.borrow_mut();
+    w.instances_before.push(dust(3, 5, amount));
+    w.instances_after.push(dust(9, 2, amount));
+}
+
+/// One `tick --apply` of the file on what the simulator shows now.
+fn apply_now(s: &Scenario, file: &mut SwapFile, record: bool) -> swap_cli::engine::TickOutcome {
+    let (n, e, now) = {
+        let w = s.world.borrow();
+        (w.noid_obs(None), w.eth_obs(), w.eth_time)
+    };
+    swap_cli::engine::tick_apply(file, &n, &e, now, record).unwrap()
+}
+
+fn wait_reason_of(out: &swap_cli::engine::TickOutcome) -> String {
+    match &out.decision.action {
+        swap_cli::engine::Action::Wait { reason } => reason.clone(),
+        other => panic!("expected wait, got {other:?}"),
+    }
+}
+
+fn stranded_note(out: &swap_cli::engine::TickOutcome) -> Option<&String> {
+    out.decision.notes.iter().find(|n| n.contains("hold NOID at the contract root"))
+}
+
+#[test]
+fn run9_several_instances_before_h_create_the_wait_reason_names_them_and_d() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    s.world.borrow_mut().tip = s.public.params.h_create - 100;
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    let why = wait_reason_of(&out);
+    let d = s.public.params.deadline_height;
+    assert!(!why.contains("behind H_create"), "{why}");
+    assert!(why.contains("2 instances") && why.contains("none is accepted") && why.contains("Fund NOTHING again"), "{why}");
+    assert!(why.contains(&format!("after D {d}")) && why.contains("recover-noid.sh"), "{why}");
+    assert!(why.contains("Bob does not lock") && why.contains("Alice does not reveal"), "{why}");
+    // The notes keep listing the slots, and nothing was recorded.
+    assert!(out.decision.notes.iter().any(|n| n.contains("2 instances at our contract root") && n.contains("slot 3") && n.contains("slot 9")), "{:?}", out.decision.notes);
+    assert_eq!(alice.phase.name(), "created");
+    assert!(alice.pending_intent.is_none());
+    // The library path chooses the same action (a wait, not a funding or an abort).
+    let mut s = s;
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "wait", "{r:?}");
+}
+
+#[test]
+fn run9_several_instances_after_h_create_the_wait_reason_is_the_same_and_nothing_is_funded() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    let why = wait_reason_of(&out);
+    let d = s.public.params.deadline_height;
+    assert!(why.contains("2 instances") && why.contains("Fund NOTHING again") && why.contains(&format!("after D {d}")), "{why}");
+    assert!(!why.contains("not funding again"), "{why}");
+    assert!(!why.contains("adopts"), "no funding of the tool's own is on record: {why}");
+    assert_eq!(alice.phase.name(), "created");
+    assert!(alice.pending_intent.is_none(), "no funding was recorded");
+    // Every later tick says the same until the tip is too late to fund (then it is an abort, with the note).
+    s.world.borrow_mut().advance_noid(1);
+    assert_eq!(wait_reason_of(&apply_now(&s, &mut alice, true)), why);
+}
+
+#[test]
+fn run9_a_single_foreign_dust_instance_gets_the_precise_wording_not_the_run_9_one() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().instances_before.push(dust(3, 5, 1_000));
+    let agreed = format!("agreed {}", s.public.params.amount_micronoid);
+    for tip in [s.public.params.h_create - 100, s.public.params.h_create + 1] {
+        s.world.borrow_mut().tip = tip;
+        let mut alice = s.alice.file.clone();
+        let out = apply_now(&s, &mut alice, true);
+        let why = wait_reason_of(&out);
+        assert!(why.contains("an instance of 1,000 micro-NOID") && why.contains("is not counted as a funding"), "{why}");
+        assert!(why.contains(&agreed), "{why}");
+        assert!(!why.contains("cannot go on") && !why.contains("recover") && !why.contains("Fund NOTHING"), "{why}");
+        assert_eq!(alice.phase.name(), "created");
+        assert!(alice.pending_intent.is_none());
+    }
+    // The library path says the same and sends nothing.
+    let r = s.tick_alice();
+    assert!(matches!(&r.action, swap_cli::engine::Action::Wait { reason } if reason.contains("is not counted as a funding")), "{r:?}");
+    assert_eq!(s.alice.executor.count("fund_noid"), 0);
+}
+
+#[test]
+fn run9_the_library_path_does_not_fund_beside_an_instance_that_was_not_accepted() {
+    // `Runner::tick` took the `FundNoid` of `decide` straight to the executor; the guard lived only in `tick_apply`.
+    let mut s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    assert!(s.world.borrow().tip + 1 >= s.public.params.h_create, "after h_create");
+    let r = s.tick_alice();
+    assert!(matches!(&r.action, swap_cli::engine::Action::Wait { reason } if reason.contains("Fund NOTHING again")), "{r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("not fund_noid")), "{:?}", r.notes);
+    assert_eq!(s.alice.executor.count("fund_noid"), 0, "nothing was funded");
+    assert_eq!(s.alice_phase(), "created");
+    assert!(s.alice.file.pending_action.is_none());
+    // A foreign instance of another amount: the same, with its own wording.
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().instances_before.push(dust(3, 5, 1_000));
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "wait", "{r:?}");
+    assert_eq!(s.alice.executor.count("fund_noid"), 0);
+}
+
+#[test]
+fn run9_texts_do_not_promise_that_the_helper_closes_an_instance_of_another_amount() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    s.world.borrow_mut().instances_before.push(dust(1, 1, 1_000));
+    let d = s.public.params.deadline_height;
+    let fee = swap_cli::params::MIN_CLOSE_FEE;
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    let why = wait_reason_of(&out);
+    assert!(why.contains("3 instances sit") && why.contains("2 of the agreed amount"), "{why}");
+    assert!(why.contains("closes the instances of the agreed amount") && why.contains("not larger than the close fee") && why.contains("at least 5,800 micro-NOID, more under load"), "{why}");
+    assert!(!why.contains("closes every instance"), "{why}");
+    assert_eq!(fee, 5_800);
+    // The abort note says the same.
+    s.world.borrow_mut().tip = s.public.params.lock_by_height - 10;
+    let out = apply_now(&s, &mut alice, true);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("3 instances hold") && note.contains("slot 1 ") && note.contains(&format!("after D {d}")), "{note}");
+    assert!(note.contains("Those of the agreed amount (2) are NOT lost"), "{note}");
+    assert!(note.contains("closes the instances of the agreed amount") && note.contains("not larger than the close fee"), "{note}");
+    assert!(!note.contains("closes every instance"), "{note}");
+    // Only foreign instances: none is this swap's funding.
+    s.world.borrow_mut().instances_before.clear();
+    s.world.borrow_mut().instances_after.clear();
+    s.world.borrow_mut().instances_before.push(dust(1, 1, 1_000));
+    let out = apply_now(&s, &mut alice, true);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("None fits the agreement") && !note.contains("NOT lost"), "{note}");
+}
+
+#[test]
+fn run9_f19_a_funding_on_record_the_note_says_the_tool_takes_the_oldest_at_d() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s); // slot 3 creation 5, slot 9 creation 2: the oldest is slot 9
+    let d = s.public.params.deadline_height;
+    let mut alice = s.alice.file.clone();
+    alice.log("intent_decided:fund_noid", s.now());
+    // The wait ticks before the abort say it too: from `alice_action` (tip below h_create) and from the fund guard (after it).
+    for tip in [s.public.params.h_create - 100, s.public.params.h_create + 1] {
+        s.world.borrow_mut().tip = tip;
+        let why = wait_reason_of(&apply_now(&s, &mut alice, true));
+        assert!(why.contains("Fund NOTHING again") && why.contains(&format!("At D {d} this file adopts the oldest fitting instance (slot 9, creation 2)")), "{why}");
+        assert!(why.contains("OTHER instances need scripts/live/recover-noid.sh") && why.contains("tick --closed-by TXID"), "{why}");
+        assert_eq!(alice.phase.name(), "created");
+    }
+    // Too late to fund: the abort is decided but not recorded (a funding was decided and never cancelled).
+    s.world.borrow_mut().tip = s.public.params.lock_by_height - 10;
+    let out = apply_now(&s, &mut alice, true);
+    assert!(matches!(out.decision.action, swap_cli::engine::Action::Abort { .. }), "{:?}", out.decision);
+    assert_eq!(alice.phase.name(), "created");
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("adopts the oldest fitting instance (slot 9, creation 2)") && note.contains("refund_noid"), "{note}");
+    assert!(note.contains("OTHER instances need scripts/live/recover-noid.sh") && note.contains("tick --closed-by TXID"), "{note}");
+    assert!(!note.contains("will not close"), "{note}");
+    // At D the tool adopts that instance, and offers its refund once it is final, as before.
+    s.world.borrow_mut().tip = d - 1;
+    let out = apply_now(&s, &mut alice, true);
+    assert_eq!(alice.phase.name(), "funded", "{:?}", out.decision);
+    assert!(stranded_note(&out).is_none(), "{:?}", out.decision.notes);
+    s.world.borrow_mut().advance_noid(18);
+    let out = apply_now(&s, &mut alice, true);
+    assert_eq!(out.decision.action.kind(), "refund_noid", "{:?}", out.decision);
+}
+
+#[test]
+fn run9_without_a_funding_on_record_the_note_keeps_the_tool_will_not_close_them() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    s.world.borrow_mut().tip = s.public.params.lock_by_height - 10;
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("This tool will not close them") && !note.contains("adopts"), "{note}");
+}
+
+#[test]
+fn run9_the_abort_tick_and_every_later_tick_of_the_aborted_file_carry_the_note() {
+    let s = Scenario::new(Variant::Raw);
+    two_fitting_at_alice_root(&s);
+    let d = s.public.params.deadline_height;
+    // Too late to fund: the abort is decided and recorded, with the instances still at the root.
+    s.world.borrow_mut().tip = s.public.params.lock_by_height - 10;
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    assert!(matches!(out.decision.action, swap_cli::engine::Action::Abort { .. }), "{:?}", out.decision);
+    assert_eq!(alice.phase.name(), "aborted");
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("2 instances") && note.contains("slot 3") && note.contains("slot 9") && note.contains("NOT lost"), "{note}");
+    assert!(note.contains(&format!("after D {d}")) && note.contains("scripts/live/recover-noid.sh") && note.contains("will not close"), "{note}");
+    // A later tick of the aborted file, before D: the same note.
+    let out = apply_now(&s, &mut alice, true);
+    assert!(matches!(&out.decision.action, swap_cli::engine::Action::Wait { reason } if reason.starts_with("aborted")), "{:?}", out.decision);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains(&format!("after D {d}")) && !note.contains("recovered now"), "{note}");
+    // A read-only tick says it too.
+    let out = apply_now(&s, &mut alice, false);
+    assert!(stranded_note(&out).is_some(), "{:?}", out.decision.notes);
+    // At D: the wording is "now".
+    s.world.borrow_mut().tip = d - 1;
+    let out = apply_now(&s, &mut alice, true);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains(&format!("D {d} is reached")) && note.contains("recovered now"), "{note}");
+    assert_eq!(alice.phase.name(), "aborted");
+    // A single leftover instance is named in the singular.
+    s.world.borrow_mut().instances_after.clear();
+    let out = apply_now(&s, &mut alice, true);
+    let note = stranded_note(&out).unwrap_or_else(|| panic!("{:?}", out.decision.notes));
+    assert!(note.contains("1 instance hold") && note.contains("will not close it"), "{note}");
+}
+
+#[test]
+fn run9_without_an_instance_at_the_root_there_is_no_such_note() {
+    let s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().tip = s.public.params.lock_by_height - 10;
+    let mut alice = s.alice.file.clone();
+    let out = apply_now(&s, &mut alice, true);
+    assert!(matches!(out.decision.action, swap_cli::engine::Action::Abort { .. }), "{:?}", out.decision);
+    assert!(stranded_note(&out).is_none(), "{:?}", out.decision.notes);
+    assert_eq!(alice.phase.name(), "aborted");
+    let out = apply_now(&s, &mut alice, true);
+    assert!(stranded_note(&out).is_none(), "{:?}", out.decision.notes);
+    // The instances are closed: the note goes away with them.
+    two_fitting_at_alice_root(&s);
+    assert!(stranded_note(&apply_now(&s, &mut alice, true)).is_some());
+    s.world.borrow_mut().instances_before.clear();
+    s.world.borrow_mut().instances_after.clear();
+    assert!(stranded_note(&apply_now(&s, &mut alice, true)).is_none());
+    // And an Alice who is not giving up (an instance is accepted) gets none of it.
+    let mut s = Scenario::new(Variant::Raw);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    let mut funded = s.alice.file.clone();
+    assert_eq!(funded.phase.name(), "funded");
+    assert!(stranded_note(&apply_now(&s, &mut funded, true)).is_none());
+}
+
+#[test]
+fn run9_bob_still_waits_with_the_old_reason_when_several_instances_fit() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    let amount = s.public.params.amount_micronoid;
+    s.world.borrow_mut().instances_after.push(dust(9, 2, amount));
+    s.world.borrow_mut().advance_noid(17);
+    let (_, rb) = s.tick_both();
+    assert!(matches!(&rb.action, swap_cli::engine::Action::Wait { reason } if reason.contains("more than one instance at the contract root")), "{rb:?}");
+    assert!(!rb.notes.iter().any(|n| n.contains("hold NOID at the contract root")), "{:?}", rb.notes);
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+}
+
 #[test]
 fn f10_a_bad_first_lock_does_not_hide_the_correct_second_one() {
     let mut s = Scenario::new(Variant::Raw);

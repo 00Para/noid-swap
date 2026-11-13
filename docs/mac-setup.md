@@ -2,7 +2,8 @@
 
 One checklist. Each step is one command or one action, with the output to expect. Nothing here moves money.
 A setup pass on an Apple Silicon Mac (8 GB, macOS) followed this file on 2026-11-06 and its findings are folded in below:
-sections 1, 3, 4, 5 and the fixture check of section 8 were run there; sections 6 and 7 were not. Every step still marked
+sections 1, 3, 4, 5 and the fixture check of section 8 were run there; section 7 ran in live runs 9 to 12, and the tunnel of
+section 6 ran in live run 12 (`docs/live-run-12.md`). Every step still marked
 **UNVERIFIED** is not stated in any file of this repository and was never run on a Mac: if it
 fails, read the pointer after it and stop; do not improvise with funds. Apple silicon is "M-series" below,
 Intel is "x86-64". Commands are typed in the Terminal app (zsh).
@@ -118,7 +119,7 @@ Run each from the repo root in a Terminal with the same `RUSTUP_TOOLCHAIN`. Coun
 |---|---|
 | `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it. Of those, the macOS memory fix was re-run on a Mac 2026-11-06: `npx hardhat test test/free-mem.test.js test/Poseidon2b.test.js` gave `28 passing` without any workaround; the full suite was not re-run there) |
 | `cd btc && npm ci && npm test` | 91 pass (Bitcoin is not used by an ETH swap; optional) |
-| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 460 passing, 1 ignored |
+| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 470 passing, 1 ignored |
 | `cd equiv && cargo test --release --locked` | 23 pass |
 | `cd equiv/zkvm && cargo test --locked -p equiv-guest-core` | 3 pass |
 
@@ -182,10 +183,15 @@ the operator key does not cover them, and `swap-cli` has no way to send a key (`
 2. On the PC (Windows PowerShell, OpenSSH is built in): `ssh -N -L 127.0.0.1:19601:127.0.0.1:9601 MACUSER@MACADDRESS`
    and leave it running. Check from the PC: `curl.exe -s -X POST -H "content-type: application/json" --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"paranoid_getChainInfo\",\"params\":[]}" http://127.0.0.1:19601`
    returns a JSON reply with a height. The method name is `paranoid_getChainInfo`: the bare `getChainInfo` answers "Method not found".
-   The tunnel itself was never tried, **UNVERIFIED**.
+   This was run in live run 12 (`docs/live-run-12.md`): one SSH connection from the PC with a local and a remote port forward, so the
+   PC saw the Mac's node on a local port and the Mac saw the PC's node on a local port. The Mac end answered with the same height and
+   best block hash as the Mac's own node. If the client offers keys the Mac does not know, the server may refuse before it asks for
+   the password: force password login for that connection (the SSH option `PreferredAuthentications=password`).
 3. The PC passes both nodes: `--noid-rpc http://127.0.0.1:9601 --noid-rpc http://127.0.0.1:19601`. The tool accepts another
    port on the same machine "with a note" because it shares one network view of the endpoint; the Mac node syncs independently,
-   which is the point. From WSL on the PC use `--transport curl` (WSL cannot reach the Windows loopback by TCP).
+   which is the point. From WSL on the PC use `--transport curl` (WSL cannot reach the Windows loopback by TCP). The tool prints the
+   same-host note (G3) on every tick, because a tunnelled node appears on localhost (finding 1 of `docs/live-run-12.md`); the two
+   nodes are still on two machines, though on one private network.
 4. Better still, run `swap-cli` on the Mac itself, where both Ethereum and Parano1d nodes are local (section 7): then Bob
    needs the tunnel the other way round for a second Parano1d node (a node of the PC or another operator). Same recipe, ports swapped.
 5. Turn Remote Login off after the check if you do not need it.

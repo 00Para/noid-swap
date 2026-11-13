@@ -166,7 +166,7 @@ fn alice_never_funds_twice_and_a_foreign_instance_is_not_a_reason_to_fund() {
     let mut a2 = s2.alice.file.clone();
     let (n, e, now) = observe(&s2);
     let out = tick_apply(&mut a2, &n, &e, now, true).unwrap();
-    assert!(wait_reason(&out).contains("not funding again"), "{:?}", out.decision);
+    assert!(wait_reason(&out).contains("is not counted as a funding"), "{:?}", out.decision);
     assert!(a2.pending_intent.is_none());
 }
 

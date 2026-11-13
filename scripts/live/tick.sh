@@ -27,7 +27,7 @@ print("eth : latest", e.get("latest_block"), "finalized", e.get("finalized_block
       "lock", json.dumps(e.get("lock"))[:200], "claimed", json.dumps(e.get("claimed"))[:80], "pending_preimage", e.get("pending_preimage"),
       "refunded", json.dumps(e.get("refunded"))[:80])
 print("sources:", json.dumps(v.get("sources"))[:300])
-print("events:", json.dumps(v.get("events"))[:300]); print("ACTION:", json.dumps(v.get("action"))[:600]); print("notes:", json.dumps(v.get("notes"))[:500])
+print("events:", json.dumps(v.get("events"))[:300]); print("ACTION:", json.dumps(v.get("action"))[:600]); print("notes:", json.dumps(v.get("notes"))[:1500])
 print("intent:", json.dumps(v.get("intent"))[:300]); print("applied:", v.get("events_applied_to_file"), "phase_after:", v.get("phase_after"))
 PY
 exit $EC

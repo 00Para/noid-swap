@@ -316,6 +316,95 @@ fn instance_ok(file: &SwapFile, noid: &NoidObservation) -> Result<(), InstancePr
     Ok(())
 }
 
+/// The helper the operator runs for instances the tool does not close: what it can and cannot do.
+fn recover_helper_clause() -> String {
+    format!(
+        "scripts/live/recover-noid.sh closes the instances of the agreed amount; an instance not larger than the close fee (at least {} micro-NOID, more under load) cannot be recovered",
+        group_thousands(params::MIN_CLOSE_FEE)
+    )
+}
+
+/// CHAOS F-19, said in the reason and in the note: a funding decided by the tool is on record and several instances fit. At `D` this file
+/// takes the oldest fitting instance as its own and offers `refund_noid` for it; the others are for the helper. `fitting` is sorted here.
+fn f19_adoption_sentence(file: &SwapFile, fitting: &mut [NoidInstanceStatus]) -> String {
+    fitting.sort_by_key(|v| (v.instance.creation_id, v.instance.slot_index));
+    let mine = &fitting[0].instance;
+    format!(
+        "At D {} this file adopts the oldest fitting instance (slot {}, creation {}) and offers its refund itself (refund_noid); the OTHER instances need scripts/live/recover-noid.sh. If the helper is run for all of them before the tool's own refund, record the tool's instance with `tick --closed-by TXID`.",
+        file.public.params.deadline_height, mine.slot_index, mine.creation_id
+    )
+}
+
+/// "1 instance" / "3 instances".
+fn count_instances(n: usize) -> String {
+    format!("{n} instance{}", if n == 1 { "" } else { "s" })
+}
+
+/// Alice, phase `created`: instances sit at her contract root and none is accepted. The `wait` reason, or `None` when there is nothing
+/// to say (no instance, or one is accepted). It comes first, whatever the tip is relative to `h_create`.
+/// - More than one instance fits (live run 9, a funding made more than once): the swap cannot go on with them, nothing may be funded
+///   again, and the NOID is taken back once `D` is reached.
+/// - The instance there does not fit (a foreign deposit, dust, another amount): it is not counted as a funding; nothing else is claimed.
+fn alice_instance_problem_text(file: &SwapFile, noid: &NoidObservation) -> Option<String> {
+    let all = noid.all_instances();
+    if all.is_empty() {
+        return None;
+    }
+    match instance_ok(file, noid) {
+        Ok(()) => None,
+        Err(InstanceProblem::Ambiguous(_)) => {
+            let d = file.public.params.deadline_height;
+            let mut fitting: Vec<NoidInstanceStatus> = all.iter().filter(|v| instance_fits(file, v)).cloned().collect();
+            let when = if params::alice_refund_ready(noid.tip, d) { format!("D {d} is reached, so they can be recovered now") } else { format!("they can be recovered after D {d}") };
+            let mut text = format!(
+                "{} at our contract root, {} of the agreed amount, and none is accepted: the swap cannot go on with them (Bob does not lock on more than one fitting instance, and Alice does not reveal). Fund NOTHING again. The instances of the agreed amount are not lost: {when}, with the wallet or with the helper ({})",
+                if all.len() == 1 { "1 instance sits".to_string() } else { format!("{} instances sit", all.len()) },
+                fitting.len(),
+                recover_helper_clause()
+            );
+            // The same sentence as the abandoned note: a funding of the tool's own is on record, so at D the file takes the oldest one.
+            if fitting.len() > 1 && alice_funding_on_record(file, &AlicePhase::Created) {
+                text.push_str(&format!(". {}", f19_adoption_sentence(file, &mut fitting)));
+            }
+            Some(text)
+        }
+        Err(InstanceProblem::Rejected(e)) => {
+            let first = noid.instance.as_ref().map(|i| group_thousands(i.amount_micronoid)).unwrap_or_else(|| "?".into());
+            Some(format!(
+                "an instance of {first} micro-NOID sits at our contract root; it is not the agreed one ({e}) and is not counted as a funding{}; not funding until the contract state has been checked",
+                if all.len() > 1 { format!(" ({} instances in all, see the notes)", all.len()) } else { String::new() }
+            ))
+        }
+    }
+}
+
+/// The note for an Alice file that is aborted, or whose `abort` is decided now, while instances still hold NOID at her root. It says where
+/// they are, which of them are not lost and how to take them back, and who closes them. `None` when no instance is left.
+/// `phase_created` / `funding_on_record`: the F-19 case (CHAOS F-19): a funding decided by this tool is on record and several instances
+/// fit; the file stays `created`, and at `D` the tool adopts the oldest fitting instance and offers its refund itself.
+fn alice_abandoned_instances_note(file: &SwapFile, noid: &NoidObservation, phase_created: bool, funding_on_record: bool) -> Option<String> {
+    let all = noid.all_instances();
+    if all.is_empty() {
+        return None;
+    }
+    let d = file.public.params.deadline_height;
+    let n = all.len();
+    let mut fitting: Vec<NoidInstanceStatus> = all.iter().filter(|v| instance_fits(file, v)).cloned().collect();
+    let when = if params::alice_refund_ready(noid.tip, d) { format!("D {d} is reached, so they can be recovered now") } else { format!("they can be recovered after D {d}") };
+    let mut text = format!("{} hold NOID at the contract root: {}.", count_instances(n), describe_instances(&all, None));
+    if fitting.is_empty() {
+        text.push_str(&format!(" None fits the agreement, so none is this swap's funding; {}.", recover_helper_clause()));
+    } else {
+        text.push_str(&format!(" Those of the agreed amount ({}) are NOT lost: {when}, with scripts/live/recover-noid.sh ({}).", fitting.len(), recover_helper_clause()));
+    }
+    if phase_created && funding_on_record && fitting.len() > 1 {
+        text.push_str(&format!(" {}", f19_adoption_sentence(file, &mut fitting)));
+    } else {
+        text.push_str(&format!(" This tool will not close {}.", if n == 1 { "it" } else { "them" }));
+    }
+    Some(text)
+}
+
 /// The instance this swap file recorded is no longer at our root (REVIEW-2 F10: judged by slot AND incarnation, so a
 /// dust instance or a re-funded slot never makes a closed instance look alive). A file that has recorded none: no
 /// instance at all is listed.
@@ -535,6 +624,17 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
         }
         other => other,
     };
+    // Live run 9: an Alice file that gives up (the `abort` is decided now) or has given up while instances still hold NOID at her
+    // root. The file ends, the loop stops, and nothing else says where the NOID is. Alice's `aborted` only comes from `created`.
+    let alice_gives_up = match &phase {
+        Phase::Alice(AlicePhase::Aborted { .. }) => true,
+        Phase::Alice(AlicePhase::Created) => matches!(action, Action::Abort { .. }),
+        _ => false,
+    };
+    if alice_gives_up {
+        let on_record = matches!(&phase, Phase::Alice(p) if alice_funding_on_record(file, p));
+        notes.extend(alice_abandoned_instances_note(file, noid, matches!(&phase, Phase::Alice(AlicePhase::Created)), on_record));
+    }
     // REVIEW-2 F10: several instances or several matching locks are never normal; say so, whatever the action is.
     // REVIEW-4 R4-11: also in a `done` that still has a leftover leg to refund (the refund is the action, or the leg is still listed).
     let still_acting = !phase.is_terminal() && (!phase.is_settled() || matches!(action, Action::RefundNoid { .. } | Action::RefundEth { .. }) || has_leftover_leg(&phase, noid, eth));
@@ -1655,7 +1755,9 @@ fn alice_action(
                 };
             }
             if noid.tip.saturating_add(1) < file.public.params.h_create {
-                return Action::Wait { reason: "node is behind H_create".into() };
+                // Instances at the root that are not accepted are the real matter, whatever the tip is (live run 9).
+                let reason = alice_instance_problem_text(file, noid).unwrap_or_else(|| "node is behind H_create".to_string());
+                return Action::Wait { reason };
             }
             Action::FundNoid { amount_micronoid: file.public.params.amount_micronoid }
         }
@@ -2720,6 +2822,19 @@ fn intent_wait_reason(intent: &PendingIntent) -> String {
     )
 }
 
+/// `fund_noid` is never offered while an instance already sits at our root and was not accepted (a second funding would make a second
+/// instance: live run 9). One function for the CLI path ([`tick_apply`]) and the library path ([`Runner::tick`]); `decide` itself
+/// still returns the `FundNoid` that its phase leads to.
+fn guard_fund_noid(file: &SwapFile, noid: &NoidObservation, decision: &mut Decision) {
+    if !matches!(decision.action, Action::FundNoid { .. }) || noid.instance.is_none() {
+        return;
+    }
+    let why = alice_instance_problem_text(file, noid)
+        .unwrap_or_else(|| "an instance already exists at our contract root but was not accepted; not funding again (check its amount and the contract state)".to_string());
+    decision.notes.push(format!("not fund_noid: {why}"));
+    decision.action = Action::Wait { reason: why };
+}
+
 /// The `tick --apply` path as one function (the CLI calls exactly this): decide, apply the derived
 /// events, then run the intent ledger. `file` is changed in memory only; the CALLER saves it before
 /// printing anything. With `record == false` (a read-only `tick`) an existing intent still holds and
@@ -2757,10 +2872,8 @@ pub fn tick_apply(
     }
     // Guards that only make sense against the ledger's own kinds.
     let kind = decision.action.kind();
-    if kind == "fund_noid" && noid.instance.is_some() {
-        let why = "an instance already exists at our contract root but was not accepted; not funding again (check its amount and the contract state)".to_string();
-        decision.notes.push(format!("not fund_noid: {why}"));
-        decision.action = Action::Wait { reason: why };
+    if kind == "fund_noid" {
+        guard_fund_noid(file, noid, &mut decision);
     } else if kind == "refund_noid" && our_instance_gone(file, noid) {
         let why = "the instance is not visible, so there is nothing to refund (already closed? verify the contract receipts)".to_string();
         decision.notes.push(format!("not refund_noid: {why}"));
@@ -3188,7 +3301,9 @@ impl<E: Executor> Runner<E> {
     }
 
     pub fn tick(&mut self, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Result<TickReport, RunnerError> {
-        let decision = decide(&self.file, noid, eth, now);
+        let mut decision = decide(&self.file, noid, eth, now);
+        // The same guard as the CLI path: no second funding beside an instance that was not accepted.
+        guard_fund_noid(&self.file, noid, &mut decision);
         let mut notes = decision.notes;
         let mut names = Vec::new();
         let phase_before = self.file.phase.clone();

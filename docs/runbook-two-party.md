@@ -80,7 +80,9 @@ The five hard rules (`PROJECT.md`):
    `paranoid_getBlockHeader`: without a header time the tool holds every NOID-side spend. A pending close the first node shows but the
    second does not no longer stalls Bob's claim. Plain `http://` is accepted only to loopback
    (`--allow-plain-http` otherwise). Do not use Alice's node, and do not rely on one remote node: `swap-cli/REVIEW-2.md` F5
-   (single-source trust) says a lagging or lying node is not detected. Download from the release page named in
+   (single-source trust) says a lagging or lying node is not detected. The two-node path has run live once, in run 12
+   (`docs/live-run-12.md`): each machine's own node plus the other's through one SSH tunnel (`docs/mac-setup.md` section 6), and two
+   Sepolia endpoints per side; both machines were on one private network. Download from the release page named in
    `vendor/parano1d/docs/getting-started/core.md` (`parano1d-core-vVERSION-macos-aarch64.tar.gz`, v2.1.0 or later)
    or take the wallet app (`parano1d-gui-vVERSION-macos-aarch64.dmg`, `getting-started/wallet.md`). Check the
    download against `SHA256SUMS` with `shasum -a 256`. Core: `./parano1d --check-hardware` must end with

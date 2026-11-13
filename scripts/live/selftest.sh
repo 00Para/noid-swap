@@ -155,6 +155,125 @@ mkdir -p "$TMP/fake/scripts/live" "$TMP/fake/eth/scripts"
 D2=$(mkl notfrozen)
 check "not frozen: the repository is found two folders above scripts/live" "$(phys "$TMP/fake/eth")" "$(env -i HOME="$TMP/home" PATH="$PATH" L="$D2" LIVE_PLATFORM=native "$BASH" -c 'set -u; . "$1/scripts/live/env.sh"; cd "$ETH_DIR" && pwd -P' _ "$TMP/fake")"
 
+
+# ---- (8) fund.sh against STUBS only: a stub wallet CLI, a stub check-object.sh and a stub swap-cli (no network, no wallet, no node, nothing funded)
+FB="$TMP/fundbin"; mkdir -p "$FB"
+cp "$HERE/env.sh" "$HERE/fund.sh" "$FB/"
+cat > "$FB/check-object.sh" <<'STUB'
+#!/bin/sh
+# STUB_CO: ok (default) | exit1 (the OK text is there, the exit status is 1) | inline (the OK text inside another line) | trailing | twice | none
+R=o1stubcontractroot0000
+OKT="object file OK: its opening is byte-for-byte the swap file's; fund exactly this address: $R"
+echo '{"claim_authority": "o1x"}'
+case "${STUB_CO:-ok}" in
+  ok) echo "$OKT" >&2 ;;
+  exit1) echo "$OKT" >&2; exit 1 ;;
+  inline) echo "note: $OKT" >&2 ;;
+  trailing) echo "$OKT (and more)" >&2 ;;
+  twice) echo "$OKT" >&2; echo "$OKT" >&2 ;;
+  none) echo "error: MISMATCH" >&2; exit 1 ;;
+esac
+exit 0
+STUB
+cat > "$TMP/stubcli" <<'STUB'
+#!/bin/sh
+# the wallet CLI: `contract instances OBJ` and `contract fund OBJ AMOUNT`; every fund call is logged with the markers it finds
+case "$1 $2" in
+  "contract instances") [ -n "${STUB_INST_OUT-}" ] && printf '%s\n' "$STUB_INST_OUT"; exit "${STUB_INST_EC:-0}" ;;
+  "contract fund")
+    m1=n; [ -e "$STUB_L/funded.marker" ] && m1=y
+    m2=n; for f in "$STUB_OBJDIR"/funded-*.marker; do [ -e "$f" ] && m2=y; done
+    echo "fund $4 mk1=$m1 mk2=$m2" >> "$STUB_LOG"; exit "${STUB_FUND_EC:-0}" ;;
+esac
+exit 9
+STUB
+cat > "$TMP/stubbin" <<'STUB'
+#!/bin/sh
+# swap-cli status: JSON whose first amount_micronoid is the swap's amount
+[ "$1" = status ] || exit 9
+[ "${STUB_STATUS_EC:-0}" = 0 ] || { echo "error: cannot load" >&2; exit "$STUB_STATUS_EC"; }
+echo "{"; echo "  \"amount_micronoid\": ${STUB_SWAP_AMOUNT:-5000000},"; echo "  \"history\": []"; echo "}"
+STUB
+chmod +x "$FB/check-object.sh" "$TMP/stubcli" "$TMP/stubbin"
+FN=0
+# fund_run NAME 'MODE' [VAR=value ...]: a fresh run folder and object folder; sets FD (the run folder), FO (the object folder), FOUT, FRC, FLOG
+fund_run() {
+  FN=$((FN + 1)); local name=$1 mode=$2; shift 2
+  FD=$(mkl "fund$FN"); FO="$TMP/fund$FN-obj"; FLOG="$TMP/fund$FN.log"; mkdir -p "$FO"; : > "$FLOG"
+  printf '{"object": "stub"}\n' > "$FO/swap.object.json"
+  [ -z "${PRE:-}" ] || eval "$PRE"
+  FOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$FD" LIVE_PLATFORM=native OBJ="$FO/swap.object.json" BIN="$TMP/stubbin" NOID_CLI="$TMP/stubcli" AMOUNT=5000000 \
+    STUB_LOG="$FLOG" STUB_L="$FD" STUB_OBJDIR="$FO" ${1+"$@"} "$BASH" "$FB/fund.sh" $mode 2>&1 < /dev/null); FRC=$?
+}
+nmarkers() { local n=0 f; for f in "$FD/funded.marker" "$FO"/funded-*.marker; do [ -e "$f" ] && n=$((n + 1)); done; echo "$n"; }
+nfunds() { grep -c '^fund ' "$FLOG" || true; }
+OBJSHA=$(printf '{"object": "stub"}\n' | { if command -v sha256sum >/dev/null 2>&1; then sha256sum; elif command -v shasum >/dev/null 2>&1; then shasum -a 256; else python3 -c 'import hashlib,sys;print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'; fi; } | sed -e 's/[[:space:]].*$//')
+
+fund_run happy --dry-run
+check "fund.sh dry run: the clean run exits 0" "0" "$FRC"
+check_has "fund.sh dry run: says it would fund once" "dry run: would fund 5.000000 NOID once with: $TMP/stubcli contract fund $FO/swap.object.json 5.000000" "$FOUT"
+check_has "fund.sh dry run: prints the object path and its sha256" "object: $FO/swap.object.json sha256 $OBJSHA" "$FOUT"
+check_has "fund.sh dry run: prints the amount line" "amount: 5000000 micro-NOID (swap file and AMOUNT agree)" "$FOUT"
+check_has "fund.sh dry run: prints the anchored object-OK line" "object file OK: its opening is byte-for-byte the swap file's; fund exactly this address: o1stubcontractroot0000" "$FOUT"
+check "fund.sh dry run: creates no marker and funds nothing" "0|0" "$(nmarkers)|$(nfunds)"
+
+fund_run co1 '' STUB_CO=exit1
+check "fund.sh: check-object exit 1 refuses even though the OK text is in its output" "3" "$FRC"
+check_has "fund.sh: ... and says why" "check-object.sh exited 1; not funding" "$FOUT"
+check "fund.sh: ... and creates no marker, funds nothing" "0|0" "$(nmarkers)|$(nfunds)"
+for m in inline trailing twice none; do
+  fund_run "co-$m" '' STUB_CO=$m
+  check "fund.sh: check-object output [$m] refuses (the OK line must be anchored, whole and single)" "3|0|0" "$FRC|$(nmarkers)|$(nfunds)"
+done
+fund_run cli1 --dry-run STUB_INST_EC=1 'STUB_INST_OUT=Error: the node is not reachable'
+check "fund.sh: a failed instance listing (exit 1) is not 'no instance': refused" "3" "$FRC"
+check_has "fund.sh: ... said as such" "could not list the contract's instances" "$FOUT"
+fund_run cli2 '' STUB_INST_EC=1 'STUB_INST_OUT=Error: boom'
+check "fund.sh: the same in real mode funds nothing and writes no marker" "3|0|0" "$FRC|$(nmarkers)|$(nfunds)"
+fund_run cli3 --dry-run 'STUB_INST_OUT=something nobody has seen before'
+check "fund.sh: unknown listing output (exit 0) is not 'no instance': refused" "3" "$FRC"
+check_has "fund.sh: ... said as such" "not an instance line" "$FOUT"
+fund_run cli4 --dry-run 'STUB_INST_OUT=Slot 635439  incarnation 757220  5.000000 NOID
+and then a line that is not one'
+check "fund.sh: an instance line plus unknown output is refused" "3" "$FRC"
+fund_run inst1 '' 'STUB_INST_OUT=Slot 635439  incarnation 757220  5.000000 NOID'
+check "fund.sh: an instance present refuses, funds nothing, writes no marker" "3|0|0" "$FRC|$(nmarkers)|$(nfunds)"
+check_has "fund.sh: ... naming the instance count" "REFUSED: the contract already has 1 instance(s)" "$FOUT"
+fund_run amt1 --dry-run STUB_SWAP_AMOUNT=4000000
+check "fund.sh: AMOUNT that is not the swap file's amount refuses" "3" "$FRC"
+check_has "fund.sh: ... naming both amounts" "AMOUNT is 5000000 micro-NOID but the swap file's amount is 4000000" "$FOUT"
+fund_run amt2 '' STUB_STATUS_EC=2
+check "fund.sh: an unreadable swap file status refuses" "3|0|0" "$FRC|$(nmarkers)|$(nfunds)"
+fund_run amt3 --dry-run AMOUNT=abc
+check "fund.sh: a non-numeric AMOUNT exits 2" "2" "$FRC"
+
+PRE='printf "2026-11-06T11:46:09Z\n" > "$FD/funded.marker"'
+fund_run mk1d --dry-run
+check "fund.sh dry run: the run folder's marker is the reason a real run would be refused" "3" "$FRC"
+check_has "fund.sh dry run: ... said with its time" "a real run would be REFUSED: fund.sh already ran for this run folder (at 2026-11-06T11:46:09Z)" "$FOUT"
+fund_run mk1r ''
+check "fund.sh real: the run folder's marker refuses; the wallet CLI is not called" "3|0" "$FRC|$(nfunds)"
+PRE='printf "2026-11-06T11:00:00Z\nrun folder /elsewhere\n" > "$FO/funded-o1stubcontractroot0000.marker"'
+fund_run mk2d --dry-run
+check "fund.sh dry run: the contract's marker (another run folder, same object folder) refuses too" "3" "$FRC"
+check_has "fund.sh dry run: ... said with its time" "this contract was already funded through fund.sh (marker $FO/funded-o1stubcontractroot0000.marker, at 2026-11-06T11:00:00Z)" "$FOUT"
+fund_run mk2r ''
+check "fund.sh real: the contract's marker refuses; the wallet CLI is not called; no marker of ours is left" "3|0|0" "$FRC|$(nfunds)|$([ -e "$FD/funded.marker" ] && echo 1 || echo 0)"
+PRE=''
+
+fund_run real ''
+check "fund.sh real: the clean run exits 0" "0" "$FRC"
+check "fund.sh real: the wallet CLI's fund was called exactly once, with BOTH markers already there" "1|fund 5.000000 mk1=y mk2=y" "$(nfunds)|$(grep '^fund ' "$FLOG")"
+check "fund.sh real: both markers exist afterwards" "2" "$(nmarkers)"
+FD1=$FD; FO1=$FO
+FOUT2=$(env -i HOME="$TMP/home" PATH="$PATH" L="$FD1" LIVE_PLATFORM=native OBJ="$FO1/swap.object.json" BIN="$TMP/stubbin" NOID_CLI="$TMP/stubcli" AMOUNT=5000000 STUB_LOG="$FLOG" STUB_L="$FD1" STUB_OBJDIR="$FO1" "$BASH" "$FB/fund.sh" 2>&1 < /dev/null); RC2=$?
+check "fund.sh real: a second run is refused, and the wallet CLI is not called again" "3|1" "$RC2|$(grep -c '^fund ' "$FLOG")"
+# a copy of the run folder (another L) with the same object folder cannot fund the same contract again
+mkdir -p "$TMP/fundcopy"; cp "$FD1/env.local.sh" "$TMP/fundcopy/"
+FOUT3=$(env -i HOME="$TMP/home" PATH="$PATH" L="$TMP/fundcopy" LIVE_PLATFORM=native OBJ="$FO1/swap.object.json" BIN="$TMP/stubbin" NOID_CLI="$TMP/stubcli" AMOUNT=5000000 STUB_LOG="$FLOG" STUB_L="$TMP/fundcopy" STUB_OBJDIR="$FO1" "$BASH" "$FB/fund.sh" 2>&1 < /dev/null); RC3=$?
+check "fund.sh real: another run folder with the same object folder is refused too" "3|1" "$RC3|$(grep -c '^fund ' "$FLOG")"
+fund_run realfail '' STUB_FUND_EC=1
+check "fund.sh real: a failing wallet CLI exits non-zero and the markers STAY (the funding may be pending)" "1|2" "$FRC|$(nmarkers)"
 echo
 echo "$PASS ok, $FAILS failed (bash $BASH_VERSION)"
 [ "$FAILS" -eq 0 ]
