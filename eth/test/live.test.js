@@ -158,6 +158,54 @@ describe("live.js (over Hardhat's in-process network)", function () {
       expect(real.lockId).to.equal(dry.expectedLockId);
     });
 
+    // A provider whose getBlock(<number>) answers null the first `nulls` times (Infinity: always); "latest" and tags are untouched.
+    const lagging = (nulls) => {
+      const st = { numeric: 0 };
+      const p = new Proxy(provider, {
+        get(t, k) {
+          if (k === "getBlock") {
+            return async (tag, ...rest) => {
+              if (typeof tag === "number" && st.numeric++ < nulls) return null;
+              return t.getBlock(tag, ...rest);
+            };
+          }
+          const v = t[k];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      return { p, st };
+    };
+    const lockArgs = async () => ({
+      ...tgt, contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal: String((await latestTs()) + HOUR), receiver: await bob.getAddress(), amountWei: "1000", blockRetryMs: 1,
+    });
+
+    it("lock: a block the node does not serve at first is read again, and its timestamp is recorded", async () => {
+      const { p, st } = lagging(1);
+      const l = await live.lock(p, alice, await lockArgs());
+      expect(st.numeric).to.equal(2);
+      expect(l.blockTimestamp).to.equal((await provider.getBlock(l.blockNumber)).timestamp);
+      expect(l).to.not.have.property("blockTimestampNote");
+    });
+
+    it("lock: a block that is never served gives a null timestamp with a note, the lock itself is not affected", async () => {
+      const { p, st } = lagging(Infinity);
+      const written = [];
+      const orig = process.stderr.write;
+      process.stderr.write = (c, ...r) => (written.push(String(c)), true);
+      let l;
+      try {
+        l = await live.lock(p, alice, await lockArgs());
+      } finally {
+        process.stderr.write = orig;
+      }
+      expect(st.numeric).to.equal(5);
+      expect(l.blockTimestamp).to.equal(null);
+      expect(l.blockTimestampNote).to.match(/not served/);
+      expect(l.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(written.filter((w) => /timestamp of block/.test(w))).to.have.length(1);
+      expect((await live.status(provider, null, { ...tgt, contract: htlcAddr, lockId: l.lockId })).exists).to.equal(true);
+    });
+
     it("lock rejects bad inputs before sending", async () => {
       const ok = { ...tgt, contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal: String((await latestTs()) + HOUR), receiver: await bob.getAddress(), amountWei: "1" };
       await expect(live.lock(provider, alice, { ...ok, hashlock: "0x1234" })).to.be.rejectedWith(/32 bytes/);

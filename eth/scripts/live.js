@@ -525,6 +525,27 @@ async function latestBlock(provider) {
   return b;
 }
 
+/**
+ * The timestamp of a mined block, for the record only. A public endpoint can lag for a moment right after a block is mined and answer
+ * null for it, so the read is retried a few times (5 tries, 2 s apart); nothing is ever re-sent. Still unknown: timestamp null and a note
+ * that says why, plus one line on stderr.
+ */
+async function readBlockTimestamp(provider, blockNumber, { tries = 5, delayMs = 2000 } = {}) {
+  const wait = delayMs === undefined ? 2000 : Number(delayMs);
+  for (let i = 0; i < tries; i++) {
+    if (i > 0) await new Promise((res) => setTimeout(res, wait));
+    try {
+      const b = await provider.getBlock(blockNumber);
+      if (b) return { timestamp: b.timestamp, note: null };
+    } catch {
+      // treated like a block the node does not serve yet
+    }
+  }
+  const note = "block not served by the node yet";
+  process.stderr.write(`note: the timestamp of block ${blockNumber} is not known (${note}); the result records blockTimestamp null\n`);
+  return { timestamp: null, note };
+}
+
 async function assertAllowedChain(provider, args) {
   const chainId = (await provider.getNetwork()).chainId;
   const { mainnet } = mainnetFlags(args);
@@ -1189,12 +1210,13 @@ async function lock(provider, signer, args0) {
   if (eventLockId.toLowerCase() !== expectedLockId.toLowerCase()) {
     throw new UserError(`lockId mismatch: event ${eventLockId} != locally recomputed ${expectedLockId}`);
   }
-  const rb = await provider.getBlock(r.receipt.blockNumber);
+  const bt = await readBlockTimestamp(provider, r.receipt.blockNumber, { delayMs: args.blockRetryMs });
   return {
     lockId: eventLockId,
     txHash: r.receipt.hash,
     blockNumber: r.receipt.blockNumber,
-    blockTimestamp: rb ? rb.timestamp : null,
+    blockTimestamp: bt.timestamp,
+    ...(bt.note ? { blockTimestampNote: bt.note } : {}),
     sender,
     chainId: target.chainId.toString(),
     ...checks,
@@ -1703,7 +1725,7 @@ async function main(argv) {
 module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
-  getLogsChunked, findDeploymentBlock, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
+  getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

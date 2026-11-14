@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d) and the two-machine happy path (run 11, section 2e) and the two-node happy path (run 12, sections 2f and 8), which were run and settled; the rest was not run, funded or sent. **The next free run number is 13.** Parano1d mainnet (tiny NOID) against public
+Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d) and the two-machine happy path (run 11, section 2e) and the two-node happy path (run 12, sections 2f and 8) and the run driven from the operator console (run 13, section 2g), which were run and settled; the rest was not run, funded or sent. **The next free run number is 14.** Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -111,8 +111,7 @@ The retry of section 2d: the same parties and setting (Alice on the Windows PC u
 against 0.001 Sepolia ETH, `poseidon` lock kind, raw v1, `sepolia` profile, `SINGLE_NODE_OK=1` on both sides), funded once with `scripts/live/fund.sh`. It
 **settled** in 44 minutes from funding to both sides final (`live-run-11.md`): Bob locked from the Mac, Alice revealed 21 minutes before her cutoff, and
 Bob's `claim.sh` (dry run and `--submit`) ran on macOS. Covered: the full swap across two machines and two independent Parano1d nodes, `fund.sh` live, a damaged
-hand-carried bundle refused before anything was sent. **Still open then:** two nodes per chain (the two-node check F5 did not run; it ran as run 12, section 2f), a hostile counterparty, the
-actions mode of the `ui/` console prototype, and the other scenarios below. Open items from the run: a safer carrier for
+hand-carried bundle refused before anything was sent. **Still open then:** two nodes per chain (the two-node check F5 did not run; it ran as run 12, section 2f), a hostile counterparty, a live run driven from the operator console (done as run 13, section 2g), and the other scenarios below. Open items from the run: a safer carrier for
 the bundle than copy and paste, and the Sepolia-versus-mainnet gas difference (finding 2 of `live-run-11.md`).
 
 ## 2f. Two machines, two nodes per chain: run 12 — DONE 2026-11-06
@@ -123,6 +122,15 @@ the other machine's, joined by one SSH tunnel with a local and a remote forward,
 behind two Parano1d nodes, Alice's reveal and Bob's reading of the secret behind two Ethereum endpoints), the tunnel recipe of `mac-setup.md` section 6. **Not covered:**
 the fail-closed refusal with the tunnel killed (section 8 listed it as a test; it was not run live), two second nodes on independent networks, a hostile
 counterparty. Open low items from the run are in `TASKS.md` (M2.7b) and finding 1 to 5 of `live-run-12.md`.
+
+## 2g. Two machines, Alice driven from the operator console: run 13 — DONE 2026-11-06
+
+The same parties and setting as section 2e (one node per chain, `SINGLE_NODE_OK=1`), but Alice's steps were run from the operator console: setup, prepare, the
+object-file check, the watch loop, the funding (through `fund.sh`) and the reveal (through `reveal.sh`) were buttons, each spend behind a dry run, the console's
+gate and a typed amount; Bob's side was run from a terminal on the Mac. It **settled** in 50 minutes from funding to Alice's side final (`live-run-13.md`).
+Covered: the console for a complete live swap, the hardened `fund.sh` live (one instance, three markers), the gate refusing once and passing once, a damaged
+bundle refused by `new-bob` again. **Not covered:** the console on Bob's side, its paths for re-sending a stuck transaction and for the abort cases, the two-node rule with the
+console, a hostile counterparty. Open low items from the run are in `TASKS.md` (M2.7b) and findings 1 to 9 of `live-run-13.md`.
 
 ## 3. Alice never reveals after Bob's lock on Sepolia: run 6 — DONE 2026-11-06
 
@@ -227,7 +235,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   **Recover.** If (b) is not included within a few blocks, Bob's own close (a higher fee is NOT possible: first seen) waits
   for the anchor rotation (up to 144 blocks) or `D`; record the wait, it is the measurement Q1 wants.
 
-## 8. Two-node run: EXECUTED 2026-11-06 as run 12 (section 2f, `live-run-12.md`); the plan below is kept for the part that did not run (the tunnel killed at the `lock_eth` tick). The next free run number is 13.
+## 8. Two-node run: EXECUTED 2026-11-06 as run 12 (section 2f, `live-run-12.md`); the plan below is kept for the part that did not run (the tunnel killed at the `lock_eth` tick). The next free run number is 14.
 
 - **Setup.** `docs/mac-setup.md` 5-8: node synced, `ssh -N -L 127.0.0.1:19601:127.0.0.1:9601 USER@MACADDR` running on
   Windows (loopback only; never expose 9601), a second distinct Sepolia RPC. Put `NOID_RPC2=http://127.0.0.1:19601` and

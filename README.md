@@ -50,9 +50,10 @@ agree on a price elsewhere.
 | 10 | the same, funded once: the abort after Bob's lock, Alice's reveal not sent before its cutoff | Bob refunded his ETH, Alice recovered her NOID at `D`, the secret never published ([`docs/live-run-9-10.md`](docs/live-run-9-10.md)) |
 | 11 | the retry of runs 9 and 10: 5 NOID against 0.001 ETH on Sepolia, happy path, `poseidon` lock kind, the two roles on two machines | settled; 44 minutes from funding to both sides final, Bob's claim sent from the Mac ([`docs/live-run-11.md`](docs/live-run-11.md)) |
 | 12 | the same swap as run 11 with the two-node check on: two Parano1d nodes and two Sepolia endpoints for each side, the Parano1d nodes joined by one SSH tunnel | settled; 45 minutes from funding to both sides final ([`docs/live-run-12.md`](docs/live-run-12.md)) |
+| 13 | the same swap as run 11 (one node per chain) with Alice's steps driven from the operator console: setup, prepare, watch loop, funding and reveal as buttons, each spend behind a dry run and a typed amount; Bob's side from a terminal | settled; 50 minutes from funding to Alice's side final ([`docs/live-run-13.md`](docs/live-run-13.md)) |
 
-Runs 1–8 were played by the author in both roles on one machine. Runs 9 to 12 used two machines (the roles on different computers with
-different Parano1d nodes), but all four were still played by the same person; runs 9 and 10 ended as aborts and runs 11 and 12 as settled swaps.
+Runs 1–8 were played by the author in both roles on one machine. Runs 9 to 13 used two machines (the roles on different computers with
+different Parano1d nodes), but all five were still played by the same person; runs 9 and 10 ended as aborts and runs 11 to 13 as settled swaps.
 No swap between two separate people has run yet. The amounts are trial amounts.
 
 > **Optional block: on-chain pointers.** Publishing them ties the handle "00" to the NOID wallet that funded
