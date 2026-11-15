@@ -4,6 +4,8 @@
 
 use std::process::Command;
 
+#[path = "common/bundle_text.rs"]
+mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
 
@@ -133,7 +135,7 @@ fn alice_and_bob_files_through_the_binary() {
     // A tampered bundle is refused.
     let tampered = bundle.replace("\"max_fee_micronoid\": 50000", "\"max_fee_micronoid\": 60000");
     assert_ne!(tampered, bundle);
-    std::fs::write(&bundle_path, &tampered).unwrap();
+    std::fs::write(&bundle_path, bundle_text::reseal(&tampered)).unwrap();
     let (ok, _, err) = run(bin().args(bob_args(&bob_dir.path().join("e.swap.json"))));
     assert!(!ok && err.contains("byte-for-byte"), "{err}");
     // status never shows the secret.

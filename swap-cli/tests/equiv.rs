@@ -201,8 +201,13 @@ fn the_process_runner_runs_the_verifier_and_nothing_else() {
 // ---------------------------------------------------------------- the binary, with a script for equiv-prove
 
 #[cfg(unix)]
+#[path = "common/bundle_text.rs"]
+mod bundle_text;
+
+#[cfg(unix)]
 mod binary {
     use super::*;
+    use super::bundle_text;
     use std::os::unix::fs::PermissionsExt as _;
     use std::process::Command;
 
@@ -248,7 +253,7 @@ mod binary {
         let dir = tempfile::tempdir().unwrap();
         let public = example_public_with(&Secret::generate().unwrap(), variant, profile);
         let bundle = dir.path().join("bundle.json");
-        std::fs::write(&bundle, serde_json::to_string_pretty(&public).unwrap()).unwrap();
+        std::fs::write(&bundle, bundle_text::checked_text(&public)).unwrap();
         let receipt = receipt_file(dir.path());
         Setup { dir, public, bundle, receipt }
     }
@@ -376,7 +381,7 @@ mod binary {
         nothing_written("g2.swap.json");
         // A tampered bundle never reaches the verifier.
         let bad = std::fs::read_to_string(&s.bundle).unwrap().replace("\"max_fee_micronoid\": 50000", "\"max_fee_micronoid\": 60000");
-        std::fs::write(&s.bundle, bad).unwrap();
+        std::fs::write(&s.bundle, bundle_text::reseal(&bad)).unwrap();
         let _ = std::fs::remove_file(s.dir.path().join("argv.txt"));
         let args = with(bob_args(&s, "h.swap.json"), &[]).into_iter().chain(receipt_flags(&s, &eq)).collect::<Vec<_>>();
         let (ok, _, err) = run(&args);

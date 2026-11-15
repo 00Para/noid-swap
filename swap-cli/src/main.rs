@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use noid_poseidon2b::primitives::Address;
 use swap_cli::client::raw::{client_r_selftest, RawClaimExecutor};
+use swap_cli::bundle::{open_bundle, BundleStatus, CheckedBundle};
 use swap_cli::client::{IntentSubmitter, RpcSubmitter};
 use swap_cli::contract_params::{alice_commands, check_object_file, contract_params};
 use swap_cli::engine::{
@@ -51,6 +52,7 @@ const USAGE: &str = "usage:
                      --eth-receiver 0x.. --eth-sender 0x.. [--variant raw|stock]
                      [--eth-code-hash 0x..] [--profile production|rehearsal|sepolia] [--contract-version 1|2]
                      [--floor-seen MICRONOID] [--passphrase-env VAR] [--registry FILE] [--eth-lock-kind sha256|poseidon]
+                     (the bundle printed on stdout carries a `bundle_check`; hand it to Bob as a file and compare the `bundle check:` line on stderr on both machines)
                      (--eth-lock-kind: the Ethereum lock. sha256 (default) = HTLC.sol keyed on SHA-256(s), Bob needs the equivalence proof; poseidon =
                       HTLCPoseidonV2.sol keyed on A = Addr(s), the raw variant only, NO equivalence proof, the lock word is the NOID claim authority;
                       the bundle carries a non-default kind and Bob must ask for the same)
@@ -65,7 +67,8 @@ const USAGE: &str = "usage:
   swap-cli new-bob --bundle FILE --out FILE --bob o1.. --amount MICRONOID --eth-chain-id N --eth-contract 0x..
                    --eth-amount-wei N --eth-sender 0x.. [--eth-code-hash 0x..] [--variant raw|stock]
                    [--profile production|rehearsal|sepolia] [--contract-version 1|2] [--pinned-image-id HEX] [--eth-lock-kind sha256|poseidon]
-                   --receipt FILE --equiv-prove BIN [--registry FILE]
+                   --receipt FILE --equiv-prove BIN [--registry FILE] [--allow-unchecked-bundle]
+                   (new-bob verifies the bundle's `bundle_check` before anything else; a bundle without one is refused unless --allow-unchecked-bundle, for bundles made before the check existed)
                    (--eth-lock-kind poseidon: NO --receipt, --equiv-prove, --equiv-*, --pinned-image-id (refused); the tool runs the client R self-test
                     on this machine before it writes the file (a throwaway authorization, proved and verified); the lock word must be the claim
                     authority of the opening this tool rebuilds)
@@ -109,7 +112,7 @@ const USAGE: &str = "usage:
   heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3). An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 8] = ["apply", "submit", "fast-kdf", "cancel", "show", "single-node-ok", "allow-plain-http", "i-checked-the-wallet"];
+const BOOL_FLAGS: [&str; 9] = ["apply", "submit", "fast-kdf", "cancel", "show", "single-node-ok", "allow-plain-http", "i-checked-the-wallet", "allow-unchecked-bundle"];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -754,6 +757,7 @@ fn alice_params(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
         let addr = check_object_file(&file.public, &object)?;
         eprintln!("object file OK: its opening is byte-for-byte the swap file's; fund exactly this address: {addr}");
     }
+    eprintln!("{}", CheckedBundle::new(&file.public)?.line());
     eprintln!(
         "Before funding: the stock wallet's ACTIVE address at refund time must be {} (a different active address cannot do the recovery close).",
         c.recovery_authority
@@ -906,8 +910,10 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
             "ethereum lock kind poseidon (HTLCPoseidonV2): the Ethereum lock word is your NOID address A = Addr(s); Bob needs NO equivalence proof; tell Bob to pass --eth-lock-kind poseidon. Your ETH reveal costs about 517,000 gas on Ethereum mainnet (run 8) and about 689,000 on Sepolia (runs 5 and 11), as measured live (docs/poseidon-leg.md section 5)"
         );
     }
-    eprintln!("send Bob the bundle below (it contains no secret):");
-    println!("{}", serde_json::to_string_pretty(&file.public).map_err(|e| e.to_string())?);
+    let bundle = CheckedBundle::new(&file.public)?;
+    eprintln!("{}", bundle.line());
+    eprintln!("send Bob the bundle below as a file, not as pasted text (it contains no secret); Bob's new-bob prints the same `bundle check:` line:");
+    println!("{}", bundle.to_pretty_json()?);
     Ok(())
 }
 
@@ -929,7 +935,12 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     let eth_amount_wei = flag(flags, "eth-amount-wei")?.parse::<u128>().map_err(|e| format!("--eth-amount-wei: {e}"))?;
     let bob_sender = addr20(flag(flags, "eth-sender")?)?;
     let text = std::fs::read_to_string(flag(flags, "bundle")?).map_err(|e| e.to_string())?;
-    let public: SwapPublic = serde_json::from_str(&text).map_err(|e| format!("bundle: {e}"))?;
+    // The carrier check comes before any other use of the bundle: a copy damaged in transit is refused here, with that message.
+    let (public, bundle_status) = open_bundle(&text, flags.contains_key("allow-unchecked-bundle"))?;
+    eprintln!("{}", bundle_status.line());
+    if bundle_status == BundleStatus::Unchecked {
+        eprintln!("(--allow-unchecked-bundle: every other check below still runs)");
+    }
     let receipt = flags.get("receipt").and_then(|v| v.first()).cloned();
     // With `--receipt` the variant defaults to the bundle's (the receipt is verified for exactly that
     // variant); without it the historical default `raw` stays.
@@ -1106,7 +1117,9 @@ fn equivalence_attestation(
 
 fn bundle(path: &str) -> Res<()> {
     let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
-    println!("{}", serde_json::to_string_pretty(&file.public).map_err(|e| e.to_string())?);
+    let bundle = CheckedBundle::new(&file.public)?;
+    eprintln!("{}", bundle.line());
+    println!("{}", bundle.to_pretty_json()?);
     Ok(())
 }
 

@@ -3,6 +3,8 @@
 
 use std::process::Command;
 
+#[path = "common/bundle_text.rs"]
+mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
 
@@ -191,7 +193,7 @@ fn the_typed_attestation_is_rehearsal_only_and_the_image_id_pin_is_a_constant() 
     for (name, profile) in [("production", ProfileName::Production), ("sepolia", ProfileName::Sepolia), ("rehearsal", ProfileName::Rehearsal)] {
         let public = example_public_with(&Secret::generate().unwrap(), Variant::Raw, profile);
         let bundle = dir.path().join(format!("{name}.json"));
-        std::fs::write(&bundle, serde_json::to_string_pretty(&public).unwrap()).unwrap();
+        std::fs::write(&bundle, bundle_text::checked_text(&public)).unwrap();
         let out = dir.path().join(format!("{name}-typed.swap.json"));
         let (ok, _, err) = run(&typed_bob_args(&public, &bundle, &out, Some(name)));
         if profile == ProfileName::Rehearsal {
@@ -222,8 +224,8 @@ fn new_bob_refuses_a_profile_mismatch() {
     let reh = example_public_with(&secret, Variant::Raw, ProfileName::Rehearsal);
     let prod = example_public(&Secret::generate().unwrap(), Variant::Raw);
     let (rb, pb) = (dir.path().join("reh.json"), dir.path().join("prod.json"));
-    std::fs::write(&rb, serde_json::to_string_pretty(&reh).unwrap()).unwrap();
-    std::fs::write(&pb, serde_json::to_string_pretty(&prod).unwrap()).unwrap();
+    std::fs::write(&rb, bundle_text::checked_text(&reh)).unwrap();
+    std::fs::write(&pb, bundle_text::checked_text(&prod)).unwrap();
     // A rehearsal bundle with Bob's default (production): refused, with both names in the message.
     let (ok, _, err) = run(&bob_args(&reh, &rb, &dir.path().join("1.swap.json"), None));
     assert!(!ok && err.contains("rehearsal") && err.contains("production") && err.contains("--profile"), "{err}");
@@ -367,8 +369,8 @@ fn new_bob_refuses_a_sepolia_bundle_under_another_profile_and_vice_versa() {
     let sep = example_public_with(&Secret::generate().unwrap(), Variant::Raw, ProfileName::Sepolia);
     let reh = example_public_with(&Secret::generate().unwrap(), Variant::Raw, ProfileName::Rehearsal);
     let (sb, rb) = (dir.path().join("sep.json"), dir.path().join("reh.json"));
-    std::fs::write(&sb, serde_json::to_string_pretty(&sep).unwrap()).unwrap();
-    std::fs::write(&rb, serde_json::to_string_pretty(&reh).unwrap()).unwrap();
+    std::fs::write(&sb, bundle_text::checked_text(&sep)).unwrap();
+    std::fs::write(&rb, bundle_text::checked_text(&reh)).unwrap();
     // A sepolia bundle with --profile rehearsal, then with Bob's default (production): refused, both names in the message.
     let (ok, _, err) = run(&bob_args(&sep, &sb, &dir.path().join("1.swap.json"), Some("rehearsal")));
     assert!(!ok && err.contains("sepolia") && err.contains("rehearsal"), "{err}");

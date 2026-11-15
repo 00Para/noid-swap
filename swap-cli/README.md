@@ -28,6 +28,7 @@ Plain words for the pieces (the design doc explains them in full):
 |---|---|---|
 | `src/secret.rs` | `Secret` (zeroized, redacted `Debug`), `H = SHA-256(s)`, `Addr(s)` / `Addr(Derive(m,0))`, the `0x`/no-`0x` hex rules, Bob's step-11 `check_preimage` | tested against the §0 vectors |
 | `src/params.rs` | §9.1 constants and the gates: `rhs_i1_eth` (629), `bob_lock_by` (`D − 629`), `t_max_eth`, `choose_t_reveal` (I1 + `W_A_min` + `B_bob`), `check_i2_eth` (reveal cutoff `T_reveal − M_A`), `classify_claim_height` (`D − 18` target, `D − 1` hard), `check_i5` (no 279,370 in `[H_create, D + 252]`, start ≥ 279,388), `fee_cap`, epoch anchor / T6 rotation guard | pins the §4.3 worked example |
+| `src/bundle.rs` | the carrier check of the bundle: `bundle_check` (`{v, sha256, opening_hex_len}`), `canonical_bytes`, `CheckedBundle` (written by `new-alice` and `bundle`), `open_bundle` (read first by `new-bob`) | unit tests pin the canonical bytes and a hash; `tests/bundle_check.rs` through the binary |
 | `src/swapfile.rs` | **M2.3** the swap file: `SwapPublic` (hashlock, authority, 699-byte opening hex, root, params; `check()` rebuilds the opening byte-for-byte through the M0.6 guard), `SwapFile` (role, phase, history, `pending_action`, sealed secret), atomic save (unique `.<pid>.<random>.tmp` + fsync + rename) and `SwapLock` (exclusive `.lock` sidecar), the `pending_intent` ledger, `HashlockRegistry` (T9) | secret at rest: Argon2id → XChaCha20-Poly1305, AAD = digest of the public section |
 | `src/state.rs` | `AlicePhase` / `BobPhase`, `Event`, `transition()`: every allowed move, nothing else | unit-tested |
 | `src/watch/mod.rs` | `JsonRpc` transport trait, `FixtureRpc` (replays `{"calls":[{method, params?, result|error}]}`), `NoidObservation`, `EthObservation`, the JSON-RPC envelope helpers | |
@@ -68,7 +69,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 470 (+1 ignored) with the `poseidon_*` test binaries and later review fixes added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 486 (+1 ignored) with the `poseidon_*` test binaries and later review fixes added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -95,7 +96,7 @@ swap-cli new-alice --out alice.swap.json --alice o1… --bob o1… --amount 1000
    --eth-amount-wei 10000000000000000 --eth-receiver 0x… --eth-sender 0x… \
    # --eth-chain-id is MANDATORY (no default). --eth-code-hash is OPTIONAL: the keccak256 of the HTLC runtime code is a
    # constant of this build (params::HTLC_CODE_HASH, REVIEW-3 F1); omitted = that constant, given = it must be equal, else refused.
-   # Prints the bundle for Bob.
+   # Prints the bundle for Bob on stdout (with its `bundle_check`, see "The bundle and its carrier check") and the `bundle check:` line on stderr.
 #   add --contract-version 2 for HashTimeLockV2 (every close pays exactly max_fee); default 1 = HashTimeLock; see "Contract versions"
 #   (v2 only: --floor-seen MICRONOID = the highest relay floor you saw in the last 24 h; max_fee = max(50,000, 5 x max(estimate, floor)))
 # Bob passes HIS terms (never read from the bundle) and the receipt Alice sent. REVIEW-2 F2: the tool itself runs
@@ -106,6 +107,7 @@ swap-cli new-alice --out alice.swap.json --alice o1… --bob o1… --amount 1000
 swap-cli new-bob --bundle bundle.json --out bob.swap.json --bob o1… --amount 10000000 --eth-chain-id 11155111 \
    --eth-contract 0x… --eth-amount-wei 10000000000000000 --eth-sender 0x… \
    --receipt swap.receipt --equiv-prove /path/to/equiv-prove
+#   Before anything else new-bob verifies the bundle's `bundle_check` and prints `bundle check: <16 hex> ok`; a bundle without one is refused unless --allow-unchecked-bundle.
 #   --variant raw|stock defaults to the bundle's here; --profile (production|rehearsal|sepolia) and --contract-version must equal the bundle's (defaults: production, 1).
 # REVIEW-3 F2: --receipt and --equiv-prove are the ONLY form under production and sepolia. The typed form
 #   ... --equiv-h 0x… --equiv-a o1… --equiv-image-id <printed>
@@ -1033,6 +1035,35 @@ reach `lost`; the reveal needs the instance in that very poll; funding finality 
 another incarnation; `refund_noid` is not offered for an instance that is gone, on either path; `done` is *settled* but no longer *terminal*
 (`Phase::is_settled()` vs `is_terminal()`); the formal-model findings: `Gates::validate` checks the two `DE`/`RA` relations and the production
 `B_safety` is 30 (`D_offset` 735).
+
+## The bundle and its carrier check (`bundle_check`)
+
+The bundle is the public section of Alice's swap file as JSON. It goes from one machine to the other, sometimes as pasted text, and in runs 11 and 13 it arrived
+damaged (three characters lost; three zeros added to a long run of zeros inside `opening_hex`). `new-bob` refused both, but only as a side effect of a later check.
+The bundle now carries its own check as one more top-level field:
+
+```json
+"bundle_check": { "v": 1, "sha256": "<64 hex>", "opening_hex_len": <number of characters of opening_hex> }
+```
+
+- **Canonical form.** `sha256` is the SHA-256 of the bundle **without** the `bundle_check` field, as JSON text in this form: the object keys sorted bytewise (UTF-8)
+  at every level, no whitespace between tokens, strings and numbers exactly as `serde_json` writes them in compact form (a string in double quotes with the quote, the backslash and
+  the control characters escaped, other characters as they are; an integer in plain decimal digits). The check depends on the values only, so the whitespace, the line
+  ends and the key order of the transported file may change harmlessly. `swap_cli::bundle::canonical_bytes` is the one function used by writer and verifier; a unit test pins the canonical bytes
+  and the hash of a small example, for anyone who checks another implementation against it.
+- **Written** by `new-alice` (stdout, with the line below on stderr) and by `swap-cli bundle FILE`, which prints the same bundle again from the swap file; `alice-params`
+  prints the line too. The line is `bundle check: <first 16 hex of sha256> (opening_hex <len> characters)`: compare it on both machines. Hand the bundle over **as a file**.
+- **Verified** by `new-bob` before anything else is done with the bundle (before the hex is decoded, the opening rebuilt or any proof or network work), and printed as
+  `bundle check: <16 hex> ok`. A bundle whose content does not match is refused with exit status 1 and nothing written: *the bundle was damaged in transit; ask Alice to
+  hand it over again as a file*, and, when the length of `opening_hex` differs from `opening_hex_len`, the sentence `opening_hex has N characters, the bundle says M`. A `v`
+  other than 1, or a malformed `bundle_check`, is refused too.
+- **Absent.** A bundle without `bundle_check` (made before this check existed) is refused with a message naming `--allow-unchecked-bundle`. With the flag `new-bob` goes on,
+  prints a warning that the bundle carries no check, and every later check (the byte-for-byte opening rebuild, Bob's own terms, the proof) runs exactly as before. The flag does not
+  excuse a check that is present and wrong.
+- **Not stored.** `bundle_check` belongs to the transported bundle. It is not part of `SwapPublic`, so it is in no swap file, and the swap files, the digest the secret is sealed to and
+  the engine are unchanged. An older `new-bob` (before this change) reads a new bundle without trouble: `SwapPublic` does not deny unknown fields, so the new key is ignored (and the
+  old tool does not do the new check). Tests: `src/bundle.rs` (unit) and `tests/bundle_check.rs` (the binary: a matching bundle, one flipped digit, three zeros added, three characters
+  removed, a changed parameter, reformatted JSON, an absent check with and without the flag, `v: 2`).
 
 ## Contract versions (`--contract-version 1|2`)
 

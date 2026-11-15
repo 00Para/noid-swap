@@ -51,7 +51,7 @@ bash ~/live-run-4/bin/watch.sh both 30 &  # both files, every 30 s, until both a
 ```
 
 Send the owner, at every run: the Parano1d contract root (`o1…`, printed by `prepare.sh` and in `$PUB/alice.bundle.json`),
-the Sepolia contract link, the bundle and the object file.
+the Sepolia contract link, the bundle and the object file. Hand the bundle over as a file, never as pasted text, and compare the `bundle check:` line that `prepare.sh` prints with the one `new-bob` prints on the other machine (the bundle carries a `bundle_check`, which `new-bob` verifies before anything else).
 
 ## On macOS or Linux (native mode)
 

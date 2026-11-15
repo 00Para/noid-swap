@@ -26,7 +26,8 @@ echo "tip $TIP, fee estimate $FEE, planned h_create $HC"
   --eth-receiver "$ALICE_ETH" --eth-sender "$BOB_ETH" --profile "$PROFILE" --variant "$VARIANT" --contract-version "$CONTRACT_VERSION" \
   --eth-lock-kind "$LOCK_KIND" > "$L/alice.bundle.json" 2> "$L/new-alice.err"; echo "new-alice exit $?"; head -3 "$L/new-alice.err"
 [ -s "$L/alice.bundle.json" ] || { echo "no bundle; stop"; exit 6; }
-ensure_pub; cp "$L/alice.bundle.json" "$PUB/alice.bundle.json" 2>/dev/null && echo "bundle copied to $PUB (send it to the owner)"
+BCL=$(grep -m1 "^bundle check:" "$L/new-alice.err")   # the line comes from the tool; the other machine compares it with the one its new-bob prints
+ensure_pub; cp "$L/alice.bundle.json" "$PUB/alice.bundle.json" 2>/dev/null && echo "bundle copied to $PUB (send it as a file, not as pasted text) -- ${BCL:-no bundle check line in new-alice.err}"
 python3 - "$L/alice.bundle.json" <<'PY'
 import sys, json; b = json.load(open(sys.argv[1]))
 print("hashlock:", b["hashlock"]); print("claim_authority:", b["claim_authority"]); print("contract_root:", b["contract_root"])
@@ -53,7 +54,7 @@ echo "== $BOB_NOTE"
 "$BIN" new-bob --bundle "$L/alice.bundle.json" --out "$BOB_FILE" --bob "$BOB_NOID" --amount "$AMOUNT" \
   --eth-chain-id "$CHAIN" --eth-contract "$CONTRACT" --eth-amount-wei "$WEI" --eth-sender "$BOB_ETH" \
   --profile "$PROFILE" --contract-version "$CONTRACT_VERSION" ${PROOF_ARGS[@]+"${PROOF_ARGS[@]}"} \
-  2>&1 | grep -E 'bundle checked|receipt|self-test|swap file written|error|refus' | head -8
+  2>&1 | grep -E 'bundle check|receipt|self-test|swap file written|error|refus' | head -8
 echo "new-bob exit ${PIPESTATUS[0]}"
 "$BIN" status "$BOB_FILE" | grep -E '"(phase|profile|deadline_height|lock_by_height)"'
 echo "== definition"

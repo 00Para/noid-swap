@@ -11,6 +11,7 @@
 //! Module map:
 //! - `secret`   : the 32-byte swap secret, its SHA-256 hashlock and Parano1d authority.
 //! - `params`   : the section 9.1 constants and the (I1)..(I5) gates, hard-coded.
+//! - `bundle`   : the carrier check of the bundle Alice hands to Bob (`bundle_check`), written by `new-alice`, verified first by `new-bob`.
 //! - `swapfile` : the persisted swap file (opening, parameters, secret encrypted at rest).
 //! - `state`    : the swap state machine (phases, events, allowed transitions).
 //! - `watch`    : Parano1d and Ethereum watchers producing `NoidObservation` / `EthObservation`.
@@ -20,6 +21,7 @@
 //! - `contract_params` : the Parano1d contract definition/params of a swap, for the stock wallet.
 //! - `client`   : client R (raw secret, `noid_gkr` + `ObjectIntent`) and client S (stock wallet script).
 
+pub mod bundle;
 pub mod child_env;
 pub mod client;
 pub mod contract_params;

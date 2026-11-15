@@ -136,7 +136,8 @@ equiv-prove verify raw 0xH A_AS_O1 alice.receipt        # self-check: prints OK 
 `--fee-estimate` is `estimateFeeDetailed(1,1).fee_micronoid` (5800 today). `--eth-chain-id` is mandatory on both sides.
 `--eth-code-hash` is optional on both sides (the hash is compiled into `swap-cli`) and only accepted when equal to it; any other
 value is refused with nothing written, and a bundle or file that pins another contract is refused by `new-bob` and `load`. Send
-Bob `bundle.json` and `alice.receipt` (public; the receipt is about 223 KB). `swap-cli bundle alice.swap.json` reprints the bundle.
+Bob `bundle.json` and `alice.receipt` (public; the receipt is about 223 KB) **as files, not as pasted text**. `swap-cli bundle alice.swap.json` reprints the bundle.
+`new-alice` printed (on stderr) a line `bundle check: <16 hex> (opening_hex <N> characters)`; the bundle carries the matching `bundle_check`, and Bob's `new-bob` verifies it before anything else and prints `bundle check: <16 hex> ok`. Compare the 16 digits on both machines. A bundle damaged in transit is refused with *the bundle was damaged in transit*, naming `opening_hex has N characters, the bundle says M` when the length differs: hand it over again as a file. A bundle made before this check existed needs `--allow-unchecked-bundle`.
 `--contract-version 1|2` (default 1) picks the Parano1d program: 1 is today's `HashTimeLock`; 2 is `HashTimeLockV2`, where
 every close pays exactly `max_fee` (no min-fee stall; `docs/htlc-v2-fixed-fee.md`). Both sides must pass the same value,
 `new-bob` refuses a mismatch, and all live runs so far used version 1. For v2, `alice-params` prints the recovery-close
@@ -159,7 +160,7 @@ runbook is the same, with three differences to plan for: Alice's reveal costs ab
 must hold `1,000,000 × fee cap`: 0.02 ETH at 20 gwei, not the 0.01 ETH of "gas money" above for a sha256 swap); small swaps are uneconomic on L1 (the reveal fee is about
 half of a 0.001 ETH leg at 1 gwei); and the helper scripts take `LOCK_KIND=poseidon` (`scripts/live/env.sh`, `prepare.sh` skips the proof and the receipt).
 
-**Bob checks. This is the only moment he can say no. He types his own terms; nothing comes from the bundle:**
+**Bob checks. This is the only moment he can say no. He types his own terms; nothing comes from the bundle (the first thing the tool does with it is its `bundle check`):**
 ```sh
 $BIN new-bob --bundle bundle.json --out bob.swap.json --bob o1BOB --amount 10000000 \
    --eth-chain-id 11155111 --eth-contract 0xC --eth-amount-wei 1000000000000000 \

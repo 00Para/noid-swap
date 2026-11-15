@@ -6,6 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "common/bundle_text.rs"]
+mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
 
@@ -180,8 +182,8 @@ fn new_bob_refuses_a_contract_version_mismatch() {
     let v2 = example_public_v(&Secret::generate().unwrap(), Variant::Raw, ContractVersion::V2);
     let v1 = example_public(&Secret::generate().unwrap(), Variant::Raw);
     let (b2, b1) = (dir.path().join("v2.json"), dir.path().join("v1.json"));
-    std::fs::write(&b2, serde_json::to_string_pretty(&v2).unwrap()).unwrap();
-    std::fs::write(&b1, serde_json::to_string_pretty(&v1).unwrap()).unwrap();
+    std::fs::write(&b2, bundle_text::checked_text(&v2)).unwrap();
+    std::fs::write(&b1, bundle_text::checked_text(&v1)).unwrap();
     // A v2 bundle with Bob's default (v1): refused, with both versions in the message.
     let out1 = dir.path().join("1.swap.json");
     let (ok, _, err) = run(&bob_args(&v2, &b2, &out1, None));
