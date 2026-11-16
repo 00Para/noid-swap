@@ -175,6 +175,13 @@ bob.swap.json`: `D`, the amount, your `o1` as recipient, `max_fee`. **Bob tells 
 
 > **Do not fund before Bob says his checks passed.** Funding first only locks Alice's NOID for about 6 hours.
 
+> **Then fund at once; do not wait for `h_create`.** Bob's lock-by is fixed at `h_create` + 49 (`sepolia` profile) and the funding needs 18 blocks to
+> be final, so every block the funding comes earlier is a block more for Bob's lock. Funded about 30 blocks before `h_create` (runs 10, 11, 12), Bob had
+> about 60 blocks when his lock was offered; funded 22 blocks after it (run 13), he had 6. The order is: Bob runs `new-bob`, the two `bundle check`
+> lines are compared and Bob says OK; Alice runs `fund.sh` (dry run first); only then anything else. In a run driven from the operator console the
+> console's own funding step opens only at `h_create`: fund with `fund.sh` from a terminal right after Bob's OK and mark the funding as done in the
+> console.
+
 ## 4. The run, side by side
 
 Each side polls every ~30 s in its own terminal. `--apply` records facts in the swap file and freezes the next

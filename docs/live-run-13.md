@@ -109,8 +109,12 @@ All low, unless said. They come from the operator's notes of the run, from the P
    creation height; the engine offers the funding once the chain reaches it. A terminal `fund.sh` could run right after the
    preparation. With `HC_LEAD=40` and the lock-by at `h_create` + 49, that leaves Bob little room: here the funding went out 22 blocks
    after the offer, and Bob's lock was seen 4 blocks inside the lock-by. Nothing warned Bob
-   that the window was short: his engine offered the lock at [286,527], six blocks before the lock-by. Options: a smaller `HC_LEAD` for console runs; let the engine offer
-   the funding before `h_create`; or show the lock-by margin on the page while the funding is open.
+   that the window was short: his engine offered the lock at [286,527], six blocks before the lock-by. A smaller `HC_LEAD` would not help: it is
+   only the wait before the offer, and it shortens the time for the bundle hand-over. Options: let the engine offer the funding before
+   `h_create` (a reviewed engine change); fund from a terminal right after Bob's check, as in runs 11 and 12; and show the lock-by
+   margin on the page while the funding is open. Bob's logs give the comparison: blocks left to the lock-by when his lock was offered
+   were 60, 59 and 62 in runs 10 to 12 and 6 in this run. Chosen for the next console run: fund from a terminal right after Bob's check
+   (`docs/runbook-two-party.md`, section 3).
 3. **The page hid the step.** The funding box sits at the bottom of a card titled "Next: wait", whose text says nothing is to be done and
    that the funding has "no button on purpose". The operator did not find it for several minutes and almost took the terminal
    command shown above it for something to send to the other machine. The card must lead with the step that is due.
