@@ -456,6 +456,10 @@ pub struct NoidObservation {
     /// REVIEW-2 F5: the second node was configured but could not be read (the reason, no secret in it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_error: Option<String>,
+    /// Display only: where the second node was read, `scheme://host:port` (never a path or a key), for the note that says it agreed.
+    /// `None` for a fixture or a hand-built observation. No decision reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_label: Option<String>,
     /// REVIEW-2 F5: the operator accepts a single node for the steps that need two (`--single-node-ok`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_node_ok: bool,
@@ -680,6 +684,10 @@ pub struct EthObservation {
     /// REVIEW-2 F5: the second node was configured but could not be read (the reason, no secret in it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub second_error: Option<String>,
+    /// Display only: where the second node was read, `scheme://host:port` (never a path or a key), for the note that says it agreed.
+    /// `None` for a fixture or a hand-built observation. No decision reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_label: Option<String>,
     /// REVIEW-2 F5: the operator accepts a single node for the steps that need two (`--single-node-ok`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_node_ok: bool,
@@ -802,6 +810,7 @@ mod tests {
             signer_nonce_pending: Some(5),
             second: None,
             second_error: None,
+            second_label: None,
             single_node_ok: false,
         };
         let text = serde_json::to_string(&obs).unwrap();

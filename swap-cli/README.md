@@ -69,7 +69,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 486 (+1 ignored) with the `poseidon_*` test binaries and later review fixes added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 500 (+1 ignored) with the `poseidon_*` test binaries and later review fixes added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -241,6 +241,39 @@ secret is in it. With ONE node configured:
 
 (`sepolia` joined `production` in REVIEW-3: a swap with a stranger there has real value on the NOID side.)
 
+**What the tick says about the second node (notes only, no decision depends on them).** Where the two-node rule is evaluated and passes, a
+note says so with the values that were compared: `second Parano1d node agrees: http://127.0.0.1:9602 at height H (first node H1), slot S
+creation C amount A` before Bob's `lock_eth`, and `second Ethereum node agrees: https://host:443 finalized F (first node finalized F1), lock 0xabcd.. final at the lower of the two`
+before Alice's `reveal_eth` (the latest block numbers are not compared and not shown). The address is the second `--noid-rpc` / `--eth-rpc` as `scheme://host:port`
+(a path, a query, a fragment, a key or credentials are never shown; a fixture has no address and the note then reads `agrees: at height …`). The note is
+absent when the rule is waived (`--single-node-ok`: the "single node" note instead), when the nodes disagree or the second cannot be read (the
+`Wait` reason says why), and for every action that needs no second node. Bob's reading of the secret from either Ethereum node compares
+nothing, so it has no such note (it keeps its own "read from the SECOND Ethereum node" note).
+
+**A second node behind a tunnel.** When both `--noid-rpc` URLs (or both `--eth-rpc`) name the same host, the tick notes that a second node on
+the same machine shares its network view (G3). With an SSH tunnel the second node appears on localhost although it runs elsewhere. Say so
+with `--noid-rpc2-is-remote` (and `--eth-rpc2-is-remote`; no value): the note then reads that the second node is declared to run on another
+machine and be reached through a local port, that the tool cannot verify this, and that two machines may still share one network and one upstream
+connection, so their agreement is still a weaker check than two nodes on separate networks. The flags change that text only. Identical
+endpoints are still refused, the two-node rule is unchanged, and `--single-node-ok` is not implied. `scripts/live/env.sh` passes them from
+`NOID_RPC2_REMOTE=1` / `ETH_RPC2_REMOTE=1` in `env.local.sh`, and only when the matching second node is set.
+
+**Lock-by margin.** While Alice's file is before `lock_seen` and while Bob's is before his lock is sent, every tick adds a note, worded by the
+action (the note states facts and never an instruction, because the action can still be changed to a wait after the note is built: a held
+intent, an instance already at the root). Bob (and Alice
+after funding): `lock-by margin: N blocks (lock-by H, tip T)` (H is the `lock_by_height` of the file); below
+`engine::LOCK_BY_MARGIN_WARN_BLOCKS` (15, display only) `lock-by margin is short: N blocks (lock-by H, tip T); see the action`. Past H with the lock
+still offered: `nominal lock-by H has passed (tip T); the lock is still allowed until the hard limit X` (X is `bob_lock_by_min_window`, the value
+`bob_action` uses); past H otherwise: `lock-by H has passed: tip T is K blocks beyond it`. Alice before funding: `funding window: N blocks left
+before it is too late to fund (lock-by H, tip T)` (N = lock-by - (b_fund + b_final) - tip, the expression the abort uses); below the constant
+`funding window is short: N blocks left before it is too late to fund (lock-by H, tip T); see the action`; once the abort applies,
+`funding window is closed: the last height to fund was X (lock-by H, tip T)`, no urgency wording. In live run 13 Bob's lock was offered
+6 blocks before the lock-by and nothing had said so. Tests: `tests/notes_only.rs` (each note appears when it should and not otherwise; the guards
+`the_agreement_notes_change_no_decision` and `the_margin_note_leaves_the_funding_gate_as_it_was` compare the decision with and without them;
+the existing action assertions of `scenarios.rs` and the engine unit tests are the guard for every other fixture; one of them,
+`a_pure_wait_is_not_touched_by_unknown_or_stale_observations`, now allows the margin note, nothing else); `main.rs` unit tests for the
+tunnel text and the redacted label.
+
 **Bob waiting on a foreign pending close.** Where Bob's claim waits because the primary node shows a pending call on the instance (T2), a
 second Parano1d node that shows NONE ends the wait: the note "the primary node reports a pending call the second node does not see: not
 waiting on it (F5)" is added and the claim decision goes on (a lying primary could otherwise keep Bob waiting until the claim branch
@@ -260,6 +293,7 @@ with --transport curl, or --allow-plain-http"). `http://127.0.0.1@elsewhere/` co
 | `--noid-rpc URL` twice / `--eth-rpc URL` twice | the second, independent node (above) |
 | `--single-node-ok` | accept one node for the two steps above under `production` or `sepolia` (no value) |
 | `--allow-plain-http` | accept non-loopback `http://` (no value) |
+| `--noid-rpc2-is-remote` / `--eth-rpc2-is-remote` | information only: the second node runs on another machine behind a local port (no value; changes the G3 note, relaxes nothing) |
 
 Tests: `tests/scenarios.rs` `f5_*` (including `f5_an_unknown_header_time_blocks_every_noid_side_spend_and_names_the_remedy`,
 `f5_sepolia_with_one_node_waits_before_the_lock_and_the_reveal_unless_single_node_ok`, `f5_bob_does_not_wait_on_a_pending_close_the_second_node_does_not_see`,

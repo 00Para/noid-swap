@@ -271,6 +271,7 @@ impl World {
             tip_time: self.tip_time_lag.map(|l| self.eth_time.saturating_sub(l)),
             second: None,
             second_error: None,
+            second_label: None,
             single_node_ok: false,
         }
     }
@@ -347,6 +348,7 @@ impl World {
             signer_nonce_pending: Some(7 + u64::from(self.lock_pending.is_some() || self.claim_pending.is_some() || self.refund_pending)),
             second: None,
             second_error: None,
+            second_label: None,
             single_node_ok: false,
         }
     }

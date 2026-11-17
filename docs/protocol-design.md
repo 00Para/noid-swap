@@ -1,7 +1,7 @@
 # Bridge-free atomic swaps: Parano1d (NOID) ↔ Ethereum / Bitcoin — protocol design v1
 
 Status: design for implementation. Unaudited. Target: small-amount mainnet trials.
-Live runs: 1 so far (2026-11-04, raw variant, 10 NOID on mainnet against 0.001 ETH on a local Hardhat chain, settled on both legs). Measurements in §9.3; log in `docs/live-run-1.md`. No parameter changed.
+Live runs: twelve logged so far, numbered 1 to 13 (there is no run 7 log). The first was on 2026-11-04 (raw variant, 10 NOID on mainnet against 0.001 ETH on a local Hardhat chain, settled on both legs); the first against Ethereum mainnet was run 8 on 2026-11-06. Measurements in §9.3; logs in `docs/live-run-*.md`. The timing parameters changed since the first run: see §9.1.
 Ground truth: `docs/parano1d-capabilities.md` (the "report", vendored Parano1d at
 commit `d29b801`) and `eth/contracts/HTLC.sol` + `eth/README.md`. Paths in brackets
 are relative to `~/noid-swap/`. Anything not established by those sources
@@ -645,7 +645,7 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s |
 | Caps | none | ≤ 20 NOID, ≤ 0.01 ETH, chain 31337 only | ≤ 20 NOID, ≤ 0.01 ETH, chain 11155111 only |
-| Exercised live | runs 1 and 2 (2026-11-04, local Hardhat leg) | not yet | run 3 (2026-11-05 UTC, Sepolia) |
+| Exercised live | run 8 (2026-11-06, Ethereum mainnet; the first live use of this profile, `docs/live-run-8.md`) | not yet | runs 3 to 6 and 9 to 13 (2026-11-05/06 UTC, Sepolia) |
 
 `B_epoch` = 0 in the two small profiles accepts the rotation risk (a claim evicted at an epoch rotation must be re-proved); the one-epoch wait that production budgets is not exercised by them. The fee rule (`F_max`) and the chain facts (finality 18, epoch 144, minimum close fee 5,800 μNOID) are the same in every profile.
 

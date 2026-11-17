@@ -285,6 +285,7 @@ impl<R: JsonRpc> NoidWatcher<R> {
             tip_time,
             second: None,
             second_error: None,
+            second_label: None,
             single_node_ok: false,
         })
     }

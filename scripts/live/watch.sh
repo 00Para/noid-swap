@@ -8,11 +8,15 @@ set -u
 WHO=${1:-both}; EVERY=${2:-30}
 case $WHO in alice) ROLES=(alice);; bob) ROLES=(bob);; both) ROLES=(alice bob);; *) echo "alice|bob|both"; exit 2;; esac
 HERE=$(dirname "$0")
+# part REGEX MAXCHARS: the lines of the tick output that match, each cut to MAXCHARS, joined with spaces
+part() { printf '%s\n' "$OUT" | grep -E "$1" | head -n 8 | cut -c1-"$2" | tr '\n' ' ' | sed -e 's/ $//'; }
 while true; do
   TERMINAL=0
   for R in "${ROLES[@]}"; do
     OUT=$(bash "$HERE/tick.sh" "$R" --apply 2>&1)
-    LINE="$(date +%T) $(echo "$OUT" | grep -E '^\[|^ACTION|^noid:|^eth :|^notes:|^phase_after|^applied|^intent' | tr '\n' ' ' | cut -c1-1200)"
+    # run 13: one cut of the whole line at 1,200 characters lost `phase_after` after a long recorded intent. Now each part is cut on
+    # its own (the long ones generously) and `applied: ... phase_after: ...` is appended whole, last, so no cut can remove it.
+    LINE="$(date +%T) $(part '^\[' 300) $(part '^noid:' 600) $(part '^eth :' 700) $(part '^ACTION' 800) $(part '^notes:' 1500) $(part '^intent' 700) $(part '^applied|^phase_after' 400)"
     echo "$LINE" >> "$L/loop-$R.txt"
     # CHAOS F-16 / review M3: `done` is not terminal while a leftover leg can still be refunded: the action then names it
     # (a refund_noid / refund_eth, a "still at the contract" / "ETH lock is still open" wait, a refund already submitted).

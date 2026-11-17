@@ -325,8 +325,8 @@ mutation). Manual check: `BONSAI_API_KEY=x`, `BONSAI_API_URL=…`, `RISC0_PROVER
 3. **Fidelity of the statement to the real chain.** Equivalence of the portable code with the vendor crate is tested
    (section 3), but the vendor primitive itself and the claim that the node's wallet derives addresses this way are
    assumptions: see "Important limit of the Derive test". A one-time real-wallet check is recommended.
-4. **Poseidon2b security**: `Addr` is a single permutation truncated to 256 bits, with all round constants <= 0x2000
-   (a small subfield; the doc flags a possible Frobenius-type symmetry). Binding of `H` to `A` rests on preimage and
+4. **Poseidon2b security**: `Addr` is a single permutation truncated to 256 bits, with all round constants and full-round MDS
+   entries <= 0x7 and a partial-round MDS diagonal of 0x20, 0x2000, 0x200, 0x800 (a small subfield; the doc flags a possible Frobenius-type symmetry). Binding of `H` to `A` rests on preimage and
    collision resistance of that construction. Flagged for cryptographer review, out of scope here.
 5. Standard: SHA-256 preimage resistance (BTC/ETH side).
 

@@ -660,6 +660,8 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
         }
         None => action,
     };
+    // Display only, from the action as finally decided: the lock-by margin while Bob's lock is not yet seen. Read by nothing.
+    notes.extend(lock_by_margin_note(file, &phase, &action, noid.tip));
     Decision { events, action, notes }
 }
 
@@ -670,6 +672,56 @@ fn has_leftover_leg(phase: &Phase, noid: &NoidObservation, eth: &EthObservation)
         Phase::Alice(AlicePhase::Done { instance: Some(i), .. }) => noid.find_instance(i).is_some(),
         Phase::Bob(BobPhase::Done { lock: Some(l), .. }) => eth.find_lock(&l.lock_id).is_some_and(|l| !l.claimed && !l.refunded),
         _ => false,
+    }
+}
+
+/// Below this many blocks between the tip and Bob's lock-by height, the lock-by margin note is phrased as a warning. Display only: it
+/// decides nothing (live run 13: Bob's lock was offered six blocks before the lock-by and nothing had said the window was short; in runs 10
+/// to 12 he had 59 to 62 blocks).
+pub const LOCK_BY_MARGIN_WARN_BLOCKS: u64 = 15;
+
+/// The lock-by margin note, while Bob's lock is not yet seen: Alice's phases before `lock_seen` (`created` to `funding_final`) and Bob's before
+/// his lock is sent (`received` to `funding_final`). `None` in every other phase. The note states facts (heights, blocks left) and never
+/// an instruction: it is built inside `decide`, and the caller may still change the action afterwards (the intent ledger holds a spend as
+/// a wait, `guard_fund_noid` turns a funding into a wait), so a command in the note could sit beside a wait. A short margin therefore ends
+/// in `see the action`. The action is read only to tell whether Bob's lock is still offered past the nominal lock-by (a statement of
+/// fact). Neither the action nor its reason is touched by this function.
+fn lock_by_margin_note(file: &SwapFile, phase: &Phase, action: &Action, tip: u64) -> Option<String> {
+    let params = &file.public.params;
+    let g = params.profile.gates();
+    let lock_by = params.lock_by_height;
+    match phase {
+        // Alice before she funds: measured the way `alice_action` measures it (it funds while `tip + b_fund + b_final <= lock-by`).
+        Phase::Alice(AlicePhase::Created) => {
+            let need = g.b_fund + g.b_final;
+            let funded_final_by = tip.checked_add(need)?;
+            if funded_final_by > lock_by {
+                return Some(format!("funding window is closed: the last height to fund was {} (lock-by {lock_by}, tip {tip})", lock_by.saturating_sub(need)));
+            }
+            let left = lock_by - funded_final_by;
+            let what = format!("{left} blocks left before it is too late to fund (lock-by {lock_by}, tip {tip})");
+            if left >= LOCK_BY_MARGIN_WARN_BLOCKS {
+                return Some(format!("funding window: {what}"));
+            }
+            Some(format!("funding window is short: {what}; see the action"))
+        }
+        Phase::Alice(AlicePhase::FundingSubmitted { .. } | AlicePhase::Funded { .. } | AlicePhase::FundingFinal { .. })
+        | Phase::Bob(BobPhase::Received | BobPhase::Funded { .. } | BobPhase::FundingFinal { .. }) => {
+            if tip > lock_by {
+                // The file's lock-by is the nominal one (the bundle states it); Bob's lock is offered up to the hard limit of `bob_action`.
+                if matches!(action, Action::LockEth { .. }) {
+                    let hard = g.bob_lock_by_min_window(params.deadline_height);
+                    return Some(format!("nominal lock-by {lock_by} has passed (tip {tip}); the lock is still allowed until the hard limit {hard}"));
+                }
+                return Some(format!("lock-by {lock_by} has passed: tip {tip} is {} blocks beyond it", tip - lock_by));
+            }
+            let margin = lock_by - tip;
+            if margin >= LOCK_BY_MARGIN_WARN_BLOCKS {
+                return Some(format!("lock-by margin: {margin} blocks (lock-by {lock_by}, tip {tip})"));
+            }
+            Some(format!("lock-by margin is short: {margin} blocks (lock-by {lock_by}, tip {tip}); see the action"))
+        }
+        _ => None,
     }
 }
 
@@ -1029,6 +1081,36 @@ fn eth_nodes_agree(file: &SwapFile, eth: &EthObservation, second: &EthObservatio
     Ok(())
 }
 
+/// Display only: the second node's address as `" URL"` for a note (`scheme://host:port`, set by the command line), or nothing.
+fn node_label(label: Option<&str>) -> String {
+    label.map(|l| format!(" {l}")).unwrap_or_default()
+}
+
+/// The positive counterpart of `noid_nodes_agree`: said once the second Parano1d node has agreed (same instance, tips close enough), with the
+/// values that were compared. Not said when the rule is waived or not evaluated. A note only; nothing reads it.
+fn noid_agreement_note(noid: &NoidObservation, second: &NoidObservation) -> String {
+    format!(
+        "second Parano1d node agrees:{} at height {} (first node {}), {}",
+        node_label(noid.second_label.as_deref()),
+        second.tip,
+        noid.tip,
+        describe_instance_opt(noid.instance.as_ref())
+    )
+}
+
+/// The positive counterpart of `eth_nodes_agree`: said once the second Ethereum node has agreed, with the values that were compared (the two
+/// finalized heights and the lock, which is final at the lower of them). The latest block numbers are not compared and are not shown. A note only.
+fn eth_agreement_note(eth: &EthObservation, second: &EthObservation, lock: &EthLock) -> String {
+    let fin = |e: &EthObservation| e.finalized_block.map_or("unknown".to_string(), |f| f.to_string());
+    format!(
+        "second Ethereum node agrees:{} finalized {} (first node finalized {}), lock {} final at the lower of the two",
+        node_label(eth.second_label.as_deref()),
+        fin(second),
+        fin(eth),
+        short_id(&lock.lock_id)
+    )
+}
+
 /// REVIEW-2 F5, applied after `spend_blocker` has passed: the chain's own age (header times) and, for the two steps
 /// that cannot be taken back on a lie, the agreement of a second node.
 ///
@@ -1062,13 +1144,25 @@ fn f5_gate(file: &SwapFile, action: &Action, noid: &NoidObservation, eth: &EthOb
         Action::LockEth { .. } => match second_node_policy(file, noid.second.as_deref(), noid.second_error.as_deref(), noid.single_node_ok, notes) {
             Err(why) => Some(why),
             Ok(None) => None,
-            Ok(Some(second)) => noid_nodes_agree(file, noid, second, now).err(),
+            Ok(Some(second)) => {
+                let verdict = noid_nodes_agree(file, noid, second, now).err();
+                if verdict.is_none() {
+                    notes.push(noid_agreement_note(noid, second));
+                }
+                verdict
+            }
         },
         Action::RevealEth { lock_id } => match second_node_policy(file, eth.second.as_deref(), eth.second_error.as_deref(), eth.single_node_ok, notes) {
             Err(why) => Some(why),
             Ok(None) => None,
             Ok(Some(second)) => match eth.find_lock(lock_id) {
-                Some(lock) => eth_nodes_agree(file, eth, second, &lock, now).err(),
+                Some(lock) => {
+                    let verdict = eth_nodes_agree(file, eth, second, &lock, now).err();
+                    if verdict.is_none() {
+                        notes.push(eth_agreement_note(eth, second, &lock));
+                    }
+                    verdict
+                }
                 None => Some("the lock this action names is not visible in the observation".into()),
             },
         },

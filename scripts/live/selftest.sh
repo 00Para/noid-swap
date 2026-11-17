@@ -77,6 +77,12 @@ check "node_flags native: second nodes added" "$BASEF --noid-rpc http://n2 --eth
 check "node_flags native: SINGLE_NODE_OK=1 adds --single-node-ok" "$BASEF --single-node-ok --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 SINGLE_NODE_OK=1)"
 check "node_flags native: SINGLE_NODE_OK=1 with both second nodes does not" "$BASEF --noid-rpc http://n2 --eth-rpc http://e2 --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2 SINGLE_NODE_OK=1)"
 check "node_flags native: only one second node and SINGLE_NODE_OK=1 passes the flag" "$BASEF --noid-rpc http://n2 --single-node-ok --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 SINGLE_NODE_OK=1)"
+check "node_flags native: NOID_RPC2_REMOTE=1 with a second node adds --noid-rpc2-is-remote" "$BASEF --noid-rpc http://n2 --noid-rpc2-is-remote --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 NOID_RPC2_REMOTE=1)"
+check "node_flags native: ETH_RPC2_REMOTE=1 with a second node adds --eth-rpc2-is-remote" "$BASEF --eth-rpc http://e2 --eth-rpc2-is-remote --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 ETH_RPC2=http://e2 ETH_RPC2_REMOTE=1)"
+check "node_flags native: both declared remote" "$BASEF --noid-rpc http://n2 --noid-rpc2-is-remote --eth-rpc http://e2 --eth-rpc2-is-remote --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2 NOID_RPC2_REMOTE=1 ETH_RPC2_REMOTE=1)"
+check "node_flags native: NOID_RPC2_REMOTE=1 and ETH_RPC2_REMOTE=1 without second nodes add nothing" "$BASEF --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2_REMOTE=1 ETH_RPC2_REMOTE=1)"
+check "node_flags native: the _REMOTE settings off (0) add nothing" "$BASEF --noid-rpc http://n2 --eth-rpc http://e2 --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2 NOID_RPC2_REMOTE=0 ETH_RPC2_REMOTE=0)"
+check "node_flags native: the declaration neither adds nor removes --single-node-ok" "$BASEF --noid-rpc http://n2 --noid-rpc2-is-remote --single-node-ok --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 NOID_RPC2_REMOTE=1 SINGLE_NODE_OK=1)"
 check "node_flags native: CURL is passed through" "$BASEF --curl-path /opt/curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 CURL=/opt/curl)"
 if command -v wslpath >/dev/null 2>&1; then
   check "node_flags wsl: no --curl-path" "$BASEF" "$(run_env "$D" "$NF" LIVE_PLATFORM=wsl NOID_RPC=http://n1 ETH_RPC=http://e1)"
@@ -195,6 +201,8 @@ case "$1 $2" in
     st=n; grep -q '^stage: calling wallet CLI' "$STUB_L/funded.marker" 2>/dev/null && st=y
     echo "fund $4 mk1=$m1 mk2=$m2 mk3=$m3 st=$st obj=$3 content=$(tr '\n' ' ' < "$3")" >> "$STUB_LOG"
     [ -z "${STUB_FUND_KILL:-}" ] || kill -9 "$PPID"
+    # STUB_FUND_TERM: the funding line is printed, then fund.sh is sent TERM while the wallet call is still running
+    if [ -n "${STUB_FUND_TERM:-}" ]; then echo "Funding submitted: stubtxid0001"; kill -TERM "$PPID"; sleep 1; exit 0; fi
     echo "Funding submitted: stubtxid0001"
     exit "${STUB_FUND_EC:-0}" ;;
 esac
@@ -433,6 +441,22 @@ check_has "fund.sh real: ... showing the recorded stage" "recorded (run folder):
 check_has "fund.sh real: ... and the recovery rule" "may or may not have gone out" "$FOUTX"
 check "fund.sh real: ... and the wallet CLI was not called again" "1" "$(nfunds)"
 check "fund.sh real: two runs in one run folder worked on two different private copies" "2|2" "$(grep -c '^check ' "$FLOG")|$(grep '^check ' "$FLOG" | sort -u | wc -l | tr -d ' ')"
+# TERM during the wallet call (the line `Funding submitted` already printed): the trap runs once the call ends; the markers stay, with the
+# stage and the txid and NO exit line, the private copy goes, a rerun is refused. tee -i keeps the line in the marker on an interrupt.
+check "fund.sh: the wallet call is piped through tee -i (an interrupt must not kill tee)" "1" "$(grep -c 'contract fund.*| tee -i -a ' "$FB/fund.sh" || true)"
+fund_run term1 '' STUB_FUND_TERM=1
+M1C=$(cat "$FD/funded.marker")
+TERM_SKIP=''
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) [ "$FRC" -ne 0 ] || TERM_SKIP="signals sent to a parent shell are not delivered reliably under $(uname -s)" ;; esac
+if [ -n "$TERM_SKIP" ]; then ok "fund.sh: TERM during the wallet call (skipped: $TERM_SKIP)"
+else
+  check "fund.sh real: TERM during the wallet call ends non-zero (the wallet was called once)" "yes|1" "$([ "$FRC" -ne 0 ] && echo yes || echo no)|$(nfunds)"
+  check "fund.sh real: ... all three markers stay" "3" "$(nmarkers)"
+  check "fund.sh real: ... the run folder's marker has the stage and the txid line and NO exit line" "yes|yes|no" "$(case "$M1C" in *"stage: calling wallet CLI"*) echo yes;; *) echo no;; esac)|$(case "$M1C" in *"Funding submitted: stubtxid0001"*) echo yes;; *) echo no;; esac)|$(case "$M1C" in *"wallet exit"*) echo yes;; *) echo no;; esac)"
+  check "fund.sh real: ... the private copy is removed" "0" "$(nleft "$FD")"
+  fund_again "$FD" "$FO/swap.object.json" "$FH"
+  check "fund.sh real: ... a rerun is refused (3) and the wallet is not called again" "3|1" "$FRCX|$(nfunds)"
+fi
 # F4: the object file swapped between the check and the funding is NOT what gets funded (the copy is)
 fund_run swap1 '' "STUB_SWAP=$TMP/fund$((FN + 1))-obj/swap.object.json"
 check "fund.sh real: the object file replaced after the check: the funding still uses the checked copy" "0|1|fund 5.000000 mk1=y mk2=y mk3=y st=y obj=$FD/fund-object.XXXXXX/fund-object.json content={\"object\": \"stub\"} " "$FRC|$(nfunds)|$(grep '^fund ' "$FLOG" | normcopy)"
@@ -505,10 +529,11 @@ done
 echo "}"
 STUB
 chmod +x "$TMP/claimstub"
+CLAIM_LOCAL=''   # one extra line for the next claim_run's env.local.sh (the path real runs use for NOID_RPC2)
 # claim_run NAME [VAR=value ...] -- [claim.sh args]: sets COUT (stdout), CRC, CARGV (the stub's argv, one per line)
 claim_run() {
   local name=$1; shift
-  local d; d=$(mkl "claim-$name"); mkdir -p "$d/rec" "$d/bob"; echo "selftest-passphrase" > "$d/passphrase.txt"
+  local d; d=$(mkl "claim-$name" ${CLAIM_LOCAL:+"$CLAIM_LOCAL"}); mkdir -p "$d/rec" "$d/bob"; echo "selftest-passphrase" > "$d/passphrase.txt"
   local vars=(); while [ $# -gt 0 ] && [ "$1" != "--" ]; do vars+=("$1"); shift; done
   [ $# -gt 0 ] && shift
   CARGV="$d/argv"
@@ -521,6 +546,11 @@ count_arg() { printf '%s\n' "$2" | grep -cx -- "$1" || true; }
 claim_run sub NOID_RPC2=http://127.0.0.1:19602 -- --submit
 check "claim.sh --submit with NOID_RPC2: --submit-rpc once, --submit once" "1|1" "$(count_arg --submit-rpc "$CARGV")|$(count_arg --submit "$CARGV")"
 check "claim.sh --submit with NOID_RPC2: the value follows the flag" "--submit-rpc http://127.0.0.1:19602" "$(printf '%s\n' "$CARGV" | grep -A1 -x -- --submit-rpc | tr '\n' ' ' | sed -e 's/ $//')"
+CLAIM_LOCAL='NOID_RPC2=http://127.0.0.1:19603'
+claim_run local -- --submit
+CLAIM_LOCAL=''
+check "claim.sh --submit with NOID_RPC2 set in env.local.sh: --submit-rpc once, --submit once" "1|1" "$(count_arg --submit-rpc "$CARGV")|$(count_arg --submit "$CARGV")"
+check "claim.sh --submit with NOID_RPC2 set in env.local.sh: the value follows the flag" "--submit-rpc http://127.0.0.1:19603" "$(printf '%s\n' "$CARGV" | grep -A1 -x -- --submit-rpc | tr '\n' ' ' | sed -e 's/ $//')"
 claim_run nosub -- --submit
 check "claim.sh --submit without NOID_RPC2: no --submit-rpc" "0|1" "$(count_arg --submit-rpc "$CARGV")|$(count_arg --submit "$CARGV")"
 claim_run dry NOID_RPC2=http://127.0.0.1:19602 --
@@ -530,6 +560,94 @@ check "claim.sh dry run without NOID_RPC2: no --submit-rpc" "0" "$(count_arg --s
 claim_run long STUB_LINES=100 --
 check "claim.sh: output longer than 40 lines is printed whole (line 100 is there)" "1" "$(printf '%s\n' "$COUT" | grep -c '"line100": 100')"
 check "claim.sh: ... and the opening_hex lines are still left out" "0" "$(printf '%s\n' "$COUT" | grep -c opening_hex)"
+
+# ---- (10) watch.sh against a STUB tick.sh: the loop line keeps the ACTION, `applied` and `phase_after` after long parts (run 13: a long
+# recorded intent pushed `phase_after` past the 1,200-character cut), and a terminal phase still ends the loop
+WB="$TMP/watchbin"; mkdir -p "$WB"
+cp "$HERE/env.sh" "$HERE/watch.sh" "$WB/"
+cat > "$WB/tick.sh" <<'STUB'
+#!/bin/sh
+# STUB_MODE: long (tick 1 lock_final, tick 2 refunded) | done (done at once) | leftover (tick 1 done with a refund_noid action, tick 2 done)
+n=$(cat "$STUB_CNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_CNT"
+Z=$(printf '%03000d' 0 | tr 0 Z); M=$(printf '%01500d' 0)
+PH=lock_final; ACT='{"action": "wait", "reason": "the lock is not final yet"}'
+case "$STUB_MODE" in
+  long) [ "$n" -lt 2 ] || PH=refunded ;;
+  done) PH=done ;;
+  leftover) PH=done; [ "$n" -ge 2 ] || ACT='{"action": "refund_noid", "reason": "the contract is still funded"}' ;;
+esac
+echo "[$1] tick exit 0 at 12:00:0$n"
+echo "noid: tip 281108 instance {$M}"
+echo "eth : latest 1416 lock {$M}"
+echo "sources: {}"; echo "events: []"
+echo "ACTION: $ACT"
+echo "notes: [\"$M\"]"
+echo "intent: {\"status\": \"held\", \"blob\": \"$Z\"}"
+echo "applied: True phase_after: $PH"
+STUB
+chmod +x "$WB/tick.sh"
+# watch_run NAME MODE: sets WRC, WOUT, WLOOP (the loop file's text), WN (its number of lines)
+watch_run() {
+  local d; d=$(mkl "watch-$1")
+  WOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$d" LIVE_PLATFORM=native STUB_MODE="$2" STUB_CNT="$d/cnt" "$BASH" "$WB/watch.sh" alice 0 2>&1 < /dev/null); WRC=$?
+  WLOOP=$(cat "$d/loop-alice.txt" 2>/dev/null); WN=$(printf '%s\n' "$WLOOP" | grep -c . || true)
+}
+watch_run long long
+WL1=$(printf '%s\n' "$WLOOP" | sed -n 1p)
+check "watch.sh: a 3,000-character intent does not push phase_after out of the line" "yes" "$(case "$WL1" in *"applied: True phase_after: lock_final") echo yes;; *) echo no;; esac)"
+check_has "watch.sh: ... the ACTION is in the line" 'ACTION: {"action": "wait", "reason": "the lock is not final yet"}' "$WL1"
+check_has "watch.sh: ... and the line starts with the time and the tick header" "[alice] tick exit 0 at 12:00:01" "$WL1"
+check "watch.sh: ... the long intent itself is cut" "no" "$(case "$WL1" in *"$(printf '%01000d' 0 | tr 0 Z)"*) echo yes;; *) echo no;; esac)"
+check "watch.sh: a non-terminal phase keeps the loop going; a terminal one (refunded) stops it with exit 0 after 2 lines" "0|2" "$WRC|$WN"
+check_has "watch.sh: ... and says so" "all watched files terminal" "$WOUT"
+watch_run done done
+check "watch.sh: phase_after done stops the loop at once (1 line, exit 0)" "0|1" "$WRC|$WN"
+check_has "watch.sh: ... the line has the phase" "phase_after: done" "$WLOOP"
+watch_run left leftover
+check "watch.sh: done with a leftover refund in the action is not terminal (2 lines), the plain done after it is" "0|2" "$WRC|$WN"
+
+# ---- (11) install.sh: refuses a run folder that is under way (nothing copied), installs into a fresh one, --force skips the check
+# inst_run DIR [ARGS...]: runs the real install.sh with L=DIR; sets IOUT, IRC, and INB (number of files under DIR/bin, 0 when absent)
+inst_run() {
+  local d=$1; shift
+  IOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$d" LIVE_PLATFORM=native "$BASH" "$HERE/install.sh" ${1+"$@"} 2>&1 < /dev/null); IRC=$?
+  INB=$(ls "$d/bin" 2>/dev/null | wc -l | tr -d ' ')
+}
+NSCRIPTS=$(ls "$HERE"/*.sh | wc -l | tr -d ' ')
+D=$(mkl inst1)
+inst_run "$D" 4
+check "install.sh: a fresh folder (only env.local.sh) installs" "0|$NSCRIPTS" "$IRC|$INB"
+check "install.sh: ... the copied helper has no carriage return and is executable" "yes" "$([ -x "$D/bin/env.sh" ] && ! grep -q "$(printf '\r')" "$D/bin/env.sh" && echo yes || echo no)"
+inst_run "$D" 4
+check "install.sh: installing again into a folder that holds only bin/, env.local.sh and repo-dir.txt works" "0|$NSCRIPTS" "$IRC|$INB"
+inst_run "$TMP/inst-new" 4
+check "install.sh: a folder that does not exist yet installs" "0|$NSCRIPTS" "$IRC|$INB"
+D=$(mkl inst2); printf '{}\n' > "$D/alice.swap.json"
+inst_run "$D" 4
+check "install.sh: a folder with alice.swap.json is refused (exit 3) and nothing is copied" "3|0" "$IRC|$INB"
+check_has "install.sh: ... said as such, naming the file and --force" "alice.swap.json" "$IOUT"
+check_has "install.sh: ... and the way out" "--force" "$IOUT"
+D=$(mkl inst3); mkdir -p "$D/bob"; printf '{}\n' > "$D/bob/bob.swap.json"
+inst_run "$D" 4
+check "install.sh: a folder with bob/bob.swap.json is refused" "3|0" "$IRC|$INB"
+D=$(mkl inst4); : > "$D/ui-console.lock"
+inst_run "$D" 4
+check "install.sh: a folder with the console's lock file is refused and nothing is copied" "3|0" "$IRC|$INB"
+D=$(mkl inst5); : > "$D/last-tick-bob.json"
+inst_run "$D" 4
+check "install.sh: a folder with a last-tick file is refused" "3|0" "$IRC|$INB"
+D=$(mkl inst6); : > "$D/loop-alice.txt"
+inst_run "$D" 4
+check "install.sh: a folder with a loop file is refused" "3|0" "$IRC|$INB"
+D=$(mkl inst7); : > "$D/funded.marker"
+inst_run "$D" 4
+check "install.sh: a folder with funded.marker is refused" "3|0" "$IRC|$INB"
+D=$(mkl inst8); : > "$D/ui-console.lock"
+inst_run "$D" --force 4
+check "install.sh: --force installs into a folder with the console's lock file" "0|$NSCRIPTS" "$IRC|$INB"
+D=$(mkl inst9); printf '{}\n' > "$D/alice.swap.json"
+inst_run "$D" --force
+check "install.sh: --force alone (RUN from the default) installs into a folder with a swap file" "0|$NSCRIPTS" "$IRC|$INB"
 
 echo
 echo "$PASS ok, $FAILS failed (bash $BASH_VERSION)"

@@ -81,6 +81,8 @@ NOID_RPC=${NOID_RPC:-http://127.0.0.1:9601}          # the wallet app's node
 NOID_RPC2=${NOID_RPC2:-}                             # a second, distinct Parano1d node (F5); empty = Bob's lock waits (unless SINGLE_NODE_OK=1)
 ETH_RPC=${ETH_RPC:-https://ethereum-sepolia-rpc.publicnode.com}
 ETH_RPC2=${ETH_RPC2:-}                               # a second, distinct Ethereum node (F5); empty = Alice's reveal waits (unless SINGLE_NODE_OK=1)
+NOID_RPC2_REMOTE=${NOID_RPC2_REMOTE:-0}              # 1 = the second Parano1d node runs on another machine and is reached through a local port (an SSH tunnel): passes --noid-rpc2-is-remote, text only (the tool cannot verify it); only with NOID_RPC2
+ETH_RPC2_REMOTE=${ETH_RPC2_REMOTE:-0}                # the same for the second Ethereum node (--eth-rpc2-is-remote), only with ETH_RPC2
 SINGLE_NODE_OK=${SINGLE_NODE_OK:-0}                  # 1 = pass --single-node-ok (waive the F5 second-node rule); opt-in, set it in env.local.sh
 PROFILE=${PROFILE:-sepolia}
 CHAIN=${CHAIN:-11155111}
@@ -127,7 +129,9 @@ node_flags() {
   single_node_warning   # said on EVERY call (every tick, every claim), not once in setup
   local f=(--transport curl --noid-rpc "$NOID_RPC" --eth-rpc "$ETH_RPC" --rpc-timeout "$RPC_TIMEOUT")
   if [ -n "$NOID_RPC2" ]; then f+=(--noid-rpc "$NOID_RPC2"); fi
+  if [ -n "$NOID_RPC2" ] && [ "$NOID_RPC2_REMOTE" = 1 ]; then f+=(--noid-rpc2-is-remote); fi
   if [ -n "$ETH_RPC2" ]; then f+=(--eth-rpc "$ETH_RPC2"); fi
+  if [ -n "$ETH_RPC2" ] && [ "$ETH_RPC2_REMOTE" = 1 ]; then f+=(--eth-rpc2-is-remote); fi
   if [ "$SINGLE_NODE_OK" = 1 ] && { [ -z "$NOID_RPC2" ] || [ -z "$ETH_RPC2" ]; }; then f+=(--single-node-ok); fi
   # native: say which curl to spawn (swap-cli's own default is the WSL curl.exe when that file exists, else `curl` from PATH)
   if [ "$LIVE_PLATFORM" = native ]; then f+=(--curl-path "$CURL"); fi

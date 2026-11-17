@@ -128,6 +128,10 @@ pub fn lock_word_of(kind: LockKind, preimage: &[u8; 32]) -> [u8; 32] {
 /// Bob's own sender, so its size does not depend on the other users of the contract.
 pub const DEFAULT_LOG_RANGE_MAX: u64 = 50_000;
 
+/// The error when `getLock` shows a lock that `eth_getLogs` does not. It stays an error (the poll fails and the engine decides nothing on
+/// it); the text only says what is the usual cause right after a lock was mined, so that one failed poll there does not alarm.
+pub const NO_LOCKED_EVENT_MSG: &str = "getLock shows this lock but eth_getLogs returned no Locked event for it. Right after a lock was mined this is usually the provider's log index lagging behind its state, and it clears on the next poll. If it does not clear, the cause is one of: --eth-from-block above the lock's block, a provider block-range limit, or a log index that stays behind; fix that and poll again";
+
 /// How many matching locks are read in full (events, `getLock`, code, block timestamp) per poll; the rest are only
 /// counted in `EthObservation::lock_count`.
 pub const MAX_LOCKS_READ: usize = 8;
@@ -374,6 +378,7 @@ impl<R: JsonRpc> EthWatcher<R> {
             signer_nonce_pending,
             second: None,
             second_error: None,
+            second_label: None,
             single_node_ok: false,
         })
     }
@@ -388,10 +393,7 @@ impl<R: JsonRpc> EthWatcher<R> {
         match self.rpc.call(M, json!([{ "to": hex0x(&self.contract), "data": hex0x(&calldata) }, "latest"])) {
             Err(RpcError::Remote { code, message }) if code == 3 || message.to_ascii_lowercase().contains("revert") => Ok(()),
             Err(e) => Err(e),
-            Ok(_) => Err(dec(
-                M,
-                "getLock shows this lock but eth_getLogs returned no Locked event for it (--eth-from-block above the lock's block, a provider block-range limit, or a lagging log index); fix that and poll again",
-            )),
+            Ok(_) => Err(dec(M, NO_LOCKED_EVENT_MSG)),
         }
     }
 

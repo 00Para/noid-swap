@@ -2,12 +2,17 @@
 
 ## Status, in one paragraph
 
-This is research code that has moved real value only in trial amounts (10 NOID against 0.001 ETH).
-It has had two adversarial code reviews by independent review sessions (`swap-cli/REVIEW-2.md`,
-`swap-cli/REVIEW-3.md`) and a review of the design (`docs/review-1.md`), all of them internal and
-none of them an external human audit. The reviews' must-fix lists are closed in code, but the latest
-verdict still reads "not yet safe to hand to a stranger" until a live run exercises the new gates and a
-fresh review checks them. Do not use it with amounts you cannot lose.
+This is research code that has moved real value only in trial amounts: at most 10 NOID against
+0.001 ETH in one swap, and one swap against Ethereum mainnet (5 NOID against 0.001 ETH, run 8,
+2026-11-06). The standing rule is trial amounts only until an external review is done.
+It has had a review of the design (`docs/review-1.md`), seven adversarial code reviews of the swap tool
+(`swap-cli/REVIEW-1.md` to `swap-cli/REVIEW-7.md`), two reviews of the Poseidon2b Solidity port, a
+seeded chaos test and an explicit-state model check. All of them are internal; none is an external
+audit. The must-fix lists of the earlier reviews are closed in code. The latest review (REVIEW-7)
+finds nothing that blocks the owner in both roles on Sepolia or at trial amounts on mainnet, and
+lists what is still needed before a stranger uses the tool and before amounts beyond trial size,
+including an outside look at the hashlock's preimage resistance. A stranger should not use it yet.
+Do not use it with amounts you cannot lose.
 
 ## Reporting a problem
 

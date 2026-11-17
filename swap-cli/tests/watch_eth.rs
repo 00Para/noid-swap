@@ -275,6 +275,8 @@ fn absent_lock_asks_get_lock_and_only_a_revert_means_no_lock() {
     // getLock still answers with the lock: the logs are missing it (from-block too high, range limit, lag).
     let msg = decode_msg(watcher(&fx, id).observe());
     assert!(msg.contains("no Locked event") && msg.contains("--eth-from-block"), "{msg}");
+    // Still an error (the poll fails), and it says that right after a lock was mined this is usually the provider's log index, clearing on the next poll.
+    assert!(msg.contains("log index lagging") && msg.contains("clears on the next poll") && msg.contains("block-range limit"), "{msg}");
     // getLock reverts LockNotFound (an eth_call revert is a JSON-RPC error): there is no such lock.
     let call = call_mut(&mut fx, "eth_call", 0);
     call.as_object_mut().unwrap().remove("result");

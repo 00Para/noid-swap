@@ -54,7 +54,7 @@ echo "== $BOB_NOTE"
 "$BIN" new-bob --bundle "$L/alice.bundle.json" --out "$BOB_FILE" --bob "$BOB_NOID" --amount "$AMOUNT" \
   --eth-chain-id "$CHAIN" --eth-contract "$CONTRACT" --eth-amount-wei "$WEI" --eth-sender "$BOB_ETH" \
   --profile "$PROFILE" --contract-version "$CONTRACT_VERSION" ${PROOF_ARGS[@]+"${PROOF_ARGS[@]}"} \
-  2>&1 | grep -E 'bundle check|receipt|self-test|swap file written|error|refus' | head -8
+  2>&1 | grep -E 'bundle check|receipt|self-test|swap file written|error|refus|^warning:|^error:' | head -8
 echo "new-bob exit ${PIPESTATUS[0]}"
 "$BIN" status "$BOB_FILE" | grep -E '"(phase|profile|deadline_height|lock_by_height)"'
 echo "== definition"

@@ -109,10 +109,22 @@ const USAGE: &str = "usage:
   Plain http:// is accepted only to 127.0.0.1, localhost or [::1]; any other host needs https:// with --transport curl, or --allow-plain-http.
   A second, independent node: give --noid-rpc (or --noid-fixture) twice, and/or --eth-rpc (or --eth-fixture) twice (REVIEW-2 F5). Bob's lock needs
   the two Parano1d nodes to agree (same instance, tips within 2 blocks); Alice's reveal needs the two Ethereum nodes to agree (same lock, finalized
-  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3). An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).";
+  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3); a second node that runs on another machine and is reached through a local port (an SSH tunnel) can be declared with --noid-rpc2-is-remote / --eth-rpc2-is-remote, which changes the text of the same-host note and nothing else. An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 9] = ["apply", "submit", "fast-kdf", "cancel", "show", "single-node-ok", "allow-plain-http", "i-checked-the-wallet", "allow-unchecked-bundle"];
+const BOOL_FLAGS: [&str; 11] = [
+    "apply",
+    "submit",
+    "fast-kdf",
+    "cancel",
+    "show",
+    "single-node-ok",
+    "allow-plain-http",
+    "i-checked-the-wallet",
+    "allow-unchecked-bundle",
+    "noid-rpc2-is-remote",
+    "eth-rpc2-is-remote",
+];
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -202,7 +214,9 @@ fn net(flags: &HashMap<String, Vec<String>>) -> Res<Net> {
 /// `scheme://host:port` only: a URL may carry an API key in its path or query.
 fn redact(url: &str) -> String {
     let (scheme, rest) = url.split_once("://").unwrap_or(("", url));
-    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Credentials in front of an `@` are not part of the address that is shown.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
     format!("{scheme}://{host}")
 }
 
@@ -240,7 +254,11 @@ type Source = (Box<dyn JsonRpc>, String);
 /// trimming, lower-casing and the default ports; the path, query and credentials do not count: one provider's two API keys
 /// are one node) are refused. A different port on the same host passes with a note: a second node on the same machine
 /// shares the first one's network view, so what "agreed" is worth is less.
-fn check_distinct_endpoints(kind: &str, urls: &[String]) -> Res<Option<String>> {
+///
+/// `declared_remote` (`--<kind>-rpc2-is-remote`) is information only: the operator says the second node runs on another machine and
+/// appears on this host through a local port (for example an SSH tunnel). The tool cannot verify that. It replaces the text of the note for
+/// a second endpoint on the same host; it relaxes nothing (identical endpoints are still refused, and the two-node rule is unchanged).
+fn check_distinct_endpoints(kind: &str, urls: &[String], declared_remote: bool) -> Res<Option<String>> {
     let [first, second] = urls else {
         return Ok(None);
     };
@@ -253,6 +271,12 @@ fn check_distinct_endpoints(kind: &str, urls: &[String]) -> Res<Option<String>> 
             "--{kind}-rpc: the second node must be a different endpoint (both are {})",
             redact(first)
         )),
+        (Some(a), Some(b)) if a.host == b.host && declared_remote => Ok(Some(format!(
+            "--{kind}-rpc: both endpoints are on the host {} ({} and {}), but --{kind}-rpc2-is-remote declares that the second node runs on another machine and is reached through this local port (for example an SSH tunnel); the tool cannot verify that. Two machines may still share one network and one upstream connection, so their agreement is a weaker check than two nodes on separate networks (G3)",
+            a.host,
+            redact(first),
+            redact(second)
+        ))),
         (Some(a), Some(b)) if a.host == b.host => Ok(Some(format!(
             "--{kind}-rpc: both nodes are on the host {} ({} and {}): a second node on the same machine shares its network view, so their agreement is a weaker check (G3)",
             a.host,
@@ -303,7 +327,7 @@ fn chain_source(flags: &HashMap<String, Vec<String>>, kind: &str, net: &Net) -> 
         return Ok((open(&fixtures[0])?, fixtures.get(1).map(open).transpose()?, Vec::new()));
     }
     let mut source_notes = Vec::new();
-    source_notes.extend(check_distinct_endpoints(kind, &urls)?);
+    source_notes.extend(check_distinct_endpoints(kind, &urls, flags.contains_key(&format!("{kind}-rpc2-is-remote")))?);
     let via = if net.curl { "curl" } else { "tcp" };
     let open = |u: &String| -> Res<(Box<dyn JsonRpc>, String)> { Ok((open_url(net, u)?, redact(u))) };
     let (rpc, label) = open(&urls[0])?;
@@ -401,6 +425,8 @@ fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, close
         }
     }
     noid.single_node_ok = single_node_ok;
+    // Display only (the note that the second node agreed): `scheme://host:port` of the second `--noid-rpc`, nothing from its path.
+    noid.second_label = flags.get("noid-rpc").and_then(|v| v.get(1)).map(|u| redact(u));
     // Bob knows his lock id as soon as he chose T_reveal; Alice discovers Bob's
     // lock by the agreed parties and her hashlock until she has recorded it.
     let lock_id = expected_lock_id(file).unwrap_or([0u8; 32]);
@@ -449,6 +475,7 @@ fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, close
         }
     }
     eth.single_node_ok = single_node_ok;
+    eth.second_label = flags.get("eth-rpc").and_then(|v| v.get(1)).map(|u| redact(u));
     // `--now T` pins the clock for a replay of recorded fixtures: the recordings are then
     // taken to have been observed at T, or the engine would (rightly) call them stale.
     let now = match flags.get("now").and_then(|v| v.first()) {
@@ -1319,21 +1346,51 @@ mod tests {
             ("http://127.0.0.1:9601", " HTTP://LOCALHOST:9601/rpc "),
             ("https://rpc.example.org/v3/KEY1", "https://RPC.example.org:443/v3/KEY2"),
         ] {
-            let err = check_distinct_endpoints("noid", &v(a, b)).unwrap_err();
+            let err = check_distinct_endpoints("noid", &v(a, b), false).unwrap_err();
             assert!(err.starts_with("--noid-rpc: the second node must be a different endpoint (both are "), "{err}");
             assert!(!err.contains("KEY"), "{err}");
         }
-        let err = check_distinct_endpoints("eth", &v("https://rpc.example.org/v3/KEY1", "https://rpc.example.org/v3/KEY2")).unwrap_err();
+        let err = check_distinct_endpoints("eth", &v("https://rpc.example.org/v3/KEY1", "https://rpc.example.org/v3/KEY2"), false).unwrap_err();
         assert_eq!(err, "--eth-rpc: the second node must be a different endpoint (both are https://rpc.example.org)");
         // Not parseable and identical: still refused.
-        assert!(check_distinct_endpoints("eth", &v("nonsense", " NONSENSE")).is_err());
+        assert!(check_distinct_endpoints("eth", &v("nonsense", " NONSENSE"), false).is_err());
         // Another port on one host passes, with a note naming the host.
-        let note = check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://localhost:9602")).unwrap().unwrap();
+        let note = check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://localhost:9602"), false).unwrap().unwrap();
         assert!(note.contains("both nodes are on the host localhost") && note.contains("shares its network view"), "{note}");
         // Two hosts, or only one url: nothing to say.
-        assert_eq!(check_distinct_endpoints("noid", &v("https://a.example.org", "https://b.example.org")).unwrap(), None);
-        assert_eq!(check_distinct_endpoints("noid", &["http://127.0.0.1:9601".to_string()]).unwrap(), None);
-        assert_eq!(check_distinct_endpoints("noid", &[]).unwrap(), None);
+        assert_eq!(check_distinct_endpoints("noid", &v("https://a.example.org", "https://b.example.org"), false).unwrap(), None);
+        assert_eq!(check_distinct_endpoints("noid", &["http://127.0.0.1:9601".to_string()], false).unwrap(), None);
+        assert_eq!(check_distinct_endpoints("noid", &[], false).unwrap(), None);
+    }
+
+    #[test]
+    fn a_declared_remote_second_node_changes_the_text_of_the_note_and_nothing_else() {
+        let v = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        // Through a tunnel the second node appears on localhost: the note says what was declared, what cannot be verified, and what still holds.
+        let note = check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://127.0.0.1:9602"), true).unwrap().unwrap();
+        assert!(note.contains("--noid-rpc2-is-remote declares") && note.contains("another machine") && note.contains("local port"), "{note}");
+        assert!(note.contains("cannot verify") && note.contains("share one network and one upstream connection"), "{note}");
+        assert!(!note.contains("shares its network view"), "{note}");
+        let eth = check_distinct_endpoints("eth", &v("http://127.0.0.1:8545", "http://localhost:8546/key"), true).unwrap().unwrap();
+        assert!(eth.starts_with("--eth-rpc: ") && eth.contains("--eth-rpc2-is-remote declares") && !eth.contains("key"), "{eth}");
+        // Without the flag the old note is unchanged.
+        let old = check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://127.0.0.1:9602"), false).unwrap().unwrap();
+        assert!(old.contains("shares its network view") && !old.contains("declares"), "{old}");
+        // Nothing is relaxed: identical endpoints are refused whatever is declared, and two hosts still have nothing to say.
+        assert!(check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://localhost:9601"), true).is_err());
+        assert_eq!(check_distinct_endpoints("noid", &v("https://a.example.org", "https://b.example.org"), true).unwrap(), None);
+        assert_eq!(check_distinct_endpoints("noid", &["http://127.0.0.1:9601".to_string()], true).unwrap(), None);
+    }
+
+    #[test]
+    fn the_remote_declarations_are_boolean_flags_and_the_label_has_no_credentials() {
+        let args: Vec<String> = ["--noid-rpc2-is-remote", "file.json", "--eth-rpc2-is-remote", "--eth-rpc", "A"].iter().map(|s| s.to_string()).collect();
+        let (positional, flags) = parse_flags(&args);
+        assert_eq!(positional, vec!["file.json".to_string()]);
+        assert!(flags.contains_key("noid-rpc2-is-remote") && flags.contains_key("eth-rpc2-is-remote"));
+        assert_eq!(redact("https://user:pw@rpc.example.org:8545/v3/KEY?x=1"), "https://rpc.example.org:8545");
+        assert_eq!(redact("http://127.0.0.1:9602"), "http://127.0.0.1:9602");
+        assert_eq!(redact("https://rpc.example.org:8545#KEY"), "https://rpc.example.org:8545");
     }
 
     #[test]

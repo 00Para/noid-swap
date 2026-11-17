@@ -195,7 +195,7 @@ NOW=$(sha_of "$COPY") || NOW=''
 note_all() { local m; for m in "$MK3" "$MK2" "$MK1"; do echo "$1" >> "$m"; done; }
 echo "funding $NOID NOID (once) at $(date -u +%T) UTC"
 note_all "stage: calling wallet CLI"
-"$NOID_CLI" contract fund "$OBJ_CLI" "$NOID" < /dev/null 2>&1 | tee -a "$MK1"
+"$NOID_CLI" contract fund "$OBJ_CLI" "$NOID" < /dev/null 2>&1 | tee -i -a "$MK1"   # tee -i: an interrupt must not kill tee before the wallet's `Funding submitted` line is in the marker
 WEC=${PIPESTATUS[0]}
 note_all "wallet exit $WEC"
 grep -i 'funding submitted' "$MK1" 2>/dev/null | head -n 3 | tr -d '\r' | while IFS= read -r l; do echo "$l" >> "$MK2"; echo "$l" >> "$MK3"; done

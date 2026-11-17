@@ -798,7 +798,8 @@ fn a_stale_or_future_observation_holds_every_spending_action_that_reads_it() {
 
 #[test]
 fn a_pure_wait_is_not_touched_by_unknown_or_stale_observations() {
-    // Nothing is spent here, so nothing is held back and no note is added.
+    // Nothing is spent here, so nothing is held back and no note is added (the lock-by margin of a Bob who has not locked yet is a note of
+    // its own, said whatever the observations are, and is the only one here).
     let mut s = Scenario::new(Variant::Raw);
     let now = s.now();
     let r = s.tick_bob_with(move |n, e| {
@@ -807,7 +808,8 @@ fn a_pure_wait_is_not_touched_by_unknown_or_stale_observations() {
         n.fee_estimate_1_1 = None;
     });
     assert_eq!(r.action.kind(), "wait");
-    assert!(r.notes.is_empty(), "{:?}", r.notes);
+    assert!(r.notes.iter().all(|n| n.starts_with("lock-by margin") || n.starts_with("funding window")), "{:?}", r.notes);
+    assert!(r.notes.len() <= 1, "{:?}", r.notes);
     assert_eq!(s.bob_phase(), "received");
 }
 

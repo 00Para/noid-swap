@@ -119,7 +119,7 @@ Run each from the repo root in a Terminal with the same `RUSTUP_TOOLCHAIN`. Coun
 |---|---|
 | `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it. Of those, the macOS memory fix was re-run on a Mac 2026-11-06: `npx hardhat test test/free-mem.test.js test/Poseidon2b.test.js` gave `28 passing` without any workaround; the full suite was not re-run there) |
 | `cd btc && npm ci && npm test` | 91 pass (Bitcoin is not used by an ETH swap; optional) |
-| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 486 passing, 1 ignored |
+| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 520 passing, 1 ignored |
 | `cd equiv && cargo test --release --locked` | 23 pass |
 | `cd equiv/zkvm && cargo test --locked -p equiv-guest-core` | 3 pass |
 
