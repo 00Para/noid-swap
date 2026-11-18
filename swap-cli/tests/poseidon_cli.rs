@@ -5,6 +5,8 @@ use std::process::Command;
 
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
+#[path = "common/home.rs"]
+mod home;
 
 use swap_cli::secret::LockKind;
 use swap_cli::swapfile::{Passphrase, SwapFile, SwapPublic};
@@ -14,7 +16,7 @@ const HTLC_CODE_HASH_HEX: &str = "0xa906117fc4e604bd25fcee2a6a41da8b824ec9b4a17d
 const V2_CODE_HASH_HEX: &str = "0xf510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780bb7043ff3";
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_swap-cli"))
+    home::isolated_bin()
 }
 
 fn run(cmd: &mut Command) -> (bool, String, String) {

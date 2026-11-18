@@ -4,12 +4,13 @@
 //! the guarantee that v1 files, bundles and digests are byte-for-byte what they were before versions existed.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[path = "common/bundle_text.rs"]
 mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
+#[path = "common/home.rs"]
+mod home;
 
 use serde_json::Value;
 use swap_cli::htlc_harness::{self, load_params_guarded};
@@ -25,7 +26,7 @@ fn contracts() -> PathBuf {
 }
 
 fn run(args: &[String]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_swap-cli")).args(args).env("SWAP_PASSPHRASE", PASS).output().expect("run swap-cli");
+    let out = home::isolated_bin().args(args).env("SWAP_PASSPHRASE", PASS).output().expect("run swap-cli");
     (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 

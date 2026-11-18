@@ -7,6 +7,8 @@ use std::process::Command;
 mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
+#[path = "common/home.rs"]
+mod home;
 
 use serde_json::Value;
 
@@ -14,7 +16,7 @@ const CODE_HASH: &str = "0xa906117fc4e604bd25fcee2a6a41da8b824ec9b4a17d10137704e
 const PASS: &str = "correct horse battery staple";
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_swap-cli"))
+    home::isolated_bin()
 }
 
 fn run(cmd: &mut Command) -> (bool, String, String) {

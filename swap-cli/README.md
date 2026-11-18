@@ -1099,6 +1099,49 @@ The bundle now carries its own check as one more top-level field:
   old tool does not do the new check). Tests: `src/bundle.rs` (unit) and `tests/bundle_check.rs` (the binary: a matching bundle, one flipped digit, three zeros added, three characters
   removed, a changed parameter, reformatted JSON, an absent check with and without the flag, `v: 2`).
 
+## The hashlock registry (T9, G5)
+
+`new-alice` and `new-bob` record the hashlock of the swap file they make, so that a second file is never made for it on one machine (a bundle offered again, a copied
+command). Since G5 the default registry is **per machine**, not per run folder:
+
+- **Where.** `$NOID_SWAP_HOME/hashlocks.txt` when the environment variable `NOID_SWAP_HOME` is set (the override; it names the directory itself, and the tests set it to a temporary
+  directory so that they never reach a real home), otherwise `$HOME/.noid-swap/hashlocks.txt` (`%USERPROFILE%` on Windows when `HOME` is unset). The directory is created with mode 700 and
+  the file with mode 600 on Unix; on Windows they are just created. The file is replaced as a whole through a temporary file in the same directory and a rename, so a failed write leaves it as
+  it was and never half a line.
+- **What it holds.** One line per swap file: the 64-digit hashlock, and the role (`alice` or `bob`), nothing else (never a path, a secret or an address; a third field written by an
+  earlier build is ignored when the file is read). Alice's file and Bob's file for the same swap may sit on one machine (a single-machine rehearsal), so a line with the role `alice` does not refuse
+  `bob`; a second `alice`, a second `bob`, or a line without a role (an older file) refuses.
+- **Both files are checked.** Without `--registry` the per-machine file and the run folder's `hashlocks.txt` (next to `--out`, as before, role-blind, the bare hashlock) are both checked before either
+  is written; a hit in either refuses with `hashlock already used by another swap (T9): it is in FILE`, and a refusal writes nothing. With no home (`HOME` unset and no `NOID_SWAP_HOME`) the run
+  folder's file is used alone and a warning says so. A per-machine file that cannot be read or written refuses (fail closed).
+- **What stderr says.** The per-machine file is named in the messages only as `$NOID_SWAP_HOME/hashlocks.txt` (when the override is set) or `~/.noid-swap/hashlocks.txt`, literally, never by its
+  expanded path: the path holds the user name and the messages end up in log files that get shared.
+- **No retry allowance.** The registry is written before the swap file (fail closed: no swap file without a line). Any hit refuses, whatever the output path: a swap file that was saved and then
+  deleted or moved away does not let the same bundle be replayed into the same path, and a command that died between the registry write and the save cannot simply be run again. In both cases the
+  operator decides: pass `--registry FILE` (a file of their own, which replaces both default files), or remove the line from the registry by hand; the refusal message says so.
+- **Open (LOW).** The check and the write are not under a lock, so two `new-*` runs at the same moment can both pass the check (see `TASKS.md`).
+- **`--registry FILE`** still wins: that file alone is used, as before. It is the way to register a bundle on purpose a second time, or to keep a registry somewhere else.
+
+Tests: `tests/hostile_gaps.rs` (`g5_…`: two folders, the explicit file, the default location and its modes, the no-home warning, the deleted swap file replayed) and the unit tests in `src/swapfile.rs`.
+
+## Bob's tool and a lock of his own sender that it did not send (G9)
+
+Bob's file adopts a lock of his own sender on the agreed terms in `funding_final`, whatever its `T_reveal`: the phase moves (`funding_final` to `locked`) and the actions are those of any lock
+(`secret_seen` and `claim_noid` once the secret is public, `refund_eth` after `T_reveal`). A lock the file did not send itself (its lock id is not the one the file expects: its pending `lock_eth`
+record or intent, or a cancelled intent's `T_reveal`; any other lock of Bob's sender was made by hand) whose `T_reveal` is above the engine's own upper bound for Bob's lock (`Gates::t_max_eth`,
+the bound `choose_t_reveal` applies, at the current Parano1d tip and the earlier of the local and the chain clock; no bound at all counts as above it) lets Alice reveal at her cutoff while Bob can no
+longer get his NOID claim final before `D`. It is still adopted, because refusing it would leave Bob without a claim path: the lock is live, Alice's tool reveals on it as soon as it is final, and a
+file that never adopted it could neither read the secret nor claim. The only difference is a note. The tick that adopts it writes a history entry `late_lock:<lock id>:<T_reveal>:<bound or none>` (`none` also when the Ethereum clock is unknown at adoption, so the note is never missed),
+and every tick while the lock is open (`locked`, `refund_submitted`; also after a restart, because the note rests on the entry) carries:
+
+```
+ALARM: this lock's T_reveal <t> is <excess> s beyond the engine's own bound <bound> (D <d>): if Alice reveals late, the NOID claim may not be final before D; claim the moment the secret is seen; do not make another lock (lock 0x1234abcd..)
+```
+
+(With no bound at this height: `… T_reveal <t> has no safe bound at this height (the engine's own bound does not exist) (D <d>): …`.) A lock at exactly the bound gets no note, nor does the lock the
+file sent itself, even if the bound has moved since. The note changes no event and no action. A `T_reveal` below the lower bound is not Bob's tool's business: Alice's rule I3 rejects it. Alice's side is
+unchanged. Tests: `tests/hostile_gaps.rs` (`g9_…`, including Alice's reveal on a late lock followed by Bob's `secret_seen` and `claim_noid`).
+
 ## Contract versions (`--contract-version 1|2`)
 
 The NOID is locked in one of two Parano1d contracts. Which one is a swap parameter, like the profile.

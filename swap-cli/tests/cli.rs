@@ -8,6 +8,8 @@ use std::process::Command;
 mod bundle_text;
 #[path = "common/equiv_stub.rs"]
 mod equiv_stub;
+#[path = "common/home.rs"]
+mod home;
 
 use swap_cli::secret::{Secret, Variant};
 use swap_cli::swapfile::{example_public, SwapFile};
@@ -18,7 +20,7 @@ const CODE_HASH: &str = "0xa906117fc4e604bd25fcee2a6a41da8b824ec9b4a17d10137704e
 const OTHER_CODE_HASH: &str = "0x2222222222222222222222222222222222222222222222222222222222222222";
 
 fn bin() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_swap-cli"))
+    home::isolated_bin()
 }
 
 fn run(cmd: &mut Command) -> (bool, String, String) {

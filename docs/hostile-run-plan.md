@@ -106,8 +106,8 @@ close must pay Bob.
 
 Counts: 30 scenarios (9 Bob, 9 Alice, 3 third party, 6 chain and node, 3 bundle). Since the tests of `swap-cli/tests/hostile_gaps.rs`
 (11 tests, written for the gaps of section 6) 29 have a direct offline test and 1 is covered only in part (T3: the simulator has one mempool).
-Before that file: 23 direct, 6 in part (B2, B4, B7, A4, A5, T3), 1 none (D2). Four of the new tests pin a recorded weakness (names ending in
-`_current_behaviour`: B2/G1, B5/G9, D3/G5 and, of low impact, A8/G6); see section 6. The table names 78 distinct tests (69 in Rust,
+Before that file: 23 direct, 6 in part (B2, B4, B7, A4, A5, T3), 1 none (D2). Four of the new tests pinned a recorded weakness (names ending in
+`_current_behaviour`: B2/G1 and, of low impact, A8/G6; B5/G9 and D3/G5 were fixed afterwards and their tests now assert the fixed behaviour); see section 6. The table names 78 distinct tests (69 in Rust,
 9 in `eth/test`), plus the chaos campaign of `CHAOS.md` and live runs 4, 6, 9, 11 and 13 where they apply.
 
 ## 3. Which scenarios need a live run
@@ -354,7 +354,7 @@ Why each live run cannot lose more than fees:
   opens at `D` with no dependency on Bob (consensus rule, `q2-history-step.md`). Back by `D` + 18 blocks.
 - **L3.** Bob's ETH sits in a lock only he can refund, from its own `T_reveal` (30 minutes). Alice's tool rejects the
   lock, so the secret is never published and no one can claim it. Alice's NOID comes back at `D`. The hand-made lock
-  must have a short `T_reveal`: a long one would be adopted by Bob's tool (gap G9) and would let Alice reveal past the
+  must have a short `T_reveal`: a long one is adopted by Bob's tool with an ALARM note (gap G9: refusing it would leave Bob without a claim path) and would let Alice reveal past the
   time Bob can still get a claim final before `D`; the dry run is checked for the 1,800 s before anything is sent.
 - **L4.** Every close before `D` must pay `claim_recipient` = Bob (`check_call` and the block proof, Q2 CONFIRMED), with
   a fee of at most `max_fee`. The third party can only choose the fee (5,800 here) and the moment. Alice's reveal goes
@@ -382,7 +382,7 @@ Must NOT be run live:
   project; a hostile run changes none of them.
 - **A rewriting or lying proxy against Sepolia** (C6): it could make a tool act on a false view with real funds.
 - **A hand-made lock whose `T_reveal` is more than about one hour ahead** (L3 uses 1,800 s after the block). Bob's tool
-  adopts a lock of his own sender on the agreed terms whatever its `T_reveal` (gap G9); with a long one Alice may
+  adopts such a lock with an ALARM note on every tick (gap G9: the lock is adopted with an ALARM note, refusing it would leave Bob without a claim path: review finding), and Alice's check has no upper bound, so with a long one she may
   reveal at her cutoff past the time Bob can still get a claim final before `D`, and Bob could lose the ETH while
   Alice recovers the NOID.
 - **Any spend from the third-party copy of Bob's file other than `claim.sh`** (L4): the copy holds a real swap's
@@ -393,7 +393,7 @@ Must NOT be run live:
 ## 6. Gaps: behaviours that had no offline test and no safe live procedure
 
 Each with the fixture, the expected engine answer and, where one was written, the test. G1 to G6, G9 and G12 were pinned on
-2026-11-06 by `swap-cli/tests/hostile_gaps.rs` (11 tests, no change to `swap-cli/src`): each test asserts what the engine does today,
+2026-11-06 by `swap-cli/tests/hostile_gaps.rs` (11 tests, no change to `swap-cli/src` at the time; G5 and G9 were fixed afterwards and their tests were rewritten for the fixed behaviour): each test asserted what the engine did then,
 and a name ending in `_current_behaviour` marks a recorded weakness, not a wanted behaviour. G7, G8, G10 and G11 are not in that
 file (reasons below).
 
@@ -428,13 +428,21 @@ file (reasons below).
   first file and the registry unchanged); a Bob file in Alice's own folder is refused the same way (her `new-alice`
   registered the hashlock there). The first tick of the replayed file is `abort`, `"last lock height … passed before
   Alice's funding was final"`, and nothing is locked. Across folders see G5.
-- **G5 (D3).** The hashlock registry defaults to the swap file's own folder (`main.rs:920-925`, `1014-1019`), and the
-  helpers make a new folder per run, so a reused lock word across runs on one machine is not caught by it. Pinned by
-  `g5_the_same_bundle_into_two_folders_is_not_caught_by_the_default_registry_current_behaviour`: both `new-bob` runs are
-  accepted, each folder holds its own `hashlocks.txt` with the same hashlock. RECORDED WEAKNESS. Review verdict
-  (2026-11-06): real, defence in depth (Bob's own-word check on the chain and the fresh secret of `new-alice` are the other
-  lines); fix: a per-machine default registry. (`new-alice` always draws a fresh secret, so only a bundle offered again can
-  repeat a hashlock.)
+- **G5 (D3). FIXED** (`g5_the_same_bundle_into_two_folders_is_refused_by_the_per_machine_registry`,
+  `g5_an_explicit_registry_still_wins_over_the_per_machine_default`,
+  `g5_the_default_is_dot_noid_swap_under_home_with_private_modes_and_no_home_falls_back_with_a_warning`,
+  `g5_a_deleted_swap_file_does_not_let_the_same_bundle_be_replayed_into_the_same_path`). The hashlock
+  registry used to default to the swap file's own folder, and the helpers make a new folder per run, so a reused lock word
+  across runs on one machine was not caught (both `new-bob` runs were accepted). Review verdict (2026-11-06): real, defence
+  in depth (Bob's own-word check on the chain and the fresh secret of `new-alice` are the other lines). Now the default is
+  a per-machine file, `$NOID_SWAP_HOME/hashlocks.txt` else `~/.noid-swap/hashlocks.txt` (directory mode 700, file mode 600
+  on Unix; written through a temporary file and a rename), holding the hashlock and the role (never a path); the run folder's `hashlocks.txt` is still written and checked, a hit in either
+  refuses and a refusal writes nothing (a run that died after registering and before saving is run again with `--registry FILE` or after
+  removing that line by hand: no retry rule, so a replayed bundle is refused even when the finished file was deleted); stderr names the per-machine file only as `$NOID_SWAP_HOME/hashlocks.txt` or
+  `~/.noid-swap/hashlocks.txt`, never by its expanded path; `--registry FILE` replaces both; with no home the run folder's file is used
+  alone and a warning says so. Alice's and Bob's files for one swap may share a machine (different roles). (`new-alice`
+  always draws a fresh secret, so only a bundle offered again can repeat a hashlock.) See `swap-cli/README.md`, "The
+  hashlock registry".
 - **G6 (A8).** Bob reads a mined, reverted claim only when told its hash (`--reveal-tx`). Fixture: a reverted claim
   carrying the secret in a block, no `--reveal-tx`, no pending calldata. Review verdict (2026-11-06): real, low impact (he
   keeps his ETH by refunding). Pinned by
@@ -454,22 +462,27 @@ file (reasons below).
   recipe is an `AMOUNT=` line at the end of `env.local.sh` (L2 step 4), to be confirmed at `D`. A helper that took the
   amount from each instance listing, or a `--amount` flag, would remove the edit. Not in `hostile_gaps.rs`: a shell helper,
   not testable offline without a scripted wallet in `scripts/live/selftest.sh`.
-- **G9 (B5).** Bob's tool adopting a lock of his own sender made outside it with a `T_reveal` it did not choose
-  (`bob_fact`, `engine.rs:2083-2116`). Fixture: Bob in `funding_final`, no intent, a lock on the agreed terms with a
-  `T_reveal` far above the engine's bound. Pinned by
-  `g9_bob_adopts_a_hand_made_lock_with_a_t_reveal_far_beyond_the_engines_bound_current_behaviour` (both lock kinds), with a
-  `T_reveal` six hours above `Gates::t_max_eth`: Bob's file adopts the lock (`eth_lock_seen`), is `locked` with that
-  `T_reveal`, and the tick says `"waiting for the secret (or T_reveal)"` with no note and no alarm; Alice's file, on the
-  same chain, takes the lock and offers `reveal_eth` once it is final (her check has no upper bound either). RECORDED
-  WEAKNESS; the fix is a later, reviewed engine change. (The short-window case is Alice's I3 check, pinned by
-  `alice_rejects_a_lock_whose_reveal_window_is_shorter_than_w_a_min`.) Review verdict (2026-11-06): in `funding_final`
-  Bob's tool adopts a lock from his own sender on the agreed terms whatever its `T_reveal`. A short one is harmless
-  (Alice's tool rejects it and Bob refunds sooner). A LONG one lets Alice reveal at her cutoff past the time Bob can
-  still get a claim final before `D`, so Bob could lose the ETH while Alice recovers the NOID. Only Bob himself can make
-  such a lock (it needs his key), so it is self-inflicted, but the tool should refuse to adopt it or raise an alarm. Fix
-  to decide: check the adopted `T_reveal` against the engine's own upper bound (`Gates::t_max_eth` and
-  `check_i1_eth`, `swap-cli/src/params.rs` near lines 670 and 659, as used by `choose_t_reveal`, near line 685); the test
-  above then changes to expect the refusal or the alarm.
+- **G9 (B5). FIXED** (`g9_a_late_hand_made_lock_is_adopted_and_the_alarm_note_stays_on_every_tick`,
+  `g9_a_hand_made_lock_at_exactly_the_bound_gets_no_note_and_one_second_above_it_gets_one`,
+  `g9_the_lock_the_file_sent_itself_gets_no_note_even_when_the_bound_has_moved`,
+  `g9_alice_reveals_on_the_late_lock_and_bobs_file_reaches_secret_seen_and_claims`,
+  `g9_the_refund_of_a_late_lock_is_offered_after_t_reveal_as_for_any_lock`; both lock kinds). Bob's tool adopts a lock of his
+  own sender made outside it with a `T_reveal` it did not choose, whatever that `T_reveal` (`bob_fact`). Review verdict
+  (2026-11-06): a short one is harmless (Alice's tool rejects it and Bob refunds sooner); a LONG one lets Alice reveal at her
+  cutoff past the time Bob can still get a claim final before `D`, so Bob could lose the ETH while Alice recovers the NOID.
+  Only Bob himself can make such a lock (it needs his key), so it is self-inflicted. The lock is adopted with an ALARM note
+  (refusing it would leave Bob without a claim path: review finding): a refused lock is still live, Alice's tool reveals on it
+  as soon as it is final, and a file that never adopted it could neither read the secret nor claim. So the phase moves and
+  the actions are exactly those of any lock (`funding_final` to `locked`, then `secret_seen` and `claim_noid` once the secret
+  is public, or `refund_eth` after `T_reveal`); the only change is a note. When a lock that the file did not send itself (not
+  the lock id named by its pending `lock_eth` record or intent, or a cancelled intent) has a `T_reveal` above `Gates::t_max_eth`
+  at the current tip and clock (the bound `choose_t_reveal` applies; no bound at all counts as above), the tick that adopts it
+  logs a history entry `late_lock:<lock id>:<T_reveal>:<bound>` and every tick while the lock is open says `ALARM: this lock's
+  T_reveal <t> is <excess> s beyond the engine's own bound <bound> (D <d>): if Alice reveals late, the NOID claim may not be
+  final before D; claim the moment the secret is seen; do not make another lock (lock <id>)`. A lock at exactly the bound, and
+  the file's own lock whatever the bound does later, get no note. Alice's side is unchanged (her check has no upper bound; the
+  short-window case is her I3 check, pinned by `alice_rejects_a_lock_whose_reveal_window_is_shorter_than_w_a_min`). See
+  `swap-cli/README.md`, "Bob's tool and a lock of his own sender that it did not send".
 - **G12 (T1, L4).** `tick --closed-by TXID --apply` for a Bob file in `secret_seen` whose loop has already decided
   `claim_noid`. Pinned by `g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid` (library calls in the
   order the binary makes them: `check_external_close_phase`, `external_close_event`, `SwapFile::apply`, `tick_apply`).

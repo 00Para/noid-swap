@@ -1207,39 +1207,137 @@ pub fn detect_contract_version(opening: &ObjectOpening) -> Option<ContractVersio
     })
 }
 
-/// T9: a per-machine registry of hashlocks already used, so a secret is never
-/// reused across swaps. One hex hashlock per line.
+/// T9: a registry of hashlocks already used, so a secret is never reused across swaps. A line is a hex hashlock,
+/// optionally followed by a role (`alice` or `bob`); nothing else is stored (never a secret, a path or an address). A third field
+/// (written by an earlier build) is read and ignored.
+///
+/// Two kinds of file use this type. The run folder's own `hashlocks.txt` (and a file given with `--registry`) is
+/// role-blind: a hashlock on any line refuses. The per-machine file (G5, see [`machine_registry_path`]) is written with a
+/// role: Alice's file and Bob's file for one swap may share a machine (a single-machine rehearsal), so a hashlock recorded
+/// for `alice` does not refuse `bob`, but a second `alice` or a second `bob` on the same hashlock is refused (a line
+/// without a role refuses either). There is no retry allowance: any hit refuses.
 pub struct HashlockRegistry {
     path: PathBuf,
+    role: Option<String>,
+    /// Create the directory of the file (mode 700 on Unix) on the first write: the per-machine file only.
+    create_dir: bool,
 }
 
 impl HashlockRegistry {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, role: None, create_dir: false }
+    }
+
+    /// The per-machine registry at `path`, for `role` (`alice` or `bob`).
+    pub fn for_machine(path: PathBuf, role: &str) -> Self {
+        Self { path, role: Some(role.to_string()), create_dir: true }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Is this the per-machine registry (the one that carries roles)?
+    pub fn is_machine(&self) -> bool {
+        self.role.is_some()
     }
 
     pub fn contains(&self, hashlock: &[u8; 32]) -> Result<bool, SwapFileError> {
         let h = hex::encode(hashlock);
         match std::fs::read_to_string(&self.path) {
-            Ok(text) => Ok(text.lines().any(|l| l.trim() == h)),
+            Ok(text) => Ok(text.lines().any(|l| {
+                let mut t = l.split_whitespace();
+                t.next() == Some(h.as_str()) && match (&self.role, t.next()) {
+                    (Some(mine), Some(theirs)) => mine == theirs,
+                    _ => true,
+                }
+            })),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(io_err(e)),
         }
     }
 
-    /// Record `hashlock`; refuse if it was already recorded.
+    /// Record the hashlock, refusing if it is already there.
     pub fn register(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
         if self.contains(hashlock)? {
             return Err(SwapFileError::HashlockReused);
         }
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(io_err)?;
-        writeln!(f, "{}", hex::encode(hashlock)).map_err(io_err)?;
-        f.sync_all().map_err(io_err)?;
-        Ok(())
+        self.append(hashlock)
+    }
+
+    /// Write the line without the reuse check (the caller has checked every registry it uses before writing any of them). The whole new
+    /// content goes to a temporary file in the same directory (mode 600 on Unix, synced) and is renamed over the registry, so a failed write
+    /// leaves the registry as it was and never half a line.
+    pub fn append(&self, hashlock: &[u8; 32]) -> Result<(), SwapFileError> {
+        if self.create_dir {
+            if let Some(dir) = self.path.parent().filter(|d| !d.as_os_str().is_empty() && !d.exists()) {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt as _;
+                    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir).map_err(io_err)?;
+                }
+                #[cfg(not(unix))]
+                std::fs::create_dir_all(dir).map_err(io_err)?;
+            }
+        }
+        let mut text = match std::fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(io_err(e)),
+        };
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        match &self.role {
+            Some(role) => text.push_str(&format!("{} {role}\n", hex::encode(hashlock))),
+            None => text.push_str(&format!("{}\n", hex::encode(hashlock))),
+        }
+        let tmp = tmp_path(&self.path)?;
+        let written = (|| -> Result<(), SwapFileError> {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut f = options.open(&tmp).map_err(io_err)?;
+            f.write_all(text.as_bytes()).map_err(io_err)?;
+            f.sync_all().map_err(io_err)?;
+            drop(f);
+            std::fs::rename(&tmp, &self.path).map_err(io_err)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
+    }
+}
+
+/// G5: where the per-machine hashlock registry lives, from the environment: `$NOID_SWAP_HOME/hashlocks.txt` when `NOID_SWAP_HOME` is set
+/// (the override the tests use so they never touch a real home; it names the directory itself), else `$HOME/.noid-swap/hashlocks.txt`
+/// (`%USERPROFILE%` on Windows when `HOME` is unset). `None` when there is no home: the caller falls back to the run folder and says so.
+pub fn machine_registry_path() -> Option<PathBuf> {
+    machine_registry_path_from(std::env::var_os("NOID_SWAP_HOME"), std::env::var_os("HOME"), std::env::var_os("USERPROFILE"))
+}
+
+/// [`machine_registry_path`] on given values (an empty value counts as unset).
+pub fn machine_registry_path_from(swap_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>, userprofile: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let non_empty = |v: Option<std::ffi::OsString>| v.filter(|v| !v.is_empty());
+    if let Some(dir) = non_empty(swap_home) {
+        return Some(PathBuf::from(dir).join("hashlocks.txt"));
+    }
+    let home = non_empty(home).or_else(|| if cfg!(windows) { non_empty(userprofile) } else { None })?;
+    Some(PathBuf::from(home).join(".noid-swap").join("hashlocks.txt"))
+}
+
+/// G5: how the per-machine registry is named in anything printed (stderr ends up in log files that are shared): the literal
+/// `$NOID_SWAP_HOME/hashlocks.txt` when that override is set, else `~/.noid-swap/hashlocks.txt`. Never the expanded path, which holds the user name.
+pub fn machine_registry_display() -> &'static str {
+    if std::env::var_os("NOID_SWAP_HOME").is_some_and(|v| !v.is_empty()) {
+        "$NOID_SWAP_HOME/hashlocks.txt"
+    } else {
+        "~/.noid-swap/hashlocks.txt"
     }
 }
 
@@ -1712,5 +1810,91 @@ mod tests {
         assert!(reg.contains(&h).unwrap());
         assert_eq!(reg.register(&h).unwrap_err(), SwapFileError::HashlockReused);
         reg.register(&fresh().hashlock()).unwrap();
+    }
+
+    #[test]
+    fn machine_registry_is_role_aware_private_and_holds_only_hashlock_and_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("home").join("hashlocks.txt");
+        let h = fresh().hashlock();
+        let alice = HashlockRegistry::for_machine(path.clone(), "alice");
+        let bob = HashlockRegistry::for_machine(path.clone(), "bob");
+        alice.register(&h).unwrap();
+        // One machine may hold Alice's file and Bob's file for the same swap; a second file of the same role may not.
+        assert!(alice.contains(&h).unwrap() && !bob.contains(&h).unwrap());
+        bob.register(&h).unwrap();
+        assert_eq!(alice.register(&h).unwrap_err(), SwapFileError::HashlockReused);
+        assert_eq!(bob.register(&h).unwrap_err(), SwapFileError::HashlockReused);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, format!("{0} alice\n{0} bob\n", hex::encode(h)));
+        // A role-blind registry (the run folder's file, or --registry) refuses a hashlock whatever role its line carries.
+        assert!(HashlockRegistry::new(path.clone()).contains(&h).unwrap());
+        // A line without a role (an older file) refuses either role.
+        let other = fresh().hashlock();
+        std::fs::write(dir.path().join("old.txt"), format!("{}\n", hex::encode(other))).unwrap();
+        assert!(HashlockRegistry::for_machine(dir.path().join("old.txt"), "bob").contains(&other).unwrap());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn machine_registry_path_follows_the_override_then_home() {
+        use std::ffi::OsString;
+        let s = |v: &str| Some(OsString::from(v));
+        assert_eq!(machine_registry_path_from(s("/x/y"), s("/home/u"), None), Some(PathBuf::from("/x/y").join("hashlocks.txt")));
+        assert_eq!(machine_registry_path_from(None, s("/home/u"), None), Some(PathBuf::from("/home/u").join(".noid-swap").join("hashlocks.txt")));
+        // An empty value is unset; with no home at all there is no machine registry.
+        assert_eq!(machine_registry_path_from(s(""), s("/home/u"), None), Some(PathBuf::from("/home/u").join(".noid-swap").join("hashlocks.txt")));
+        assert_eq!(machine_registry_path_from(None, s(""), None), None);
+        assert_eq!(machine_registry_path_from(None, None, None), None);
+    }
+
+    #[test]
+    fn machine_registry_write_goes_through_a_temporary_file_and_a_failed_write_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hashlocks.txt");
+        let (first, second) = (fresh().hashlock(), fresh().hashlock());
+        let reg = HashlockRegistry::for_machine(path.clone(), "bob");
+        reg.register(&first).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        // Only the registry itself is left in the directory after a successful write (the temporary file was renamed over it).
+        let names = |d: &Path| std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert_eq!(names(dir.path()), vec!["hashlocks.txt".to_string()]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // A directory that cannot be written: the new line is refused, the old content stays byte for byte, and no temporary file is left.
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+            let root = std::fs::File::create(dir.path().join("probe")).is_ok();
+            if !root {
+                assert!(reg.append(&second).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+            }
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let _ = std::fs::remove_file(dir.path().join("probe"));
+            assert_eq!(names(dir.path()), vec!["hashlocks.txt".to_string()]);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // A line that was not newline-terminated gets its terminator; the earlier lines are kept.
+        std::fs::write(&path, format!("{} bob", hex::encode(first))).unwrap();
+        reg.append(&second).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), format!("{0} bob\n{1} bob\n", hex::encode(first), hex::encode(second)));
+    }
+
+    #[test]
+    fn a_third_field_of_an_older_build_is_ignored_and_never_allows_a_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hashlocks.txt");
+        let h = fresh().hashlock();
+        std::fs::write(&path, format!("{} bob {}\n", hex::encode(h), "ab".repeat(32))).unwrap();
+        let bob = HashlockRegistry::for_machine(path.clone(), "bob");
+        assert!(bob.contains(&h).unwrap());
+        assert!(!HashlockRegistry::for_machine(path.clone(), "alice").contains(&h).unwrap());
+        assert_eq!(bob.register(&h).unwrap_err(), SwapFileError::HashlockReused);
+        assert!(HashlockRegistry::new(path).contains(&h).unwrap());
     }
 }

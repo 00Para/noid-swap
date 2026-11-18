@@ -112,6 +112,8 @@ pub struct Decision {
     pub action: Action,
     /// Human-readable remarks (checks that failed, warnings).
     pub notes: Vec<String>,
+    /// Log-only history entries to append after the events (G9: `late_lock:` markers); they never change a phase.
+    pub log: Vec<String>,
 }
 
 /// Close fee for Bob's claim or Alice's refund under contract v1 (see [`close_fee_for`] for v2): the live relay minimum, never
@@ -605,6 +607,13 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
             }
         }
     }
+    // Bob only (G9): a late lock of his own sender that the file did not send is adopted like any other and carries an ALARM note.
+    let mut log = Vec::new();
+    if let Phase::Bob(p) = &phase {
+        let (marker, note) = bob_late_lock(file, p, &events, noid, eth, now);
+        log.extend(marker);
+        notes.extend(note);
+    }
     let action = match &phase {
         Phase::Alice(p) => alice_action(file, p, noid, eth, now, &mut notes),
         Phase::Bob(p) => bob_action(file, p, noid, eth, now, &mut notes),
@@ -662,7 +671,7 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     };
     // Display only, from the action as finally decided: the lock-by margin while Bob's lock is not yet seen. Read by nothing.
     notes.extend(lock_by_margin_note(file, &phase, &action, noid.tip));
-    Decision { events, action, notes }
+    Decision { events, action, notes, log }
 }
 
 /// REVIEW-4 R4-11: a `done` file that still holds a leg the tool can refund: Alice's NOID instance still listed, Bob's Ethereum lock still
@@ -2052,6 +2061,81 @@ fn alice_leftover_refund(file: &SwapFile, recorded: Option<&NoidInstance>, noid:
     true
 }
 
+/// G9: the largest `T_reveal` the engine itself would put on a lock of Bob's at this Parano1d tip and Ethereum time (`Gates::t_max_eth`, the
+/// bound `choose_t_reveal` applies, with Bob's own clock rule: the earlier of ours and the chain's). `None`: no `T_reveal` is safe at this
+/// height, or the Ethereum clock is unknown.
+fn late_lock_bound(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Option<u64> {
+    if eth.latest_timestamp == 0 {
+        return None;
+    }
+    let t_now = now.min(eth.latest_timestamp.max(1));
+    file.public.params.profile.gates().t_max_eth(file.public.params.deadline_height, noid.tip, t_now).ok()
+}
+
+/// G9: the start of the history entry that records, at adoption, that a lock of Bob's own sender which the file did not send had a `T_reveal`
+/// above the engine's bound: `late_lock:<lock id, 64 hex>:<T_reveal>:<bound, or none>`. A log-only entry (no phase change); the note is built
+/// from it on every later tick, so it does not depend on a bound that has moved since.
+const LATE_LOCK_MARKER: &str = "late_lock:";
+
+/// G9: at adoption (a lock-less phase, in practice `funding_final`, to `locked`; `lock_submitted` is the file's own send): was `lock` (it already passed [`lock_matches`]: Bob's sender, the agreed terms) sent by this
+/// file? The lock the file sent is the one [`expected_lock_id`] names (the pending `lock_eth` record or intent, or a cancelled intent's
+/// `T_reveal`); any other lock of Bob's sender was made by hand. A foreign lock with a `T_reveal` above the engine's bound (no bound at all
+/// counts as above it, which includes an unknown Ethereum clock: the marker then carries the bound `none`) lets Alice reveal so late that Bob
+/// cannot get his NOID claim final before `D`. It is still adopted, exactly like any other (refusing it would leave Bob without a claim path);
+/// the returned marker makes every tick say so. `None`: no marker needed (the file's own lock, or a lock within the bound).
+fn late_lock_marker(file: &SwapFile, lock: &LockSummary, noid: &NoidObservation, eth: &EthObservation, now: u64) -> Option<String> {
+    if matches!(&file.phase, Phase::Bob(BobPhase::LockSubmitted { .. })) || Some(lock.lock_id) == expected_lock_id(file) {
+        return None;
+    }
+    let bound = late_lock_bound(file, noid, eth, now);
+    if bound.is_some_and(|b| lock.t_reveal <= b) {
+        return None;
+    }
+    let bound = bound.map_or_else(|| "none".to_string(), |b| b.to_string());
+    Some(format!("{LATE_LOCK_MARKER}{}:{}:{bound}", hex::encode(lock.lock_id), lock.t_reveal))
+}
+
+/// G9: the ALARM note for a late lock, from its marker (see [`LATE_LOCK_MARKER`]). The same text on every tick while the lock is open.
+fn late_lock_note(marker: &str, deadline: u64) -> Option<String> {
+    let mut parts = marker.strip_prefix(LATE_LOCK_MARKER)?.split(':');
+    let id: [u8; 32] = hex::decode(parts.next()?).ok()?.try_into().ok()?;
+    let t_reveal: u64 = parts.next()?.parse().ok()?;
+    let against = match parts.next()? {
+        "none" => "has no safe bound at this height (the engine's own bound does not exist)".to_string(),
+        b => {
+            let bound: u64 = b.parse().ok()?;
+            format!("is {} s beyond the engine's own bound {bound}", t_reveal.saturating_sub(bound))
+        }
+    };
+    Some(format!(
+        "ALARM: this lock's T_reveal {t_reveal} {against} (D {deadline}): if Alice reveals late, the NOID claim may not be final before D; claim the moment the secret is seen; do not make another lock (lock {})",
+        short_id(&id)
+    ))
+}
+
+/// G9: for Bob's file after this tick's events: the marker to log (a lock adopted THIS tick that is late) and the ALARM note (that marker, or
+/// the one in the history for a lock adopted earlier), the note only while the lock is open (`locked`, `refund_submitted`). Nothing here changes
+/// an event or an action.
+fn bob_late_lock(file: &SwapFile, after: &BobPhase, events: &[Event], noid: &NoidObservation, eth: &EthObservation, now: u64) -> (Option<String>, Option<String>) {
+    let fresh = events.iter().find_map(|e| match e {
+        Event::EthLockSeen { lock } => late_lock_marker(file, lock, noid, eth, now),
+        _ => None,
+    });
+    let open = matches!(after, BobPhase::Locked { .. } | BobPhase::RefundSubmitted { .. });
+    let Some(lock) = after.lock().filter(|_| open) else { return (fresh, None) };
+    let id = hex::encode(lock.lock_id);
+    let marker = fresh.clone().or_else(|| {
+        file.history
+            .iter()
+            .rev()
+            .map(|h| h.event.as_str())
+            .find(|e| e.strip_prefix(LATE_LOCK_MARKER).is_some_and(|rest| rest.starts_with(&id)))
+            .map(str::to_string)
+    });
+    let note = marker.and_then(|m| late_lock_note(&m, file.public.params.deadline_height));
+    (fresh, note)
+}
+
 fn bob_fact(
     file: &SwapFile,
     p: &BobPhase,
@@ -2954,6 +3038,9 @@ pub fn tick_apply(
     for e in &decision.events {
         file.apply(e, now)?;
     }
+    for entry in &decision.log {
+        file.log(entry.clone(), now);
+    }
     let mut status = IntentStatus::None;
     note_reveal_pending(file, eth, now);
     note_record_only_close(file, eth, now);
@@ -3404,6 +3491,9 @@ impl<E: Executor> Runner<E> {
         for e in &decision.events {
             self.file.apply(e, now)?;
             names.push(e.name());
+        }
+        for entry in &decision.log {
+            self.file.log(entry.clone(), now);
         }
         // A log-only event (Alice's `eth_refund_mined`) leaves the phase alone and so
         // must not resolve a pending action the way a phase move does.

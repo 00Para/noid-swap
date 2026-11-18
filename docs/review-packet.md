@@ -590,14 +590,14 @@ cd parano1d/harness && cargo test                    # 37 tests (+1 ignored P_au
 cd equiv && cargo test --release                     # 23 tests; EQUIV_PARITY_N=100000 for the large parity run
 cd equiv/zkvm && cargo test -p equiv-guest-core      # 3 tests; proving needs rzup (equiv/README.md §5)
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=<dir with raw.receipt, stock.receipt> cargo test --release -p equiv-host
-cd swap-cli && cargo test --offline                  # 520 tests (+1 ignored)
+cd swap-cli && cargo test --offline                  # 532 tests (+1 ignored)
 bash scripts/live/selftest.sh                        # 204 cases, no network
 # the Pruv contract, from the vendor workspace:
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   verify parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json --z3 "$(which z3)"
 ```
 
-The counts for `swap-cli`, `eth` and the self-test are those at the commit that adds this packet (520, 267, 218). The formal model:
+The counts for `swap-cli`, `eth` and the self-test are those at the commit that adds this packet (532, 267, 218). The formal model:
 `cd docs/formal && python model.py all` (`docs/formal/README.md` §1). The chaos test:
 `cd swap-cli && cargo test --offline --test chaos` (`swap-cli/CHAOS.md` "Run it"). Never fund the example params:
 their secret is the public test vector `00 01 … 1f` (`SECURITY.md` rule 1).

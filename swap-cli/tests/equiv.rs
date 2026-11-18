@@ -203,6 +203,9 @@ fn the_process_runner_runs_the_verifier_and_nothing_else() {
 #[cfg(unix)]
 #[path = "common/bundle_text.rs"]
 mod bundle_text;
+#[cfg(unix)]
+#[path = "common/home.rs"]
+mod home;
 
 #[cfg(unix)]
 mod binary {
@@ -212,7 +215,7 @@ mod binary {
     use std::process::Command;
 
     fn bin() -> Command {
-        Command::new(env!("CARGO_BIN_EXE_swap-cli"))
+        home::isolated_bin()
     }
 
     /// Run, retrying the rare "Text file busy" a freshly written script can hit when another test thread forks.

@@ -804,6 +804,54 @@ fn flag<'a>(flags: &'a HashMap<String, Vec<String>>, key: &str) -> Res<&'a str> 
     flags.get(key).and_then(|v| v.first()).map(String::as_str).ok_or_else(|| format!("missing --{key}\n{USAGE}"))
 }
 
+/// T9 / G5: record the hashlock of a new swap file so that no second file on this machine is made for it.
+///
+/// With `--registry FILE` that file alone is used (as before). Without it TWO files are used and a hit in either refuses: the
+/// per-machine registry (`$NOID_SWAP_HOME/hashlocks.txt`, else `$HOME/.noid-swap/hashlocks.txt`; directory mode 700 and file mode 600 on
+/// Unix; one line per swap file: the hashlock and the role, never a secret) and the run folder's `hashlocks.txt`
+/// next to `--out`. Both are checked before either is written, so a refusal leaves both as they were. With no home the run folder's file is
+/// used alone and a warning says so. A per-machine file that cannot be read or written refuses (fail closed); `--registry FILE` is the way
+/// around. The registry is written BEFORE the swap file is saved (fail closed: no swap file without a registry line). There is no retry
+/// allowance: any hit in either file refuses, even for the same output path, so a run that died after registering and before saving is
+/// handled by the operator (`--registry FILE`, or removing the line).
+/// The per-machine registry is only ever named on stderr as `$NOID_SWAP_HOME/hashlocks.txt` or `~/.noid-swap/hashlocks.txt`, never by its
+/// expanded path (the user name would end up in log files).
+fn register_hashlock(flags: &HashMap<String, Vec<String>>, out: &Path, hashlock: &[u8; 32], role: &str) -> Res<()> {
+    if let Some(explicit) = flags.get("registry").and_then(|v| v.first()) {
+        return HashlockRegistry::new(PathBuf::from(explicit)).register(hashlock).map_err(|e| e.to_string());
+    }
+    let folder = HashlockRegistry::new(out.parent().unwrap_or(Path::new(".")).join("hashlocks.txt"));
+    let machine = swap_cli::swapfile::machine_registry_path().map(|p| HashlockRegistry::for_machine(p, role));
+    if machine.is_none() {
+        eprintln!(
+            "warning: no home directory (HOME is unset), so the per-machine hashlock registry is not used; only {} guards against a second swap file on this hashlock (set HOME or NOID_SWAP_HOME, or pass --registry FILE)",
+            folder.path().display()
+        );
+    }
+    let shown = swap_cli::swapfile::machine_registry_display();
+    let mut to_write = Vec::new();
+    for (reg, is_machine) in machine.iter().map(|m| (m, true)).chain(std::iter::once((&folder, false))) {
+        let name = if is_machine { shown.to_string() } else { reg.path().display().to_string() };
+        match reg.contains(hashlock) {
+            Ok(false) => to_write.push(reg),
+            Ok(true) => {
+                return Err(format!(
+                    "hashlock already used by another swap (T9): it is in {name}; if an earlier run died before saving its swap file, pass --registry FILE or remove that line yourself"
+                ))
+            }
+            Err(e) => return Err(format!("the hashlock registry {name} cannot be read ({e}); fix it or pass --registry FILE")),
+        }
+    }
+    for reg in to_write {
+        let name = if reg.is_machine() { shown.to_string() } else { reg.path().display().to_string() };
+        reg.append(hashlock).map_err(|e| format!("the hashlock registry {name} cannot be written ({e}); fix it or pass --registry FILE"))?;
+    }
+    if machine.is_some() {
+        eprintln!("hashlock registry: recorded in {shown} (per machine) and {} (this run folder)", folder.path().display());
+    }
+    Ok(())
+}
+
 fn flag_u64(flags: &HashMap<String, Vec<String>>, key: &str) -> Res<u64> {
     flag(flags, key)?.replace('_', "").parse::<u64>().map_err(|e| format!("--{key}: {e}"))
 }
@@ -917,12 +965,7 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     )
     .map_err(|e| e.to_string())?;
     // T9: never two swaps under one hashlock on this machine.
-    let registry_path = flags
-        .get("registry")
-        .and_then(|v| v.first())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| out.parent().unwrap_or(Path::new(".")).join("hashlocks.txt"));
-    HashlockRegistry::new(registry_path).register(&public.hashlock).map_err(|e| e.to_string())?;
+    register_hashlock(flags, &out, &public.hashlock, "alice")?;
     let file = SwapFile::new_alice(public, &secret, &pass, &kdf, now_unix()).map_err(|e| e.to_string())?;
     file.save(&out).map_err(|e| e.to_string())?;
     eprintln!("swap file written: {} (phase created; nothing on chain)", out.display());
@@ -1011,12 +1054,7 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
         selftest_note = Some(format!("{} ms, owner-authorization {}", rec.proof_ms, rec.auth_version));
         file.record_client_r_selftest(rec, now_unix()).map_err(|e| e.to_string())?;
     }
-    let registry_path = flags
-        .get("registry")
-        .and_then(|v| v.first())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| out.parent().unwrap_or(Path::new(".")).join("hashlocks.txt"));
-    HashlockRegistry::new(registry_path).register(&file.public.hashlock).map_err(|e| e.to_string())?;
+    register_hashlock(flags, &out, &file.public.hashlock, "bob")?;
     file.save(&out).map_err(|e| e.to_string())?;
     eprintln!("bundle checked: opening rebuilt byte-for-byte, tool guard and (I5) pass, your terms match,");
     if let Some(note) = &selftest_note {
