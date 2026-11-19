@@ -431,7 +431,7 @@ check_has "fund.sh real: ... and the marker records the exit code" "wallet exit 
 fund_run kill1 '' STUB_FUND_KILL=1
 check "fund.sh real: an interrupted call ends non-zero, and the funding was attempted once" "yes|1" "$([ "$FRC" -ne 0 ] && echo yes || echo no)|$(nfunds)"
 M1C=$(cat "$FD/funded.marker")
-check "fund.sh real: ... the marker has the stage and NO exit line" "yes|no" "$(case "$M1C" in *"stage: calling wallet CLI"*) echo yes;; *) echo no;; esac)|$(case "$M1C" in *"wallet exit"*) echo yes;; *) echo no;; esac)"
+check "fund.sh real: ... the marker has the stage and NO exit line" "yes|no" "$(case "$M1C" in (*"stage: calling wallet CLI"*) echo yes;; (*) echo no;; esac)|$(case "$M1C" in (*"wallet exit"*) echo yes;; (*) echo no;; esac)"
 fund_again "$FD" "$FO/swap.object.json" "$FH"
 check "fund.sh real: ... a rerun is refused (3)" "3" "$FRCX"
 check_has "fund.sh real: ... naming the run folder's marker path" "$FD/funded.marker" "$FOUTX"
@@ -452,7 +452,7 @@ if [ -n "$TERM_SKIP" ]; then ok "fund.sh: TERM during the wallet call (skipped: 
 else
   check "fund.sh real: TERM during the wallet call ends non-zero (the wallet was called once)" "yes|1" "$([ "$FRC" -ne 0 ] && echo yes || echo no)|$(nfunds)"
   check "fund.sh real: ... all three markers stay" "3" "$(nmarkers)"
-  check "fund.sh real: ... the run folder's marker has the stage and the txid line and NO exit line" "yes|yes|no" "$(case "$M1C" in *"stage: calling wallet CLI"*) echo yes;; *) echo no;; esac)|$(case "$M1C" in *"Funding submitted: stubtxid0001"*) echo yes;; *) echo no;; esac)|$(case "$M1C" in *"wallet exit"*) echo yes;; *) echo no;; esac)"
+  check "fund.sh real: ... the run folder's marker has the stage and the txid line and NO exit line" "yes|yes|no" "$(case "$M1C" in (*"stage: calling wallet CLI"*) echo yes;; (*) echo no;; esac)|$(case "$M1C" in (*"Funding submitted: stubtxid0001"*) echo yes;; (*) echo no;; esac)|$(case "$M1C" in (*"wallet exit"*) echo yes;; (*) echo no;; esac)"
   check "fund.sh real: ... the private copy is removed" "0" "$(nleft "$FD")"
   fund_again "$FD" "$FO/swap.object.json" "$FH"
   check "fund.sh real: ... a rerun is refused (3) and the wallet is not called again" "3|1" "$FRCX|$(nfunds)"
@@ -594,10 +594,10 @@ watch_run() {
 }
 watch_run long long
 WL1=$(printf '%s\n' "$WLOOP" | sed -n 1p)
-check "watch.sh: a 3,000-character intent does not push phase_after out of the line" "yes" "$(case "$WL1" in *"applied: True phase_after: lock_final") echo yes;; *) echo no;; esac)"
+check "watch.sh: a 3,000-character intent does not push phase_after out of the line" "yes" "$(case "$WL1" in (*"applied: True phase_after: lock_final") echo yes;; (*) echo no;; esac)"
 check_has "watch.sh: ... the ACTION is in the line" 'ACTION: {"action": "wait", "reason": "the lock is not final yet"}' "$WL1"
 check_has "watch.sh: ... and the line starts with the time and the tick header" "[alice] tick exit 0 at 12:00:01" "$WL1"
-check "watch.sh: ... the long intent itself is cut" "no" "$(case "$WL1" in *"$(printf '%01000d' 0 | tr 0 Z)"*) echo yes;; *) echo no;; esac)"
+check "watch.sh: ... the long intent itself is cut" "no" "$(case "$WL1" in (*"$(printf '%01000d' 0 | tr 0 Z)"*) echo yes;; (*) echo no;; esac)"
 check "watch.sh: a non-terminal phase keeps the loop going; a terminal one (refunded) stops it with exit 0 after 2 lines" "0|2" "$WRC|$WN"
 check_has "watch.sh: ... and says so" "all watched files terminal" "$WOUT"
 watch_run done done
