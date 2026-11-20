@@ -353,7 +353,7 @@ node scripts/live.js watch --lock TXID:0 --witness-script WS --until-height T_B 
 #    and, only when he asks for the value (pipe it, never redirect it into a file):
 node scripts/live.js watch --lock TXID:0 --witness-script WS --until-height T_B --print-secret   # -> "preimage": "0x..."
 #    if the claim sits unconfirmed, Alice raises its fee: claim --replace (same flags); GO-AHEAD NEEDED for --send
-#    then Bob closes the NOID contract to himself (swap-cli claim) before D - 18.
+#    then Bob closes the NOID contract to himself (swap-cli claim) before D - 19.
 
 # 7b. Failure path: nobody claimed. Once tip >= T_b, Bob refunds (refused locally before then).
 node scripts/live.js refund --key-file keys/bob.key --txid TXID --vout 0 --witness-script WS --to BOB_ADDR

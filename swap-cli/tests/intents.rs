@@ -39,7 +39,7 @@ fn bob_ready_to_lock() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     s
@@ -223,7 +223,7 @@ fn refund_eth_and_refund_noid_intents_hold_and_resolve() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     let tip = s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);
@@ -425,7 +425,7 @@ fn f3_cancel_of_a_refund_noid_is_refused_while_a_call_sits_in_the_parano1d_mempo
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     let tip = s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);

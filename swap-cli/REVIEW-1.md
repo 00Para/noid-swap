@@ -54,6 +54,8 @@ Findings: 4 critical, 4 high, 8 medium, 8 low, 5 nit.
 | 32 | ETH ABI decoding, lockId and selectors | CONFIRMED | eth.rs:37-53 matches `abi.encodePacked(address,address,uint256,bytes32,uint256)` (HTLC.sol:115); topics and selectors are pinned by eth.rs tests |
 | 33 | The CLI wiring lets each party discover Bob's lock | REFUTED | main.rs:228-239. Finding H4 |
 
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; rows 7 and 8 of this table (claim target `D - 18`, finality `tip >= h + 17`) are therefore off by one, and the review's other findings are not affected.
+
 ---
 
 ## Findings

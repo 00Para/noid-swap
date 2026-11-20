@@ -54,7 +54,7 @@ Unchanged (design sections in brackets):
 * Roles, order, who reveals: Alice makes `s`, locks NOID first with the longer timeout `D`, Bob locks ETH
   second, Alice claims ETH (reveal), Bob claims NOID from the revealed `s` (sections 1, 2.2).
 * Every timeout inequality and number (section 4): `W_A = 7,200 s`, `M_A = 1,800 s`,
-  `D = creation + 735` blocks, Bob's lock-by `D - 629`, `B_post = 252` blocks. Block time and finality of both
+  `D = creation + 738` blocks, Bob's lock-by `D - 631`, `B_post = 254` blocks. Block time and finality of both
   chains are the same; the claim is just a bigger transaction. The windows of `HTLCPoseidonV2` are identical
   to `HTLC.sol` (claim while `timestamp < timelock`, refund when `timestamp >= timelock`).
 * The Parano1d contract (`htlc.pruv`, `htlc_v2.pruv`), its opening, Bob's rebuild-byte-for-byte check, the

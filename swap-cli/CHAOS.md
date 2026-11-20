@@ -77,6 +77,10 @@ After every tick (all scenarios):
    the agreed amount, the instance present. `claim_noid`: instance present, call height = tip + 1 < D, the secret is the
    published one, fee in the contract's range (v2: exactly `max_fee`). `refund_noid`: instance present, call height >= D, fee
    in range. `refund_eth`: lock open and `time >= T_reveal`. Wrong role is a violation.
+   **Finality: 18 blocks (corrected 2026-11-08).** The oracle counts a funding or a close as final at `tip >= height + 18`, the node's rule
+   (`is_final`, `CONSENSUS_FINALITY_DEPTH = 18`); it used 17 before, which the engine used too. `B_FINAL` is 19 (`NF + 1`), so the checks at
+   `D + B_FINAL` and the funding gate `tip + B_FUND + B_FINAL <= lock-by` are one block stricter than before. The seeds and scenario numbers
+   quoted below were drawn under the old rule; a replay under the new one is a different run.
 3. **No spend twice.** Funding at most once; no second lock while the first lock or its transaction exists; no claim, refund
    or reveal against something already closed. In `Cli` mode, additionally: the ledger never prints a spend whose first copy
    (that the operator sent) is still in flight, and `intent --cancel` never succeeds while the operator's send is still in a
@@ -185,8 +189,8 @@ to its latest nonce and the effect not visible goes back to the phase before (`l
 note, so the action is offered again; the ledger already treats "same params, effect absent" as safe to resend for `lock_eth`.
 
 ### F-3 (Low) Funding finality is counted from the tick that first saw the instance — **FIXED 2026-11-05**
-`B::Funded` / `A::Funded` become final at `tip >= seen_at_tip + 17`; the observation carries no creation height. After a
-reorg that takes the funding back and re-includes it later, Bob can lock up to a few blocks (at most the reorg depth, 17)
+`B::Funded` / `A::Funded` become final at `tip >= seen_at_tip + 18`; the observation carries no creation height. After a
+reorg that takes the funding back and re-includes it later, Bob can lock up to a few blocks (at most the reorg depth, 18)
 before the funding is really final (scenario 3, 18, 1054). 94 scenarios. The lock is still protected by the instance check
 at `funding_final` (an absent instance aborts).
 **Fix:** read the instance's creation height from the node if `getObjectInstances` / `getObjectStatus` gives it; otherwise

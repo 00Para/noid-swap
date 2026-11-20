@@ -136,7 +136,7 @@ fn alice_params_files_round_trip_to_the_swap_files_opening() {
     assert_eq!(v["modes_byte"], 10);
     assert_eq!(v["recovery_authority"], public.params.alice_noid);
     assert_eq!(v["claim_recipient"], public.params.bob_noid);
-    assert_eq!(v["deadline_height"], 300_735);
+    assert_eq!(v["deadline_height"], 300_738);
     assert!(v["commands"][0].as_str().unwrap().starts_with("parano1d-cli contract create"));
     assert!(err.contains("ACTIVE address") && err.contains(&public.params.alice_noid), "{err}");
 

@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{parse_rpc_response, rpc_request, snippet, JsonRpc, RpcError};
+use super::{parse_rpc_batch_response, parse_rpc_response, rpc_batch_request, rpc_request, snippet, JsonRpc, RpcError};
 
 /// Default for connect, write and read together.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -386,10 +386,9 @@ fn read_response(conn: &mut Conn) -> Result<(Head, Vec<u8>), RpcError> {
     Ok((head, std::mem::take(&mut conn.buf)))
 }
 
-impl JsonRpc for HttpJsonRpc {
-    fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = rpc_request(id, method, &params);
+impl HttpJsonRpc {
+    /// One HTTP exchange: send `body`, read the whole reply.
+    fn exchange(&self, body: &[u8]) -> Result<(Head, Vec<u8>), RpcError> {
         let deadline = Instant::now() + self.timeout;
         let mut stream = self.connect(deadline)?;
         let _ = stream.set_nodelay(true);
@@ -407,7 +406,7 @@ impl JsonRpc for HttpJsonRpc {
         }
         request.push_str("\r\n");
         let mut bytes = request.into_bytes();
-        bytes.extend_from_slice(&body);
+        bytes.extend_from_slice(body);
         stream.write_all(&bytes).map_err(|e| {
             if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) {
                 RpcError::Transport("timed out sending the request".into())
@@ -417,7 +416,15 @@ impl JsonRpc for HttpJsonRpc {
         })?;
 
         let mut conn = Conn { stream, deadline, buf: Vec::new() };
-        let (head, body) = read_response(&mut conn)?;
+        read_response(&mut conn)
+    }
+}
+
+impl JsonRpc for HttpJsonRpc {
+    fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let body = rpc_request(id, method, &params);
+        let (head, body) = self.exchange(&body)?;
         if head.status != 200 {
             // A JSON-RPC error object on a non-200 status is still the node's answer.
             if let Err(e @ RpcError::Remote { .. }) = parse_rpc_response(&body, id) {
@@ -426,6 +433,21 @@ impl JsonRpc for HttpJsonRpc {
             return Err(RpcError::Transport(format!("HTTP {} {}: {}", head.status, head.reason, snippet(&body))));
         }
         parse_rpc_response(&body, id)
+    }
+
+    /// One `POST` with a JSON array body. Any reply that is not an array of the right length (a node that refuses batches answers with
+    /// one error object, or a non-200 status) is an `Err`, and the caller goes back to single calls.
+    fn call_batch(&self, method: &str, params: &[Value]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+        if params.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = self.next_id.fetch_add(params.len() as u64, Ordering::Relaxed);
+        let ids: Vec<u64> = (0..params.len() as u64).map(|i| first + i).collect();
+        let (head, body) = self.exchange(&rpc_batch_request(&ids, method, params))?;
+        if head.status != 200 {
+            return Err(RpcError::Transport(format!("HTTP {} {}: {}", head.status, head.reason, snippet(&body))));
+        }
+        parse_rpc_batch_response(&body, &ids)
     }
 }
 

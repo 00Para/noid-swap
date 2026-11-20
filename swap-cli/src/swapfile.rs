@@ -1487,8 +1487,8 @@ mod tests {
     fn build_and_check_public_section() {
         let s = fresh();
         let p = example_public(&s, Variant::Raw);
-        assert_eq!(p.params.deadline_height, 300_735);
-        assert_eq!(p.params.lock_by_height, 300_106);
+        assert_eq!(p.params.deadline_height, 300_738);
+        assert_eq!(p.params.lock_by_height, 300_107);
         assert_eq!(p.params.max_fee_micronoid, 50_000);
         assert_eq!(p.opening_hex.len(), 2 * noid_tx::experimental_object::OPENING_BYTES);
         assert_eq!(p.claim_authority, s.authority(Variant::Raw).to_bech32());

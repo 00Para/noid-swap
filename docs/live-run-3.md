@@ -148,6 +148,7 @@ reveals → Bob refunds at `T_reveal` (`live.js refund`); the NOID returns to Al
   744,461, **9.994200 NOID**; Alice's index-0 balance 2,038.917590 NOID = 2,048.926590 − 10 − 0.009000 (funding fee 9,000 μNOID,
   as in run 2); Alice's Sepolia balance 0.006 ETH (= 0.005 gas from Bob + 0.001 claimed − claim gas), Bob 0.0465 ETH. `parano1d-cli tx`
   no longer finds the funding transaction (block bodies are pruned after 42 blocks; it was included ≈ 282,001, 90 blocks earlier).
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 02:52 **Receipt**: `parano1d-cli contract receipt --out claim-3.receipt swap.object.json 9efbf8a6…bef6` → 897,013 bytes; `contract verify`
   → "Verified on selected chain at height 282072". (The wallet-level `parano1d-cli receipt <hash>` says "no receipt": it only covers the
   wallet's own transactions; the contract-side export works because this node created the opening and retains the receipts of its calls.)

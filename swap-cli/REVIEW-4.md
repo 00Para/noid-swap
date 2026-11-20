@@ -251,6 +251,8 @@ There is no amount cap for production / mainnet anywhere: the amount discipline 
 
 The engine reads every window from `file.public.params.profile.gates()`. The constants it uses directly (`B_FINAL`, `CLAIM_TARGET_MARGIN`) are 18 in all three profiles. `D_offset` and `lock_by_height` are re-derived and compared at load (swapfile.rs:326-334), so a file and a binary with different budgets refuse to work together. Production 735 / 629 / 539 is consistent in params.rs, the tests and docs/live-run-mainnet-plan.md.
 
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; `B_FINAL` and `CLAIM_TARGET_MARGIN` are 19 since the correction.
+
 `sepolia` and `rehearsal` keep `B_safety` 5, below the one adversarial NOID reorg the formal model needs (20). That costs only Bob's valueless leg, because the NOID moves to him only after the secret is public. Acceptable for those profiles.
 
 **Abort recording and the one-hour hold (question 4).** The abort is not recorded while a funding or lock was decided and not cancelled (engine.rs:2170-2186), or within 3,600 s of a cancel (engine.rs:2239). This does what it says. Its over-reach is R4-6. The hold covers only the abort, not a re-funding or re-lock after the cancel: R4-2.

@@ -43,8 +43,8 @@ last moment Alice may reveal (`T_reveal - M_A`); `D` is the height from which th
 - **Record.** Per run, a log in the style of `live-run-12.md`: setting, parameters, a timed log, the exact refusal
   texts, costs, findings, and "What it did not show".
 
-Numbers every run shares (`sepolia`, from `params.rs` and `live-scenarios.md` 0): `D = h_create + 300` (about 2 h 30);
-Bob's nominal lock-by `D - 251` (`h_create + 49`), hard lock-by `D - 209` (`+91`); `W_A` 4,200 s, `W_A_min` 3,360 s,
+Numbers every run shares (`sepolia`, from `params.rs` and `live-scenarios.md` 0): `D = h_create + 302` (about 2 h 31);
+Bob's nominal lock-by `D - 252` (`h_create + 50`), hard lock-by `D - 210` (`+92`); `W_A` 4,200 s, `W_A_min` 3,360 s,
 `M_A` 1,800 s; Sepolia finality about 19 minutes; Parano1d finality 18 blocks. NOID cost of an abort: funding fee
 9,000 plus recovery close 5,800 = 14,800 μNOID. Sepolia gas: a lock about 584,000, a `poseidon` claim about 689,000.
 
@@ -77,7 +77,7 @@ Columns: **Hostile act** (the concrete command or manual deviation); **Honest to
 | A1 | Funds twice: `parano1d-cli contract fund swap.object.json 5.000000` twice (`fund.sh` refuses the second: `"REFUSED: the contract already has 1 instance(s)…"`, `fund.sh:137`). | `"more than one instance at the contract root: … instances at our contract root fit the agreement and the tool will not guess which one is the lock's: …"` (`engine.rs:2647`, `301`) | Bob's lock | none (he never locks) | two fundings, two recoveries | `f10_two_instances_that_both_fit_make_bob_refuse_to_lock_until_one_is_left`, `f10_alice_two_fitting_instances_at_the_root_stop_her_reveal_and_the_swap_ends_by_refund_at_d`, `r4_4_a_first_reveal_still_refuses_two_fitting_instances`, `alice_never_funds_twice_and_a_foreign_instance_is_not_a_reason_to_fund`; live run 9 |
 | A2 | Funds the wrong amount: `parano1d-cli contract fund swap.object.json 4.000000` (`fund.sh` refuses: `fund.sh:127`). | note `"instance seen but not accepted: instance holds 4000000 micro-NOID, agreed 5000000"` (`engine.rs:2071`, `311`), `"waiting for Alice's funding"` (`engine.rs:2637`), then abort `"last lock height … passed before Alice's funding was final"` (`engine.rs:2634`) | Bob's acceptance of the funding | none | 14,800 μNOID | `f10_dust_alone_is_still_not_accepted`, `run9_a_single_foreign_dust_instance_gets_the_precise_wording_not_the_run_9_one` |
 | A3 | Bundle whose opening pays someone else: `new-alice --bob <another o1>`; the bundle check passes (she computed it). | `new-bob`: `"bundle disagrees with your terms: bob_noid (your NOID payout address)"` (`swapfile.rs:413`, `453`); no file is written | `new-bob` | none | nothing | `bob_refuses_a_bundle_that_disagrees_with_his_terms`, `build_and_check_public_section` (`swf`) |
-| A4 | Bundle with another deadline. (a) `new-alice --h-create` far ahead or behind; (b) a hand-built bundle whose `D` is not `h_create + 300` (needs a test-only script: rebuild the opening with another `deadline`, reseal the bundle check). | (a) far ahead: harmless, `D` only delays her own refund; behind: `"last lock height … passed …"` (`engine.rs:2634`) or `"not locking: height … is past Bob's lock-by height …"` (`engine.rs:2690`, `params.rs:570`). (b) `"deadline … != h_create … + 300 (the sepolia profile's D_offset)"` (`swapfile.rs:357`); a deadline changed without the opening: `"opening does not rebuild byte-for-byte …"` (`swapfile.rs:332`) | `new-bob`, or Bob's lock gate | none | nothing | `a_resealed_bundle_reaches_the_later_checks`, `alice_aborts_before_funding_when_too_late_and_bob_walks_away`; for (b) `g3_new_bob_refuses_a_consistent_bundle_whose_deadline_is_not_h_create_plus_the_profile_offset` (`hostile_gaps.rs`: a bundle with a valid check and a rebuilt opening and `D` = `h_create` + 835 is refused with `"deadline 300835 != h_create 300000 + 735 (the production profile's D_offset)"`, no file written) |
+| A4 | Bundle with another deadline. (a) `new-alice --h-create` far ahead or behind; (b) a hand-built bundle whose `D` is not `h_create + 302` (needs a test-only script: rebuild the opening with another `deadline`, reseal the bundle check). | (a) far ahead: harmless, `D` only delays her own refund; behind: `"last lock height … passed …"` (`engine.rs:2634`) or `"not locking: height … is past Bob's lock-by height …"` (`engine.rs:2690`, `params.rs:570`). (b) `"deadline … != h_create … + 300 (the sepolia profile's D_offset)"` (`swapfile.rs:357`); a deadline changed without the opening: `"opening does not rebuild byte-for-byte …"` (`swapfile.rs:332`) | `new-bob`, or Bob's lock gate | none | nothing | `a_resealed_bundle_reaches_the_later_checks`, `alice_aborts_before_funding_when_too_late_and_bob_walks_away`; for (b) `g3_new_bob_refuses_a_consistent_bundle_whose_deadline_is_not_h_create_plus_the_profile_offset` (`hostile_gaps.rs`: a bundle with a valid check and a rebuilt opening and `D` = `h_create` + 835 is refused with `"deadline 300838 != h_create 300000 + 738 (the production profile's D_offset)"`, no file written) |
 | A5 | Bundle with another amount: `new-alice --amount 6000000` while Bob types 5,000,000. (Not 4,000,000: the fee cap of 50,000 is more than 1 % of 4 NOID, so `new-alice` itself refuses, see G3.) | `"bundle disagrees with your terms: amount_micronoid"` (`swapfile.rs:456`) | `new-bob` | none | nothing | the ETH amount case of `bob_refuses_a_bundle_that_disagrees_with_his_terms` (`swf`); the NOID amount case: `g3_new_bob_refuses_a_bundle_whose_noid_amount_is_not_the_one_bob_typed` (`hostile_gaps.rs`; no file, no registry entry) |
 | A6 | Never funds. | `"waiting for Alice's funding"` (`engine.rs:2637`), then abort `"last lock height … passed before Alice's funding was final"` (`engine.rs:2634`), recorded by `tick --apply` | Bob never reaches a lock | none | nothing | `alice_aborts_before_funding_when_too_late_and_bob_walks_away`, `f1_the_cli_path_records_the_abort` |
 | A7 | Never reveals. | `"waiting for the secret (or T_reveal)"` (`engine.rs:2789`), then `refund_eth` past `T_reveal`, `refund_mined`, `refunded` at Sepolia finality | Bob's refund | Sepolia gas | 14,800 μNOID | `bob_locks_but_alice_never_reveals_both_refund`, `sepolia_alice_never_reveals_both_refund_in_about_317_blocks`; live run 6 |
@@ -94,7 +94,7 @@ close must pay Bob.
 | T1 | Someone who read the secret from the reveal closes first at the minimum fee (it still pays Bob): the stalled-claim case. | while pending: `"a close by someone else is pending on the instance (…); it pays B_noid if valid; proving again only after it is evicted (T2)"` (`engine.rs:2296`); once mined: `"the instance is gone but no tracked transaction closed it; verify the contract receipts manually"` (`engine.rs:2285`); then `tick --closed-by TXID --apply` | Bob's own claim waits | under congestion the rival can sit until eviction at an anchor rotation or `D`; Bob then loses the NOID (Q1, `protocol-design.md` T2) | 5,800 μNOID, paid from the instance | `bob_does_not_reprove_into_a_foreign_pending_close`, `m25d_bobs_claim_made_elsewhere_is_recorded_then_follows_to_done`, `f5_bob_keeps_waiting_on_a_pending_close_without_a_usable_second_opinion`; `g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid` (`hostile_gaps.rs`); CHAOS "third party closes to Bob at minimum fee" |
 | T2 | A close to Bob at `max_fee` (the burn, T1 of the design). | as T1 | none: it is a valid close | Bob loses up to `max_fee` (50,000 μNOID) | none to the closer | `fee_capped_by_max_fee`, `close_must_pay_committed_recipient` (`hns`); CHAOS invariant 5 |
 | T3 | Two closes of one slot: the first seen wins, no replace-by-fee. | Bob's later close is rejected by the node; T1 texts | the node's mempool | as T1 | none | CHAOS ("starved in the mempool"; the simulator has one mempool), `bob_reproves_after_his_claim_is_evicted` |
-| C1 | An epoch rotation while Bob's claim is pending. | `"epoch anchor rotates in N block(s); proving after the boundary (T6)"` (`engine.rs:2313`); after an eviction Bob proves again | Bob's claim timing | claim later, still before `D - 18` by (I1) | none | `epoch_anchor_and_rotation_guard` (`par`), `bob_reproves_after_his_claim_is_evicted`; CHAOS "pending calls evicted" |
+| C1 | An epoch rotation while Bob's claim is pending. | `"epoch anchor rotates in N block(s); proving after the boundary (T6)"` (`engine.rs:2313`); after an eviction Bob proves again | Bob's claim timing | claim later, still before `D - 19` by (I1) | none | `epoch_anchor_and_rotation_guard` (`par`), `bob_reproves_after_his_claim_is_evicted`; CHAOS "pending calls evicted" |
 | C2 | A reorg of Bob's lock block on Ethereum. | Alice reveals only on a lock in a finalized block; Bob re-sends the same lock id after a drop | Alice's reveal gate (finality) | none | none | `f5_a_lock_transaction_that_was_dropped_is_sent_again_only_when_nothing_of_the_signer_is_pending`, `m25b_bobs_refund_reorged_out_returns_to_locked_and_is_sent_again`; CHAOS |
 | C3 | A reorg of Alice's reveal. | Alice's file never says `done` on a dropped claim; she re-sends until `T_reveal - DE` | Alice's `done` | none if re-sent in time | none | `f9_a_claim_that_a_reorg_dropped_never_reaches_done`, `f9_a_claim_that_moved_to_a_later_block_restarts_the_finality_count` |
 | C4 | A Parano1d reorg of the funding or of Bob's claim. | Funding finality restarts when the instance is absent from a poll; a dropped claim is proved again | Bob's lock (funding final) | none | none | `f3_a_funding_that_left_the_chain_and_came_back_is_counted_from_its_return`, `f6_a_claim_reorged_out_and_gone_goes_back_to_secret_seen_and_is_proved_again` |
@@ -167,7 +167,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   near line 574) uses a Bob file at `secret_seen` and does not say whether the loop had already decided `claim_noid`.
   Now pinned by `g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid` (`hostile_gaps.rs`, library calls
   in the order the binary makes them): the file in `secret_seen` whose decision is `claim_noid` accepts the close, goes to
-  `claim_included` and 17 blocks later to `done`. `claim_noid` is not an intent kind, so no intent is held for it.
+  `claim_included` and 18 blocks later to `done`. `claim_noid` is not an intent kind, so no intent is held for it.
 - Record the texts. Cost: none.
 - Afterwards delete the scratch files (the scratch folders of this check, the bundles, the Bob and Alice scratch swap
   files and their sealed secrets): none of them is a swap that may be run.
@@ -217,7 +217,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
    (native mode: `parano1d-cli contract fund swap.object.json 4.000000`). No marker is written by this command, so
    write down the time and the txid yourself. Note the txid.
 2. Bob's machine: loop. Expected: note `"instance seen but not accepted: instance holds 4000000 micro-NOID, agreed
-   5000000"` (`engine.rs:2071`, `311`), action `wait` "waiting for Alice's funding"; after `h_create + 91`, `abort`
+   5000000"` (`engine.rs:2071`, `311`), action `wait` "waiting for Alice's funding"; after `h_create + 92`, `abort`
    "last lock height … passed before Alice's funding was final", file `aborted`. `lock.sh --dry-run` refuses (no
    intent).
 3. Alice's machine: loop. Expected: `wait` with `"an instance of 4,000,000 micro-NOID sits at our contract root; it is
@@ -307,7 +307,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
    in L0).
 6. Alice's machine: her own file follows her claim to `done` as usual.
 - Abort path: if the third-party close is not mined within a few blocks, Bob's own `claim.sh --submit` after it is
-  evicted (the tool says when); if neither lands before `D - 18`, Alice recovers at `D`. Cost: as a normal swap.
+  evicted (the tool says when); if neither lands before `D - 19`, Alice recovers at `D`. Cost: as a normal swap.
   Duration: about 50 minutes. The mempool stall itself (Q1) is not shown: on an idle chain the close is mined in one
   or two blocks.
 - Record: whether Bob's tool saw the close pending, the exact texts, Bob's net payout (amount - 5,800).
@@ -323,7 +323,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
    tunnel went down, `lock.sh --dry-run` will not refuse: record that, it is not a failure of the rule (the rule
    gates the offer of the step, not a step already recorded).
 3. Restore the tunnel; the next tick offers `lock_eth`. Continue the run-12 sequence to the end.
-- Abort path: if the tunnel cannot be restored before the hard lock-by (`h_create + 91`), Bob does not lock and the
+- Abort path: if the tunnel cannot be restored before the hard lock-by (`h_create + 92`), Bob does not lock and the
   run ends as run 4 (Alice's `recover-noid.sh` at `D`). Cost: as a normal swap. Duration: about 1 hour.
 
 ### L6 (run 19). C1: an epoch rotation around Bob's claim
@@ -331,7 +331,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 Run `live-scenarios.md` 6 as written, on raw v1 `poseidon`: pick the boundary `B` (a multiple of 144), set `HC_LEAD`,
 fund promptly, delay `reveal.sh` until `tip >= B - 6` (still well before the cutoff), and expect Bob's `claim.sh`
 dry run at `B - 3` to say `"epoch anchor rotates in N block(s); proving after the boundary (T6)"` (`engine.rs:2313`);
-after `B + 1`, go-ahead, `claim.sh --submit`. Pass: the claim's call height is above `B` and final before `D - 18`.
+after `B + 1`, go-ahead, `claim.sh --submit`. Pass: the claim's call height is above `B` and final before `D - 19`.
 Abort path: the run-6 one. Cost: as a normal swap.
 
 ### L7. Later, not scheduled: T2, T3, C6
@@ -363,7 +363,7 @@ Why each live run cannot lose more than fees:
   lock or refund anything.
 - **L5.** A missing node only makes the tool wait. If Bob never locks, run 4's abort applies.
 - **L6.** The reveal stays inside the cutoff; the guard only delays Bob's proof by a few blocks; (I1) budgets a
-  full epoch, so the claim lands before `D - 18`.
+  full epoch, so the claim lands before `D - 19`.
 
 Must NOT be run live:
 
@@ -416,7 +416,7 @@ file (reasons below).
   and a bundle whose NOID amount differs from Bob's `--amount`. Pinned by
   `g3_new_bob_refuses_a_consistent_bundle_whose_deadline_is_not_h_create_plus_the_profile_offset` and
   `g3_new_bob_refuses_a_bundle_whose_noid_amount_is_not_the_one_bob_typed`. Observed, as wanted: `new-bob` prints `bundle check:
-  … ok` and then refuses with `"deadline 300835 != h_create 300000 + 735 (the production profile's D_offset)"` and with
+  … ok` and then refuses with `"deadline 300838 != h_create 300000 + 738 (the production profile's D_offset)"` and with
   `"bundle disagrees with your terms: amount_micronoid"`; no file and no registry entry. Found on the way: `new-alice
   --amount 4000000` (the plan's earlier desk check) is refused by `new-alice` itself, because the fee cap of 50,000 is
   more than 1 % of 4 NOID; the desk check uses 6,000,000 against Bob's 5,000,000.
@@ -486,7 +486,7 @@ file (reasons below).
 - **G12 (T1, L4).** `tick --closed-by TXID --apply` for a Bob file in `secret_seen` whose loop has already decided
   `claim_noid`. Pinned by `g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid` (library calls in the
   order the binary makes them: `check_external_close_phase`, `external_close_event`, `SwapFile::apply`, `tick_apply`).
-  Observed, as wanted: accepted, the close recorded as `claim_included`, and 17 blocks later `done`. `claim_noid` is not an
+  Observed, as wanted: accepted, the close recorded as `claim_included`, and 18 blocks later `done`. `claim_noid` is not an
   intent kind (the ledger holds `fund_noid`, `lock_eth`, `reveal_eth`, `refund_eth`, `refund_noid`), so no intent is held
   and nothing has to be cancelled first.
 - **G10 (T1 to T3).** The mempool stall under congestion, the first-seen conflict and eviction at a real rotation:

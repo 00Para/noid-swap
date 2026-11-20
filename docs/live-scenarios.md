@@ -8,8 +8,8 @@ from an earlier session does not carry over. Clock times are UTC. Sources: `live
 
 ## 0. Numbers every scenario shares
 
-`sepolia` profile (`swap-cli/src/params.rs`): `D = h_create + 300` (about 2 h 30 at 30 s/block); Bob's lock-by `D - 251`
-= `h_create + 49` (hard minimum-window limit `D - 209` = `+91`); `W_A` 4,200 s so `T_reveal` is about 70 min after
+`sepolia` profile (`swap-cli/src/params.rs`): `D = h_create + 302` (about 2 h 31 at 30 s/block); Bob's lock-by `D - 252`
+= `h_create + 50` (hard minimum-window limit `D - 210` = `+92`); `W_A` 4,200 s so `T_reveal` is about 70 min after
 Bob's lock tick; Alice's reveal cutoff `T_reveal - 1,800 s` (about 40 min after the lock); Sepolia finality about 19 min;
 Parano1d finality 18 blocks (about 9 min); caps 20 NOID, 0.01 ETH, chain 11155111. Run 3 milestones in blocks after
 `h_create`: instance visible +2, funding final +20, Bob's `lock_eth` +22, lock mined +26, lock final +60, reveal +70,
@@ -52,23 +52,23 @@ different swap files, passphrases, secrets and contract roots, so they can overl
 
 **Result (`live-run-4.md`).** Settled 20:41:43 UTC: 10 NOID funded 17:49:49, no Bob, no Sepolia transaction; `refund_noid` offered at tip 284,173
 (`D` = 284,172), chained preview and send, recovery close confirmed at 284,179, receipt verified, Alice's file `refunded` at 284,197 (18 blocks
-later); cost 14,800 μNOID (9,000 + 5,800), exactly the bound below. The Bob-side checks of this section (`lock_eth` refused after `h_create` + 49,
-`lock.sh --dry-run` refusing after `+91`, Bob's file reaching `aborted`) were not run, because Bob never appeared: they remain open.
+later); cost 14,800 μNOID (9,000 + 5,800), exactly the bound below. The Bob-side checks of this section (`lock_eth` refused after `h_create` + 50,
+`lock.sh --dry-run` refusing after `+92`, Bob's file reaching `aborted`) were not run, because Bob never appeared: they remain open.
 
 - **Merge.** From the chain's view both are "NOID funded, no Sepolia lock": Alice does nothing until `D`. The only
   difference is a person's intent, so one run covers both. Extra check for Bob's side: his engine must stop offering
-  `lock_eth` after `h_create + 49` (hard `+91`), and a `lock.sh --dry-run` after that must refuse.
+  `lock_eth` after `h_create + 50` (hard `+92`), and a `lock.sh --dry-run` after that must refuse.
 - **Proves (new).** The abort path with NOID at the contract and nothing on Ethereum; Bob's file reaches a terminal phase
   without ever touching Sepolia; Alice's engine offers `refund_noid` at `D` and `--closed-by` closes her file (run 2 only
   covered "after Bob's lock"). Uses the shortest path to `D`: no lock, no Sepolia finality.
 - **Preconditions.** Wallet balance >= 11 NOID; Sepolia HTLC address known; `VARIANT=raw CONTRACT_VERSION=1`.
-- **Commands.** Common setup and funding (GO-AHEAD: fund). Watch loop on. Bob: never run `lock.sh`. After `h_create + 91`
+- **Commands.** Common setup and funding (GO-AHEAD: fund). Watch loop on. Bob: never run `lock.sh`. After `h_create + 92`
   (about 46 min after funding): `lock.sh --dry-run` (expect refusal; sends nothing). At tip >= `D - 1` ask for the
   GO-AHEAD, then Alice's recovery close above, then `tick.sh alice --closed-by TXID --apply`.
 - **Watch.** `loop-alice.txt`: `funded` -> `funding_final` ("waiting for Bob's lock") -> `refund_noid` once tip + 1 >= `D`.
-  `loop-bob.txt`: `lock_eth` offered between funding final and `D - 251`, then `wait` with a lock-by reason; no `intent
+  `loop-bob.txt`: `lock_eth` offered between funding final and `D - 252`, then `wait` with a lock-by reason; no `intent
   lock_eth pending` remains if Bob ignores it (if the engine froze one, `swap-cli intent bob.swap.json --cancel`).
-- **Duration.** 300 blocks to `D`, +18 to final: about 2 h 40 from `h_create`. Active work: 5 min at start, 5 min at `D`.
+- **Duration.** 302 blocks to `D`, +18 to final: about 2 h 40 from `h_create`. Active work: 5 min at start, 5 min at `D`.
 - **Pass.** Alice's index-0 balance back to start minus 9,000 (funding fee) minus 5,800 (v1 close) = minus 14,800 μNOID;
   `contract instances` empty; receipt verifies; Alice file `refunded`; Bob file terminal (`aborted`; if it stays `received`/
   `funded` past `D`, record it as a finding, not a failure); no Sepolia transaction at all.
@@ -148,7 +148,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   cutoff passed; keeping the secret and waiting for D"); after Bob's refund an `eth_refund_mined` event. Bob: `locked`,
   then `refund_eth` on the first tick past `T_reveal`, then `refund_mined` (non-terminal), then `refunded` about 19
   min later. A phase `refunded` before Sepolia's `finalized` passes the refund block is a bug: stop and record.
-- **Duration.** Refund offered about +165 blocks (82 min), final about +205; `D` at +300, NOID final about +318 (2 h 40).
+- **Duration.** Refund offered about +165 blocks (82 min), final about +205; `D` at +302, NOID final about +320 (2 h 40).
 - **Pass.** Bob's Sepolia balance back to start minus gas (about 0.0001 ETH); contract lock state `refunded`, preimage
   `null`; Alice's NOID back minus 14,800 μNOID; both files terminal; receipt verifies.
 - **If it goes wrong.** Never run `reveal.sh` after the cutoff (it refuses; do not use `--margin-s`). Refund tx stuck or
@@ -186,7 +186,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   and may not handle the stock variant (undetermined, see section 9): use the manual client-S sequence of the
   README (import `m` over stdin, `contract call ... --close --fee 0.005800 --preview`, then `--expected-txid`, same
   height, `swap.object.json` = `{"opening_hex": "<swap file opening_hex>"}`), GO-AHEAD before the send. Chain `--preview`
-  and send in one command. The close must be included and final before `D - 18`.
+  and send in one command. The close must be included and final before `D - 19`.
 - **Watch.** Bob: `claim_noid` from `Claimed`; the throwaway node synced to within a few blocks BEFORE the reveal;
   authorization proof time (stock = raw in M0.5, 3 extra permutations).
 - **Duration.** As run 3 plus the second node's sync (prepare it hours earlier) plus the manual claim: about 1 h 15 from fund.
@@ -196,13 +196,13 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
 
 ## 6. Forced epoch rotation (T6): overlay on run 6 (or a plain raw v1 run)
 
-- **Proves (new).** The `sepolia` profile budgets `B_epoch` = 0 and the window (300 blocks) always contains a rotation, but
+- **Proves (new).** The `sepolia` profile budgets `B_epoch` = 0 and the window (302 blocks) always contains a rotation, but
   nothing in 3 runs was near one. What can be forced: Bob's tick refuses to prove within 4 blocks of a boundary ("epoch
   anchor rotates in N block(s); proving after the boundary (T6)") and then builds the claim after it. What cannot be
   forced with one node: an already-pending claim evicted by a rotation (inclusion takes 1-2 blocks).
 - **Plan the boundary.** Anchors rotate at heights that are multiples of 144 (280,656 = 1,949 x 144 in run 1). Pick the
   first boundary `B` with `B - 72 >= tip + 80` (the proof takes 40-70 blocks) and set `HC_LEAD = B - 72 - tip` before
-  `prepare.sh`; fund promptly at about `B - 72` (funding must not be later than `h_create + 20`, lock-by is `+49`).
+  `prepare.sh`; fund promptly at about `B - 72` (funding must not be later than `h_create + 20`, lock-by is `+50`).
   Then Bob's lock is final about `B - 7`.
 - **Commands.** The run-6 sequence, except: Alice delays `reveal.sh` until tip >= `B - 6` (the cutoff is about
   `B + 25`, so the slack is large), GO-AHEAD, reveal. Bob's `claim.sh` dry run at `B - 3` must say wait (T6); repeat
@@ -211,7 +211,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   stale intent by hand with `paranoid_submitTxIntent`: expected rejection (anchor older than the epoch). No helper does
   this; if the node accepts it, record it as a finding.
 - **Watch.** `loop-bob.txt` notes with "rotates in"; the claim's `call_height` > `B`; a changed anchor in the recording.
-- **Pass.** Claim included after `B`, final before `D - 18`; otherwise the run-6 criteria. **Recover.** Guard refuses
+- **Pass.** Claim included after `B`, final before `D - 19`; otherwise the run-6 criteria. **Recover.** Guard refuses
   forever: tick again (it clears at `B`); if the reveal came too early/late, the run simply is not a rotation test.
 
 ## 7. Conflicting close at minimum fee, and the F_max burn (Q1): run 8, stock v1
@@ -261,8 +261,8 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
 
 | # | Scenario | Run | NOID at risk (recovered less fees) | Sepolia ETH needed | Blocks to completion from `h_create` | Go-aheads |
 |---|---|---|---|---|---|---|
-| 1+2 | Abort before any lock | 4 | 10; loss 14,800 μ | 0 | 318 (2 h 40) | fund, recovery close |
-| 3 | Alice never reveals | 5 | 10; loss 14,800 μ | 0.001 locked and returned + gas (about 0.0002) | 318 | fund, lock, refund-eth, recovery close |
+| 1+2 | Abort before any lock | 4 | 10; loss 14,800 μ | 0 | 320 (2 h 40) | fund, recovery close |
+| 3 | Alice never reveals | 5 | 10; loss 14,800 μ | 0.001 locked and returned + gas (about 0.0002) | 320 | fund, lock, refund-eth, recovery close |
 | 4 | Happy, contract v2 | 6 | 5; Bob gets 4.95 | 0.001 to Alice + gas | about 105 (the fund GO also accepts the v2 risk) | fund, lock, reveal, claim submit |
 | 5 | Happy, stock | 7 | 10 | 0.001 + gas; 0.0005 spare | about 105 plus throwaway-node sync | fund, lock, reveal, claim send |
 | 6 | Epoch rotation | on 6 | as 4 | none extra | +10 blocks of waiting | the same as 4, reveal timed |

@@ -33,7 +33,7 @@ amount can go back to the side that locked it, so nobody is stuck if the other s
 | HTLC contract | to be deployed by Bob; must report `matchesArtifact: true` and `codeHash` `0xa906117fc4e604bd25fcee2a6a41da8b824ec9b4a17d10137704e7da42545e2f` (the hash of this repo's `deployedBytecode`, the same as runs 1 and 3; `swap-cli` has it compiled in) |
 | Amounts | 10 NOID (10,000,000 μNOID) ↔ 0.001 ETH (`1000000000000000` wei). **The first mainnet swap is 0.001 ETH, nothing larger.** The `production` profile has no cap (`max_noid_micro`, `max_eth_wei` and the chain list are unset), so the limit is the operator's rule, not a gate: both amounts are typed by hand and checked in the dry runs |
 | Profile / contract version / variant | `production` (no `--profile` flag; the field is absent from the swap file) / 1 / raw |
-| Timing (production) | `D = h_create + 735` (about 6 h 08 min at the planning pace of 30 s per block); Bob's lock-by `D − 629` (full window) or `D − 539` (minimum window); `W_A` 7,200 s, `W_A_min` 5,400 s; Alice's reveal cutoff `T_reveal − 1,800 s`; Ethereum finality budget 1,140 s; `B_post` 252 (`B_epoch` 144 + `B_fee` 60 + `B_final` 18 + `B_safety` 30); `B_fund` 10, `B_bob` 60 |
+| Timing (production) | `D = h_create + 738` (about 6 h 09 min at the planning pace of 30 s per block); Bob's lock-by `D − 631` (full window) or `D − 541` (minimum window); `W_A` 7,200 s, `W_A_min` 5,400 s; Alice's reveal cutoff `T_reveal − 1,800 s`; Ethereum finality budget 1,140 s; `B_post` 254 (`B_epoch` 144 + `B_fee` 60 + `B_final` 19 + `B_safety` 31); `B_fund` 10, `B_bob` 60 |
 | Fee settings | NOID `max_fee` 50,000 μNOID (at least 5,800); Ethereum `--max-fee-gwei` chosen on the day (see the gas budget) |
 
 ## What is new compared with run 3, and what stays
@@ -42,7 +42,7 @@ amount can go back to the side that locked it, so nobody is stuck if the other s
 |---|---|---|
 | Ethereum chain | Sepolia (testnet ETH) | **mainnet (real ETH)** |
 | `live.js` flags | `--chain-id 11155111` | `--mainnet --max-fee-gwei N --chain-id 1`, and `--swap FILE` (the file must say chain 1 and `production`) |
-| Profile | `sepolia` (`D = h_create + 300`, `W_A` 4,200 s, capped) | `production` (`D = h_create + 735`, `W_A` 7,200 s, no caps, two nodes required) |
+| Profile | `sepolia` (`D = h_create + 302`, `W_A` 4,200 s, capped) | `production` (`D = h_create + 738`, `W_A` 7,200 s, no caps, two nodes required) |
 | HTLC contract | deployed on Sepolia | **a new deployment on mainnet** (the dominant gas cost, once per network) |
 | Everything else | raw variant, contract v1, happy path, one machine, equivalence proof, wallet node | the same |
 
@@ -101,7 +101,7 @@ All of these are read-only or dry runs. Any NO-GO stops the run; nothing is "fix
    --t-now …` (production) passes. The swap files carry no `profile` field and `eth.chain_id` 1; `live.js --mainnet --swap`
    refuses any other file by itself.
 9. **Object and window.** `alice-params --check-object` says "object file OK" with the bundle's contract root; `h_create`
-   within a few blocks of the tip; `D = h_create + 735`; the tip is at least 279,388 (the trial start; long past) and
+   within a few blocks of the tip; `D = h_create + 738`; the tip is at least 279,388 (the trial start; long past) and
    `check_i5` passes; Bob's file exists and is in phase `received`.
 10. **Second nodes.** `tick` is given `--eth-rpc` twice with two different operators. For the NOID side there is only the
     wallet's own node, so `--single-node-ok` is needed; this is an explicit choice to record in the log (the production
@@ -156,7 +156,7 @@ new folder and endpoints, written beside the old one and moved into place (run 3
    90 minutes of Bob's lock, of which about 13–19 minutes are Ethereum finality. *Go-ahead needed: the reveal.*
 7. Bob's `tick` records the secret from the `Claimed` event and says `claim_noid`: `swap-cli claim bob.swap.json …` (dry run proves
    and prints txid / call height / recipient), then `--submit`. `tick` until the claim is final (18 blocks). Bob's claim must be
-   final before `D` (target `D − 18`). *Go-ahead needed: the NOID close.*
+   final before `D` (target `D − 19`). *Go-ahead needed: the NOID close.*
 8. **Verify**: `parano1d-cli contract instances` shows no live instance; Bob's NOID address received 10 NOID − fee (5,800 μNOID under
    v1 if the close pays the floor); Alice's mainnet address holds 0.001 ETH plus what is left of the gas money; Bob's balance equals
    his start minus 0.001, 0.002 and the gas; receipts exported (`contract receipt` and `contract verify`). Record the day's gas prices,
@@ -171,11 +171,11 @@ Ethereum block. The gates are budgets, the "typical" column is what runs 1–3 s
 |---|---|---|
 | funding included | `F` + 1–2 min | within `B_fund` = 10 blocks (5 min) |
 | funding final | `F` + 10 min | inclusion + 18 blocks |
-| Bob's lock mined | `F` + 12–15 min | within `B_bob` = 60 blocks (30 min) after funding final, and by `D − 629` (= `h_create` + 106, about 53 min after `h_create`; minimum window `D − 539`, about 98 min) |
+| Bob's lock mined | `F` + 12–15 min | within `B_bob` = 60 blocks (30 min) after funding final, and by `D − 631` (= `h_create` + 107, about 54 min after `h_create`; minimum window `D − 541`, about 99 min) |
 | lock final on Ethereum | lock + 13 min (two epochs) | budget 1,140 s (19 min); run 3 on Sepolia: 18.9 min |
 | Alice's reveal mined | lock + 14–20 min | cutoff `T_reveal − 1,800 s` = lock + 90 min; `T_reveal` = lock + 7,200 s |
 | Bob's claim: detect, prove, submit | reveal + 1–3 min | `Δ_detect` 300 s, `P_auth` budget 20 s (measured p50 1.5 s, worst p99 6.0 s) |
-| Bob's claim final | submission + 10 min | 18 blocks; must be before `D` (target `D − 18`) |
+| Bob's claim final | submission + 10 min | 18 blocks; must be before `D` (target `D − 19`) |
 | Alice's claim final on Ethereum (her file `done`) | reveal + 13 min | about the same finality as the lock |
 
 Expected wall clock from `F` to Bob's NOID being final: **about 45–60 minutes** (run 3: 44 minutes with the Sepolia numbers),

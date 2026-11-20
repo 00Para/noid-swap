@@ -48,7 +48,7 @@ fn happy_path_in(variant: Variant, profile: ProfileName) -> Scenario {
     // Finality on both sides (Ethereum: `finality_lag` blocks after the claim's own, 3 for the short default).
     let lag = s.world.borrow().finality_lag;
     s.world.borrow_mut().advance_eth(lag + 1);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -95,13 +95,13 @@ fn alice_aborts_before_funding_when_too_late_and_bob_walks_away() {
     let w = s.world.borrow();
     assert!(w.instance.is_none() && w.lock.is_none() && w.noid_payout.is_none() && w.eth_payout.is_none());
     drop(w);
-    // Bob waits, then gives up once even the minimum-window lock-by height (D - 539 = 300,196) passed.
+    // Bob waits, then gives up once even the minimum-window lock-by height (D - 541 = 300,197) passed.
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "wait");
     s.world.borrow_mut().advance_noid(100); // tip 300,191: still waiting
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "wait");
-    s.world.borrow_mut().advance_noid(6); // tip 300,197 > 300,196
+    s.world.borrow_mut().advance_noid(7); // tip 300,198 > 300,197
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "abort", "{rb:?}");
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Aborted { .. })));
@@ -116,7 +116,7 @@ fn alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funding_final");
     // Bob's executor is offline: the engine decided to lock, the attempt failed and is
@@ -140,7 +140,7 @@ fn alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
     let w = s.world.borrow();
@@ -171,7 +171,7 @@ fn bob_locks_but_alice_never_reveals_both_refund() {
     s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
     let w = s.world.borrow();
@@ -220,7 +220,7 @@ fn bob_claims_noid_when_the_secret_appears_while_his_refund_is_pending() {
     assert_eq!(rb.events, vec!["eth_preimage_seen", "claim_submitted"], "{rb:?}");
     // Her claim reverts (timelock passed), his refund mines, and his NOID claim is included.
     s.world.borrow_mut().advance_eth(1);
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_bob();
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -279,7 +279,7 @@ fn bob_reproves_after_his_claim_is_evicted() {
         }
         other => panic!("{other:?}"),
     }
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })));
     assert_eq!(s.world.borrow().evicted, vec![first]);
@@ -316,7 +316,7 @@ fn bob_offline_until_d_loses_the_noid_claim_and_alice_takes_the_noid_back_ending
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let ra = s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
     assert!(matches!(&ra.action, swap_cli::engine::Action::Wait { reason } if reason.contains("both legs ended with Alice")), "{ra:?}");
@@ -343,7 +343,7 @@ fn f9_alice_whose_claim_is_still_pending_at_d_also_takes_the_noid_back() {
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
     assert_eq!(s.world.borrow().noid_payout.as_ref().unwrap().0, s.public.params.alice_noid);
@@ -396,7 +396,7 @@ fn f9_a_reveal_stalled_past_t_reveal_bob_refunds_the_eth_after_his_claim_and_end
     s.world.borrow_mut().advance_eth(1);
     s.tick_bob();
     assert_eq!(s.bob_phase(), "claim_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     // Before T_reveal the lock is open but not refundable: Bob only says so.
@@ -450,7 +450,7 @@ fn f9_the_claim_goes_first_while_it_is_possible_then_the_eth_refund() {
     s.world.borrow_mut().advance_eth(1);
     s.tick_bob();
     assert_eq!(s.bob_phase(), "claim_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     let w = s.world.borrow();
@@ -502,7 +502,7 @@ fn f9_a_closed_claim_branch_is_no_reason_to_abort_while_the_eth_lock_is_refundab
     s.world.borrow_mut().advance_eth(1);
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
     let w = s.world.borrow();
@@ -570,7 +570,7 @@ fn at_bob_lock(s: &mut Scenario) {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     assert_eq!(s.bob_phase(), "funded");
@@ -706,7 +706,7 @@ fn alice_at_refund_time() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     let tip = s.world.borrow().tip;
@@ -808,8 +808,9 @@ fn a_pure_wait_is_not_touched_by_unknown_or_stale_observations() {
         n.fee_estimate_1_1 = None;
     });
     assert_eq!(r.action.kind(), "wait");
-    assert!(r.notes.iter().all(|n| n.starts_with("lock-by margin") || n.starts_with("funding window")), "{:?}", r.notes);
-    assert!(r.notes.len() <= 1, "{:?}", r.notes);
+    // T21: the simulator's healthy producer summary is said once while Bob waits (information; it decides nothing here).
+    assert!(r.notes.iter().all(|n| n.starts_with("lock-by margin") || n.starts_with("funding window") || n.starts_with("producer concentration ok")), "{:?}", r.notes);
+    assert!(r.notes.iter().filter(|n| !n.starts_with("producer concentration ok")).count() <= 1, "{:?}", r.notes);
     assert_eq!(s.bob_phase(), "received");
 }
 
@@ -882,7 +883,7 @@ fn alice_logs_bobs_eth_refund_once_and_changes_nothing_else() {
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
     assert!(!ra.events.contains(&"eth_refund_mined".to_string()), "{ra:?}");
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
     assert_eq!(logged(&s), 1);
@@ -911,7 +912,7 @@ fn alice_coming_back_after_the_refund_records_lock_final_then_the_refund() {
 // ---------------------------------------------------------------- the rehearsal profile (ideas idea 3)
 //
 // The same simulator, the same engine, the same formulas; only the numbers of the profile the two swap
-// files carry differ (W_A 600 s, D_offset 120). Nothing in the engine may read a production constant.
+// files carry differ (W_A 600 s, D_offset 122). Nothing in the engine may read a production constant.
 
 #[test]
 fn rehearsal_files_commit_to_the_profile_and_use_its_numbers() {
@@ -919,10 +920,10 @@ fn rehearsal_files_commit_to_the_profile_and_use_its_numbers() {
     let g = s.gates();
     assert_eq!(s.alice.file.public.params.profile, ProfileName::Rehearsal);
     assert_eq!(s.bob.file.public.params.profile, ProfileName::Rehearsal);
-    assert_eq!(s.public.params.deadline_height, s.public.params.h_create + 120);
-    assert_eq!(s.public.params.lock_by_height, s.public.params.deadline_height - 68);
+    assert_eq!(s.public.params.deadline_height, s.public.params.h_create + 122);
+    assert_eq!(s.public.params.lock_by_height, s.public.params.deadline_height - 69);
     assert_eq!(s.public.params.w_a_s, 600);
-    assert_eq!((g.d_offset, g.w_a_s, g.m_a_s, g.b_post()), (120, 600, 300, 33));
+    assert_eq!((g.d_offset, g.w_a_s, g.m_a_s, g.b_post()), (122, 600, 300, 34));
     // The profile is written into the file and read back from it.
     let reloaded = SwapFile::load(&s.alice.path).unwrap();
     assert_eq!(reloaded.public.params.profile, ProfileName::Rehearsal);
@@ -982,13 +983,13 @@ fn rehearsal_alice_never_reveals_both_refund_in_about_120_blocks() {
     assert_eq!(s.world.borrow().tip, d - 1, "the refund goes out at D - 1");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
-    // The full abort cycle, from the creation height to Alice's final refund: D_offset + 17 blocks
-    // (about 120 blocks to the refund, 137 to its finality; one hour at 30 s per block to D).
+    // The full abort cycle, from the creation height to Alice's final refund: D_offset + 18 blocks
+    // (about 122 blocks to the refund, 140 to its finality; about one hour at 30 s per block to D).
     let used = s.world.borrow().tip - h_create;
-    assert_eq!(used, 120 + 17, "abort cycle took {used} blocks");
+    assert_eq!(used, 122 + 18, "abort cycle took {used} blocks");
     let w = s.world.borrow();
     assert_eq!(w.noid_payout.as_ref().unwrap().0, s.public.params.alice_noid);
     assert_eq!(w.eth_payout.unwrap().0, s.public.params.eth.bob_sender);
@@ -1002,13 +1003,13 @@ fn rehearsal_alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funding_final");
-    // Bob's lock-by with the minimum window is D - 62 = h_create + 58; past it he aborts.
+    // Bob's lock-by with the minimum window is D - 63 = h_create + 59; past it he aborts.
     let tip = s.world.borrow().tip;
-    assert!(tip < s.public.params.h_create + 58);
-    s.world.borrow_mut().advance_noid(s.public.params.h_create + 59 - tip);
+    assert!(tip < s.public.params.h_create + 59);
+    s.world.borrow_mut().advance_noid(s.public.params.h_create + 60 - tip);
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "abort", "{rb:?}");
     let tip = s.world.borrow().tip;
@@ -1017,10 +1018,10 @@ fn rehearsal_alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
-    assert_eq!(s.world.borrow().tip - s.public.params.h_create, 120 + 17);
+    assert_eq!(s.world.borrow().tip - s.public.params.h_create, 122 + 18);
     assert!(s.world.borrow().eth_payout.is_none());
 }
 
@@ -1054,7 +1055,7 @@ fn the_engine_reads_the_profile_from_the_file() {
         s.tick_alice();
         s.world.borrow_mut().advance_noid(1);
         s.tick_both();
-        s.world.borrow_mut().advance_noid(17);
+        s.world.borrow_mut().advance_noid(18);
         // Bob sees the funding become final now (his B_bob window starts here) but cannot send yet.
         s.bob.executor.offline_for.insert("lock_eth");
         s.tick_both();
@@ -1063,23 +1064,23 @@ fn the_engine_reads_the_profile_from_the_file() {
         s.world.borrow_mut().advance_noid(extra_blocks);
         s.tick_bob().action.kind().to_string()
     }
-    // Funding is final at h_create + 19. Rehearsal: B_bob = 20, so Bob may lock up to h_create + 39 (and
-    // not past lock-by(min) = h_create + 58): 15 more blocks is h_create + 34, fine; 25 more is
-    // h_create + 44, past his B_bob window: abort. Production (B_bob = 60) still locks at h_create + 44.
+    // Funding is final at h_create + 20. Rehearsal: B_bob = 20, so Bob may lock up to h_create + 40 (and
+    // not past lock-by(min) = h_create + 59): 15 more blocks is h_create + 35, fine; 25 more is
+    // h_create + 45, past his B_bob window: abort. Production (B_bob = 60) still locks at h_create + 45.
     assert_eq!(bob_after_funding(ProfileName::Rehearsal, 15), "lock_eth");
     assert_eq!(bob_after_funding(ProfileName::Rehearsal, 25), "abort");
     assert_eq!(bob_after_funding(ProfileName::Production, 25), "lock_eth");
     let p = Scenario::with_profile(Variant::Raw, ProfileName::Production);
     let r = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
-    assert_eq!(p.public.params.deadline_height - p.public.params.h_create, 735);
-    assert_eq!(r.public.params.deadline_height - r.public.params.h_create, 120);
+    assert_eq!(p.public.params.deadline_height - p.public.params.h_create, 738);
+    assert_eq!(r.public.params.deadline_height - r.public.params.h_create, 122);
 }
 
 // ---------------------------------------------------------------- the sepolia profile
 //
 // The rehearsal budgets with the real Ethereum finality: the simulator is put on a finality lag of 95
 // blocks (95 x 12 s = 1,140 s, `SEPOLIA_FINALITY_LAG_BLOCKS`), because it has no time-based finality. The
-// swap files name the profile and carry chain 11155111, W_A 4,200 s, D_offset 300.
+// swap files name the profile and carry chain 11155111, W_A 4,200 s, D_offset 302.
 
 #[test]
 fn sepolia_files_commit_to_the_profile_and_use_its_numbers() {
@@ -1088,10 +1089,10 @@ fn sepolia_files_commit_to_the_profile_and_use_its_numbers() {
     assert_eq!(s.alice.file.public.params.profile, ProfileName::Sepolia);
     assert_eq!(s.bob.file.public.params.profile, ProfileName::Sepolia);
     assert_eq!(s.public.params.eth.chain_id, 11_155_111);
-    assert_eq!(s.public.params.deadline_height, s.public.params.h_create + 300);
-    assert_eq!(s.public.params.lock_by_height, s.public.params.deadline_height - 251);
+    assert_eq!(s.public.params.deadline_height, s.public.params.h_create + 302);
+    assert_eq!(s.public.params.lock_by_height, s.public.params.deadline_height - 252);
     assert_eq!(s.public.params.w_a_s, 4_200);
-    assert_eq!((g.d_offset, g.w_a_s, g.m_a_s, g.b_post(), g.eth_finality_s), (300, 4_200, 1_800, 33, 1_140));
+    assert_eq!((g.d_offset, g.w_a_s, g.m_a_s, g.b_post(), g.eth_finality_s), (302, 4_200, 1_800, 34, 1_140));
     // The simulator's finality lag is the profile's 1,140 s in 12 s blocks.
     assert_eq!(s.world.borrow().finality_lag * 12, g.eth_finality_s);
     // The profile is written into the file and read back from it.
@@ -1139,7 +1140,7 @@ fn sepolia_alice_reveals_only_once_bobs_lock_is_final_and_before_her_cutoff() {
     assert_eq!(r.action.kind(), "fund_noid");
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let (_, rb) = s.tick_both();
     assert_eq!(rb.action.kind(), "lock_eth", "{rb:?}");
     s.world.borrow_mut().advance_eth(1);
@@ -1202,12 +1203,12 @@ fn sepolia_alice_never_reveals_both_refund_in_about_317_blocks() {
     assert_eq!(s.world.borrow().tip, d - 1, "the refund goes out at D - 1");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
-    // The full abort cycle: D_offset + 17 blocks = 317 (about 2 h 40 at 30 s per block).
+    // The full abort cycle: D_offset + 18 blocks = 320 (about 2 h 40 at 30 s per block).
     let used = s.world.borrow().tip - h_create;
-    assert_eq!(used, 300 + 17, "abort cycle took {used} blocks");
+    assert_eq!(used, 302 + 18, "abort cycle took {used} blocks");
     let w = s.world.borrow();
     assert_eq!(w.noid_payout.as_ref().unwrap().0, s.public.params.alice_noid);
     assert_eq!(w.eth_payout.unwrap().0, s.public.params.eth.bob_sender);
@@ -1221,13 +1222,13 @@ fn sepolia_alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funding_final");
-    // Bob's lock-by with the minimum window is D - 209 = h_create + 91; past it he aborts.
+    // Bob's lock-by with the minimum window is D - 210 = h_create + 92; past it he aborts.
     let tip = s.world.borrow().tip;
-    assert!(tip < s.public.params.h_create + 91);
-    s.world.borrow_mut().advance_noid(s.public.params.h_create + 92 - tip);
+    assert!(tip < s.public.params.h_create + 92);
+    s.world.borrow_mut().advance_noid(s.public.params.h_create + 93 - tip);
     let rb = s.tick_bob();
     assert_eq!(rb.action.kind(), "abort", "{rb:?}");
     let tip = s.world.borrow().tip;
@@ -1236,10 +1237,10 @@ fn sepolia_alice_funded_but_bob_never_locks_alice_refunds_at_d() {
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
-    assert_eq!(s.world.borrow().tip - s.public.params.h_create, 300 + 17);
+    assert_eq!(s.world.borrow().tip - s.public.params.h_create, 302 + 18);
     assert!(s.world.borrow().eth_payout.is_none());
 }
 
@@ -1284,7 +1285,7 @@ fn happy_path_v(variant: Variant, version: ContractVersion) -> Scenario {
     assert_eq!(s.alice_phase(), "revealed");
     assert_eq!(s.bob_phase(), "claim_included");
     s.world.borrow_mut().advance_eth(3);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -1336,7 +1337,7 @@ fn v2_alice_funded_but_bob_never_locks_alice_refunds_at_d_paying_max_fee() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funding_final");
     s.world.borrow_mut().advance_noid(200);
@@ -1350,7 +1351,7 @@ fn v2_alice_funded_but_bob_never_locks_alice_refunds_at_d_paying_max_fee() {
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
     let w = s.world.borrow();
@@ -1381,7 +1382,7 @@ fn v2_bob_locks_but_alice_never_reveals_both_refund() {
         s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);
         let ra = s.tick_alice();
         assert!(matches!(ra.action, swap_cli::engine::Action::RefundNoid { fee_micronoid: 50_000, .. }), "{ra:?}");
-        s.world.borrow_mut().advance_noid(18);
+        s.world.borrow_mut().advance_noid(19);
         s.tick_alice();
         assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })));
         let w = s.world.borrow();
@@ -1428,7 +1429,7 @@ fn to_bob_lock_decision(version: ContractVersion) -> Scenario {
     assert_eq!(r.action.kind(), "fund_noid");
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     s
@@ -1506,7 +1507,7 @@ fn relay_floor_note_stops_once_the_swap_is_over() {
 // An included close used to become final from the tip height alone. Now the txid stays tracked: the node must keep
 // confirming it at the recorded height, or the phase goes back.
 
-/// Bob's claim is included, then the tip runs on 17 blocks WITHOUT a tick (the tip alone would say "final").
+/// Bob's claim is included, then the tip runs on 18 blocks WITHOUT a tick (the tip alone would say "final").
 fn bob_claim_included_unticked() -> (Scenario, String, u64) {
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();
@@ -1523,7 +1524,7 @@ fn bob_claim_included_unticked() -> (Scenario, String, u64) {
         }
         other => panic!("{other:?}"),
     };
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     (s, txid, height)
 }
 
@@ -1547,10 +1548,10 @@ fn f6_a_claim_reorged_out_but_back_in_the_mempool_returns_to_claim_submitted_the
         Phase::Bob(BobPhase::ClaimIncluded { height, .. }) => *height,
         other => panic!("{other:?}"),
     };
-    assert!(new_height > height + 17, "{new_height} vs {height}");
-    s.world.borrow_mut().advance_noid(16);
+    assert!(new_height > height + 18, "{new_height} vs {height}");
+    s.world.borrow_mut().advance_noid(17);
     s.tick_bob();
-    assert_eq!(s.bob_phase(), "claim_included", "16 blocks after the re-inclusion is not final");
+    assert_eq!(s.bob_phase(), "claim_included", "17 blocks after the re-inclusion is not final");
     s.world.borrow_mut().advance_noid(1);
     s.tick_bob();
     assert!(matches!(&s.bob.file.phase, Phase::Bob(BobPhase::Done { height, .. }) if *height == new_height), "{}", s.bob_phase());
@@ -1578,7 +1579,7 @@ fn f6_a_claim_reorged_out_and_gone_goes_back_to_secret_seen_and_is_proved_again(
         }
         other => panic!("{other:?}"),
     }
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     assert_eq!(s.world.borrow().noid_payout.as_ref().unwrap().0, s.public.params.bob_noid);
@@ -1587,7 +1588,7 @@ fn f6_a_claim_reorged_out_and_gone_goes_back_to_secret_seen_and_is_proved_again(
 #[test]
 fn f6_a_reinclusion_at_another_height_restarts_the_finality_count() {
     let (mut s, txid, height) = bob_claim_included_unticked();
-    // The tip is at height + 17: the old count would be final. The node now reports it 5 blocks later.
+    // The tip is at height + 18: the old count would be final. The node now reports it 5 blocks later.
     let tip = s.world.borrow().tip;
     assert!(swap_cli::params::noid_final(tip, height));
     s.world.borrow_mut().move_close(&txid, height + 5);
@@ -1595,7 +1596,7 @@ fn f6_a_reinclusion_at_another_height_restarts_the_finality_count() {
     assert_eq!(rb.events, vec!["noid_tx_reincluded"], "{rb:?}");
     assert_eq!(s.bob_phase(), "claim_included", "not final at the old count");
     assert!(matches!(&s.bob.file.phase, Phase::Bob(BobPhase::ClaimIncluded { height: h, .. }) if *h == height + 5));
-    // Final exactly 17 blocks after the NEW height (the tip is already height + 17: 5 more blocks, minus the last one).
+    // Final exactly 18 blocks after the NEW height (the tip is already height + 18: 5 more blocks, minus the last one).
     s.world.borrow_mut().advance_noid(4);
     s.tick_bob();
     assert_eq!(s.bob_phase(), "claim_included");
@@ -1620,7 +1621,7 @@ fn f6_an_observation_that_never_asked_about_the_txid_is_not_a_reorg_and_not_fina
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })));
 }
 
-/// Alice funded and final, Bob never locks; her refund is included at D and the tip runs on 17 blocks unticked.
+/// Alice funded and final, Bob never locks; her refund is included at D and the tip runs on 18 blocks unticked.
 fn alice_refund_included_unticked() -> (Scenario, String, u64) {
     let mut s = alice_at_refund_time();
     let ra = s.tick_alice();
@@ -1631,7 +1632,7 @@ fn alice_refund_included_unticked() -> (Scenario, String, u64) {
         Phase::Alice(AlicePhase::RefundIncluded { txid, height, .. }) => (txid.clone(), *height),
         other => panic!("{other:?}"),
     };
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     (s, txid, height)
 }
 
@@ -1647,7 +1648,7 @@ fn f6_alice_refund_reorged_out_returns_to_refund_submitted_then_to_refunded() {
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
-    s.world.borrow_mut().advance_noid(16);
+    s.world.borrow_mut().advance_noid(17);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
     s.world.borrow_mut().advance_noid(1);
@@ -1667,7 +1668,7 @@ fn f6_alice_refund_reorged_out_and_gone_is_offered_and_sent_again() {
     assert_eq!(s.alice_phase(), "refund_submitted");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
 }
@@ -1681,7 +1682,7 @@ fn f6_alice_reinclusion_at_another_height_restarts_the_count() {
     assert_eq!(s.alice_phase(), "refund_included");
     s.world.borrow_mut().advance_noid(2);
     s.tick_alice();
-    assert_eq!(s.alice_phase(), "refund_included", "tip is 16 past the new height");
+    assert_eq!(s.alice_phase(), "refund_included", "tip is 17 past the new height");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { height: h, .. }) if h == height + 3), "{}", s.alice_phase());
@@ -1731,7 +1732,7 @@ fn m25d_alices_close_made_with_the_wallet_cli_is_recorded_then_follows_to_refund
     assert_eq!(s.alice_phase(), "refund_included");
     assert!(matches!(&s.alice.file.phase, Phase::Alice(AlicePhase::RefundIncluded { txid: t, height, .. }) if *t == txid && *height == d));
     // Finality as usual, now by the tracked txid.
-    s.world.borrow_mut().advance_noid(16);
+    s.world.borrow_mut().advance_noid(17);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "refund_included");
     s.world.borrow_mut().advance_noid(1);
@@ -1765,7 +1766,7 @@ fn m25d_bobs_claim_made_elsewhere_is_recorded_then_follows_to_done() {
     let now = s.now();
     s.bob.file.apply(&event, now).unwrap();
     assert_eq!(s.bob_phase(), "claim_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     assert_eq!(s.world.borrow().noid_payout.as_ref().unwrap().0, s.public.params.bob_noid);
@@ -1865,7 +1866,7 @@ fn f10_a_dust_instance_in_a_lower_slot_does_not_hide_the_real_one_and_the_swap_s
         assert_eq!(slot, Some(7), "{p:?}");
     }
     assert!(ra.notes.iter().chain(rb.notes.iter()).any(|n| n.contains("2 instances at our contract root") && n.contains("slot 3")), "{:?} {:?}", ra.notes, rb.notes);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let (_, rb) = s.tick_both();
     assert_eq!(rb.action.kind(), "lock_eth", "{rb:?}");
     assert!(rb.notes.iter().any(|n| n.contains("2 instances")), "{:?}", rb.notes);
@@ -1883,7 +1884,7 @@ fn f10_a_dust_instance_in_a_lower_slot_does_not_hide_the_real_one_and_the_swap_s
     s.tick_both();
     let lag = s.world.borrow().finality_lag;
     s.world.borrow_mut().advance_eth(lag + 1);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -1903,7 +1904,7 @@ fn f10_two_instances_that_both_fit_make_bob_refuse_to_lock_until_one_is_left() {
     // A second instance of the agreed amount appears (a gift, a double funding): which one is "the" lock's is not guessed.
     let amount = s.public.params.amount_micronoid;
     s.world.borrow_mut().instances_after.push(dust(9, 2, amount));
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let (_, rb) = s.tick_both();
     assert_eq!(s.bob_phase(), "funding_final", "{rb:?}");
     assert_eq!(rb.action.kind(), "wait", "{rb:?}");
@@ -2176,7 +2177,7 @@ fn run9_bob_still_waits_with_the_old_reason_when_several_instances_fit() {
     s.tick_both();
     let amount = s.public.params.amount_micronoid;
     s.world.borrow_mut().instances_after.push(dust(9, 2, amount));
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let (_, rb) = s.tick_both();
     assert!(matches!(&rb.action, swap_cli::engine::Action::Wait { reason } if reason.contains("more than one instance at the contract root")), "{rb:?}");
     assert!(!rb.notes.iter().any(|n| n.contains("hold NOID at the contract root")), "{:?}", rb.notes);
@@ -2194,7 +2195,7 @@ fn f10_a_bad_first_lock_does_not_hide_the_correct_second_one() {
         s.tick_alice();
         s.world.borrow_mut().advance_noid(1);
         s.tick_both();
-        s.world.borrow_mut().advance_noid(17);
+        s.world.borrow_mut().advance_noid(18);
         let (_, rb) = s.tick_both();
         assert_eq!(rb.action.kind(), "wait", "{rb:?}");
         return;
@@ -2216,7 +2217,7 @@ fn f10_a_bad_first_lock_does_not_hide_the_correct_second_one() {
     s.tick_both();
     let lag = s.world.borrow().finality_lag;
     s.world.borrow_mut().advance_eth(lag + 1);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -2232,7 +2233,7 @@ fn f10_two_correct_locks_before_alice_accepts_either_she_waits_and_says_why() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funding_final");
     let a = side_lock(&s, T0 + W_A_S, s.public.params.eth.amount_wei);
@@ -2397,7 +2398,7 @@ fn f9_alices_wallet_refund_after_the_reveal_is_recorded_with_closed_by_and_follo
     let now = s.now();
     s.alice.file.apply(&ev, now).unwrap();
     assert_eq!(s.alice_phase(), "refund_included");
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let ra = s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{} {ra:?}", s.alice_phase());
     assert_eq!(s.world.borrow().noid_payout.as_ref().unwrap().0, s.public.params.alice_noid);
@@ -3007,7 +3008,7 @@ fn m25b_bobs_refund_reorged_into_alices_claim_gives_him_the_secret() {
     assert_eq!(s.bob_phase(), "claim_submitted");
     s.world.borrow_mut().advance_noid(1);
     s.tick_bob();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     let w = s.world.borrow();
@@ -3072,7 +3073,7 @@ fn m25b_alice_reveal_pending_bobs_refund_first_bob_never_claims_alice_refunds_at
     s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
     let w = s.world.borrow();
@@ -3096,7 +3097,7 @@ fn m25b_alice_loses_both_legs_when_bob_refunds_and_claims_with_the_exposed_secre
     s.world.borrow_mut().advance_noid(1);
     s.world.borrow_mut().advance_eth(1);
     s.tick_bob();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
     // T_reveal passes with her claim still pending: his refund is mined, her claim reverts.
@@ -3115,7 +3116,7 @@ fn m25b_alice_loses_both_legs_when_bob_refunds_and_claims_with_the_exposed_secre
     assert_eq!(ra.events, vec!["eth_refund_mined", "noid_instance_gone_before_d"], "{ra:?}");
     assert_eq!(s.alice_phase(), "reveal_submitted");
     assert!(matches!(&ra.action, Action::Wait { reason } if reason.contains("reveal lost") && reason.contains("not final yet")), "{ra:?}");
-    // The refund becomes final, but the tip has not reached D + 18: still not declared.
+    // The refund becomes final, but the tip has not reached D + 19: still not declared.
     s.world.borrow_mut().advance_eth(3);
     let ra = s.tick_alice();
     assert!(ra.events.is_empty(), "{ra:?}");
@@ -3124,12 +3125,12 @@ fn m25b_alice_loses_both_legs_when_bob_refunds_and_claims_with_the_exposed_secre
     // The recorded instance is gone, so refund_noid is never offered, at D or after.
     let d = s.public.params.deadline_height;
     let tip = s.world.borrow().tip;
-    s.world.borrow_mut().advance_noid(d + 17 - tip);
+    s.world.borrow_mut().advance_noid(d + 18 - tip);
     let ra = s.tick_alice();
     assert!(ra.events.is_empty(), "{ra:?}");
     assert_eq!(ra.action.kind(), "wait", "{ra:?}");
     assert_eq!(s.alice_phase(), "reveal_submitted");
-    // D + 18: both facts hold. The file reaches a terminal phase that says what happened.
+    // D + 19: both facts hold. The file reaches a terminal phase that says what happened.
     s.world.borrow_mut().advance_noid(1);
     let ra = s.tick_alice();
     assert_eq!(ra.events, vec!["both_legs_lost"], "{ra:?}");

@@ -30,15 +30,15 @@ fn run(cmd: &mut Command) -> (bool, String, String) {
 
 #[test]
 fn gates_reproduce_the_section_4_3_example() {
-    let (ok, out, _) = run(bin().args(["gates", "--d", "300735", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
+    let (ok, out, _) = run(bin().args(["gates", "--d", "300738", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["lock_by_full_window"], 300_106);
-    assert_eq!(v["lock_by_min_window"], 300_196);
-    assert_eq!(v["rhs_i1_full_window"], 629);
+    assert_eq!(v["lock_by_full_window"], 300_107);
+    assert_eq!(v["lock_by_min_window"], 300_197);
+    assert_eq!(v["rhs_i1_full_window"], 631);
     assert_eq!(v["t_reveal"], "1794319200");
     assert_eq!(v["reveal_cutoff"], 1_794_317_400);
-    assert_eq!(v["claim_target_height"], 300_717);
+    assert_eq!(v["claim_target_height"], 300_719);
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn alice_and_bob_files_through_the_binary() {
     let (ok, bundle, err) = run(bin().args(["new-alice", "--out", a.to_str().unwrap()]).args(common).env("SWAP_PASSPHRASE", "correct horse battery staple"));
     assert!(ok, "{err}");
     let public: swap_cli::swapfile::SwapPublic = serde_json::from_str(&bundle).unwrap();
-    assert_eq!(public.params.deadline_height, 300_735);
+    assert_eq!(public.params.deadline_height, 300_738);
     let file = SwapFile::load(&a).unwrap();
     assert!(file.secret.is_some());
     assert_eq!(file.decrypt_secret(&swap_cli::swapfile::Passphrase::new("correct horse battery staple")).unwrap().hashlock(), public.hashlock);
@@ -394,7 +394,7 @@ fn read_only_tick_withholds_the_parameters_of_a_spend_and_apply_records_and_prin
         path.to_str().unwrap().to_string()
     };
     let flags = |extra: &[&str]| {
-        let mut v: Vec<String> = vec!["tick".into(), b.to_str().unwrap().into(), "--noid-fixture".into(), noid.clone(), "--eth-fixture".into(), eth.to_str().unwrap().into(), "--now".into(), "1000".into(), "--single-node-ok".into()];
+        let mut v: Vec<String> = vec!["tick".into(), b.to_str().unwrap().into(), "--noid-fixture".into(), noid.clone(), "--eth-fixture".into(), eth.to_str().unwrap().into(), "--now".into(), "1000".into(), "--single-node-ok".into(), "--accept-producer-concentration".into()];
         v.extend(extra.iter().map(|s| s.to_string()));
         v
     };
@@ -413,7 +413,7 @@ fn read_only_tick_withholds_the_parameters_of_a_spend_and_apply_records_and_prin
     assert_eq!(std::fs::read(&b).unwrap(), before);
 
     // `claim` (no --submit) names the engine's action too, and withholds it the same way.
-    let (ok, out, err) = run(bin().args(["claim", b.to_str().unwrap(), "--noid-fixture", &noid, "--eth-fixture", eth.to_str().unwrap(), "--now", "1000", "--single-node-ok"]));
+    let (ok, out, err) = run(bin().args(["claim", b.to_str().unwrap(), "--noid-fixture", &noid, "--eth-fixture", eth.to_str().unwrap(), "--now", "1000", "--single-node-ok", "--accept-producer-concentration"]));
     assert!(ok, "{err}");
     let c: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(c["action"]["kind"], "lock_eth", "{out}");

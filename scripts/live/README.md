@@ -113,6 +113,28 @@ With two Ethereum nodes Bob's tool also reads the secret from either of them, an
 Ethereum head time with the clock (limit 600 s): a lagging node shows up as an `ALARM` in the action reason. Switch `ETH_RPC` to a
 healthy node when you see it.
 
+## Producer concentration and the removed-claim alert (threat T21)
+
+Design and texts: `docs/bob-concentration-gate.md`. Two settings in `$L/env.local.sh`, both off unless you set them:
+
+- **`ACCEPT_PRODUCER_CONCENTRATION=1`** makes `node_flags` pass `--accept-producer-concentration` to `swap-cli`. Under the `production` profile Bob's tool does
+  not offer the lock while one address produced more than 35 % of the last 2,880 or 720 Parano1d blocks, or while it cannot read those headers from
+  the node in full (a screen, not a defence); this setting waives that refusal. It is opt-in only (only the value `1` counts), no profile and no other
+  setting implies it, it does not waive the second-node rule (`SINGLE_NODE_OK` is separate), and every call that builds the node flags (every tick, every
+  claim, so every poll of `watch.sh`) prints a warning on stderr while it is on. Under `sepolia` and `rehearsal` the screen only warns, so a run
+  with both roles played by one person needs nothing. The tool keeps the headers it has read in `<swap file>.producers` beside Bob's swap file (it
+  holds miner addresses; keep it local, never commit it).
+- **`ALERT_URL=https://...`** makes `watch.sh` send a short message when Bob's mined NOID claim was removed by a reorg (a tick's `ALERT:` note;
+  `tick.sh` prints each such note on a line of its own, and the loop line carries it). For every line that starts with `ALERT:` the loop runs
+  `curl -s -f -m 20 -d "noid-swap run N: claim removed by a reorg; run claim.sh dry run" -K -` (with the helpers' `$CURL`), the URL on curl's standard
+  input so that it is not in the process list. The engine prints the alert on one tick only (the tick that takes the transition), so there is no
+  latch: a second removal later in the run alerts again, and the same message twice in one call is sent once. A send that fails is kept in
+  `$L/alert-pending` (`TRIES|MESSAGE`) and tried again at every later tick, up to 20 times; it can never stop the loop. The message is fixed text
+  and the run number: no address, amount or transaction id leaves the machine. **The URL
+  is read only from `$L/env.local.sh`** (an `ALERT_URL` in the environment is ignored), is never printed by the helpers, and must never be put in a
+  tracked file. The alert only asks you to look: run the dry run (`bash $L/bin/claim.sh`), check it, then `--submit`. Nothing is sent to a chain
+  automatically; an opt-in automatic re-send is a later item (`TASKS.md` T21-8).
+
 ## The reveal: fee cap, a stuck claim, a late re-send (REVIEW-4 R4-1, R4-3, R4-5; REVIEW-5 R5-1, R5-2)
 
 - **Fee cap.** `live.js claim` reads the latest base fee before it signs (also in `--dry-run`) and refuses a cap below 2 x that

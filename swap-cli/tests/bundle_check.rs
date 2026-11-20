@@ -122,7 +122,7 @@ fn a_damaged_bundle_is_refused_before_anything_else_and_nothing_is_written() {
             f.bundle_text.replacen(&opening, &format!("{}{}", &opening[..zero_run], &opening[zero_run + 3..]), 1),
             Some(format!("opening_hex has {} characters, the bundle says {n}", n - 3)),
         ),
-        ("param", f.bundle_text.replacen("\"deadline_height\": 300735", "\"deadline_height\": 300736", 1), None),
+        ("param", f.bundle_text.replacen("\"deadline_height\": 300738", "\"deadline_height\": 300739", 1), None),
     ];
     for (name, text, length_line) in cases {
         assert_ne!(text, f.bundle_text, "{name}");
@@ -177,7 +177,7 @@ fn a_bundle_without_the_check_needs_the_flag_and_the_other_checks_still_run() {
     let (ok, _, err, _) = f.new_bob("old-tampered", &tampered, &["--allow-unchecked-bundle"]);
     assert!(!ok && err.contains("byte-for-byte"), "{err}");
     // The flag does not excuse a check that is present and wrong.
-    let wrong = f.bundle_text.replacen("\"deadline_height\": 300735", "\"deadline_height\": 300736", 1);
+    let wrong = f.bundle_text.replacen("\"deadline_height\": 300738", "\"deadline_height\": 300739", 1);
     let (ok, _, err, _) = f.new_bob("wrong-flag", &wrong, &["--allow-unchecked-bundle"]);
     assert!(!ok && err.contains("damaged in transit"), "{err}");
 }

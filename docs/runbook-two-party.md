@@ -18,10 +18,10 @@ typing anything. Every command that spends is a go-ahead you give yourself.
 - **The receipt (a proof file).** Before Bob locks anything, Alice gives him a proof that the same `s` is behind
   `H` (Ethereum side) and `A = Addr(s)` (Parano1d side). Without it Alice could lock NOID under a different secret
   and Bob's ETH would be stuck. Alice proves; Bob only verifies.
-- **Two timeouts.** Parano1d `D` (a block height, `h_create + 735` blocks, about 6 h): from `D` on, Alice can take
+- **Two timeouts.** Parano1d `D` (a block height, `h_create + 738` blocks, about 6 h): from `D` on, Alice can take
   her NOID back. Ethereum `T_reveal` (a time, Bob's lock time + 7,200 s): from `T_reveal` on, Bob can take his ETH
   back. Alice must reveal at least 1,800 s before `T_reveal`, or Bob could refund the ETH and still claim the
-  NOID. Bob must lock by Parano1d height `D - 629` and have his NOID claim final before `D` (target `D - 18`, hard
+  NOID. Bob must lock by Parano1d height `D - 631` and have his NOID claim final before `D` (target `D - 19`, hard
   limit `D - 1`). Miss your window and the other side keeps your money.
 - **Real money.** Parano1d has no test network: every NOID amount is mainnet. The ETH side runs on Sepolia or a
   Hardhat chain by default; `live.js` refuses Ethereum mainnet unless the command carries `--mainnet` together with
@@ -175,7 +175,7 @@ bob.swap.json`: `D`, the amount, your `o1` as recipient, `max_fee`. **Bob tells 
 
 > **Do not fund before Bob says his checks passed.** Funding first only locks Alice's NOID for about 6 hours.
 
-> **Then fund at once; do not wait for `h_create`.** Bob's lock-by is fixed at `h_create` + 49 (`sepolia` profile) and the funding needs 18 blocks to
+> **Then fund at once; do not wait for `h_create`.** Bob's lock-by is fixed at `h_create` + 50 (`sepolia` profile) and the funding needs 18 blocks to
 > be final, so every block the funding comes earlier is a block more for Bob's lock. Funded about 30 blocks before `h_create` (runs 10, 11, 12), Bob had
 > about 60 blocks when his lock was offered; funded 22 blocks after it (run 13), he had 6. The order is: Bob runs `new-bob`, the two `bundle check`
 > lines are compared and Bob says OK; Alice runs `fund.sh` (dry run first); only then anything else. In a run driven from the operator console the
@@ -243,8 +243,8 @@ $BIN claim bob.swap.json --transport curl --noid-rpc http://127.0.0.1:9601 --eth
 $BIN claim bob.swap.json --transport curl --noid-rpc http://127.0.0.1:9601 --eth-rpc $ETH_RPC_URL --submit
 ```
 Keep running `tick --apply` until `done: NOID received` (about 18 blocks after inclusion, 7 min). "Included" is not
-safe: a rollback of up to 17 blocks can undo it. Run 1: proved for call height 280,658, included at 280,659, final
-at 280,676, Bob received 9,994,200 uNOID (10 NOID minus the 5,800 close fee). Check by Bob's `o1` balance.
+safe: a rollback can undo it until the tip is 18 blocks past the inclusion height (`is_final`: tip >= height + 18). Run 1: proved for call height 280,658, included at 280,659, final
+at 280,676 by the rule the tool used then (the chain's rule makes it 280,677; the outcome did not change), Bob received 9,994,200 uNOID (10 NOID minus the 5,800 close fee). Check by Bob's `o1` balance.
 
 **The intent ledger.** `tick --apply` writes each spending step (`fund_noid`, `lock_eth`, `reveal_eth`, `refund_eth`,
 `refund_noid`) into the swap file before printing it, so it can never print the same step twice. Until the chain
@@ -262,7 +262,7 @@ $BIN intent bob.swap.json --cancel --transport curl --noid-rpc http://127.0.0.1:
 ## 5. When it goes wrong (abort paths)
 
 - **Bob never locks.** Alice does nothing until `D`; at tip + 1 >= `D` her engine says `refund_noid`. Bob's engine
-  stops offering `lock_eth` once the lock-by limit (`D - 629`, hard `D - 539`) has passed. Alice keeps `s` secret.
+  stops offering `lock_eth` once the lock-by limit (`D - 631`, hard `D - 541`) has passed. Alice keeps `s` secret.
 - **Alice never reveals (run 2).** At `T_reveal - 1800 s` Alice's engine switches to `wait` with the reason `reveal
   cutoff passed; keeping the secret and waiting for D` and will not reveal even if asked. At `T_reveal` Bob's engine
   goes from `locked` to `refund_eth` (run 2: about 80 s later, mostly the poll interval):
@@ -280,7 +280,7 @@ $BIN intent bob.swap.json --cancel --transport curl --noid-rpc http://127.0.0.1:
   Do not do this before `D` (the preview then shows `"recovery": false`). If the node says the height changed between
   preview and submit, preview again. Alice keeps `s` secret until her refund is final.
 - **Alice reveals, Bob goes offline.** Bob's loss: Alice keeps the ETH and refunds her NOID at `D`. Bob must be online
-  between the reveal and `D - 18`.
+  between the reveal and `D - 19`.
 - **The reveal cutoff.** Never reveal after `T_reveal - 1800 s`. Even a failed late `claim` publishes `s` in its data,
   and then Bob can refund the ETH and also claim the NOID. `live.js` refuses; do not use `--margin-s` to get around it.
 
@@ -298,12 +298,12 @@ the profile's reveal cutoff, so no extra flag is needed.
 
 | item | production | rehearsal | sepolia |
 |---|---|---|---|
-| `D - h_create` | 735 blocks (about 6 h) | 120 blocks (1 h at 30 s) | 300 blocks (2 h 30 at 30 s) |
-| Bob's lock-by (hard limit) | `D - 629` (`D - 539`) | `D - 68` (`D - 62`) | `D - 251` (`D - 209`) |
+| `D - h_create` | 738 blocks (about 6 h) | 122 blocks (about 1 h at 30 s) | 302 blocks (about 2 h 30 at 30 s) |
+| Bob's lock-by (hard limit) | `D - 631` (`D - 541`) | `D - 69` (`D - 63`) | `D - 252` (`D - 210`) |
 | `W_A` / reveal cutoff before `T_reveal` | 7,200 s / 1,800 s | 600 s / 300 s | 4,200 s / 1,800 s |
-| Bob's claim target / hard limit | `D - 18` / `D - 1` | same | same |
+| Bob's claim target / hard limit | `D - 19` / `D - 1` | same | same |
 | finality, close fee | 18 blocks, 5,800 uNOID | same | same |
-| a full "Alice never reveals" cycle | about 6 h | 137 blocks to final (about 70 min) | 317 blocks to final (about 2 h 40) |
+| a full "Alice never reveals" cycle | 756 blocks to final (about 6 h 18) | 140 blocks to final (about 70 min) | 320 blocks to final (about 2 h 40) |
 
 Measured on the real chain (design §9.3): funding included in 2 blocks and final 8.5 min later; claim proof 3 s; claim
 included 1 block after submission and final 7 min later; the chain-bound part of run 1 was 22 min; the equivalence
@@ -320,14 +320,14 @@ Practical points (derived from the README table, not run):
   prefunded accounts (run 1 did; the exact command is not in the log). A first alternative: one person plays both
   roles on one PC, as in runs 1 and 2.
 - Set `--h-create` to the tip at the moment the proof should finish (about 2 blocks per minute of proof), not tip + 40.
-  The window is only 120 blocks: funding must be final and Bob's lock in before `D - 62`, so fund within roughly 15
+  The window is only 122 blocks: funding must be final and Bob's lock in before `D - 63`, so fund within roughly 15
   minutes of Bob's OK. If the proof overran, discard the files and start over; a rehearsal costs only fees.
-- Under `sepolia` the window is 300 blocks. Bob's lock-by is `D - 251` = `h_create + 49` with the full reveal window
-  (`D - 209` = `h_create + 91` at the minimum window), and the funding must be final (18 blocks) before he locks, so fund
+- Under `sepolia` the window is 302 blocks. Bob's lock-by is `D - 252` = `h_create + 50` with the full reveal window
+  (`D - 210` = `h_create + 92` at the minimum window), and the funding must be final (18 blocks) before he locks, so fund
   within about 15 minutes of `h_create` (roughly 30 blocks) to keep the full window, 35 minutes at the latest. Alice may
   reveal only once Bob's Sepolia lock is finalized (13-19 min after it is mined) and not after `T_reveal - 1,800 s`.
 - Run two: the happy path, then "Alice never reveals" (section 5). Epoch rotation is not covered by either profile
-  (budget 0; with the `sepolia` window of 300 blocks a rotation will fall inside it, and a claim evicted at a rotation
+  (budget 0; with the `sepolia` window of 302 blocks a rotation will fall inside it, and a claim evicted at a rotation
   must be re-proved).
 
 **Helpers.** `scripts/live/` holds the versioned helpers for a run on this machine (`install.sh`, `setup.sh`, `prepare.sh`,
@@ -347,7 +347,7 @@ secret; `alice.swap.json` and `swap.object.json` backed up; Bob said OK; `--chec
 **Bob, before locking:** own node synced, tip agrees with the clock; `new-bob` printed `bundle checked` and used
 `--receipt`; `D`, amount, recipient and `max_fee` read and agreed; chain id checked with `live.js balance`; enough ETH
 for the lock and gas; `tick --apply` has said `lock_eth` (not before) and `live.js lock --swap` takes its `t_reveal` from the file; you can be
-online from the reveal until `D - 18`.
+online from the reveal until `D - 19`.
 
 | Symptom | Meaning | Do |
 |---|---|---|

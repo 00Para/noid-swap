@@ -40,7 +40,7 @@ fn alice_at_funding_final(kind: LockKind) -> Scenario {
     assert_eq!(s.tick_alice().action.kind(), "fund_noid");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     s
@@ -52,7 +52,7 @@ fn bob_ready(kind: LockKind) -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.bob_phase(), "funded");
     s
@@ -276,16 +276,16 @@ impl Cli {
 // ================================================================================================ G3
 
 /// G3 (A4), the deadline: a bundle that is internally consistent (its `bundle_check` verifies, its opening rebuilds byte-for-byte from its own
-/// parameters, `lock_by_height` follows from its `D`) but whose deadline is `h_create` + 835, not `h_create` + the profile's 735.
+/// parameters, `lock_by_height` follows from its `D`) but whose deadline is `h_create` + 838, not `h_create` + the profile's 738.
 ///
-/// DESIRED BEHAVIOUR. `new-bob` refuses it with `deadline 300835 != h_create 300000 + 735 (the production profile's D_offset)` and writes no
+/// DESIRED BEHAVIOUR. `new-bob` refuses it with `deadline 300838 != h_create 300000 + 738 (the production profile's D_offset)` and writes no
 /// file. (A bundle whose deadline was changed without rebuilding the opening is refused earlier, by the carrier check or the rebuild:
 /// `bundle_check.rs`.)
 #[test]
 fn g3_new_bob_refuses_a_consistent_bundle_whose_deadline_is_not_h_create_plus_the_profile_offset() {
     let f = cli();
     let (mut public, _) = swap_cli::bundle::open_bundle(&f.bundle_text, false).unwrap();
-    assert_eq!(public.params.deadline_height, 300_735);
+    assert_eq!(public.params.deadline_height, 300_738);
     let d = public.params.deadline_height + 100;
     public.params.deadline_height = d;
     public.params.lock_by_height = public.params.profile.gates().bob_lock_by(d);
@@ -296,12 +296,12 @@ fn g3_new_bob_refuses_a_consistent_bundle_whose_deadline_is_not_h_create_plus_th
     let text = bundle_text::checked_text(&public);
     assert!(swap_cli::bundle::open_bundle(&text, false).is_ok());
     let err = public.check().unwrap_err().to_string();
-    assert!(err.contains("deadline 300835 != h_create 300000 + 735 (the production profile's D_offset)"), "{err}");
+    assert!(err.contains("deadline 300838 != h_create 300000 + 738 (the production profile's D_offset)"), "{err}");
     let bundle = f.write_bundle("late-d", &text);
     let out = f.bob_dir().join("late-d.swap.json");
     let (ok, stdout, stderr) = f.new_bob(&bundle, &out, "10000000");
     assert!(!ok && stdout.is_empty(), "{stderr}");
-    assert!(stderr.contains("deadline 300835 != h_create 300000 + 735 (the production profile's D_offset)"), "{stderr}");
+    assert!(stderr.contains("deadline 300838 != h_create 300000 + 738 (the production profile's D_offset)"), "{stderr}");
     assert!(stderr.contains("bundle check: ") && stderr.contains(" ok"), "the carrier check passed before the refusal: {stderr}");
     assert!(!out.exists() && !f.bob_dir().join("hashlocks.txt").exists());
 }
@@ -948,7 +948,7 @@ fn g9_the_refund_of_a_late_lock_is_offered_after_t_reveal_as_for_any_lock() {
 /// The binary itself, over a mock node, is `cli_live.rs`: `tick_closed_by_records_an_outside_claim_only_with_apply_and_refuses_everything_doubtful`.)
 ///
 /// DESIRED BEHAVIOUR. The phase is accepted, the close is recorded (`claim_included`, at the height the node confirms, before `D`), and the
-/// next tick that sees the transaction 17 blocks deep ends the file in `done`. A file that has not seen the secret refuses the close by its phase.
+/// next tick that sees the transaction 18 blocks deep ends the file in `done`. A file that has not seen the secret refuses the close by its phase.
 #[test]
 fn g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid() {
     let mut s = scenario(LockKind::Sha256);
@@ -978,8 +978,8 @@ fn g12_closed_by_is_accepted_for_a_bob_file_whose_decision_is_claim_noid() {
     let out = tick_apply(&mut work, &noid, &eth, now, true).unwrap();
     assert!(matches!(out.decision.action, Action::Wait { .. }), "{:?}", out.decision);
     assert_eq!(work.phase.name(), "claim_included", "{:?}", out.decision);
-    // Seventeen blocks later the file follows the recorded close to `done`.
-    s.world.borrow_mut().advance_noid(17);
+    // Eighteen blocks later the file follows the recorded close to `done`.
+    s.world.borrow_mut().advance_noid(18);
     let (noid, eth, now) = {
         let w = s.world.borrow();
         (w.noid_obs(Some(&txid)), w.eth_obs(), w.eth_time)

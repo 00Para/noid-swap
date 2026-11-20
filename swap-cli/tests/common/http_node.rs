@@ -2,6 +2,9 @@
 //! 127.0.0.1 on an ephemeral port, answers every POST with `handler(method, params)`
 //! as `{"jsonrpc":"2.0","id":..,"result"|"error":..}` and logs each call.
 //! It speaks only to the test process; no external network is involved.
+//!
+//! A request whose body is a JSON array (a JSON-RPC batch) is answered with an array of one reply per item, in order, unless the node was
+//! spawned with `BatchMode::Refuse`, which answers a batch the way a node without batch support does: one error object.
 
 #![allow(dead_code)]
 
@@ -17,6 +20,17 @@ use swap_cli::watch::RpcError;
 
 type Handler = dyn Fn(&str, &Value) -> Result<Value, RpcError> + Send + Sync;
 
+/// How the mock answers a JSON array body.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BatchMode {
+    /// One reply per item, as an array.
+    Array,
+    /// One error object (no batch support).
+    Refuse,
+    /// An array with one reply too few.
+    Short,
+}
+
 pub struct MockNode {
     pub url: String,
     pub calls: Arc<Mutex<Vec<(String, Value)>>>,
@@ -26,6 +40,10 @@ pub struct MockNode {
 
 impl MockNode {
     pub fn spawn(handler: impl Fn(&str, &Value) -> Result<Value, RpcError> + Send + Sync + 'static) -> Self {
+        Self::spawn_with(handler, BatchMode::Array)
+    }
+
+    pub fn spawn_with(handler: impl Fn(&str, &Value) -> Result<Value, RpcError> + Send + Sync + 'static, batch: BatchMode) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -38,7 +56,7 @@ impl MockNode {
                 match listener.accept() {
                     Ok((s, _)) => {
                         let (h, c) = (handler.clone(), calls2.clone());
-                        std::thread::spawn(move || serve(s, &*h, &c));
+                        std::thread::spawn(move || serve(s, &*h, &c, batch));
                     }
                     Err(_) => std::thread::sleep(Duration::from_millis(5)),
                 }
@@ -66,7 +84,7 @@ impl Drop for MockNode {
     }
 }
 
-fn serve(mut s: TcpStream, handler: &Handler, calls: &Mutex<Vec<(String, Value)>>) {
+fn serve(mut s: TcpStream, handler: &Handler, calls: &Mutex<Vec<(String, Value)>>, batch: BatchMode) {
     s.set_nonblocking(false).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let mut buf = Vec::new();
@@ -86,13 +104,30 @@ fn serve(mut s: TcpStream, handler: &Handler, calls: &Mutex<Vec<(String, Value)>
         }
     };
     let req: Value = serde_json::from_slice(&buf[head_end..head_end + len]).unwrap();
-    let method = req["method"].as_str().unwrap().to_string();
-    let params = req["params"].clone();
-    calls.lock().unwrap().push((method.clone(), params.clone()));
-    let reply = match handler(&method, &params) {
-        Ok(v) => json!({"jsonrpc": "2.0", "id": req["id"], "result": v}),
-        Err(RpcError::Remote { code, message }) => json!({"jsonrpc": "2.0", "id": req["id"], "error": {"code": code, "message": message}}),
-        Err(other) => json!({"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32603, "message": other.to_string()}}),
+    let answer = |req: &Value| -> Value {
+        let method = req["method"].as_str().unwrap().to_string();
+        let params = req["params"].clone();
+        calls.lock().unwrap().push((method.clone(), params.clone()));
+        match handler(&method, &params) {
+            Ok(v) => json!({"jsonrpc": "2.0", "id": req["id"], "result": v}),
+            Err(RpcError::Remote { code, message }) => json!({"jsonrpc": "2.0", "id": req["id"], "error": {"code": code, "message": message}}),
+            Err(other) => json!({"jsonrpc": "2.0", "id": req["id"], "error": {"code": -32603, "message": other.to_string()}}),
+        }
+    };
+    let reply = match (&req, batch) {
+        (Value::Array(_), BatchMode::Refuse) => {
+            calls.lock().unwrap().push(("<batch refused>".to_string(), Value::Null));
+            json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "batch requests are not supported"}})
+        }
+        (Value::Array(items), mode) => {
+            calls.lock().unwrap().push(("<batch>".to_string(), json!(items.len())));
+            let mut out: Vec<Value> = items.iter().map(&answer).collect();
+            if mode == BatchMode::Short {
+                out.pop();
+            }
+            Value::Array(out)
+        }
+        _ => answer(&req),
     };
     let body = serde_json::to_vec(&reply).unwrap();
     let head = format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len());

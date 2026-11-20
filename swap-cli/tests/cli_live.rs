@@ -119,9 +119,17 @@ fn tick_over_loopback_http_matches_the_fixture_and_records_a_replayable_copy() {
     assert!(ok, "{err}");
     let (f, l): (Value, Value) = (serde_json::from_str(&from_fixture).unwrap(), serde_json::from_str(&live).unwrap());
     // Same observations except the poll stamps (a fixed clock vs the real one).
+    // T21: a live Bob in `received` also reads the producer headers (the mock node has none to give), a fixture replay reads none; that summary
+    // and its note are the only difference and are compared on their own below.
+    assert!(f["noid"].get("producers").is_none(), "a fixture replay reads no headers");
+    assert_eq!(l["noid"]["producers"]["complete"], false, "{}", l["noid"]["producers"]);
+    assert!(l["noid"]["producers"]["error"].as_str().unwrap().contains("paranoid_getBlockHeader"), "{}", l["noid"]["producers"]);
     let strip = |mut v: Value| {
         v["noid"]["observed_at"] = Value::Null;
         v["eth"]["observed_at"] = Value::Null;
+        v["noid"].as_object_mut().unwrap().remove("producers");
+        let kept: Vec<Value> = v["notes"].as_array().unwrap().iter().filter(|n| !n.as_str().unwrap().contains("producer concentration")).cloned().collect();
+        v["notes"] = Value::Array(kept);
         v
     };
     let (f, l) = (strip(f), strip(l));
@@ -137,7 +145,10 @@ fn tick_over_loopback_http_matches_the_fixture_and_records_a_replayable_copy() {
     let text = std::fs::read_to_string(&rec).unwrap();
     let fx: Value = serde_json::from_str(&text).unwrap();
     assert!(fx["description"].as_str().unwrap().starts_with("RECORDED from http://127.0.0.1:"), "{text}");
-    assert_eq!(fx["calls"].as_array().unwrap().len(), node.calls.lock().unwrap().len());
+    // The recording holds what the watcher asked (six reads and the tip's own header); the producer reader of a live Bob in `received` uses its
+    // own, unrecorded transport, so its header calls (and the batch markers of the mock) are not in it.
+    let watcher_calls = node.methods().iter().filter(|m| *m != "paranoid_getBlockHeader" && !m.starts_with('<')).count() + 1;
+    assert_eq!(fx["calls"].as_array().unwrap().len(), watcher_calls);
     let (ok, again, err) = run(bin().args(["tick", s(&b), "--noid-fixture", s(&rec)]).args(base));
     assert!(ok, "{err}");
     let a: Value = strip(serde_json::from_str(&again).unwrap());
@@ -364,7 +375,7 @@ fn claim_world() -> ClaimWorld {
         .to_string(),
     )
     .unwrap();
-    let tip = public.params.deadline_height - 19; // next call height D - 18: on target, away from an epoch boundary
+    let tip = public.params.deadline_height - 20; // next call height D - 19: on target, away from an epoch boundary
     ClaimWorld { public, inst, tip, dir, bob, eth }
 }
 

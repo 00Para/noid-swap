@@ -87,7 +87,7 @@ const USAGE: &str = "usage:
   swap-cli secret FILE [--passphrase-env VAR]   (Alice only: the 32-byte secret as 0x-hex, for equiv-prove and the Ethereum reveal)
   swap-cli tick FILE (--noid-fixture FILE | --noid-rpc URL) (--eth-fixture FILE | --eth-rpc URL)
                 [--record-noid FILE] [--record-eth FILE] [--now UNIX (fixtures only)] [--pending-tx 0x..]... [--reveal-tx 0x..] [--apply]
-                [--closed-by TXID]
+                [--closed-by TXID] [--accept-producer-concentration] [--single-node-ok]
                 (--closed-by: record a close made OUTSIDE this tool, e.g. the wallet CLI's recovery close. Needs the transaction confirmed on the node and the
                  instance gone; writes only with --apply; refuses otherwise. Alice: recovery close at h >= D, Bob: claim at h < D)
                 [--eth-from-block N] [--transport tcp|curl] [--curl-path PATH] [--rpc-timeout SECS]
@@ -109,16 +109,22 @@ const USAGE: &str = "usage:
   Plain http:// is accepted only to 127.0.0.1, localhost or [::1]; any other host needs https:// with --transport curl, or --allow-plain-http.
   A second, independent node: give --noid-rpc (or --noid-fixture) twice, and/or --eth-rpc (or --eth-fixture) twice (REVIEW-2 F5). Bob's lock needs
   the two Parano1d nodes to agree (same instance, tips within 2 blocks); Alice's reveal needs the two Ethereum nodes to agree (same lock, finalized
-  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3); a second node that runs on another machine and is reached through a local port (an SSH tunnel) can be declared with --noid-rpc2-is-remote / --eth-rpc2-is-remote, which changes the text of the same-host note and nothing else. An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).";
+  heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3); a second node that runs on another machine and is reached through a local port (an SSH tunnel) can be declared with --noid-rpc2-is-remote / --eth-rpc2-is-remote, which changes the text of the same-host note and nothing else. An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).
+  Producer concentration (threat T21, docs/bob-concentration-gate.md): before Bob locks, `tick` reads the Parano1d block headers from his own node (--noid-rpc, never a
+  fixture), keeps them in FILE.producers, and counts who produced the last 2,880 and the last 720 blocks. Under the production profile `lock_eth` is not offered while one
+  address produced more than 35 % of either window, or when the headers cannot be read in full, are stale, or the second Parano1d node disagrees; under sepolia and rehearsal
+  the same check only warns. The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives the production refusals: it
+  prints a warning on every tick and writes one history entry; it is never implied by a profile. It is a screen, not a defence.";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 11] = [
+const BOOL_FLAGS: [&str; 12] = [
     "apply",
     "submit",
     "fast-kdf",
     "cancel",
     "show",
     "single-node-ok",
+    "accept-producer-concentration",
     "allow-plain-http",
     "i-checked-the-wallet",
     "allow-unchecked-bundle",
@@ -389,11 +395,12 @@ fn store_eth_from_block(file: &mut SwapFile, given: Option<u64>, now: u64) {
 
 /// Run both watchers for `file` (the part `tick` and `claim` share).
 fn observe(file: &SwapFile, flags: &HashMap<String, Vec<String>>) -> Res<Observed> {
-    observe_tracking(file, flags, None)
+    observe_tracking(None, file, flags, None)
 }
 
 /// [`observe`], additionally asking the node about `closed_by` (`tick --closed-by`) when the phase tracks no txid of its own.
-fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, closed_by: Option<&str>) -> Res<Observed> {
+/// `producer_cache`: the swap file's path when this command should read the producer headers (`tick` only); `None` reads none.
+fn observe_tracking(producer_cache: Option<&Path>, file: &SwapFile, flags: &HashMap<String, Vec<String>>, closed_by: Option<&str>) -> Res<Observed> {
     // REVIEW-2 F12: `--now` rewrites both `observed_at` stamps, which switches the staleness rule off.
     // That is for replaying recorded fixtures only; a live RPC must be judged by the real clock.
     if flags.contains_key("now") && (flags.contains_key("noid-rpc") || flags.contains_key("eth-rpc")) {
@@ -427,6 +434,14 @@ fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, close
     noid.single_node_ok = single_node_ok;
     // Display only (the note that the second node agreed): `scheme://host:port` of the second `--noid-rpc`, nothing from its path.
     noid.second_label = flags.get("noid-rpc").and_then(|v| v.get(1)).map(|u| redact(u));
+    // T21: the operator accepts the producer-concentration risk (never implied by a profile).
+    noid.accept_producer_concentration = flags.contains_key("accept-producer-concentration");
+    // T21: who produced the recent blocks, from Bob's own node's headers. Bob only, before his lock, and only against a live node.
+    if let (Some(path), true) = (producer_cache, swap_cli::engine::producer_scan_wanted(file)) {
+        if let Some(urls) = flags.get("noid-rpc") {
+            noid.producers = Some(read_producers_for(path, file, &net, urls, &noid));
+        }
+    }
     // Bob knows his lock id as soon as he chose T_reveal; Alice discovers Bob's
     // lock by the agreed parties and her hashlock until she has recorded it.
     let lock_id = expected_lock_id(file).unwrap_or([0u8; 32]);
@@ -498,6 +513,33 @@ fn observe_tracking(file: &SwapFile, flags: &HashMap<String, Vec<String>>, close
     Ok(Observed { noid, eth, now, noid_rpc, sources, source_notes, eth_from_block_flag: from_block_flag })
 }
 
+/// T21: read the producer summary for Bob's file from his own node(s). Uses its own transports (never the recording ones, so no header or
+/// miner address ends up in a recorded fixture) with a timeout no longer than the per-tick budget. The cache is `<swap file>.producers`.
+/// Any failure is in the summary; this never fails the tick.
+fn read_producers_for(path: &Path, file: &SwapFile, net: &Net, urls: &[String], noid: &NoidObservation) -> swap_cli::watch::producers::ProducerSummary {
+    use swap_cli::watch::producers::{cache_path_for, read_producers, ProducerSummary, ReaderConfig, DEFAULT_BUDGET, PER_CALL_TIMEOUT};
+    let g = file.public.params.profile.gates();
+    let (long, short) = (g.producer_window_long, g.producer_window_short);
+    let reader_net = Net { curl: net.curl, curl_path: net.curl_path.clone(), timeout: net.timeout.min(DEFAULT_BUDGET).min(PER_CALL_TIMEOUT), allow_plain_http: net.allow_plain_http };
+    let first = match open_url(&reader_net, &urls[0]) {
+        Ok(r) => r,
+        Err(e) => return ProducerSummary::failed(noid.tip, long, short, now_unix(), format!("cannot open the node for the headers: {e}")),
+    };
+    let second = match urls.get(1) {
+        Some(u) => match open_url(&reader_net, u) {
+            Ok(r) => Some(r),
+            Err(e) => return ProducerSummary::failed(noid.tip, long, short, now_unix(), format!("cannot open the second node for the headers: {e}")),
+        },
+        None => None,
+    };
+    let mut cfg = ReaderConfig::new(long, short);
+    cfg.source = Some(redact(&urls[0]));
+    // A second node whose whole poll failed (`second_error`) is left to the F5 rule, which holds the lock with its own reason; its headers are not asked for.
+    let second_tip = noid.second.as_ref().map(|s| s.tip);
+    let second = if noid.second_error.is_some() { None } else { second };
+    read_producers(first.as_ref(), second.as_ref().map(|r| (r.as_ref(), second_tip)), &cache_path_for(path), noid.tip, &cfg)
+}
+
 /// The `sources` block of a report; a second node is listed only when there is one.
 fn sources(noid: String, noid_second: Option<String>, eth: String, eth_second: Option<String>) -> serde_json::Value {
     let mut v = serde_json::json!({"noid": noid, "eth": eth});
@@ -560,7 +602,7 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
             Some(txid)
         }
     };
-    let obs = observe_tracking(&file, flags, closed_by.as_deref())?;
+    let obs = observe_tracking(Some(&path), &file, flags, closed_by.as_deref())?;
     let (noid, eth, now) = (&obs.noid, &obs.eth, obs.now);
     // The whole `tick --apply` path is `tick_apply`: events, then the intent ledger (REVIEW-2 F3).
     // The file is saved BEFORE anything is printed, so a spending action the operator sees is

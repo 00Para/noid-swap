@@ -58,9 +58,9 @@ fn production_files_do_not_mention_the_profile_and_rehearsal_files_do() {
     assert_eq!(back.digest(), prod.digest());
     assert_ne!(prod.digest(), reh.digest());
     // The two share nothing but the secret: different deadline, lock-by, chain.
-    assert_eq!(prod.params.deadline_height, 300_735);
-    assert_eq!(reh.params.deadline_height, 300_120);
-    assert_eq!(reh.params.lock_by_height, 300_052);
+    assert_eq!(prod.params.deadline_height, 300_738);
+    assert_eq!(reh.params.deadline_height, 300_122);
+    assert_eq!(reh.params.lock_by_height, 300_053);
     assert_eq!(reh.params.eth.chain_id, 31_337);
 }
 
@@ -69,11 +69,11 @@ fn a_bundle_cannot_be_moved_between_profiles() {
     let secret = Secret::generate().unwrap();
     let reh = example_public_with(&secret, Variant::Raw, ProfileName::Rehearsal);
     reh.check().unwrap();
-    // Relabel it production: D is no longer h_create + 735.
+    // Relabel it production: D is no longer h_create + 738.
     let mut as_prod = reh.clone();
     as_prod.params.profile = ProfileName::Production;
     let e = as_prod.check().unwrap_err().to_string();
-    assert!(e.contains("735"), "{e}");
+    assert!(e.contains("738"), "{e}");
     // Strip the profile field from the JSON (what an old tool would produce): the same result.
     let mut v: serde_json::Value = serde_json::to_value(&reh).unwrap();
     v["params"].as_object_mut().unwrap().remove("profile").unwrap();
@@ -121,7 +121,7 @@ fn new_alice_profile_rehearsal_through_the_binary() {
     assert!(ok, "{err}");
     let public: SwapPublic = serde_json::from_str(&bundle).unwrap();
     assert_eq!(public.params.profile, ProfileName::Rehearsal);
-    assert_eq!(public.params.deadline_height, 300_120);
+    assert_eq!(public.params.deadline_height, 300_122);
     assert!(bundle.contains("\"profile\": \"rehearsal\""));
     assert_eq!(SwapFile::load(&a).unwrap().public.params.profile, ProfileName::Rehearsal);
     // `status` shows it.
@@ -248,26 +248,26 @@ fn new_bob_refuses_a_profile_mismatch() {
 
 #[test]
 fn gates_prints_the_rehearsal_numbers() {
-    // Funding final at 300,022, Bob locks at 300,030, D = 300,120.
+    // Funding final at 300,023, Bob locks at 300,030, D = 300,122.
     let (ok, out, err) = run(&s(&[
-        "gates", "--profile", "rehearsal", "--d", "300120", "--h-now", "300030", "--t-now", "1794312000", "--h-final", "300022",
+        "gates", "--profile", "rehearsal", "--d", "300122", "--h-now", "300030", "--t-now", "1794312000", "--h-final", "300023",
     ]));
     assert!(ok, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["profile"], "rehearsal");
-    assert_eq!(v["d_offset"], 120);
-    assert_eq!(v["rhs_i1_full_window"], 68);
-    assert_eq!(v["lock_by_full_window"], 300_052);
-    assert_eq!(v["lock_by_min_window"], 300_058);
+    assert_eq!(v["d_offset"], 122);
+    assert_eq!(v["rhs_i1_full_window"], 69);
+    assert_eq!(v["lock_by_full_window"], 300_053);
+    assert_eq!(v["lock_by_min_window"], 300_059);
     assert_eq!(v["t_reveal"], "1794312600");
     assert_eq!(v["reveal_cutoff"], 1_794_312_300u64);
-    assert_eq!(v["claim_target_height"], 300_102);
+    assert_eq!(v["claim_target_height"], 300_103);
     // The default is unchanged (no profile key for production).
-    let (ok, out, _) = run(&s(&["gates", "--d", "300735", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300022"]));
+    let (ok, out, _) = run(&s(&["gates", "--d", "300738", "--h-now", "300040", "--t-now", "1794312000", "--h-final", "300023"]));
     assert!(ok);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert!(v.get("profile").is_none());
-    assert_eq!(v["rhs_i1_full_window"], 629);
+    assert_eq!(v["rhs_i1_full_window"], 631);
     let (ok, _, err) = run(&s(&["gates", "--profile", "nope", "--d", "1", "--h-now", "1", "--t-now", "1"]));
     assert!(!ok && err.contains("unknown profile"), "{err}");
 }
@@ -288,9 +288,9 @@ fn sepolia_files_mention_the_profile_and_carry_its_numbers() {
     assert_eq!(back.digest(), sep.digest());
     assert_ne!(sep.digest(), reh.digest());
     assert_ne!(sep.digest(), prod.digest());
-    // D_offset 300, lock-by D - 251, W_A 4,200 s, and the only chain the profile allows.
-    assert_eq!(sep.params.deadline_height, 300_300);
-    assert_eq!(sep.params.lock_by_height, 300_300 - 251);
+    // D_offset 302, lock-by D - 252, W_A 4,200 s, and the only chain the profile allows.
+    assert_eq!(sep.params.deadline_height, 300_302);
+    assert_eq!(sep.params.lock_by_height, 300_302 - 252);
     assert_eq!(sep.params.w_a_s, 4_200);
     assert_eq!(sep.params.eth.chain_id, 11_155_111);
     // A sepolia bundle cannot be relabelled rehearsal or production: D, lock-by and (for rehearsal) the chain disagree.
@@ -340,8 +340,8 @@ fn new_alice_profile_sepolia_through_the_binary() {
     assert!(ok, "{err}");
     let public: SwapPublic = serde_json::from_str(&bundle).unwrap();
     assert_eq!(public.params.profile, ProfileName::Sepolia);
-    assert_eq!(public.params.deadline_height, 300_300);
-    assert_eq!(public.params.lock_by_height, 300_049);
+    assert_eq!(public.params.deadline_height, 300_302);
+    assert_eq!(public.params.lock_by_height, 300_050);
     assert!(bundle.contains("\"profile\": \"sepolia\""));
     assert_eq!(SwapFile::load(&a).unwrap().public.params.profile, ProfileName::Sepolia);
     let (ok, out, _) = run(&s(&["status", a.to_str().unwrap()]));
@@ -396,13 +396,13 @@ fn gates_prints_the_sepolia_numbers() {
     assert!(ok, "{err}");
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     assert_eq!(v["profile"], "sepolia");
-    assert_eq!(v["d_offset"], 300);
-    assert_eq!(v["rhs_i1_full_window"], 251);
-    assert_eq!(v["lock_by_full_window"], 1_000 - 251);
-    assert_eq!(v["lock_by_min_window"], 1_000 - 209);
+    assert_eq!(v["d_offset"], 302);
+    assert_eq!(v["rhs_i1_full_window"], 252);
+    assert_eq!(v["lock_by_full_window"], 1_000 - 252);
+    assert_eq!(v["lock_by_min_window"], 1_000 - 210);
     assert_eq!(v["t_reveal"], "1700004200");
     assert_eq!(v["reveal_cutoff"], 1_700_002_400u64);
-    assert_eq!(v["claim_target_height"], 982);
+    assert_eq!(v["claim_target_height"], 981);
     // A funding-final height that is too old for B_bob (20) is refused under sepolia too.
     let (ok, out, _) = run(&s(&["gates", "--profile", "sepolia", "--d", "1000", "--h-now", "700", "--t-now", "1700000000", "--h-final", "670"]));
     assert!(ok);

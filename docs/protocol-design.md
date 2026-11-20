@@ -80,7 +80,7 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 | a2 | `H = SHA-256(x)` | Alice → Bob | public | ETH hashlock |
 | a3 | `A` | Alice → Bob | public | `Addr(s)`, or `Addr(Derive(m,0))` in the stock path |
 | a4 | variant ∈ {`raw`, `stock`} | Alice → Bob | public | determines Bob's claim tooling (§7) |
-| a5 | π: zkVM receipt whose journal = `(version, variant, H, A)` | Alice → Bob | public | §5. Proved **locally** by Alice |
+| a5 | π: zkVM receipt whose journal = `variant ‖ H ‖ A` (65 bytes) | Alice → Bob | public | §5. Proved **locally** by Alice |
 | a6 | `htlc.pruv` (the canonical source, §6.1) + params file | Alice → Bob | public | Bob rebuilds from these |
 | a7 | opening JSON (`opening_hex`, 699 bytes) | Alice → Bob | public | both parties **must back it up**. It cannot be recovered from chain after it leaves the mempool (report §5) |
 | a8 | `o1` root address of the opening | derived by both | public | `ObjectOpening::root()` |
@@ -104,7 +104,7 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 6. **Alice funds:** `parano1d-cli contract fund swap.opening.json <V in NOID>`. **Alice → Bob:** a9.
 7. ✔ **Bob funding checks** (§6.3 items 9–11):
    - the instance `(slot, creation_id)` exists at the `o1` root with amount `V`;
-   - it is final, i.e. `tip ≥ h_f + 17`;
+   - it is final, i.e. `tip ≥ h_f + 18`;
    - no pending call in the mempool spends it;
    - `H_now ≤ lock-by height`.
 8. **Bob locks ETH.** He sets `T_reveal = min(t_now + W_A, T_max)`, where `T_max` is the largest timestamp satisfying (I1) at the current Parano1d height (§4). He requires `T_reveal − t_now ≥ W_A_min`; otherwise he does not lock. He calls `HTLC.newLock{value: amount}(H, T_reveal, A_eth)`. **Bob → Alice:** a12.
@@ -118,8 +118,8 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 11. **Bob learns `x`.** He picks it up from the pending tx calldata, from the `Claimed(lockId, preimage)` event, or from `getLock(lockId).preimage`.
     - ✔ He checks `SHA-256(x) == H`.
     - ✔ He recomputes `Addr(x)` (raw path) or `Addr(Derive(x,0))` (stock path) with the reference crate and checks it equals `claim_authority`. This is a belt-and-braces check of π, and it is cheap.
-12. **Bob claims NOID immediately** (§7). He builds the close for the instance at candidate height `tip+1`, proves the authorization, and submits it to ≥3 nodes. On eviction (anchor rotation, slot conflict) he re-proves and resubmits. He targets inclusion at `h ≤ D − 18`.
-13. **Bob waits for finality:** `tip ≥ h_incl + 17`. He exports the receipt (`contract receipt … --out`). Done.
+12. **Bob claims NOID immediately** (§7). He builds the close for the instance at candidate height `tip+1`, proves the authorization, and submits it to ≥3 nodes. On eviction (anchor rotation, slot conflict) he re-proves and resubmits. He targets inclusion at `h ≤ D − 19`.
+13. **Bob waits for finality:** `tip ≥ h_incl + 18`. He exports the receipt (`contract receipt … --out`). Done.
 14. Alice's ETH claim is finalized. Done.
 
 ### 2.3 Alice-aborts paths
@@ -128,7 +128,7 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 |---|---|---|---|
 | before step 6 (funding) | nothing on chain | — | none |
 | after step 6, before step 8 | Bob does not lock. At `tip+1 ≥ D`, Alice closes via the recovery branch: `contract call swap.opening.json <slot> <cid> --close --preview`, then `--expected-txid … --out refund.json`. Her stock wallet's **active address must equal `A_noid`** (`builder.rs:L109-L126`), so she must not switch addresses while the swap is open | Alice | NOID locked until `D`, plus the refund fee |
-| after step 8, Alice never reveals | at `block.timestamp ≥ T_reveal`, Bob calls `HTLC.refund(lockId)`. At `h ≥ D`, Alice refunds NOID. **Alice must keep `x` secret until her refund is final at `h_refund + 17`.** Leaking it earlier lets anyone close the lock to Bob | Bob, then Alice | both locked until their timeouts, plus gas and fees |
+| after step 8, Alice never reveals | at `block.timestamp ≥ T_reveal`, Bob calls `HTLC.refund(lockId)`. At `h ≥ D`, Alice refunds NOID. **Alice must keep `x` secret until her refund is final at `h_refund + 18`.** Leaking it earlier lets anyone close the lock to Bob | Bob, then Alice | both locked until their timeouts, plus gas and fees |
 | Alice reveals too late (`now > T_reveal − M_A`) | **forbidden by the protocol.** A claim that reverts or misses `T_reveal` still publishes `x` in calldata. Bob can then refund ETH *and* claim NOID, and Alice loses both. The tool must refuse to broadcast past the cutoff | Alice's tool | — |
 
 ### 2.4 Bob-aborts paths
@@ -137,7 +137,7 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 |---|---|---|
 | Bob never locks (any reason, including the free option, §8 T13) | Alice refunds at `D` | Alice's liquidity, up to `D` (§4) |
 | Bob locks with a `T_reveal` that fails Alice's checks (step 9) | Alice does not reveal. Bob refunds at `T_reveal`. Alice refunds at `D` | both are locked |
-| Bob locks, Alice reveals, Bob goes offline | **Bob's loss.** Alice refunds NOID at `D` and keeps the ETH. HTLCs require Bob (or his watchtower) to be online in `[T_reveal − W_A, D − 18]` | Bob's NOID claim |
+| Bob locks, Alice reveals, Bob goes offline | **Bob's loss.** Alice refunds NOID at `D` and keeps the ETH. HTLCs require Bob (or his watchtower) to be online in `[T_reveal − W_A, D − 19]` | Bob's NOID claim |
 
 ### 2.5 Race-at-deadline paths
 
@@ -145,9 +145,9 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 |---|---|---|
 | Alice's ETH claim vs `T_reveal` | `claim` requires `block.timestamp < T_reveal`. `refund` requires `≥` (disjoint) | Alice broadcasts by `T_reveal − M_A`. A late claim publishes `x` and lets Bob take both. **Alice bears this risk** |
 | ETH reorg of Alice's claim near `T_reveal` | A re-included claim may revert after `T_reveal` | Alice's risk. `M_A = 30 min` exceeds Ethereum finality (~13–19 min) |
-| Bob's NOID claim vs `D` | Claim valid iff `h < D`. The mempool evicts a pending claim when the branch would flip at the next height (`contracts.rs:L92-L113`), so the **last possible inclusion height is `D − 1`** | Bob targets `h ≤ D − 18` so the claim is final (17-block maximum rollback) before refund becomes possible |
+| Bob's NOID claim vs `D` | Claim valid iff `h < D`. The mempool evicts a pending claim when the branch would flip at the next height (`contracts.rs:L92-L113`), so the **last possible inclusion height is `D − 1`** | Bob targets `h ≤ D − 19` so the claim is final (18 blocks after inclusion, so `h + 18 ≤ D − 1`) before refund becomes possible |
 | Alice pre-submits a refund | rejected: `check_call` at `h < D` selects the claim authority, and her proof is for the recovery authority | impossible |
-| Parano1d reorg removes Bob's claim (`h > D − 18`) | the re-included claim may land at `≥ D` and be invalid, and then Alice can refund | prevented by the `D − 18` target and the (I1) margin |
+| Parano1d reorg removes Bob's claim (`h > D − 19`) | the re-included claim may land at `≥ D` and be invalid, and then Alice can refund | prevented by the `D − 19` target and the (I1) margin |
 
 ### 2.6 Sequence diagram (ETH)
 
@@ -167,7 +167,7 @@ sequenceDiagram
     Note over B: verify π (pinned image ID, journal = H,A)<br/>rebuild opening byte-for-byte, check policy, (I1) feasible
     A->>P: contract fund opening V
     A->>B: funding txid, h_f, (slot, creation_id)
-    Note over B: wait tip ≥ h_f+17, check instance amount = V, unspent
+    Note over B: wait tip ≥ h_f+18, check instance amount = V, unspent
     B->>E: newLock(H, T_reveal, A_eth) {value}
     B->>A: lockId, tx hash, T_reveal
     Note over A: verify code hash, getLock fields, finalized,<br/>now ≤ T_reveal − M_A
@@ -175,8 +175,8 @@ sequenceDiagram
     E-->>B: Claimed(lockId, x) / calldata
     Note over B: SHA256(x)=H, Addr(...)=A (local check)
     B->>P: close(instance) to B_noid, auth = ZK proof of x
-    Note over B: re-prove on epoch rotation, include by D−18
-    P-->>B: included at h; final at h+17
+    Note over B: re-prove on epoch rotation, include by D−19
+    P-->>B: included at h; final at h+18
     alt Alice never reveals
         B->>E: refund(lockId) at t ≥ T_reveal
         A->>P: recovery close at h ≥ D (to A_noid)
@@ -285,7 +285,7 @@ sequenceDiagram
     Note over A: rebuild script, ≥3 conf, tip ≤ T_b−6
     A->>C: claim spend, witness = sig_A, x, 01, ws (x is witness[1])
     C-->>B: mempool / block: x
-    B->>P: close instance to B_noid (include by D−18)
+    B->>P: close instance to B_noid (include by D−19)
     alt Alice never reveals
         B->>C: refund at height ≥ T_b+1 (nLockTime=T_b)
         A->>P: recovery close at h ≥ D
@@ -300,19 +300,19 @@ sequenceDiagram
 
 | Item | Symbol | v1 value | Unit | Source / reason |
 |---|---|---|---|---|
-| Parano1d finality (Bob's claim must be final before `D`) | `B_final` | 18 | blocks | 17-block maximum rollback (report §4). Inclusion `≤ D−18` |
+| Parano1d finality (Bob's claim must be final before `D`) | `B_final` | 19 | blocks | the chain's finality depth is 18 (`is_final`: tip ≥ h + 18, vendored `consensus/header.rs`; the upstream documents' "17 blocks of rollback" is the same rule counted from the other side), plus the inclusion block. Inclusion `≤ D−19` |
 | Mempool eviction at the branch flip | — | subsumed | — | last inclusion `D−1`. Subsumed by `B_final` |
 | One epoch-anchor rotation | `B_epoch` | 144 | blocks | A stuck claim (e.g. a conflicting third-party claim admitted first, T2) holds the instance until its anchor rotates. Then Bob re-authorizes. Anchor for child `C` = block `⌊(C−1)/144⌋·144` |
 | Authorization proving time (once, then again after a rotation) | `P_auth` | 20 (×2) | s | **Measured in M0.5 (Q4)**: p50 1.4–1.6 s, worst p99 6.0 s over 8 release series of N = 30 (table below). Budget = 3 × the worst p99, rounded up. Replaces the 600 s placeholder |
 | Relay-floor / congestion wait | `B_fee` | 60 | blocks | the floor is local and pressure-latched (80% on / <50% off). Duration on mainnet is UNKNOWN (Q6) |
-| Ops slack | `B_safety` | 30 | blocks | restarts, RPC hiccups, and an adversarial reorg of Bob's close with margin on top. Was 20 until 2026-11-05 (§9.1) |
+| Ops slack | `B_safety` | 31 | blocks | restarts, RPC hiccups, and an adversarial reorg of Bob's close (18 blocks deep) with margin on top. Was 20 until 2026-11-05 and 30 until 2026-11-08 (§9.1) |
 | Reveal detection (ETH) | `Δ_detect` | 300 | s | polling plus a few seconds of block-timestamp skew |
 | Alice's reveal margin (ETH) | `M_A` | 1,800 | s | > Ethereum finality (~13–19 min) plus inclusion |
 | Alice's window (ETH) | `W_A` / `W_A_min` | 7,200 / 5,400 | s | finality of Bob's lock + `M_A` + slack |
 | BTC refund burial | `k_refund` | 5 | BTC blocks | refund minable at `T_b+1`, ≤2 blocks of fee delay, 2 confirmations |
 | BTC lock length | `N_btc` | 24 | BTC blocks | ≈ 4 h nominal |
 
-The post-reveal Parano1d budget, in blocks, is `B_post = B_epoch + B_fee + B_final + B_safety = 144 + 60 + 18 + 30 = 252`.
+The post-reveal Parano1d budget, in blocks, is `B_post = B_epoch + B_fee + B_final + B_safety = 144 + 60 + 19 + 31 = 254`.
 
 **Measured `P_auth` (M0.5, Q4, 2026-11-04).** `P_auth` is the wall-clock time for one complete claim authorization of the `HashTimeLock` contract, the way Bob's client does it: fresh secret and opening, build the 1-input/1-output closing page, prepare the witness, prove (`noid_gkr`, owner-authorization proof). The proof is verified afterwards, outside the timer. Page height 279,369 for V3 and 279,370 for V4. Benchmark: `parano1d/harness/tests/pauth_bench.rs` (`#[ignore]`, run with `PAUTH_BENCH_N`, see `parano1d/README.md`). Times in seconds, nearest-rank percentiles (with N = 30, p99 is the maximum; with N = 10, p90 is the 9th value). Variant `raw` = witness `s`; `stock` = witness `Derive(m,0)` (adds 3 permutations, negligible).
 
@@ -353,7 +353,7 @@ Let `H_b, t_b` be the Parano1d height and the wall-clock time when Bob locks. Le
 (I2) Alice safety:   ETH: broadcast claim only if  now ≤ T_reveal − M_A  and Bob's lock finalized
                      BTC: broadcast claim only if  h_btc ≤ T_b − 6  and funding ≥ k_fund conf
 (I3) Alice liveness: T_reveal − t_b ≥ W_A_min   (else Alice will not reveal → abort)
-(I4) Hard rule:      Bob's claim inclusion h ≤ D − 1;  target h ≤ D − 18
+(I4) Hard rule:      Bob's claim inclusion h ≤ D − 1;  target h ≤ D − 19
 (I5) Version:        no scheduled owner-authorization version change in [H_create, D + B_post]
                      (v2.1: 279,370 ∉ window; start only at ≥ 279,370 + 18)
 ```
@@ -361,7 +361,7 @@ Let `H_b, t_b` be the Parano1d height and the wall-clock time when Bob locks. Le
 Alice picks `D` at creation, before she knows `H_b`:
 
 ```text
-D = H_create + B_fund(10) + B_final(18) + B_bob(≤60, lock-by) + RHS(I1) + margin
+D = H_create + B_fund(10) + B_final(19) + B_bob(≤60, lock-by) + RHS(I1) + margin
 ```
 
 Bob enforces (I1) at his lock time. If it fails, he either shrinks `T_reveal` (down to `W_A_min`) or does not lock. His **lock-by height** is `D − RHS(I1)`.
@@ -372,13 +372,13 @@ Figures re-derived 2026-11-04 from the measured P_auth (M0.5); see §9.1.
 
 The Parano1d height of 300,000 is illustrative (post-v2.1).
 
-1. `H_create = 300,000`, `D_offset = 735`, so `D = 300,735`.
-2. Funding is included by 300,005 and final by 300,022.
+1. `H_create = 300,000`, `D_offset = 738`, so `D = 300,738`.
+2. Funding is included by 300,005 and final by 300,023.
 3. Bob locks at `H_b = 300,040`, `t_b = 1,794,312,000` (2026-11-10 12:00:00 UTC), with `T_reveal = t_b + 7,200 = 1,794,319,200` (14:00:00 UTC).
-4. RHS(I1) = `⌈(7,200 + 300 + 40)/20⌉ + 252 = 377 + 252 = 629`. LHS = `300,735 − 300,040 = 695 ≥ 629` ✔ (66 blocks of slack).
-5. Bob's lock-by height is `300,735 − 629 = 300,106` with `W_A = 7,200`. With `W_A_min = 5,400` it is `300,735 − (⌈5,740/20⌉ + 252) = 300,735 − 539 = 300,196`. (Measured from `H_create` the lock-by heights are the same as with `B_safety` = 20: `D_offset` and RHS(I1) both grew by 10.)
-6. Nominal times: Alice must broadcast by 13:30 UTC. Bob's worst-case learn time is 14:05 UTC. `D` arrives at about 17:47 UTC at 30 s/block (695 blocks after the lock, 5 h 47 m 30 s), and at about 15:51 UTC at 20 s/block (3 h 51 m 40 s).
-7. In the fast case Bob still has 320 blocks after `t_L` (`300,735 − (300,040 + 375)`). He needs `2 (2·P_auth) + 252 = 254` ✔.
+4. RHS(I1) = `⌈(7,200 + 300 + 40)/20⌉ + 254 = 377 + 254 = 631`. LHS = `300,738 − 300,040 = 698 ≥ 631` ✔ (67 blocks of slack).
+5. Bob's lock-by height is `300,738 − 631 = 300,107` with `W_A = 7,200`. With `W_A_min = 5,400` it is `300,738 − (⌈5,740/20⌉ + 254) = 300,738 − 541 = 300,197`. (Measured from `H_create` that is `H_create + 107` / `+ 197`.)
+6. Nominal times: Alice must broadcast by 13:30 UTC. Bob's worst-case learn time is 14:05 UTC. `D` arrives at about 17:49 UTC at 30 s/block (698 blocks after the lock, 5 h 49 m), and at about 15:52 UTC at 20 s/block (3 h 52 m 40 s).
+7. In the fast case Bob still has 323 blocks after `t_L` (`300,738 − (300,040 + 375)`). He needs `2 (2·P_auth) + 254 = 256` ✔.
 8. Alice's worst-case lockup if Bob aborts: until about `D + 18`, roughly 6 h nominal.
 
 ### 4.4 Worked example: BTC
@@ -386,7 +386,7 @@ The Parano1d height of 300,000 is illustrative (post-v2.1).
 1. `D_offset = 2,050`, so `D = 302,050`.
 2. Bob locks at `H_b = 300,040`, BTC height `h0 = 975,000` (illustrative), with `T_b = 975,024`.
 3. `t_L − t_b = Q_{0.999}(Gamma(29, 660 s)) + 300 = 32,023 + 300 s` (8.9 h).
-4. RHS(I1) = `⌈(32,323 + 40)/20⌉ + 252 = 1,619 + 252 = 1,871`. LHS = `2,010` ✔ (139 blocks of slack). Bob's lock-by height is `302,050 − 1,871 = 300,179`.
+4. RHS(I1) = `⌈(32,323 + 40)/20⌉ + 254 = 1,619 + 254 = 1,873`. LHS = `2,010` ✔ (137 blocks of slack). Bob's lock-by height is `302,050 − 1,873 = 300,177`.
 5. Alice's cutoff is BTC height 975,018. Even in the fast case (p0.1 of 18 blocks = 1.28 h) she has ample time.
 6. Nominal `D` is about 16.8 h after `t_b`. **The cost is Alice's lockup.** Reducing `N_btc` to 12 cuts `D_offset` to about 1,400 (about 1,390 before `B_safety` was raised to 30; not re-derived exactly), but leaves Alice ≥ 0.67 h at p0.1 for 12 blocks. That is acceptable only with automated reveal.
 
@@ -394,10 +394,10 @@ The Parano1d height of 300,000 is illustrative (post-v2.1).
 
 | Pair | `W_A` / `N_btc` | `D_offset` (blocks) | Nominal @30 s | Fast case @20 s |
 |---|---|---|---|---|
-| NOID↔ETH | 7,200 s | 735 | 6 h 08 m | 4 h 05 m |
+| NOID↔ETH | 7,200 s | 738 | 6 h 09 m | 4 h 06 m |
 | NOID↔BTC | 24 BTC blocks | 2,050 | 17 h 05 m | 11 h 23 m |
 
-These were re-derived on 2026-11-04 from the measured `P_auth` (M0.5, §4.1, §9.1) and the ETH row again on 2026-11-05 for `B_safety` = 30 (§9.1). They are re-derived again after M2 measures the floor duration, and the empirical Parano1d block-rate distribution (Q6, Q13).
+These were re-derived on 2026-11-04 from the measured `P_auth` (M0.5, §4.1, §9.1) and the ETH row again on 2026-11-05 for `B_safety` = 30 and on 2026-11-08 for the finality depth of 18 (§9.1). They are re-derived again after M2 measures the floor duration, and the empirical Parano1d block-rate distribution (Q6, Q13).
 
 ---
 
@@ -406,7 +406,7 @@ These were re-derived on 2026-11-04 from the measured `P_auth` (M0.5, §4.1, §9
 ### 5.1 Statement
 
 ```text
-Public inputs:  version (u32), variant ∈ {raw, stock}, H ∈ {0,1}^256, A ∈ {0,1}^256
+Public inputs:  variant ∈ {raw, stock}, H ∈ {0,1}^256, A ∈ {0,1}^256
 Witness:        x ∈ {0,1}^256
 R_raw  : SHA256(x) = H  ∧  Addr(x) = A
 R_stock: SHA256(x) = H  ∧  Addr(Derive(x, 0)) = A
@@ -454,14 +454,14 @@ The first version runs RISC Zero with the stock-path circuit also supported. The
 
 Implementation rules:
 - **Guest crate `p2b_ref`.** It is a minimal no_std extraction of the permutation, constants, sponge, `soft_clmul`, and the tower↔flat conversion. It does not depend on `noid_poseidon2b`/`noid_core` directly, because those pull in `rayon`. It must be differentially tested against `noid_poseidon2b` on ≥ 10^5 random inputs, for both `Addr` and `Derive`.
-- **Guest program.** It reads `(variant, x)` and computes `H` and `A`. It commits the journal `= (b"NOIDSWAP-EQ-v1", variant, H, A)` and nothing derived from `x` beyond that.
+- **Guest program.** It reads `(variant, x)` and computes `H` and `A`. It commits the journal `= variant ‖ H ‖ A`, 65 raw bytes (`variant` one byte, `H` and `A` 32 bytes each), with no tag, version or length prefix, and nothing derived from `x` beyond that. A change of the encoding would change the image ID.
 - **Pin and reproduce.** The image ID is pinned in the tool and built reproducibly (risc0 docker build). Bob verifies with `receipt.verify(IMAGE_ID)` and then checks the journal byte-for-byte against `(variant, H, A)`, with `A` equal to the opening's `claim_authority`.
 - **Local proving only.** Alice proves locally. Remote proving services (Bonsai, Boundless, prover networks) are disabled in code because they would see `x`.
 
 ### 5.5 Bob's verification, and what a bad proof does
 
 1. Verify the receipt against the pinned image ID and the pinned risc0 version.
-2. Check the journal: tag, `variant`, `H` (equal to the hashlock Bob will use), and `A` (equal to `claim_authority` in the opening).
+2. Check the journal: length (65 bytes), `variant`, `H` (equal to the hashlock Bob will use), and `A` (equal to `claim_authority` in the opening).
 3. If anything fails, **Bob does not lock.** Nothing is at risk: Alice's NOID is either unfunded or refundable at `D`, and Bob has not locked anything.
 4. After the reveal, Bob recomputes `Addr` locally (§2.2 step 11). A mismatch there means π was unsound. Bob cannot recover, so this check is diagnostic only and must trigger an incident.
 
@@ -535,7 +535,7 @@ The tool ships this file, and both parties pin its SHA-256. The params-file shap
 7. Compute `root(opening)` locally (Rust `ObjectOpening::root`) and check it equals the `o1` address Alice will fund.
 8. π verifies (§5.5). `H` is fresh (not in Bob's swap DB), and `getSlotsByOwner(A)` is empty. Funds sitting at `A` would be stealable after the reveal and suggest secret reuse.
 9. *(After funding)* `contract instances` / `getObjectInstances(root)` lists the exact `(slot, creation_id)` with `amount == V`. Any extra instances are ignored, and each needs its own claim.
-10. Funding is final: `tip ≥ h_f + 17`.
+10. Funding is final: `tip ≥ h_f + 18`.
 11. No pending call spends the instance: scan `getMempoolInfo` and check `getMempoolEntry(txid).contract_opening_hex` against ours.
 
 ### 6.4 Why `refundable_payment` must not be used
@@ -574,14 +574,14 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 | T1 | **`max_fee` burn griefing.** Anyone holding `x` (Alice before the reveal, everyone after it) closes early to Bob with `fee = F_max` | Bob loses up to `F_max`. The closer cannot redirect funds | small `F_max` (≤1% of `V`). `V = Q_net + F_max` is priced in | Bob always bears up to `F_max`. A miner-griefer recoups it as a tip |
 | T2 | **Third party (or Alice) races Bob's claim** with a different fee. The mempool rejects the second spend of an admitted input slot (`SlotConflict`, `pool.rs:L1296-L1350`), and I found no replacement path. A min-fee claim stuck under congestion could block Bob's until its anchor rotates, and could be re-submitted every epoch | liveness only: every valid close pays `B_noid`. But if the blocking lasts until `D`, Alice refunds and **Bob loses** | Bob claims on first sight of `x` (mempool). Multi-node and miner-direct submission. Budget `B_epoch + B_fee` in (I1) | **open (Q1).** Test: submit two conflicting closes of one instance with fees 5,800 and `F_max` to two nodes on an isolated net, then mainnet-tiny. Observe admission, relay, block selection, and resubmission after rotation |
 | T3 | **Alice reveals late** near `T_reveal` (ETH) or after `T_b` (BTC) | ETH: bounded by `T_reveal`, which (I1) already covers. A late attempt hurts Alice (Bob takes both). BTC: the claim has no expiry, so it can land after `T_b` | (I1) uses `t_L` = `T_reveal + Δ` / BTC `T_b + k_refund`. Alice's tool enforces cutoffs (I2). Bob refunds BTC promptly at `T_b+1` with a high fee | Bob depends on watchtower uptime |
-| T4 | **Reorgs.** Parano1d (≤17 blocks), ETH (pre-finality), BTC | a reorged claim may re-land on the wrong side of a deadline | Bob's claim must be final by `D−1` (target `D−18`). Alice's ETH claim must be finalized before `T_reveal` (`M_A`). BTC: `k_fund = 3`, Alice gets 3 confirmations before `T_b`, `k_refund = 5`. Bob never acts on Alice's NOID funding before 18 blocks | deep BTC/ETH reorgs beyond these depths. Acceptable at trial sizes |
+| T4 | **Reorgs.** Parano1d (a block is final only at `tip ≥ h + 18`), ETH (pre-finality), BTC | a reorged claim may re-land on the wrong side of a deadline | Bob's claim must be final by `D−1` (target `D−19`). Alice's ETH claim must be finalized before `T_reveal` (`M_A`). BTC: `k_fund = 3`, Alice gets 3 confirmations before `T_b`, `k_refund = 5`. Bob never acts on Alice's NOID funding before 18 blocks | deep BTC/ETH reorgs beyond these depths. Acceptable at trial sizes |
 | T5 | **Fee-floor liveness failure.** `F_max` < local relay floor (raised to 0.9 × median of the last 50 fees under pressure) | the claim (or refund) cannot be relayed. If this lasts past `D`, Bob loses | `F_max ≥ max(50,000, 3 × estimateFeeDetailed(1,1))` at lock time. Submit to nodes not under pressure (the floor is per-node). `B_fee = 60` | a sustained network-wide floor above `F_max` (Q6). The consensus minimum for a 1-in/1-out close is fixed at 5,800 (no growth burn) |
 | T6 | **Epoch-anchor expiry mid-swap** | a pending claim is dropped at the 144-block boundary | client R re-proves at once. (I1) budgets `B_epoch` and `2·P_auth`. Avoid proving in the last `⌈P_auth/τ_fast⌉+3` blocks of an epoch (4 blocks for `P_auth` = 20 s): wait for the boundary instead | none, provided `P_auth ≪ 144 × 20 s` (Q4: answered by M0.5) |
-| T7 | **v2.1 activation straddle** (V3→V4 at 279,370) | a proof made for one version is rejected under the other (`pool.rs:L486-L493`) and in the final-admission check | (I5): no swap window may contain 279,370. M2 starts at ≥ 279,370 + 18 on upgraded nodes. The tool reads `owner_authorization_version(tip+1)` at proof time | future forks: the tool checks for scheduled version changes in the node's params before every swap |
+| T7 | **v2.1 activation straddle** (V3→V4 at 279,370) | a proof made for one version is rejected under the other (`pool.rs:L486-L493`) and in the final-admission check | (I5): no swap window may contain 279,370. M2 starts at ≥ 279,370 + 18 on upgraded nodes. The tool picks the version for the call height with `auth_version_at` (`swap-cli/src/params.rs:955`, `swap-cli/src/client/raw.rs:179,286`), a mirror of the node's rule with one hardcoded activation height (`parano1d/harness/src/lib.rs:222`); nothing is read from the node | future forks: not covered. The tool does not read a fork schedule from the node, so a further fork height would need a code change (constant, `check_i5`, `auth_version_at`) and a new profile review before any swap whose window could reach it |
 | T8 | **Poseidon2b cryptanalytic margin.** The hashlock is a preimage of `Addr`. All round constants are ≤ 0x7 and MDS entries ≤ 0x2000, i.e. in a small tower subfield, which suggests Frobenius-type structure. The IV lanes (`L<<64, L`) are not obviously fixed by the subfield Frobenius, but **that is not an analysis** | a preimage attack lets anyone claim before the reveal (paying Bob), and the same attack would break every Parano1d address | **flag for cryptographer review (M4).** Keep trial amounts small | unknown until reviewed. Systemic to Parano1d, not specific to swaps |
 | T9 | **Secret reuse** | once `x` is public, every other lock under the same `H`/`A` is claimable by anyone. In the stock path, `m` also exposes `Addr(Derive(m,i))` for all `i` | fresh CSPRNG `x` per swap. The tool refuses a known `H` (local DB). Bob checks `getSlotsByOwner(A)` is empty. A stock-path `m` is never a real wallet master | user error outside the tool |
 | T10 | **Equivalence-proof soundness / ZK failure.** zkVM bug, guest/spec mismatch, wrong image ID, non-ZK proof type, or remote prover | unsound: Alice takes both. Non-ZK: Bob claims without locking. Remote prover: a third party learns `x` | pinned version and reproducible image ID. Differential tests vs `noid_poseidon2b`. Test vectors. No SP1 core/compressed proofs. Local proving only. Bob's post-reveal local recheck (diagnostic) | zkVM soundness assumptions. Review in M4 |
-| T11 | **ETH receiver rejects ETH.** `HTLC.claim` reverts if `A_eth` cannot accept ETH. `refund` reverts if `B_eth` cannot | if Alice's receiver rejects ETH and Alice reveals with a failing claim, `x` is public and Bob takes both. A rejecting `B_eth` means Bob cannot refund | `A_eth` and `B_eth` must be EOAs (checked with `eth_getCode == 0x`). Alice simulates `claim` with `eth_call` before broadcasting | smart-contract wallets unsupported in v1 |
+| T11 | **ETH receiver rejects ETH.** `HTLC.claim` reverts if `A_eth` cannot accept ETH. `refund` reverts if `B_eth` cannot | if Alice's receiver rejects ETH and Alice reveals with a failing claim, `x` is public and Bob takes both. A rejecting `B_eth` means Bob cannot refund | `A_eth` and `B_eth` must be EOAs (checked with `eth_getCode == 0x`). The claim is sent with a fixed gas limit and is never estimated or simulated: a remote `eth_call` or `eth_estimateGas` would carry the secret to a third-party node (`eth/scripts/live.js`, `claimGas`). The safeguards are the EOA check, the lock, amount and timelock checks, the cutoff and the fee plan. A receiver that rejects ETH, or a claim that runs out of gas, still publishes the secret | smart-contract wallets unsupported in v1 |
 | T12 | **Bitcoin fee/CPFP needs** | Alice's claim or Bob's refund is stuck. Stuck past the cutoff, Alice's claim converts into T3 | RBF signalling (`nSequence = 0xfffffffd`). Pre-signed fee ladder. An optional CPFP from the claimant's own output. Before `T_b`, nobody but Alice can spend, so there is no pinning. After `T_b`, a pinned Alice claim still exposes `x` in the mempool, and Bob claims NOID at once | fee spikes. Covered by the `T_b − 6` cutoff and `k_refund` |
 | T13 | **Free option** | Bob can wait to see the price move before locking, up to the lock-by height. Alice can wait before revealing, up to `T_reveal − M_A`. Bob not locking also ties up Alice's NOID until `D` | short windows (`B_bob ≤ 60` blocks, `W_A = 2 h`). Small amounts. Counterparty reputation. Optionally a premium paid up front out-of-band (not atomic) | inherent to HTLC swaps |
 | T14 | **Consensus does not enforce `check_call`** (terminal recipient, mode bits) in the HistoryStep circuit. Unverified (report "could not determine") | if not enforced, a block producer holding the public `x` could redirect Bob's NOID | **must be settled before M2** (Q2): code audit of `history_step.rs` / `region_source_binding.rs` plus a negative test on an isolated net | until settled, mainnet trials risk only the trial amount |
@@ -590,7 +590,8 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 | T17 | **Malicious ETH contract or wrong address** | Alice reveals to a fake HTLC | pinned deployment address and runtime code hash | — |
 | T18 | **Authorization capsule not actually ZK** (docs-only claim) | Bob's claim leaks `x` (harmless, already public). Alice's refund may leak her wallet's spend secret (a chain-wide issue) | audit item (Q3) | systemic |
 | T19 | **Privacy** | anyone can link the ETH/BTC leg to the NOID leg via `Addr(x)` | none in v1 (documented) | linkable |
-| T20 | **Clock / height misestimation** (Parano1d bursts faster than 20 s average) | Bob's window shrinks | `τ_fast` = 20 s is 1.5× nominal, beyond the Poisson p0.1 (~26 s/block over 600 blocks). Validate empirically (Q13) | hash-rate shocks |
+| T20 | **Clock / height misestimation** (Parano1d bursts faster than 20 s average) | Bob's window shrinks | `τ_fast` = 20 s is 1.5× nominal, beyond the Poisson p0.1 (~26 s/block over 600 blocks). Validate empirically (Q13) | hash-rate shocks. Consensus enforces no minimum time between blocks (`vendor/parano1d/noid_chain/src/consensus/timestamps.rs:4-12,41-58`: a timestamp must exceed the median of the last 11 and stay within 120 s of the validating node's clock, `params.rs:131,134`; the parent's timestamp only feeds the difficulty target, `header.rs:218-228`), so a surge of hashrate shortens blocks until the difficulty adjustment (ASERT) catches up, and block-count budgets (`B_post`, the claim window, `D`) can pass in less wall-clock time than planned (see also T21) |
+| T21 | **Concentrated hashrate on Parano1d.** One party (possibly Alice, or a partner of hers) mines a large share of the blocks. **Measured 2026-11-08** from the node's own block headers: one address mined 52.7 % of the last 24 hours (2,857 blocks) and between 45 % and 63 % of every 2,880-block day for the 20 days before; before that no address had more than about 31 % of a day. The deepest reorg seen in the node logs was 3 blocks | such a miner can orphan the block that carries Bob's claim by out-mining the honest chain inside the 18-block window (the consensus rule refuses deeper reorgs, `CONSENSUS_FINALITY_DEPTH`), and can try again after each failure. If it holds the claim out until `D`, Alice recovers the NOID after `D` and keeps the ETH she claimed: she takes both, and the victim is Bob. **Modelled** (`docs/formal/t21_race.py`, report `docs/miner-concentration.md`: the exact optimum of the repeated attack with a private lead, depth cap 18, Bob's re-send after 2 block events; checked by enumeration, closed forms and Monte Carlo). Chance that the attack works at the span the design guarantees (production 361 blocks / sepolia profile 132), clean start, with free ties (an equal-length chain wins a fair coin and costs nothing when it loses; the strict rule without ties is a lower bound): share 0.40: under 0.0001 % / 0.35 %; 0.45: 0.29 % / 9.2 %; 0.50: 28.5 % / 49.6 %; 0.53: 72 % / 76 %; 0.60: 98.7 % / 98.2 %; 0.715 and above: certain. **For a share above 0.50 the clean start is a lower bound:** her lead grows for free before the swap, and with a reserve of 20 blocks the chance at 0.53 is 90 % / 97 % (strict ties), with 40 blocks 99 % / 100 % | the claim must be final (18 blocks after inclusion), not merely included (T4). The wider the span between the reveal and `D` (`B_post`), the more consecutive attempts the attacker needs, so the odds fall with a longer window **only for a share up to about 0.45 to 0.47**: under 1 % at the guaranteed production span needs a share of at most 0.45 (free ties; 0.47 with strict ties), 0.40 for the sepolia profile (0.42 strict); at 0.50 even 2,500 blocks leave 1.4 % (free ties); above 0.50 the chance levels off (about 49 % at 0.53 clean start, strict ties) however long the window is. A re-send delay of 10 or 20 blocks (an operator running the step by hand) turns 0.03 % at 0.45 into 3.6 % or 15 %. **Recommendation:** swaps in which Bob locks ETH against an unknown Alice are still not recommended, and amounts stay tiny, although the Bob-side screen described next is built. A Bob-side check of who mined the recent blocks before locking is feasible from Bob's own node (`paranoid_getBlockHeader` returns the miner address); the model suggests a refusal threshold of about 35 % of 2,880 blocks (production profile). The gate is a screen, not a defence; its design and built behaviour are in `docs/bob-concentration-gate.md`. **Built 2026-11-08** (production refuses above 35 %, sepolia and rehearsal warn above 28 %) | **open**: no protocol-level defence against a majority. The stated assumption (no party holds a majority) is **false at the time of measurement**. Limits of the measurement: an operator can use several addresses (a share is a lower bound), the block template accepts any miner address, and a party that is not Alice gains nothing. See `docs/miner-concentration.md` for the model, its assumptions and the decisions it leaves |
 
 ---
 
@@ -606,17 +607,17 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 | `F_max` | `max(50,000 μNOID, 3 × estimateFeeDetailed(1,1))`, ≤ 1% of `V` | 50,000 ≈ 8.6 × the 5,800 minimum |
 | `V` | `Q_net + F_max` | Bob gets ≥ `Q_net` |
 | `τ_nom` / `τ_fast` | 30 s / 20 s | |
-| `B_final`, `B_epoch`, `B_fee`, `B_safety` | 18, 144, 60, 30 blocks | `B_post = 252` (was 242 with `B_safety` = 20) |
+| `B_final`, `B_epoch`, `B_fee`, `B_safety` | 19, 144, 60, 31 blocks | `B_post = 254` (was 252 until 2026-11-08 and 242 with `B_safety` = 20) |
 | `P_auth` budget | 20 s (×2) | M0.5 measurement: worst p99 6.0 s on the owner's WSL2 VM, × 3, rounded up (§4.1). Was 600 s (placeholder) |
-| Bob claim target | include by `D − 18` | hard limit `D − 1` |
+| Bob claim target | include by `D − 19` | hard limit `D − 1` |
 | ETH `W_A` / `W_A_min` / `M_A` / `Δ_detect` | 7,200 / 5,400 / 1,800 / 300 s | |
 | ETH confirmations | Alice waits for Bob's lock to be **finalized** | |
-| ETH `D_offset` | 735 blocks (~6 h 08 m @30 s) | lock-by = `D − 629` (was 725 and `D − 619` with `B_safety` = 20; 780 and `D − 677` with the 600 s placeholder) |
+| ETH `D_offset` | 738 blocks (~6 h 09 m @30 s) | lock-by = `D − 631` (was 735 and `D − 629` until 2026-11-08; 725 and `D − 619` with `B_safety` = 20; 780 and `D − 677` with the 600 s placeholder) |
 | BTC `N_btc`, `k_fund`, Alice cutoff, `k_refund` | 24, 3, `T_b − 6`, 5 | BTC p99.9 at 660 s/block |
-| BTC `D_offset` | 2,050 blocks (~17 h 05 m @30 s) | lock-by = `D − 1,871` (was `D − 1,861` with `B_safety` = 20; 2,100 and `D − 1,919` with the 600 s placeholder) |
+| BTC `D_offset` | 2,050 blocks (~17 h 05 m @30 s) | lock-by = `D − 1,873` (was `D − 1,871` until 2026-11-08, `D − 1,861` with `B_safety` = 20; 2,100 and `D − 1,919` with the 600 s placeholder) |
 | Bob lock window `B_bob` | ≤ 60 blocks after funding finality | |
 | Fork rule | the window excludes 279,370. Start at ≥ 279,370 + 18 | (I5) |
-| π | RISC Zero, pinned version and image ID, local prover, journal `(tag, variant, H, A)` | §5.4 |
+| π | RISC Zero, pinned version and image ID, local prover, journal `variant ‖ H ‖ A` (65 bytes) | §5.4 |
 | ETH contract | `HTLC.sol` at a pinned address and code hash. EOAs only | |
 
 **Re-derivation after M0.5 (Q4)** (values of 2026-11-04, with `B_safety` = 20; superseded by the 2026-11-05 step below). Replacing `2·P_auth` = 1,200 s by 40 s lowers the right-hand side of (I1) by 58 blocks, which is more than the 10-block threshold, so the offsets were recomputed with the same rule as before, `D_offset = B_fund(10) + B_final(18) + B_bob(60) + RHS(I1) + margin`:
@@ -625,11 +626,20 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 - Nothing else moves: `W_A`, `N_btc` and every other row are unchanged, so Alice's lockup only drops by 55 blocks (about 27 min at 30 s) for ETH and 50 blocks (about 25 min) for BTC. The proving time was never the dominant term; Alice's reveal window and Ethereum/Bitcoin latency are.
 - **Propagated 2026-11-04:** §4.3–§4.5, the T6 advice (4 blocks for `P_auth` = 20 s) and decision 6 in `PROJECT.md` now carry these values. `margin` (18 blocks ETH, 101 BTC) is a deliberate rounding-up of `D_offset`, not an output of the formula; it is named in §4.2 since the same date.
 
-**`B_safety` raised from 20 to 30 (2026-11-05, production profile only).** `B_safety` was raised from 20 to 30 because the explicit-state model check (`docs/formal/README.md`, section 7) showed that 20 blocks equals exactly one adversarial reorg of Bob's close with nothing on top. `D_offset` was recomputed with the same rule:
+**`B_safety` raised from 20 to 30 (2026-11-05, production profile only; the values below are superseded by the 2026-11-08 step after it).** `B_safety` was raised from 20 to 30 because the explicit-state model check (`docs/formal/README.md`, section 7) showed that 20 blocks equals exactly one adversarial reorg of Bob's close with nothing on top. `D_offset` was recomputed with the same rule:
 - `B_post = 144 + 60 + 18 + 30 = 252`.
 - ETH: `RHS = ⌈(7,200 + 300 + 40)/20⌉ + 252 = 377 + 252 = 629` (minimum window: `⌈(5,400 + 300 + 40)/20⌉ + 252 = 287 + 252 = 539`). `10 + 18 + 60 + 629 = 717`; `D_offset` = 735 leaves the same 18 blocks of margin. Bob's lock-by is `D − 629` / `D − 539`, which is `H_create + 106` / `H_create + 196` as before (both `D_offset` and RHS grew by 10), so Bob's time to lock is unchanged and only Alice's lockup grows, by 10 blocks (about 5 min at 30 s).
 - BTC: `RHS = ⌈(32,323 + 40)/20⌉ + 252 = 1,619 + 252 = 1,871`. `88 + 1,871 = 1,959`; `D_offset` stays 2,050 and the margin shrinks from 101 to 91 blocks. Bob's lock-by moves 10 blocks earlier, from `H_create + 189` to `H_create + 179`.
 - The `rehearsal` and `sepolia` profiles keep `B_safety` = 5 and their numbers.
+
+**Finality depth corrected from 17 to 18 (2026-11-08).** The vendored node's code governs: `is_final(h, tip)` is `tip ≥ h + 18` (`CONSENSUS_FINALITY_DEPTH` = 18), and `reorg_allowed` lets a fork replace up to 18 descendants of the finalized checkpoint, so a block at height `h` can still be replaced while the tip is `h + 17`. The design, the tool and the other documents had counted 17 (the upstream documents' "17 blocks of rollback" is the same rule counted from the other side). The design's own convention is kept: `NF` = 18 is the chain fact, and `B_final = NF + 1 = 19` is the budget term (the inclusion block plus the finality depth). The rule for `D_offset` is unchanged: `D_offset = B_fund + B_final + B_bob + RHS(I1) + margin`.
+- Bob's claim target is `h ≤ D − 19`. Alice's refund is first includable at height `D` (the tip is then `D − 1`), and a claim included at `h` is final at tip `h + 18`, so `h + 18 ≤ D − 1`.
+- Production `B_safety` goes from 30 to 31: the zero-slack one-reorg term of the formal model is `NF + RD + PA + 1` = 21 (it was 20), plus 4 for the T6 guard and 6 for restarts. `B_post = 144 + 60 + 19 + 31 = 254`.
+- ETH: `RHS = 377 + 254 = 631` (minimum window: `287 + 254 = 541`). `10 + 19 + 60 + 631 = 720`; `D_offset` = 738 leaves the same 18 blocks of margin. Bob's lock-by is `D − 631` / `D − 541`, which is `H_create + 107` / `H_create + 197` (it was 106 / 196), and Alice's lockup grows by 3 blocks.
+- BTC: `RHS = 1,619 + 254 = 1,873`. `89 + 1,873 = 1,962`; `D_offset` stays 2,050 and the margin shrinks from 91 to 88 blocks. Bob's lock-by is `H_create + 177`.
+- `rehearsal` and `sepolia` keep `B_safety` = 5: `B_post` 34, `RHS(I1)` 69 / 63 and 252 / 210, `D_offset` 122 and 302 (see the profile table below).
+- The full "Alice never reveals" cycle, from creation to her final refund, is `D_offset + 18`: 756 blocks (production), 140 (rehearsal), 320 (sepolia).
+- The measurements in §9.3 and the earlier derivations above are kept as they were; where they say "17 blocks" they are the old rule.
 
 **Profiles (2026-11-05).** `swap-cli` runs the same (I1)/(I2)/(I3) formulas under three parameter sets. `production` is the table above. `rehearsal` (a local Hardhat chain, instant Ethereum finality) and `sepolia` (public Sepolia, real finality) shrink the budgets so that an abort path takes an hour or two instead of six, and cap the amounts. The derivation, the checker (`Gates::validate`) and the tests that pin the numbers are in `swap-cli/README.md`, "The rehearsal and sepolia profiles", and `swap-cli/src/params.rs`.
 
@@ -637,11 +647,11 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 |---|---|---|---|
 | `W_A` / `W_A_min` / `M_A` | 7,200 / 5,400 / 1,800 s | 600 / 480 / 300 s | 4,200 / 3,360 / 1,800 s |
 | `Δ_detect`, `2·P_auth` | 300 s, 40 s | 60 s, 40 s | 120 s, 40 s |
-| `B_epoch` / `B_fee` / `B_final` / `B_safety` → `B_post` | 144 / 60 / 18 / 30 → 252 | 0 / 10 / 18 / 5 → 33 | 0 / 10 / 18 / 5 → 33 |
-| `RHS(I1)`, full / minimum reveal window | 629 / 539 | 68 / 62 | 251 / 209 |
+| `B_epoch` / `B_fee` / `B_final` / `B_safety` → `B_post` | 144 / 60 / 19 / 31 → 254 | 0 / 10 / 19 / 5 → 34 | 0 / 10 / 19 / 5 → 34 |
+| `RHS(I1)`, full / minimum reveal window | 631 / 541 | 69 / 63 | 252 / 210 |
 | `B_fund` / `B_bob` / `margin` | 10 / 60 / 18 | 5 / 20 / 9 | 5 / 20 / 6 |
-| `D_offset` | 735 (≈ 6 h 08 m) | 120 (1 h) | 300 (2 h 30) |
-| Bob's lock-by, full / minimum window | `D − 629` / `D − 539` | `D − 68` / `D − 62` | `D − 251` / `D − 209` |
+| `D_offset` | 738 (≈ 6 h 09 m) | 122 (≈ 1 h 01 m) | 302 (≈ 2 h 31 m) |
+| Bob's lock-by, full / minimum window | `D − 631` / `D − 541` | `D − 69` / `D − 63` | `D − 252` / `D − 210` |
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s |
 | Caps | none | ≤ 20 NOID, ≤ 0.01 ETH, chain 31337 only | ≤ 20 NOID, ≤ 0.01 ETH, chain 11155111 only |
@@ -688,10 +698,12 @@ Source: `docs/live-run-1.md` (log and "Result" table). One swap, raw variant, 10
 | Equivalence proof π (raw, 2^18 segments, 3 GB VM) | 2,090 s prove, under 1 s verify | the VM was contended (a disk inventory ran at the same time). 1,180 s on 2026-11-03 on an idle VM. Receipt 223,356 bytes, image ID as pinned |
 | Fees paid | funding 9,000 μNOID (from the wallet); close 5,800 μNOID (from the contract) | Bob received 9,994,200 μNOID. `max_fee` was 50,000 |
 
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected. The spans of 17 blocks in the table are what the tool then called final; the chain needed one more block.
+
 **Limits of this evidence.** It is one sample, on a self-swap, with a local Ethereum chain whose `finalized` tag equals `latest`: Ethereum finality (the `M_A` and `W_A` terms), public RPC limits and Sepolia latency were not exercised. (Run 3, below, exercised them.) The stock variant, the abort paths (Bob refunds at `T_reveal`, Alice recovers at `D`), the `F_max`-burn early close and a conflicting third-party close were not run.
 
 **Budgets it supports.**
-- `B_final` = 18: the claim became final 17 blocks after inclusion at the measured pace, as the rule says.
+- `B_final` = 18: the claim became final 17 blocks after inclusion at the measured pace, as the rule says. (Erratum (2026-11-08): the finality depth is 18, so `B_final` is 19 now and the claim was final one block later than this line says; see §9.1.)
 - `P_auth` ≤ 20 s: 3 s measured on the real claim, with room (§4.1).
 - The fee cap: the real close cost 5,800 μNOID, the minimum, so `F_max` = 50,000 (about 8.6 times that) was never close to binding.
 
@@ -716,10 +728,12 @@ that run 1 could not measure:
 | Equivalence proof π (raw, 2^18 segments, 8 GB host, VM idle) | 1,510 s | 2,754,050 user cycles, receipt 223,356 bytes, same image ID |
 | Whole run, go-ahead → Bob's NOID final | 01:32 → 02:47 UTC: 1 h 15 (44 min after funding) | the 2 h 30 deadline had 228 blocks left at the claim |
 
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected. The 17-block spans to "final" in this table are the old tool's rule.
+
 **Budgets it supports.** `eth_finality_s` = 1,140 s is realistic for Sepolia (1,131 s measured), with the remark that it is
 a lower bound at a quiet hour, not a worst case; `M_A` = 1,800 s left Alice 17 minutes at the full window; the (I1)
 budget `Δ_detect + 2 P_auth` (160 s) covered the measured 84 s from reveal to submission. The `sepolia` profile's
-`D_offset` = 300 is comfortable for the happy path; the abort paths under it (2 h 30 and 2 h 40 cycles) are not yet run.
+`D_offset` = 300 (302 since 2026-11-08) is comfortable for the happy path; the abort paths under it (2 h 30 and 2 h 40 cycles) are not yet run.
 
 ## 10. Implementation plan
 

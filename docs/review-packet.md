@@ -168,7 +168,7 @@ From `docs/protocol-design.md` §4.2, as implemented in `swap-cli/src/params.rs`
                      B_post = B_epoch + B_fee + B_final + B_safety
 (I2) Alice safety:   reveal only if now ≤ T_reveal − M_A and Bob's lock is finalized
 (I3) Alice liveness: T_reveal − t_b ≥ W_A_min
-(I4) Hard rule:      Bob's claim included at h ≤ D − 1; target h ≤ D − 18
+(I4) Hard rule:      Bob's claim included at h ≤ D − 1; target h ≤ D − 19
 (I5) Version:        no owner-authorization version change in [H_create, D + B_post]
 D_offset = B_fund + B_final + B_bob + RHS(I1)(W_A) + margin,   D = H_create + D_offset
 Bob's T_reveal = min(t_now + W_A, T_max), refused below W_A_min (params.rs choose_t_reveal)
@@ -176,11 +176,11 @@ Bob's T_reveal = min(t_now + W_A, T_max), refused below W_A_min (params.rs choos
 
 `choose_t_reveal` (`params.rs` L685 to L692) refuses Bob's lock in two cases: `h_now` is above the minimum-window
 lock-by height `D − RHS(I1)(W_A_min)`, or `h_now` is more than `B_bob` blocks after the height at which the funding is
-final. The lock-by values `D − 629`, `D − 68` and `D − 251` in the table below are nominal (they belong to the full
+final. The lock-by values `D − 631`, `D − 69` and `D − 252` in the table below are nominal (they belong to the full
 reveal window); the hard limit is the minimum-window height together with the `B_bob` rule. If the funding is included
-at about `h_create` and is final `B_final` = 18 blocks later, the `B_bob` limit comes first in every profile: about
-`h_create + 38` against `D − 209` = `h_create + 91` under `sepolia`, `h_create + 78` against `D − 539` =
-`h_create + 196` under `production`, and `h_create + 38` against `D − 62` = `h_create + 58` under `rehearsal`
+at about `h_create` and is final 18 blocks later (`NOID_FINALITY_DEPTH`), the `B_bob` limit comes first in every profile: about
+`h_create + 38` against `D − 210` = `h_create + 92` under `sepolia`, `h_create + 78` against `D − 541` =
+`h_create + 197` under `production`, and `h_create + 38` against `D − 63` = `h_create + 59` under `rehearsal`
 (arithmetic from the constants, not a measurement). Section 10 has the operational consequence seen in run 13.
 
 `Gates::validate` (`params.rs`) also requires, for every profile: `M_A > eth_finality`;
@@ -188,7 +188,7 @@ at about `h_create` and is final `B_final` = 18 blocks later, the `B_bob` limit 
 `W_A_min ≥ DE + eth_finality + RA + M_A` (one Ethereum reorg of Alice's claim; from `docs/formal/README.md` §7);
 `tx_grace ≥ 2·RA`; `tx_grace + RA + DE ≤ M_A`; `W_A < W_A_min + min_cancel_age + abort_after_cancel`;
 `D_offset` equal to the derived value; the epoch-end proving guard (`⌈P_auth/τ_fast⌉ + 3` = 4 blocks) fits in
-`B_safety`; `B_final` = 18.
+`B_safety`; `B_final` = `NOID_FINALITY_DEPTH` + 1 = 19.
 
 Current numbers, read from `swap-cli/src/params.rs` (`PRODUCTION`, `REHEARSAL`, `SEPOLIA`); derived rows computed
 from them with the formulas above:
@@ -201,17 +201,17 @@ from them with the formulas above:
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s |
 | `DE` / `RA` / `tx_grace` | 120 / 120 / 600 s | 60 / 60 / 120 s | 120 / 120 / 600 s |
 | `min_cancel_age` / `abort_after_cancel` | 600 / 3,600 s | 120 / 600 s | 600 / 3,600 s |
-| `B_epoch` / `B_fee` / `B_final` / `B_safety` | 144 / 60 / 18 / 30 | 0 / 10 / 18 / 5 | 0 / 10 / 18 / 5 |
-| `B_post` | 252 | 33 | 33 |
-| RHS(I1), full / minimum window | 629 / 539 | 68 / 62 | 251 / 209 |
+| `B_epoch` / `B_fee` / `B_final` / `B_safety` | 144 / 60 / 19 / 31 | 0 / 10 / 19 / 5 | 0 / 10 / 19 / 5 |
+| `B_post` | 254 | 34 | 34 |
+| RHS(I1), full / minimum window | 631 / 541 | 69 / 63 | 252 / 210 |
 | `B_fund` / `B_bob` / `margin` | 10 / 60 / 18 | 5 / 20 / 9 | 5 / 20 / 6 |
-| `D_offset` | 735 (about 6 h at 30 s) | 120 | 300 (about 2 h 30) |
-| Bob's lock-by, full (nominal) / minimum window (the hard limit, with `B_bob`) | `D − 629` / `D − 539` | `D − 68` / `D − 62` | `D − 251` / `D − 209` |
+| `D_offset` | 738 (about 6 h at 30 s) | 122 | 302 (about 2 h 30) |
+| Bob's lock-by, full (nominal) / minimum window (the hard limit, with `B_bob`) | `D − 631` / `D − 541` | `D − 69` / `D − 63` | `D − 252` / `D − 210` |
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` |
 | Amount caps, Ethereum chain | none, any chain | 20 NOID, 0.01 ETH, chain 31337 | 20 NOID, 0.01 ETH, chain 11155111 |
 | Second node required before Bob's lock and Alice's reveal (`requires_second_node`; `--single-node-ok` turns it off) | yes | no | yes |
 
-Common to all profiles (`params.rs`): `B_FINAL` = 18 (finality), `B_EPOCH` = 144 (the chain's epoch),
+Common to all profiles (`params.rs`): `NOID_FINALITY_DEPTH` = 18 (finality: a block is final at tip ≥ height + 18) and `B_FINAL` = 19 (its budget term), `B_EPOCH` = 144 (the chain's epoch),
 `MIN_CLOSE_FEE` = 5,800 μNOID, trials only from height 279,388 (`TRIAL_START_HEIGHT` = activation 279,370 + 18).
 Fee cap: v1 `F_max = max(50,000, 3 × estimateFeeDetailed(1,1))`, v2 `max(50,000, 5 × floor_seen)`, and at most
 1 % of the amount in both (`F_MAX_*` constants). `B_epoch` = 0 in the two small profiles accepts the risk of a
@@ -237,7 +237,7 @@ test in the repository or a recorded scratch run shows it), **verified live** (s
 | A8 | A Parano1d authorization proof hides `s` (witness hiding) | assumed | upstream docs only (`docs/parano1d-capabilities.md` §3; Q3). If it does not hold, Bob's claim leaks a secret that is already public, but Alice's refund may leak the spend secret of her wallet, a chain-wide issue (`docs/protocol-design.md` §8 T18) |
 | A9 | The mempool evicts a pending call when its branch would flip at the next height; last inclusion `D − 1` | verified by source reading | `docs/review-1.md` #5 (`noid_mempool/src/contracts.rs:92-113`) |
 | A10 | An authorization proof is bound to its branch and epoch anchor, not the exact call height | verified live, one sample | run 1: proved for 280,658, included at 280,659, a gap of one block, on a self-swap (`docs/review-1.md` "Applied" item 9; `docs/protocol-design.md` §9.3, "Limits of this evidence") |
-| A11 | Finality is 18 blocks, at most 17 blocks of rollback | assumed | upstream docs (`docs/parano1d-capabilities.md` §4: `parameters.md:L11`, `lifecycle.md:L85-L89`) |
+| A11 | Finality is 18 blocks after inclusion (`is_final`: tip ≥ height + 18); the upstream documents' "at most 17 blocks of rollback" is the same rule counted from the other side | read in the vendored code; the documents and the tool counted 17 until 2026-11-08 | `consensus/header.rs` (`is_final`), `consensus/fork_choice.rs` (`reorg_allowed`) in the vendored node; `docs/parano1d-capabilities.md` §4 |
 | A12 | First-seen per input slot, no replace-by-fee | verified by source reading | `docs/review-1.md` R1 (`pool.rs:1296-1297, 1334-1356`) |
 | A13 | A stuck minimum-fee close blocks Bob for at most one epoch (144 blocks) | assumed | `docs/protocol-design.md` §8 T2; Q1 not run |
 | A14 | `max_fee < 5,800` locks both branches forever; the tool refuses it | verified by test | `docs/review-1.md` R3 (scratch run); `TASKS.md` M0.6 (`check_swap_params`) |
@@ -255,8 +255,9 @@ test in the repository or a recorded scratch run shows it), **verified live** (s
 | A26 | Each party reads each chain through two independent nodes | check exercised live; independence assumed | The two-node check ran once, in run 12 (`docs/live-run-12.md`). On Parano1d each side's second node was the counterparty's own node, reached through a tunnel, and both machines were on one private network, so the nodes were not independent; on Ethereum each side used two different public endpoints. Required before Bob's lock and Alice's reveal unless `--single-node-ok` is set (`swap-cli/src/params.rs` `requires_second_node`) |
 | A27 | Each party is online inside its own window | assumed | `docs/protocol-design.md` §2.4, §8 T3 |
 | A28 | The secret stays sealed until the reveal (Argon2id + XChaCha20-Poly1305 file, never on argv) | verified by test | `TASKS.md` M2.3, M2.7a; `SECURITY.md` rule 3 |
-| A29 | The model's timeout relations hold under its bounded adversary | verified by test on scaled-down sets only | `docs/formal/README.md` §3: the model ran on a toy set and on production divided by about 10 and by 6, each with `B_safety` = `NF` + 3. The production column was checked against the inequalities only, with the old values (`B_safety` 20, `B_post` 242, `RHS(I1)` 619, `D_offset` 725). The current numbers (30, 252, 629, 735) are enforced in `Gates::validate` but were never run in the model. `DE` and `RA` are the model author's own assumptions, not measured. The model has not been reviewed independently |
+| A29 | The model's timeout relations hold under its bounded adversary | verified by test on scaled-down sets only | `docs/formal/README.md` §3: the model ran on a toy set and on production divided by about 10 and by 6, each with `B_safety` = `NF` + 3. The production column was checked against the inequalities only, with the zero-slack values of the model (since 2026-11-08: `NF` 18, `B_safety` 21, `B_post` 244, `RHS(I1)` 621, `D_offset` 728; before that 17, 20, 242, 619, 725). The tool's numbers (31, 254, 631, 738) are enforced in `Gates::validate` but were never run in the model. `DE` and `RA` are the model author's own assumptions, not measured. The model has not been reviewed independently |
 | A30 | A secret is never reused across swaps | assumed (user discipline) | Once the secret is public, every other lock under the same `H` or `A` is claimable by anyone; the design says the tool refuses a known `H` from its local record and Bob checks that `getSlotsByOwner(A)` is empty (`docs/protocol-design.md` §8 T9). Not re-verified here |
+| A31 | No party holds a majority of Parano1d's hashrate (so that a miner who is Alice cannot keep Bob's claim from becoming final until `D`) | **false at the time of measurement** (2026-11-08) | One address mined 52.7 % of the last 24 hours and between 45 % and 63 % of every 2,880-block day for 20 days, read from the node's own block headers. Above half of the hashrate no window length helps. Modelled, not tested on a chain; the review status of the model is in the header of `docs/miner-concentration.md` (threat T21, `docs/protocol-design.md` §8; section 5.9). Partly mitigated in swap-cli (2026-11-08): under the `production` profile Bob's `lock_eth` is not offered while one address produced more than 35 % of the last 2,880 or 720 blocks (a screen, not a defence: `docs/bob-concentration-gate.md`) |
 
 ---
 
@@ -345,20 +346,20 @@ Ordered by how much rests on them.
 
 ### 5.6 Reorg and finality margins
 
-- **Claim.** Bob's claim, targeted at `h ≤ D − 18`, is final before `D`; Alice's reveal is final before `T_reveal`.
+- **Claim.** Bob's claim, targeted at `h ≤ D − 19`, is final before `D`; Alice's reveal is final before `T_reveal`.
 - **What was checked.** A claim at `D − 1` reorged out and re-included at `≥ D` becomes invalid (`docs/review-1.md` R2).
-  The explicit-state model raised production `B_safety` from 20 to 30 because 20 "equals exactly one adversarial
+  The explicit-state model raised production `B_safety` from 20 to 30 (31 since the finality correction of 2026-11-08) because 20 "equals exactly one adversarial
   reorg of Bob's close with nothing on top" (`docs/protocol-design.md` §9.1). With all gates on, no invariant is
   violated in the model's bounds; but "the design's budgets have no unused slack against one more unit of reorg,
   eviction, detection delay, proving time or an unbounded mempool stall" (`docs/formal/README.md`, bottom line).
   The model ran on scaled-down parameter sets (a toy set and production divided by about 10 and by 6), not on the
   production numbers. The production column was checked against the inequalities only, and with the old values
-  (`B_safety` 20; 242, 619 and 725). The current values (`B_safety` 30; 252, 629 and 735) are enforced in
+  (`B_safety` 20; 242, 619 and 725; the model's zero-slack set is 21; 244, 621 and 728 since 2026-11-08). The current values (`B_safety` 31; 254, 631 and 738) are enforced in
   `Gates::validate` and were never run in the model. `DE` and `RA` are the model author's own assumptions
   (`docs/formal/README.md` §3, §7, "Applied 2026-11-05").
   The engine follows inclusion until final and goes back on a reorg (REVIEW-2 F6, closed in REVIEW-3).
-- **Not known.** Whether removed contract calls are re-admitted to the mempool after a reorg (Q14); the real
-  block-interval distribution (Q13); deeper Ethereum reorgs. The model has not been reviewed independently.
+- **Not known.** Whether removed contract calls are re-admitted to the mempool after a reorg (Q14; source reading says no, section 5.9); the real
+  block-interval distribution (Q13); deeper Ethereum reorgs. The T21 model (`docs/formal/t21_race.py`) was reviewed independently twice on 2026-11-08 and its figures reproduced by a separate implementation; the repeated game with ASERT and timestamp manipulation are not covered.
 - **What would settle it.** An isolated-net reorg test (Q14), header statistics (Q13), and a review of
   `docs/formal/model.py`.
 
@@ -370,7 +371,7 @@ Ordered by how much rests on them.
   mutants, all caught (`docs/poseidon-leg.md` §7); two reviews of the Poseidon port
   (`docs/poseidon-evm-review.md`, `docs/poseidon-v2-review.md`).
 - **Known limits.** A receiver that rejects ETH makes `claim` revert after the secret is already in calldata; Bob can
-  then take both legs (`docs/protocol-design.md` §8 T11). The tool requires EOAs and simulates locally. A `poseidon`
+  then take both legs (`docs/protocol-design.md` §8 T11). The tool requires EOAs (`eth_getCode == 0x`) and sends the claim with a fixed gas limit; it never estimates or simulates the claim, because that would send the secret to the node first. A `poseidon`
   claim costs 517,084 gas on mainnet and 689,324 on Sepolia; a claim that runs out of gas still publishes the secret
   (`eth/contracts/HTLCPoseidonV2.sol` "COST AND GAS"; `docs/live-run-8.md` "What it showed"). The reveal's fixed limit
   of 1,000,000 had 31 % headroom on Sepolia, and the cause of the higher Sepolia gas is, in the run log's words, "an
@@ -404,9 +405,40 @@ From `docs/protocol-design.md` §9.2, with the later status from `TASKS.md` and 
 | Q11 | RISC Zero ZK claim, cycles, time, receipt size | Measured (2,752,498 user cycles raw, receipt 223,356 bytes; `equiv/README.md` §6); the ZK citation for the pinned version is still to add (`TASKS.md` M1.2) |
 | Q12 | Bob's output slot taken before inclusion | Open |
 | Q13 | Block-interval distribution | Open |
-| Q14 | Reorged calls re-admitted to the mempool? | Open |
+| Q14 | Reorged calls re-admitted to the mempool? | Source reading says no: the node only logs them and removes duplicates (`noid_mempool/src/pool.rs`, `readmit_after_reorg`); swap-cli proves and offers the claim again (5.9). Isolated-net test not run |
 | Q15 | `--expected-txid` preview/submit window | Open; run 2 showed that preview and send must be chained (`TASKS.md` M2.7) |
 | — | Is the claim proof bound to the exact call height? | Answered by run 1: no, to the branch and epoch anchor (A10) |
+
+### 5.9 Concentrated hashrate on Parano1d (threat T21)
+
+- **Claim (the protocol's assumption).** No party holds a majority of the hashrate. Then Bob's claim, once final (18 blocks after inclusion), cannot be
+  taken back, and the abort paths hold.
+- **What was measured.** From the node's own block headers (`paranoid_getBlockHeader`, field `miner`): one address mined 52.7 % of the last 24 hours
+  (2,857 blocks) and between 45 % and 63 % of every 2,880-block day for the 20 days before; before that no address had more than about 31 % of a day.
+  The deepest reorg seen in the node logs was 3 blocks. A miner address is where the reward goes, not who did the work, and one operator can use
+  several addresses, so a measured share is a lower bound (`docs/miner-concentration.md` §1).
+- **What was modelled.** The exact optimum of the repeated attack (a private lead, depth cap 18, Bob's re-send after a stated delay), checked by
+  enumeration, closed forms and Monte Carlo (`docs/formal/t21_race.py`). Above half of the hashrate no window length helps. At a 53 % share and
+  the production window the chance is about 55 % from a clean start (a lower bound) and about 90 % or more for a prepared attacker. Under 1 %
+  at the production window needs a share of at most 0.45 (free ties) or 0.47 (strict ties). A smaller miner is limited by the window and by how
+  quickly Bob re-sends: a re-send after 10 or 20 blocks (an operator who re-sends by hand needs minutes) turns 0.03 % at 0.45 into 3.6 % or 15 %.
+  The victim is Bob, the Ethereum side: Alice has claimed his ETH and takes the NOID back at `D`.
+- **What is done about it.** A Bob-side screen is built (2026-11-08; not yet independently reviewed): `swap-cli tick` reads who produced the last
+  2,880 and 720 blocks from Bob's own node's headers, and under the `production` profile does not offer `lock_eth` while one address produced more
+  than 35 % of either window or while the headers cannot be read in full, are stale, or the second Parano1d node disagrees (28 % and a warning only
+  under `sepolia` and `rehearsal`; the two largest together above 50 % only warn; an explicit flag waives the production refusals). It is a screen, not
+  a defence: it does not see an operator on several addresses, a pool, rented hashrate or a share that grows after the lock
+  (`docs/bob-concentration-gate.md`). The recommendation stays that swaps in which Bob locks ETH against an unknown Alice are not made with more
+  than tiny amounts.
+- **Not known.** The share an attacker would hold at the time of a swap (hashrate can move or be rented; the gate looks backwards); whether the
+  largest address is one operator or several; whether a reorg deeper than 3 blocks is possible in practice; the effect of timestamp choices on
+  the work of a private branch (the repeated game was not simulated with the difficulty rule; the model's review status is in the header of the
+  report).
+- **What would settle it.** A reviewer's read of the model and of the node's fork-choice and depth rules; a daily record of the concentration and of
+  reorg depths over time (`TASKS.md` T21-1, T21-4); an isolated-net reorg test (Q14).
+- **Re-send after a reorg.** The node does not put the transactions of a reverted block back into its mempool; swap-cli goes back to the state
+  `secret_seen` and offers the claim again on the next tick, and adds a note that starts with `ALERT:` (the watch loop can pass it on as a short message);
+  the sending is still a step the operator runs. An automatic re-send is not built (`docs/bob-concentration-gate.md`, "Bob's re-send after a reorg").
 
 ---
 
@@ -618,7 +650,7 @@ their secret is the public test vector `00 01 … 1f` (`SECURITY.md` rule 1).
 - **The opening cannot be recovered from chain** after it leaves the mempool; both parties must keep it
   (`docs/protocol-design.md` §8 T15).
 - **Alice's active wallet address must not change** before her refund (`docs/protocol-design.md` §8 T16).
-- **No version change in the swap window** (I5); future forks need the tool to read scheduled changes
+- **No version change in the swap window** (I5); the tool knows one hardcoded activation height (279,370) and reads no fork schedule from the node, so a future fork would need a code change and a new profile review
   (`docs/protocol-design.md` §8 T7).
 - **Fair exchange of value** (the free option, premiums) is out of scope (`docs/protocol-design.md` §8 T13).
 - **Privacy** is out of scope for v1 (T19).
@@ -644,7 +676,7 @@ was first written; they are kept here so a reviewer who holds an older copy can 
    correct; the other three documents now give the exact values. `docs/poseidon-evm.md` (about L156) still says
    "all <= 0x2000".
 2. **Old production timeouts in `docs/poseidon-leg.md` §3:** `D = creation + 725`, lock-by `D − 619`.
-   `swap-cli/src/params.rs` `PRODUCTION`: `D_offset` 735, lock-by `D − 629` (raised with `B_safety` 30 on 2026-11-05,
+   `swap-cli/src/params.rs` `PRODUCTION`: `D_offset` 735, lock-by `D − 629` (raised with `B_safety` 30 on 2026-11-05; 738 and `D − 631` since 2026-11-08,
    `docs/protocol-design.md` §9.1). Corrected in `docs/poseidon-leg.md`.
 3. **First live use of `production`.** `docs/protocol-design.md` §9.1 profile table said `production` was "exercised
    live" in runs 1 and 2; `docs/live-run-8.md` says run 8 was "the first live use of the `production` profile".
@@ -666,7 +698,7 @@ was first written; they are kept here so a reviewer who holds an older copy can 
    tests at M1.4b, 6 stdin and argument tests, and 2 dev-mode tests; left as it is.
 9. **Test counts in `PROJECT.md`.** Settled: `PROJECT.md`, `README.md` and this packet now give the same counts.
 10. **Comment on `PRODUCTION` in `params.rs`.** It reads "Section 9.1 as it stood on 2026-11-04", but the values include
-    `B_safety` 30 and `D_offset` 735, set on 2026-11-05.
+    `B_safety` 30 and `D_offset` 735, set on 2026-11-05 (31 and 738 since 2026-11-08).
 11. **Sepolia finality in `params.rs` module notes:** "about 13 min"; run 3 measured 18 min 51 s
     (`docs/protocol-design.md` §9.3). The budget used (1,140 s) matches the measurement.
 12. **Header of `docs/protocol-design.md`:** said "Live runs: 1 so far". Twelve are logged; corrected.
@@ -684,4 +716,8 @@ was first written; they are kept here so a reviewer who holds an older copy can 
     name.
 18. **Scope of the model check.** `docs/formal/README.md` §3 lists production `B_safety` 20 (and 242, 619, 725) as
     "relations only"; the model ran on the scaled sets, which use `B_safety` = `NF` + 3. The production numbers
-    changed after the run (252, 629, 735) and were not run (A29).
+    changed after the run (252, 629, 735; 254, 631, 738 since 2026-11-08) and were not run (A29).
+19. **Finality depth.** The documents and the tool counted a block as final at tip ≥ height + 17 and aimed Bob's claim
+    at `D − 18`; the vendored node's `is_final` is tip ≥ height + 18. Fixed 2026-11-08: `B_final` 19, claim target
+    `D − 19`, production `B_safety` 31, `B_post`, `RHS(I1)` and `D_offset` recomputed in every profile (tables above;
+    `docs/protocol-design.md` §9.1). The earlier reviews that confirmed the 17 rule carry an erratum note.

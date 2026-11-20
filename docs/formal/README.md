@@ -55,7 +55,7 @@ design and used only as a sensitivity run). The state stores only relative quant
 
 **Parano1d side** (design 2, 6, 8):
 - Alice's lock, funded by Alice, mined within `B_fund` blocks, final once `NF` more blocks are mined
-  (`NF` = 17 in production; `B_final = NF + 1`).
+  (`NF` = 18 in production; `B_final = NF + 1`).
 - Claim branch for heights `h < D`, recovery to Alice for `h >= D`. A pending close is evicted as soon as the next
   height would flip the branch, so the last inclusion height is `D - 1` (design I4).
 - A close pays Bob whoever submits it: Bob, or a third party holding the secret (design T1, T2).
@@ -118,23 +118,23 @@ needs in addition (derivations in section 7). Every parameter set below satisfie
 | `FE` (Ethereum finality) | 4 | 6 | 10 | 57 |
 | `DE` / `RA` (inclusion, reaction) | 1 / 1 | 1 / 1 | 1 / 1 | 5 / 3 |
 | `Delta_detect`, `P_auth` per proof, `RD` | 1, 1, 1 | 2, 1, 1 | 3, 1, 1 | 15, 1, 1 |
-| `NF` (`B_final = NF + 1`) | 2 | 2 | 2 | 17 |
-| `B_epoch` / `B_fee` / `B_safety` | 2 / 1 / 5 | 14 / 6 / 5 | 24 / 10 / 5 | 144 / 60 / 20 |
+| `NF` (`B_final = NF + 1`) | 2 | 2 | 2 | 18 |
+| `B_epoch` / `B_fee` / `B_safety` | 2 / 1 / 5 | 14 / 6 / 5 | 24 / 10 / 5 | 144 / 60 / 21 |
 | `B_fund` / `B_bob` / `margin` | 2 / 3 / 2 | 2 / 6 / 3 | 2 / 10 / 3 | 10 / 60 / 18 |
-| `B_post`, stall budget | 11, 3 | 28, 20 | 42, 34 | 242, 204 |
-| `RHS(I1)(W_A)` | 30 | 68 | 107 | 619 |
-| `D_offset` | 40 | 82 | 125 | 725 |
+| `B_post`, stall budget | 11, 3 | 28, 20 | 42, 34 | 244, 204 |
+| `RHS(I1)(W_A)` | 30 | 68 | 107 | 621 |
+| `D_offset` | 40 | 82 | 125 | 728 |
 | reorg / eviction budgets | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 | 1 / 1 / 1 |
 | arbitrary Bob's windows `w` | all of 1..23 | 15 sampled values | 14 sampled values | - |
 
-`python model.py relations` prints the checks; for production all of them hold (`619` and `725` reproduce the
-design's own numbers).
+`python model.py relations` prints the checks; for production all of them hold (the production set is the design's with the zero-slack `B_safety` = 21 of
+this model: `621` and `728`; the tool adds margin on top, see "Applied 2026-11-08" in section 7).
 
 How the scaled sets are made. The design's `tau_fast` is 20 s, so the tick is already the design's own unit; the
 large budgets (`W_A`, `M_A`, `FE`, `B_epoch`, `B_fee`, `D_offset`) are divided by about 10 (or 6) and rounded to keep
 every inequality true. Quantities that cannot shrink (one proof is one tick, noticing a drop is one tick, `NF` of at
 least 2, one block of inclusion delay) are kept. The slack of each model inequality is kept at about its production
-ratio, with one exception kept exactly: production has `B_safety = 20 = NF + RD + PA + 1` (zero slack), so every set
+ratio, with one exception kept exactly: production has `B_safety = 21 = NF + RD + PA + 1` (zero slack; 20 with `NF` = 17 before 2026-11-08), so every set
 uses `B_safety = NF + 3`. `D_offset` is recomputed from the design's formula, not scaled.
 
 Choices that are **mine, not the design's**: `DE`, `RA`, `RD`, the one-tick proof, and the budgets of one reorg, one
@@ -286,9 +286,9 @@ What these say:
 1. **The (I1) budget is exactly the model's worst case.** `Delta_detect`, `P_auth`, `RD` each +1 break S2 even though the
    scaled sets keep the production ratios. There is no cushion at Bob's lock-by height. The `margin` in `D_offset`
    (18 blocks in production) only helps a Bob who locks earlier than the lock-by height.
-2. **`B_safety` = 20 is exactly one NOID reorg.** The worst case: the close is mined, a reorg of depth `NF` drops it
+2. **`B_safety` = 21 is exactly one NOID reorg** (20 with `NF` = 17, before the finality correction of 2026-11-08). The worst case: the close is mined, a reorg of depth `NF` drops it
    when it is one block short of final, Bob notices (`RD`), proves (`PA`), the close is mined again and must be final:
-   `NF + RD + PA + 1 = 20`. With no NOID reorg `B_safety = 0` is enough; with the reorg, 19 is not. So the design's
+   `NF + RD + PA + 1 = 21`. With no NOID reorg `B_safety = 0` is enough; with the reorg, 20 is not. So the design's
    "restarts, RPC hiccups" slack has nothing left for restarts or hiccups on top of one adversarial reorg.
 3. **An unbounded stall is a violation** (design T2, open question Q1). If a conflicting minimum-fee close can sit in
    the mempool until the branch flips, Bob loses the NOID although every gate held. The budget `B_epoch + B_fee` is
@@ -340,7 +340,9 @@ t=25  BOB CRASHES
 and `W_A_min >= DE + eth_finality + RA + M_A`, with two new per-profile fields (`DE` = 120 / 60 / 120 s and `RA` = 120 / 60 / 120 s for
 production / rehearsal / sepolia: ten 12-s blocks, two polls; the local chain mines on demand), and the production `B_safety` is 30 instead of 20,
 so `B_post` = 252, `RHS(I1)` = 629 (full window) / 539 (minimum), `D_offset` = 735 (design 9.1; `swap-cli/src/params.rs`). `rehearsal` and `sepolia`
-keep their numbers (they accept the rotation and reorg risk by design) and pass the new checks without change. The table above quotes the values the model was run with (242 / 619 / 725 for production); production is now 252 / 629 / 735.
+keep their numbers (they accept the rotation and reorg risk by design) and pass the new checks without change. The scaled runs of this section were made with `NF` = 2 and are unchanged by the later correction; the production column was then 242 / 619 / 725 (`NF` = 17, `B_safety` 20 in the model) and the tool 252 / 629 / 735.
+
+**Applied 2026-11-08.** The finality depth is 18 (the vendored node's `is_final` is `tip >= height + 18`), not 17, so production `NF` = 18, `B_final` = 19 and the zero-slack `B_safety` = `NF + RD + PA + 1` = 21. The model's production set is now `NF` 18, `B_safety` 21, `B_post` 244, `RHS(I1)` 621, `D_offset` 728 (`python model.py relations`: every design relation holds). The tool's production `B_safety` is 31 (= 21 + the T6 guard 4 + 6 for restarts), `B_post` 254, `RHS(I1)` 631 (full window) / 541 (minimum), `D_offset` 738 (`swap-cli/src/params.rs`). The scaled sets (`NF` = 2, `B_safety` = `NF` + 3) do not change and were not run again.
 
 ## 8. What is abstracted away, and what the checker does not cover
 
@@ -366,7 +368,7 @@ keep their numbers (they accept the rotation and reorg risk by design) and pass 
   that reject ETH (T11)** are outside.
 - **Sampling.** Arbitrary Bob's windows in the two scaled runs are a boundary-value sample, and Bob cannot crash there.
   Both are exact in the toy run. The scaled sets are structured scalings of one design, not the design: the real
-  production state space (725 blocks, 360-tick windows) is far too large to enumerate here, and the relations
+  production state space (728 blocks, 360-tick windows) is far too large to enumerate here, and the relations
   in section 3 are the bridge.
 - **The model is mine.** It encodes my reading of the design; a different reading of "Bob learns the secret within
   `Delta_detect`" or of how fast a dropped close is noticed moves the exact thresholds above (not the structure).

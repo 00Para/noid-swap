@@ -213,7 +213,7 @@ fn client_r_builds_and_verifies_a_claim_for_a_poseidon_lock_and_the_self_test_re
     let p = poseidon_public(&s);
     let opening = p.opening().unwrap();
     let inst = NoidInstance { slot_index: 11, creation_id: 3, amount_micronoid: p.params.amount_micronoid };
-    let h = p.params.deadline_height - 18;
+    let h = p.params.deadline_height - 19;
     let plan = build_claim(claim_inputs(&p, &opening, &inst, h, &s)).unwrap();
     verify_intent_bytes(&plan.intent_bytes, h).unwrap();
     assert_eq!(plan.recipient.to_bech32(), p.params.bob_noid);
@@ -612,7 +612,7 @@ fn funded_bob_ready_to_lock() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s
 }
 
@@ -630,7 +630,7 @@ fn a_full_poseidon_swap_settles_and_pays_both_sides_without_any_equivalence_proo
     s.tick_both();
     let lag = s.world.borrow().finality_lag;
     s.world.borrow_mut().advance_eth(lag + 1);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })), "{}", s.bob_phase());
@@ -707,7 +707,7 @@ fn bob_never_locks_in_a_poseidon_swap_that_has_no_self_test_and_alice_takes_the_
     assert_eq!(ra.action.kind(), "refund_noid", "{ra:?}");
     s.world.borrow_mut().advance_noid(1);
     s.tick_alice();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{}", s.alice_phase());
     assert!(s.world.borrow().lock.is_none() && s.world.borrow().eth_payout.is_none());

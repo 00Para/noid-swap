@@ -96,7 +96,7 @@ fn bob_lock_submitted() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     let (_, rb) = s.tick_both();
     assert_eq!(rb.action.kind(), "lock_eth", "{rb:?}");
     assert_eq!(s.bob_phase(), "lock_submitted");
@@ -280,14 +280,14 @@ fn f12_alice_on_the_cli_path_reaches_lost_without_a_recorded_reveal() {
     s.tick_bob();
     // The tip is past D plus finality.
     let d = s.public.params.deadline_height;
-    let need = d + 18 + 1 - s.world.borrow().tip;
+    let need = d + 19 - s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(need);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "lost", "{:?}", s.alice.file.history.last());
 }
 
 /// Alice stays in `lock_final` (the reveal never leaves the tool), Bob refunds his ETH and it is final, the NOID instance is closed by
-/// somebody (her wallet) and the tip is past `D + 18`. `logs` are history entries written to Alice's file before.
+/// somebody (her wallet) and the tip is past `D + 19`. `logs` are history entries written to Alice's file before.
 fn lock_final_with_bob_refunded_and_instance_gone(logs: &[&str]) -> Scenario {
     lock_final_gone(logs, false)
 }
@@ -366,7 +366,7 @@ fn f12_a_reveal_intent_that_was_cancelled_is_no_trace_of_a_reveal() {
 #[test]
 fn f17_an_instance_that_was_alive_when_bobs_claim_branch_closed_is_never_called_lost() {
     // The reveal was sent (evidence) and Bob refunded his ETH, but he never claimed the NOID: at D the instance is still there. Alice's
-    // wallet then closes it (recovery), outside the tool. Gone + Bob's refund final + tip past D + 18 looked like "both legs lost".
+    // wallet then closes it (recovery), outside the tool. Gone + Bob's refund final + tip past D + 19 looked like "both legs lost".
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();
     s.alice.executor.offline_for.insert("reveal_eth");
@@ -387,7 +387,7 @@ fn f17_an_instance_that_was_alive_when_bobs_claim_branch_closed_is_never_called_
     s.world.borrow_mut().advance_noid(need);
     let r = s.tick_alice();
     assert!(r.events.contains(&"noid_instance_alive_at_d".to_string()), "{r:?}");
-    // Her wallet closes it; the chain goes on past D + 18.
+    // Her wallet closes it; the chain goes on past D + 19.
     s.world.borrow_mut().close_outside(true, None);
     let need = d + 19 - s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(need);
@@ -555,7 +555,7 @@ fn f4_the_runner_does_not_try_to_close_an_instance_that_is_gone() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     let d = s.public.params.deadline_height;
@@ -591,8 +591,8 @@ fn f3_a_funding_that_left_the_chain_and_came_back_is_counted_from_its_return() {
     }
     s.tick_both();
     assert_eq!((s.alice_phase().as_str(), s.bob_phase().as_str()), ("funded", "funded"));
-    // The first sight was 10 blocks ago: 7 more blocks would have made it "final" by the old count. It is not.
-    s.world.borrow_mut().advance_noid(7);
+    // The first sight was 10 blocks ago: 8 more blocks would have made it "final" by the old count (first sight + 18). It is not.
+    s.world.borrow_mut().advance_noid(8);
     s.tick_both();
     assert_eq!((s.alice_phase().as_str(), s.bob_phase().as_str()), ("funded", "funded"));
     s.world.borrow_mut().advance_noid(10);
@@ -613,7 +613,7 @@ fn f3_a_silent_reincarnation_between_two_polls_is_noticed_too() {
         let c = w.creation_seq;
         w.instance.as_mut().unwrap().creation_id = c;
     }
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     assert_eq!(s.alice_phase(), "funded", "the count restarted at the poll that saw the new incarnation");
 }
@@ -714,7 +714,7 @@ fn f16_done_is_settled_but_not_terminal() {
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
     s.world.borrow_mut().advance_eth(4);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_both();
     for f in [&s.alice.file, &s.bob.file] {
         assert!(matches!(f.phase, Phase::Alice(AlicePhase::Done { .. }) | Phase::Bob(BobPhase::Done { .. })), "{}", f.phase.name());
@@ -734,7 +734,7 @@ fn a_lock_intent_is_not_cancelled_while_its_lock_is_on_chain_even_if_this_poll_d
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     let mut bob = s.bob.file.clone();
     let (n, e, now) = observe(&s);

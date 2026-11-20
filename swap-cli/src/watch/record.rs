@@ -102,10 +102,27 @@ fn height_of(method: &str, result: &Value) -> Option<u64> {
     }
 }
 
+/// The header reply with its `miner` field replaced by a fixed label; any other shape is left as it is.
+fn redact_miner(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(obj) = v.as_object_mut() {
+        if obj.contains_key("miner") {
+            obj.insert("miner".into(), Value::String("redacted-in-recording".into()));
+        }
+    }
+    v
+}
+
 impl<R: JsonRpc> JsonRpc for RecordingRpc<R> {
     fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         let outcome = self.inner.call(method, params.clone());
-        if let Some(rec) = RecordedCall::from_outcome(method, &params, &outcome) {
+        // A block header names the address that received the block reward (`miner`). A recording may be shared or committed, and the
+        // watcher reads only the timestamp of the tip header, so the recorded copy carries no producer address (the caller still gets the real reply).
+        let recorded = match &outcome {
+            Ok(v) if method == "paranoid_getBlockHeader" => Ok(redact_miner(v)),
+            other => other.clone(),
+        };
+        if let Some(rec) = RecordedCall::from_outcome(method, &params, &recorded) {
             let mut st = self.state.lock().unwrap();
             if st.height.is_none() {
                 if let Ok(v) = &outcome {
@@ -161,5 +178,22 @@ mod tests {
         let again = RecordingRpc::create(ScriptedRpc(|_: &str, _: &Value| Ok(json!(1))), &path, "x");
         assert!(matches!(again, Err(RpcError::Fixture(m)) if m.contains("already exists")));
         assert!(!dir.path().join("rec.json.tmp").exists());
+    }
+
+    #[test]
+    fn a_recorded_block_header_carries_no_miner_address_but_the_caller_still_gets_the_real_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rec.json");
+        let reply = json!({"height": 5, "hash": "aa", "timestamp": 1_700_000_000u64, "miner": "synthetic-miner-A"});
+        let live = ScriptedRpc(move |m: &str, _: &Value| if m == "paranoid_getBlockHeader" { Ok(reply.clone()) } else { Ok(json!(1)) });
+        let rec = RecordingRpc::create(live, &path, "http://127.0.0.1:9601").unwrap();
+        let got = rec.call("paranoid_getBlockHeader", json!([5])).unwrap();
+        assert_eq!(got["miner"], json!("synthetic-miner-A"), "the caller sees the real reply");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("synthetic-miner-A"), "{text}");
+        assert!(text.contains("redacted-in-recording") && text.contains("1700000000"), "{text}");
+        // The recording still replays, and the watcher's field (the timestamp) is intact.
+        let replay = FixtureRpc::from_file(&path).unwrap();
+        assert_eq!(replay.call("paranoid_getBlockHeader", json!([5])).unwrap()["timestamp"], json!(1_700_000_000u64));
     }
 }

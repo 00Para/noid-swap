@@ -22,7 +22,20 @@ use swap_cli::state::{Event, Phase};
 use swap_cli::params::{ContractVersion, Gates, ProfileName};
 use swap_cli::swapfile::{example_public_kind, KdfParams, Passphrase, SwapFile, SwapPublic};
 use swap_cli::watch::eth::{compute_lock_id, lock_word_of};
+use swap_cli::watch::producers::{ProducerSummary, SecondCheck};
 use swap_cli::watch::{EthClaimed, EthLock, EthObservation, EthRefunded, NoidInstance, NoidInstanceStatus, NoidObservation, PendingCall, PendingPreimage, RevertedClaim, WordLock, WordScan};
+
+/// What the simulated Bob's producer-concentration read (threat T21) says. The default is a healthy, complete, fresh summary
+/// (largest producer 30 %, two largest 45 %, synthetic labels), so every older scenario still reaches `lock_eth` under any profile.
+#[derive(Clone, Debug, Default)]
+pub enum SimProducers {
+    #[default]
+    Healthy,
+    /// The observation carries no summary (nothing was read).
+    Absent,
+    /// Exactly this summary (a scenario's own numbers).
+    Fixed(ProducerSummary),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimKind {
@@ -99,6 +112,11 @@ pub struct World {
     pub tip_time_lag: Option<u64>,
     pub single_node: bool,
     pub single_node_ok: bool,
+    /// Threat T21: what the producer read says, and whether the operator passed `--accept-producer-concentration`.
+    pub producers: SimProducers,
+    pub accept_producer_concentration: bool,
+    /// The swap's timing profile (the producer windows come from it).
+    pub profile: ProfileName,
     /// The second Parano1d node's tip is this many blocks behind the first.
     pub second_tip_lag: u64,
     /// `Some(x)`: the second Parano1d node shows `x` as the instance (`Some(None)` = no instance) instead of the real one.
@@ -173,6 +191,9 @@ impl World {
             tip_time_lag: Some(0),
             single_node: false,
             single_node_ok: false,
+            producers: SimProducers::Healthy,
+            accept_producer_concentration: false,
+            profile: public.params.profile,
             second_tip_lag: 0,
             second_instance: None,
             second_finalized_delta: 0,
@@ -206,6 +227,19 @@ impl World {
     pub fn noid_obs(&self, tracked: Option<&str>) -> NoidObservation {
         let mut obs = self.noid_view(tracked);
         obs.single_node_ok = self.single_node_ok;
+        obs.accept_producer_concentration = self.accept_producer_concentration;
+        obs.producers = match &self.producers {
+            SimProducers::Absent => None,
+            SimProducers::Fixed(s) => Some(s.clone()),
+            SimProducers::Healthy => {
+                let g = self.profile.gates();
+                let mut s = ProducerSummary::synthetic(self.tip, g.producer_window_long, g.producer_window_short, self.eth_time, 300, 450);
+                if !self.single_node {
+                    s.second = SecondCheck::Agrees { height: self.tip.saturating_sub(3) };
+                }
+                Some(s)
+            }
+        };
         if self.single_node {
             return obs;
         }
@@ -273,6 +307,8 @@ impl World {
             second_error: None,
             second_label: None,
             single_node_ok: false,
+            producers: None,
+            accept_producer_concentration: false,
         }
     }
 
@@ -790,7 +826,7 @@ impl Scenario {
         self.tick_both();
         assert_eq!(self.alice_phase(), "funded");
         assert_eq!(self.bob_phase(), "funded");
-        self.world.borrow_mut().advance_noid(17);
+        self.world.borrow_mut().advance_noid(18);
         let (_, rb) = self.tick_both();
         assert_eq!(self.alice_phase(), "funding_final");
         assert_eq!(rb.action.kind(), "lock_eth", "{:?}", rb);

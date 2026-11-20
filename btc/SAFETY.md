@@ -97,7 +97,7 @@ the same field names. A real Alice/Bob file has not been fed to this script.
    Bob's attestation and the engine's "verified before locking" gate are written for the Ethereum pair, and the BTC script
    (`H`, Alice's pubkey, `T_b`) must be rebuilt by Bob and compared with the swap file before he funds.
 3. **The D offsets and profiles from the design.** BTC: `T_b = h_btc_now + 24`, `D_offset = 2,050`, Bob's lock-by
-   `D - 1,871`, `RHS(I1) = 1,871` for `B_safety = 30` (design §4.4/§4.5); `swap-cli/src/params.rs` has production,
+   `D - 1,873`, `RHS(I1) = 1,873` for `B_safety = 31` and `B_final` 19 (design §4.4/§4.5; corrected 2026-11-08: the chain's finality is 18 blocks after inclusion); `swap-cli/src/params.rs` has production,
    rehearsal and sepolia profiles for the Ethereum pair only. A short signet rehearsal profile for BTC (shorter `N_btc`, and
    a `D` that respects the Parano1d v2.1 height rule) has to be defined and its inequalities checked before a run.
 4. **A bitcoind check of every hex** (`testmempoolaccept`) and a regtest loop for the race (claim vs. refund at `T_b`) (M3.2).

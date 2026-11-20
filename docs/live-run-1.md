@@ -101,6 +101,7 @@ _(filled in during the run: times, heights, txids, what differed from the plan)_
   18-block finality. Public files copied to `C:\Users\00\Documents\live-run-1\` (object, definition, bundle, fund receipt).
 - 14:34 Funding final at tip 280,655 (nominal lock-by 280,667). Bob's engine: `lock_eth` with `t_reveal` 1,793,810,086
   (= chain time + 7,200 s, full window), hashlock, receiver and amount as committed.
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 14:35 Bob locked 0.001 ETH on the local chain: lock id `0x23a340a6…8c69`, tx `0xfde62e25…db24`, block 265, gas est. 149,197.
   Both ticks saw the lock (`eth_lock_seen`); Alice's engine went `lock_final` → `reveal_eth` at once (local chain: `finalized` = latest).
 - 14:36 Alice revealed: `HTLC.claim` tx `0x764db838…37ae`, block 269; her balance 1.000911 ETH (+0.001 − gas). Alice's
@@ -118,6 +119,7 @@ _(filled in during the run: times, heights, txids, what differed from the plan)_
   the authorization proof is bound to the branch and epoch anchor, not to the exact call height (answers REVIEW-1
   "could not determine" #1 in the favourable direction). Bob's file: `claim_included`.
 - 14:45 **Claim final** at tip 280,676 (`noid_tx_final`). Bob's engine: `done: NOID received`.
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 14:46 Verification. Parano1d: Bob's index-1 address holds a new UTXO of **9,994,200 μNOID** (creation id 736,440,
   slot 606,411); `contract instances` lists nothing (the instance is closed); the wallet's active-address balance went
   2,148.960190 → 2,138.951190 NOID (= −10 NOID −9,000 μNOID fee; the index-1 funds are not in that figure). Receipt

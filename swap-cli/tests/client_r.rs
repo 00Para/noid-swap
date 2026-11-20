@@ -42,7 +42,7 @@ fn raw_claim_builds_proves_and_encodes_a_valid_intent() {
     let (s, p, inst) = setup(Variant::Raw);
     let opening = p.opening().unwrap();
     let d = p.params.deadline_height;
-    let h = d - 18;
+    let h = d - 19;
     let plan = build_claim(inputs(&s, &p, &opening, &inst, h, 6_000)).unwrap();
     assert_eq!(plan.height_class, ClaimHeight::OnTarget);
     assert_eq!(plan.version, noid_tx::OwnerAuthorizationVersion::V4);
@@ -85,7 +85,7 @@ fn raw_claim_refuses_bad_inputs_before_proving() {
     let d = p.params.deadline_height;
     let other = Secret::generate().unwrap();
     assert_eq!(
-        build_claim(inputs(&other, &p, &opening, &inst, d - 18, 6_000)).unwrap_err(),
+        build_claim(inputs(&other, &p, &opening, &inst, d - 19, 6_000)).unwrap_err(),
         ClaimError::Preimage(PreimageError::HashlockMismatch)
     );
     assert_eq!(
@@ -93,11 +93,11 @@ fn raw_claim_refuses_bad_inputs_before_proving() {
         ClaimError::BranchClosed { call_height: d, deadline: d }
     );
     assert_eq!(
-        build_claim(inputs(&s, &p, &opening, &inst, d - 18, 5_799)).unwrap_err(),
+        build_claim(inputs(&s, &p, &opening, &inst, d - 19, 5_799)).unwrap_err(),
         ClaimError::Fee { fee: 5_799, min: 5_800, max: p.params.max_fee_micronoid }
     );
     assert_eq!(
-        build_claim(inputs(&s, &p, &opening, &inst, d - 18, p.params.max_fee_micronoid + 1)).unwrap_err(),
+        build_claim(inputs(&s, &p, &opening, &inst, d - 19, p.params.max_fee_micronoid + 1)).unwrap_err(),
         ClaimError::Fee { fee: p.params.max_fee_micronoid + 1, min: 5_800, max: p.params.max_fee_micronoid }
     );
     // D - 1 is valid but flagged.
@@ -145,7 +145,7 @@ fn raw_executor_drives_bobs_claim_through_the_runner() {
     ] {
         file.apply(&e, 1).unwrap();
     }
-    let call_height = d - 18;
+    let call_height = d - 19;
     let rpc = FixtureRpc::from_results(
         "node",
         vec![("paranoid_getEpochAnchor", serde_json::json!(hex::encode(ANCHOR))), ("paranoid_getSlotHints", serde_json::json!([2]))],
@@ -212,7 +212,7 @@ fn v2_claim_pays_exactly_max_fee_and_the_proof_verifies() {
     assert_eq!(p.params.contract_version, ContractVersion::V2);
     let opening = p.opening().unwrap();
     let max_fee = p.params.max_fee_micronoid;
-    let h = p.params.deadline_height - 18;
+    let h = p.params.deadline_height - 19;
     // One real proof: fee == max_fee.
     let plan = build_claim(inputs(&s, &p, &opening, &inst, h, max_fee)).unwrap();
     assert_eq!(plan.fee_micronoid, max_fee);
@@ -231,7 +231,7 @@ fn v2_claim_refuses_every_other_fee_before_proving() {
     let (s, p, inst) = setup_v(Variant::Raw, ContractVersion::V2);
     let opening = p.opening().unwrap();
     let max_fee = p.params.max_fee_micronoid;
-    let h = p.params.deadline_height - 18;
+    let h = p.params.deadline_height - 19;
     for fee in [5_800, 6_000, max_fee - 1, max_fee + 1] {
         let err = build_claim(inputs(&s, &p, &opening, &inst, h, fee)).unwrap_err();
         assert_eq!(err, ClaimError::Fee { fee, min: max_fee, max: max_fee }, "fee {fee}");
@@ -246,7 +246,7 @@ fn v1_claim_keeps_its_range_and_v1_openings_are_detected_as_v1() {
     assert_eq!(swap_cli::swapfile::detect_contract_version(&opening), Some(ContractVersion::V1));
     let v2 = example_public_v(&s, Variant::Raw, ContractVersion::V2);
     assert_eq!(swap_cli::swapfile::detect_contract_version(&v2.opening().unwrap()), Some(ContractVersion::V2));
-    let h = p.params.deadline_height - 18;
+    let h = p.params.deadline_height - 19;
     // Range errors exactly as before; no proof is built for them.
     assert_eq!(
         build_claim(inputs(&s, &p, &opening, &inst, h, 5_799)).unwrap_err(),
@@ -280,7 +280,7 @@ fn raw_executor_drives_a_v2_claim_with_the_fixed_fee_and_refuses_a_version_mix_u
     ] {
         file.apply(&e, 1).unwrap();
     }
-    let call_height = d - 18;
+    let call_height = d - 19;
     let rpc = FixtureRpc::from_results(
         "node",
         vec![("paranoid_getEpochAnchor", serde_json::json!(hex::encode(ANCHOR))), ("paranoid_getSlotHints", serde_json::json!([2]))],

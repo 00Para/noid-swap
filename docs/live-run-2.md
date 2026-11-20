@@ -25,6 +25,7 @@ plus 40 blocks, because the proof runs for 20–35 minutes before funding can fo
   (planned `h_create` 280,789: 22 blocks late, nominal lock-by 280,895 still 84 blocks away). Files in
   `C:\Users\00\Documents\live-run-2\`; `contract watch` registered the terms in the wallet app.
 - 15:57 Funding included at 280,814 (instance slot 9,705,979, creation id 737,344); final at 280,831 (16:04).
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 16:05 Bob's engine: `lock_eth`, `t_reveal` 1,793,815,478. Bob locked 0.001 ETH: lock id
   `0x844f4c78…e3cba`, tx `0x2de640b0…067d`, block 716. Bob's engine: `locked`, "waiting for the secret (or T_reveal)".
   Alice's engine: `lock_final` → `reveal_eth` — **deliberately not executed**. From here Alice is silent.

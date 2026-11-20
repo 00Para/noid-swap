@@ -42,6 +42,8 @@ For further self-swaps of tiny amounts by the owner the tool is adequate, with t
 | R7 | — | REFUTED | "Alice is told to reveal before Bob's lock is finalized" | engine.rs:412-414; watch/mod.rs:507-512 |
 | R8 | — | REFUTED (claim path) | "a crash between the pending record and the send double-spends" | engine.rs:849-872, 896-924, 742-744; swapfile.rs:607-631 |
 
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; read the "17" in F6 as 18. The fix (follow the inclusion until final) is unchanged.
+
 ---
 
 ## F1. The ETH code hash is optional and is checked too late (Critical, CONFIRMED)
@@ -178,6 +180,8 @@ If `live.js` stays separate, it must take the swap file (or a short-lived signed
 - The watcher tracks a txid only in `claim_submitted` and `refund_submitted` (main.rs:211-215). After inclusion, nobody checks that the transaction is still in the chain.
 
 **Why it matters.** A 17-block rollback is within the protocol's assumptions. If it drops Bob's claim and the node does not re-admit it (Q14 is open), Bob's tool says `done: NOID received` while the instance is live again, and Alice refunds at D. Bob loses the NOID after having paid the ETH.
+
+Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; read "17" in this section as 18.
 
 **Fix.**
 - Keep tracking the txid until final. Each tick, require `confirmed_tx.height == recorded height`.

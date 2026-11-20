@@ -16,8 +16,10 @@ while true; do
     OUT=$(bash "$HERE/tick.sh" "$R" --apply 2>&1)
     # run 13: one cut of the whole line at 1,200 characters lost `phase_after` after a long recorded intent. Now each part is cut on
     # its own (the long ones generously) and `applied: ... phase_after: ...` is appended whole, last, so no cut can remove it.
-    LINE="$(date +%T) $(part '^\[' 300) $(part '^noid:' 600) $(part '^eth :' 700) $(part '^ACTION' 800) $(part '^notes:' 1500) $(part '^intent' 700) $(part '^applied|^phase_after' 400)"
+    LINE="$(date +%T) $(part '^\[' 300) $(part '^noid:' 600) $(part '^eth :' 700) $(part '^ACTION' 800) $(part '^notes:' 1500) $(part '^ALERT:' 400) $(part '^intent' 700) $(part '^applied|^phase_after' 400)"
     echo "$LINE" >> "$L/loop-$R.txt"
+    # Optional (ALERT_URL in $L/env.local.sh): every new line that starts with ALERT: is sent once as a short message; a failure never stops the loop.
+    printf '%s\n' "$OUT" | alert_hook || true
     # CHAOS F-16 / review M3: `done` is not terminal while a leftover leg can still be refunded: the action then names it
     # (a refund_noid / refund_eth, a "still at the contract" / "ETH lock is still open" wait, a refund already submitted).
     case "$LINE" in

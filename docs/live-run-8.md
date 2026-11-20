@@ -63,6 +63,7 @@ Preparation had no proof step, so `prepare.sh` finished in seconds.
   (V4), recipient = Bob's address, fee 5,800 μNOID, payout 4,994,200 μNOID.
 - 01:38:22 **Claim submitted** at call height 284,786: Parano1d txid `948d97477f3f78181d7d679ceed6569a438d9e2d1fa97b7648ea6e6bb6ae5e92`.
   Included by [284,789] at 01:39:39. 01:48:04 the claim is final [284,806] and Bob's file is **`done`**, 647 blocks before `D`.
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 01:52:33 Alice's ETH claim is final on Ethereum and her file is **`done`** [284,816].
 
 ## Result

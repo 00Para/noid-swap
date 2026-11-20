@@ -310,7 +310,7 @@ pub struct StockClaimReport {
     pub attempts: u32,
     /// The attempts that ended in `HeightChanged`.
     pub retries: Vec<RetryRecord>,
-    /// The accepted height is in `(D-18, D-1]`: valid but possibly reorg-exposed.
+    /// The accepted height is in `(D-19, D-1]`: valid but possibly reorg-exposed.
     pub late_but_valid: bool,
 }
 

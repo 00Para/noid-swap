@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(c.opening_bytes, 699);
         assert_eq!(c.fund_amount_noid, "10.000000");
         assert_eq!(c.max_fee_noid, "0.050000");
-        assert_eq!(c.pruv_params["timeout_height"], json!("300735"));
+        assert_eq!(c.pruv_params["timeout_height"], json!("300738"));
         assert_eq!(c.pruv_params["max_fee"], json!("50000"));
         assert_eq!(c.definition["kind"], "custom_program");
         assert_eq!(c.definition["definition"]["program"].as_array().unwrap().len(), 1);

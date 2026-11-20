@@ -712,6 +712,8 @@ async function requireFundsFor(provider, from, req, gasLimit) {
  * { dry: false, resp, receipt, chainId, from }. Never includes keys.
  * opts.hideData: the calldata carries the secret, so a dry run prints its length only.
  * opts.fees: fee fields (and nonce) already chosen and checked by feePlan; else the command's own flags.
+ * opts.preSend: optional async guard, run once everything is prepared and immediately before the transaction is signed and broadcast
+ * (never in a dry run). If it throws, nothing is sent. The claim uses it to re-check the reveal cutoff after the slow steps.
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
@@ -767,7 +769,14 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
     }
     return { dry: true, out };
   }
-  const resp = await signer.sendTransaction(req);
+  let toSend = req;
+  if (typeof opts.preSend === "function") {
+    // Fill nonce, chain id and fees first, so that no network read is left between the guard and the broadcast. Only with a fixed gas limit: then
+    // nothing is estimated and the calldata (the secret) goes to the node only inside the transaction itself.
+    if (fixedGas !== null && typeof signer.populateTransaction === "function") toSend = await signer.populateTransaction(req);
+    await opts.preSend();
+  }
+  const resp = await signer.sendTransaction(toSend);
   // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
   if (typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
   let receipt;
@@ -1469,7 +1478,32 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   if (kind === "poseidon") assertPoseidonClaimCalldata(iface, tx.data, lockId, secret);
   let r;
   try {
-    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas });
+    // The event scans, the finality lookup and the fee planning above can take minutes on a slow public endpoint: the cutoff is read again
+    // (wall clock and latest block, the later one) immediately before the claim is signed, against the same cutoff the early check ended with.
+    const preSend = async () => {
+      let late;
+      try {
+        late = await latestBlock(provider);
+      } catch (e) {
+        throw new UserError(
+          `refusing: could not re-read the latest block just before sending (${e instanceof UserError ? e.message : explain(e)}), so the reveal cutoff ${cutoff} cannot be re-checked; nothing was sent`
+        );
+      }
+      if (BigInt(late.timestamp) >= l.timelock) {
+        throw new UserError(
+          `refusing: timelock ${l.timelock} has passed (latest block timestamp ${late.timestamp}, re-checked just before sending); the claim would revert with the secret in its calldata; nothing was sent`
+        );
+      }
+      const wallLate = BigInt(Math.floor(Date.now() / 1000));
+      const nowLate = wallLate > BigInt(late.timestamp) ? wallLate : BigInt(late.timestamp);
+      if (nowLate > cutoff) {
+        throw new UserError(
+          `refusing: past the reveal cutoff. now ${nowLate} > cutoff ${cutoff} (${cutoffRule}; re-checked just before sending: the earlier steps took ${nowLate > now ? nowLate - now : 0n} s) ` +
+            `(a late claim publishes the secret and lets the counterparty take both legs; nothing was sent)`
+        );
+      }
+    };
+    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend });
   } catch (e) {
     // REVIEW-6 R6-3: a claim that was mined and REVERTED (it came too late, or lost a race with the refund) paid nobody and still published the
     // secret in its calldata. Say so in the result, with the hash, instead of a bare failure: the caller must treat the secret as public.

@@ -187,7 +187,7 @@ fn bob_ready_to_lock() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     s
@@ -370,7 +370,7 @@ fn r5_5_the_minimum_cancel_age_follows_the_profile() {
         s.tick_alice();
         s.world.borrow_mut().advance_noid(1);
         s.tick_both();
-        s.world.borrow_mut().advance_noid(17);
+        s.world.borrow_mut().advance_noid(18);
         s.tick_alice();
         let path = s.dir.path().join("bob-ops.swap.json");
         let mut bob = s.bob.file.clone();

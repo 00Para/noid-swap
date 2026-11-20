@@ -15,6 +15,7 @@ pub mod eth;
 pub mod exec;
 pub mod http;
 pub mod parano1d;
+pub mod producers;
 pub mod record;
 
 use std::collections::{HashMap, VecDeque};
@@ -56,17 +57,30 @@ impl std::error::Error for RpcError {}
 /// (`paranoid_getEpochAnchor`, `eth_getLogs`); `params` is the JSON array.
 pub trait JsonRpc {
     fn call(&self, method: &str, params: Value) -> Result<Value, RpcError>;
+
+    /// Several calls of ONE method in one request (a JSON-RPC batch), one answer per parameter list, in order. The default sends
+    /// them one at a time, so every transport has it. A transport that really batches (`http`, `exec`) returns `Err` when the node's
+    /// reply is not an array of the right length, and the caller (the producer reader) then falls back to single calls.
+    fn call_batch(&self, method: &str, params: &[Value]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+        Ok(params.iter().map(|p| self.call(method, p.clone())).collect())
+    }
 }
 
 impl<T: JsonRpc + ?Sized> JsonRpc for &T {
     fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         (**self).call(method, params)
     }
+    fn call_batch(&self, method: &str, params: &[Value]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+        (**self).call_batch(method, params)
+    }
 }
 
 impl<T: JsonRpc + ?Sized> JsonRpc for Box<T> {
     fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
         (**self).call(method, params)
+    }
+    fn call_batch(&self, method: &str, params: &[Value]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+        (**self).call_batch(method, params)
     }
 }
 
@@ -138,6 +152,37 @@ pub(crate) fn parse_rpc_response(body: &[u8], id: u64) -> Result<Value, RpcError
         }
     }
     obj.get("result").cloned().ok_or_else(|| RpcError::Decode(format!("reply has neither result nor error: {}", snippet(body))))
+}
+
+/// The JSON-RPC 2.0 request body for a batch of calls of one method: an array with ids `ids[i]`.
+pub(crate) fn rpc_batch_request(ids: &[u64], method: &str, params: &[Value]) -> Vec<u8> {
+    let items: Vec<Value> = ids
+        .iter()
+        .zip(params)
+        .map(|(id, p)| serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": p}))
+        .collect();
+    serde_json::to_vec(&items).expect("a JSON value serializes")
+}
+
+/// Turn a JSON-RPC batch response body into one outcome per request id, in request order. A body that is not an array of exactly
+/// `ids.len()` objects, each answering one of the ids once, is `Err(RpcError::Decode)`: the caller then falls back to single calls.
+pub(crate) fn parse_rpc_batch_response(body: &[u8], ids: &[u64]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+    let v: Value = serde_json::from_slice(body)
+        .map_err(|e| RpcError::Decode(format!("batch reply is not JSON ({e}): {}", snippet(body))))?;
+    let items = v.as_array().ok_or_else(|| RpcError::Decode(format!("batch reply is not an array: {}", snippet(body))))?;
+    if items.len() != ids.len() {
+        return Err(RpcError::Decode(format!("batch reply has {} answers for {} requests", items.len(), ids.len())));
+    }
+    let mut out: Vec<Option<Result<Value, RpcError>>> = (0..ids.len()).map(|_| None).collect();
+    for item in items {
+        let id = item.get("id").and_then(Value::as_u64).ok_or_else(|| RpcError::Decode("batch answer without a numeric id".into()))?;
+        let idx = ids.iter().position(|i| *i == id).ok_or_else(|| RpcError::Decode(format!("batch answer with unknown id {id}")))?;
+        if out[idx].is_some() {
+            return Err(RpcError::Decode(format!("batch answer id {id} appears twice")));
+        }
+        out[idx] = Some(parse_rpc_response(&serde_json::to_vec(item).expect("a JSON value serializes"), id));
+    }
+    Ok(out.into_iter().map(|o| o.expect("every id answered once: lengths equal and no duplicates")).collect())
 }
 
 fn some_value<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Value>, D::Error> {
@@ -463,6 +508,15 @@ pub struct NoidObservation {
     /// REVIEW-2 F5: the operator accepts a single node for the steps that need two (`--single-node-ok`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub single_node_ok: bool,
+    /// Threat T21: who produced the recent blocks, read from the node's own headers (Bob, before his lock, only). `None` = no
+    /// summary was read in this poll (Alice; a phase that needs none; a recorded fixture; a live read that did not run). Never holds an
+    /// address, only counts and 8-hex ids. See [`producers::ProducerSummary`] and `docs/bob-concentration-gate.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producers: Option<producers::ProducerSummary>,
+    /// The operator accepts the producer-concentration risk (`--accept-producer-concentration`). Waives the refusals of the screen under
+    /// the `production` profile only; printed on every tick that uses it. Never implied by a profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accept_producer_concentration: bool,
 }
 
 impl NoidObservation {
@@ -854,5 +908,40 @@ mod tests {
         assert_eq!(one.all_instances().len(), 1);
         assert_eq!(one.find_instance(&NoidInstance { slot_index: 3, creation_id: 8, amount_micronoid: 99 }).map(|v| v.matches_opening), Some(Some(true)));
         assert!(one.find_instance(&NoidInstance { slot_index: 3, creation_id: 9, amount_micronoid: 5 }).is_none());
+    }
+
+    #[test]
+    fn a_batch_request_is_an_array_and_its_reply_is_matched_by_id_not_by_position() {
+        let body = rpc_batch_request(&[10, 11], "m", &[json!([1]), json!([2])]);
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v, json!([{"jsonrpc": "2.0", "id": 10, "method": "m", "params": [1]}, {"jsonrpc": "2.0", "id": 11, "method": "m", "params": [2]}]));
+        // Answers in the other order, one of them an error object.
+        let reply = br#"[{"jsonrpc":"2.0","id":11,"error":{"code":-32000,"message":"nope"}},{"jsonrpc":"2.0","id":10,"result":"a"}]"#;
+        let out = parse_rpc_batch_response(reply, &[10, 11]).unwrap();
+        assert_eq!(out[0], Ok(json!("a")));
+        assert_eq!(out[1], Err(RpcError::Remote { code: -32000, message: "nope".into() }));
+    }
+
+    #[test]
+    fn a_reply_that_is_not_an_array_of_the_right_length_is_a_decode_error() {
+        for (name, reply) in [
+            ("one error object", &br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"batch not supported"}}"#[..]),
+            ("not json", &b"<html>"[..]),
+            ("too short", &br#"[{"jsonrpc":"2.0","id":1,"result":1}]"#[..]),
+            ("too long", &br#"[{"id":1,"result":1},{"id":2,"result":1},{"id":3,"result":1}]"#[..]),
+            ("an unknown id", &br#"[{"id":1,"result":1},{"id":9,"result":1}]"#[..]),
+            ("the same id twice", &br#"[{"id":1,"result":1},{"id":1,"result":1}]"#[..]),
+            ("no id", &br#"[{"id":1,"result":1},{"result":1}]"#[..]),
+        ] {
+            let e = parse_rpc_batch_response(reply, &[1, 2]).unwrap_err();
+            assert!(matches!(e, RpcError::Decode(_)), "{name}: {e:?}");
+        }
+    }
+
+    #[test]
+    fn the_default_batch_is_one_call_after_another() {
+        let rpc = FixtureRpc::from_results("t", vec![("m", json!(1)), ("m", json!(2))]);
+        let out = rpc.call_batch("m", &[json!([]), json!([])]).unwrap();
+        assert_eq!(out, vec![Ok(json!(1)), Ok(json!(2))]);
     }
 }

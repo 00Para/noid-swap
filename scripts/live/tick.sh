@@ -28,6 +28,9 @@ print("eth : latest", e.get("latest_block"), "finalized", e.get("finalized_block
       "refunded", json.dumps(e.get("refunded"))[:80])
 print("sources:", json.dumps(v.get("sources"))[:300])
 print("events:", json.dumps(v.get("events"))[:300]); print("ACTION:", json.dumps(v.get("action"))[:600]); print("notes:", json.dumps(v.get("notes"))[:1500])
+# A note that starts with ALERT: (a claim removed by a reorg) gets a line of its own, so that watch.sh can pass it on.
+for note in (v.get("notes") or []):
+    if isinstance(note, str) and note.startswith("ALERT:"): print(note)
 print("intent:", json.dumps(v.get("intent"))[:300]); print("applied:", v.get("events_applied_to_file"), "phase_after:", v.get("phase_after"))
 PY
 exit $EC

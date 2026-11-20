@@ -27,13 +27,15 @@ Plain words for the pieces (the design doc explains them in full):
 | Path | What | Status |
 |---|---|---|
 | `src/secret.rs` | `Secret` (zeroized, redacted `Debug`), `H = SHA-256(s)`, `Addr(s)` / `Addr(Derive(m,0))`, the `0x`/no-`0x` hex rules, Bob's step-11 `check_preimage` | tested against the §0 vectors |
-| `src/params.rs` | §9.1 constants and the gates: `rhs_i1_eth` (629), `bob_lock_by` (`D − 629`), `t_max_eth`, `choose_t_reveal` (I1 + `W_A_min` + `B_bob`), `check_i2_eth` (reveal cutoff `T_reveal − M_A`), `classify_claim_height` (`D − 18` target, `D − 1` hard), `check_i5` (no 279,370 in `[H_create, D + 252]`, start ≥ 279,388), `fee_cap`, epoch anchor / T6 rotation guard | pins the §4.3 worked example |
+| `src/params.rs` | §9.1 constants and the gates: `rhs_i1_eth` (631), `bob_lock_by` (`D − 631`), `t_max_eth`, `choose_t_reveal` (I1 + `W_A_min` + `B_bob`), `check_i2_eth` (reveal cutoff `T_reveal − M_A`), `classify_claim_height` (`D − 19` target, `D − 1` hard), `check_i5` (no 279,370 in `[H_create, D + 254]`, start ≥ 279,388), `fee_cap`, epoch anchor / T6 rotation guard | pins the §4.3 worked example |
 | `src/bundle.rs` | the carrier check of the bundle: `bundle_check` (`{v, sha256, opening_hex_len}`), `canonical_bytes`, `CheckedBundle` (written by `new-alice` and `bundle`), `open_bundle` (read first by `new-bob`) | unit tests pin the canonical bytes and a hash; `tests/bundle_check.rs` through the binary |
 | `src/swapfile.rs` | **M2.3** the swap file: `SwapPublic` (hashlock, authority, 699-byte opening hex, root, params; `check()` rebuilds the opening byte-for-byte through the M0.6 guard), `SwapFile` (role, phase, history, `pending_action`, sealed secret), atomic save (unique `.<pid>.<random>.tmp` + fsync + rename) and `SwapLock` (exclusive `.lock` sidecar), the `pending_intent` ledger, `HashlockRegistry` (T9) | secret at rest: Argon2id → XChaCha20-Poly1305, AAD = digest of the public section |
 | `src/state.rs` | `AlicePhase` / `BobPhase`, `Event`, `transition()`: every allowed move, nothing else | unit-tested |
 | `src/watch/mod.rs` | `JsonRpc` transport trait, `FixtureRpc` (replays `{"calls":[{method, params?, result|error}]}`), `NoidObservation`, `EthObservation`, the JSON-RPC envelope helpers | |
 | `src/watch/http.rs` | `HttpJsonRpc`: HTTP/1.1 `POST` over `std::net::TcpStream`, `http://` only; reply by Content-Length, chunked or to EOF; one deadline for the whole call (default 30 s); HTTP ≠ 200 → `Transport`, JSON-RPC `error` → `Remote` | 9 unit tests against a loopback listener (Content-Length, chunked split across writes, no length, HTTP 500, 401, JSON-RPC error, malformed replies, timeout, connect refused) |
 | `src/watch/exec.rs` | `ExecJsonRpc`: spawns `curl` (default `/mnt/c/Windows/System32/curl.exe` if it exists, else `curl`) with the request on stdin; reaches `http://127.0.0.1:9601` from WSL and any `https://` endpoint; watchdog kills a hung program | 6 unit tests with fake shell-script programs (no socket, no curl) |
+| `src/watch/producers.rs` | **T21** the producer reader: `paranoid_getBlockHeader` in JSON-RPC batches of up to 250 (single calls when a batch is refused), a rolling cache `<swap file>.producers`, a re-read below a hash mismatch, the link check on `prev_hash`, a 40 s budget per tick, the counts of the last 2,880 and 720 blocks, the cross-check against the second node; `ProducerSummary` (no address in it) | unit-tested in `tests/producer_gate.rs` |
+| `src/producer_gate.rs` | **T21** what the engine makes of the summary: the single-address limit (35 % production, 28 % sepolia and rehearsal), the stale and fail-closed rules, the top-two warning, the override, and the texts of every note | unit-tested and in `tests/producer_gate.rs` |
 | `src/watch/record.rs` | `RecordingRpc`: wraps any transport, appends every node answer (result or JSON-RPC error; never transport failures) to a fixture file `FixtureRpc` replays; refuses to overwrite a recording | 1 unit test + round trip through the binary |
 | `src/contract_params.rs` | the Parano1d contract parameters of a swap in the forms the stock wallet takes (`pruv` params, SDK definition JSON), compiled through `noid_pruv` and checked against the swap file's 699-byte opening; `check_object_file` | tested (`tests/alice_params.rs`) |
 | `src/watch/parano1d.rs` | **M2.4** Parano1d watcher: tip, epoch anchor, fee floor and estimate, our instance (`getObjectInstances`/`getObjectStatus`), pending calls whose mempool opening is ours, tracked txid | method names and shapes **verified against the live node 2026-11-04** (table below); `idle.json`, `recorded_misc.json` and six LIVE RUN 1 files (funded unfinal / final / first seen, claim pending / included / final) are real recordings of the first real swap; `funded.json` (drives the `cli.rs` tick test) and `pending_claim.json` (a second contract's call next to ours) stay synthesized; drift-guard test over the vendor source |
@@ -69,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 500 (+1 ignored) with the `poseidon_*` test binaries and later review fixes added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 570 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -120,7 +122,7 @@ swap-cli tick bob.swap.json --noid-fixture fixtures/parano1d/funded.json \
 #   {"kind": ..., "parameters": "withheld", ...} (REVIEW-3 F3); tick --apply records the intent first and then prints the parameters
 swap-cli intent bob.swap.json [--show]                                      # the frozen intent, if any
 swap-cli intent bob.swap.json --cancel <the tick chain flags>               # drops an intent that was never sent; fails closed (below)
-swap-cli gates --d 300735 --h-now 300040 --t-now 1794312000 --h-final 300022
+swap-cli gates --d 300738 --h-now 300040 --t-now 1794312000 --h-final 300022
 ```
 
 ### Data sources: fixture or live node, per chain
@@ -152,12 +154,12 @@ Both roles record `eth_refund_mined` when the ETH observation shows the swap's l
 
 **Reorg handling (F6).** A close that is "included" is not "final" until the NODE still says so. Bob's `claim_included` and Alice's
 `refund_included` keep the transaction id tracked: every `tick` asks `paranoid_getTx` and `paranoid_getMempoolEntry` about it, and
-`noid_tx_final` (then `done` / `refunded`) needs both the 17-block depth AND a `getTx` answer that still gives the recorded height on that very
-tick. If the node says the transaction is no longer confirmed there (a rollback of up to 17 blocks), the phase steps back: still in the mempool,
+`noid_tx_final` (then `done` / `refunded`) needs both the 18-block depth AND a `getTx` answer that still gives the recorded height on that very
+tick. If the node says the transaction is no longer confirmed there (a rollback of up to 18 blocks), the phase steps back: still in the mempool,
 Bob returns to `claim_submitted` and Alice to `refund_submitted` (event `noid_tx_reorged`); in neither chain nor mempool, Bob returns to `secret_seen`
 (the engine then says `claim_noid` and he proves again; `claim_included` now carries the secret and the re-proof counter for this) and Alice to the
 phase from which `refund_noid` is offered again (the same step an eviction takes). A transaction confirmed again at a DIFFERENT height is a
-re-inclusion (`noid_tx_reincluded`): the recorded height changes and the 17-block count starts over. A poll that did not ask the node about the
+re-inclusion (`noid_tx_reincluded`): the recorded height changes and the 18-block count starts over. A poll that did not ask the node about the
 txid at all (`tracked_tx_pending: null`, e.g. a recording made before F6) is never read as a reorg and never as final: the tick adds a note and waits.
 `tests/scenarios.rs` (`f6_*`) drives all of it on the two-chain simulator.
 
@@ -180,7 +182,7 @@ recovered her NOID with the wallet CLI, so her file stayed in `lock_final` with 
 transaction did it: `swap-cli tick alice.swap.json … --closed-by <txid> --apply`. The tick asks the node about that txid and records the close only if
 (1) it is confirmed (`getTx` gives a height) and (2) the instance is gone. Alice then moves to `refund_included` (requires height `>= D`; from
 `funded`, `funding_final`, `lock_seen`, `lock_final` or `refund_submitted`) and Bob to `claim_included` (requires height `< D`; from `secret_seen` or
-`claim_submitted`), and the same tick follows the finality rules above (`refunded` / `done` once 17 blocks deep). It refuses, with a message and
+`claim_submitted`), and the same tick follows the finality rules above (`refunded` / `done` once 18 blocks deep). It refuses, with a message and
 no change to the file, when: the txid is not 64 hex characters; the txid is unknown to the node or only in the mempool; the instance is still
 visible; the height is on the wrong side of `D` for the role (a close before `D` paid Bob, at or after `D` paid Alice); the phase makes no sense
 (`created`, `funding_submitted`, `received`, terminal phases, Alice after her reveal, Bob before he knows the secret); or the file already tracks a
@@ -292,6 +294,7 @@ with --transport curl, or --allow-plain-http"). `http://127.0.0.1@elsewhere/` co
 |---|---|
 | `--noid-rpc URL` twice / `--eth-rpc URL` twice | the second, independent node (above) |
 | `--single-node-ok` | accept one node for the two steps above under `production` or `sepolia` (no value) |
+| `--accept-producer-concentration` | `tick`: waive the `production` refusals of the producer-concentration screen (no value; see "The producer-concentration gate") |
 | `--allow-plain-http` | accept non-loopback `http://` (no value) |
 | `--noid-rpc2-is-remote` / `--eth-rpc2-is-remote` | information only: the second node runs on another machine behind a local port (no value; changes the G3 note, relaxes nothing) |
 
@@ -454,7 +457,7 @@ no signer); `tick` prints which one is due (`lock_eth` with `t_reveal`, `reveal_
    #   dry run: proves and self-verifies, prints txid / call_height / fee / amount_out / recipient (must be Bob's o1…); sends nothing
    swap-cli claim bob.swap.json --transport curl --noid-rpc http://127.0.0.1:9601 --eth-rpc <ETH URL> --submit
    ```
-   The claim must be **included and final before D** (target ≤ D − 18); `tick` afterwards tracks the txid until final.
+   The claim must be **included and final before D** (target ≤ D − 19); `tick` afterwards tracks the txid until final.
 4. Reference only, client S (the stock wallet, if client R is unavailable). The sequence the scripted `client::stock` follows, **not run
    anywhere yet** and with two unknowns noted:
    ```sh
@@ -474,10 +477,10 @@ no signer); `tick` prints which one is due (`lock_eth` with `t_reveal`, `reveal_
 
 The first real swap ran `tick`/`claim` with `--record-noid`, so every call of the tool left one fixture file; six of them are
 kept in `fixtures/parano1d/` and replayed by `tests/watch_parano1d.rs` (the rest of the run's recordings stay in WSL under `~/live-run-1/rec/`). Timeline
-they pin: funding included at 280,638 (instance slot 9,750,400, creation id 736,337, 10,000,000 μNOID), final at 280,655 (tip =
-inclusion + 17); our claim `d50743e3…1324` was in the mempool at 280,657 (the tick before the claim command had `tip` 280,657, so the claim was
+they pin: funding included at 280,638 (instance slot 9,750,400, creation id 736,337, 10,000,000 μNOID), counted final at 280,655 (tip =
+inclusion + 17; the node's rule, inclusion + 18, makes it 280,656); our claim `d50743e3…1324` was in the mempool at 280,657 (the tick before the claim command had `tip` 280,657, so the claim was
 proved for call height 280,658) and was **included at 280,659**, one block later than the height it was proved for (still the
-claim branch: the deadline is 281,286); final at 280,676 (inclusion + 17). Differences from the synthesized shapes: none in
+claim branch: the deadline is 281,286); counted final at 280,676 (inclusion + 17; under the node's rule 280,677). Differences from the synthesized shapes: none in
 the keys the watcher reads (every top-level key of the synthesized `getObjectInstances`, `getObjectStatus`, `getMempoolInfo`,
 `getMempoolEntry` and `getTx` answers matches); the real `getObjectStatus.object` also carries `code_id`, `max_payout_micronoid`,
 `min_retained_micronoid`, `program`, `state` and `state_hex`; real mempool listings hold entries the synthesized ones did not
@@ -518,7 +521,7 @@ Real, exercised by the tests:
 
 - the Parano1d RPC answers for a **funded** HashTimeLock (unfinal, final, first seen), our **pending** claim, the **included** claim
   and the **final** state, replayed from LIVE RUN 1's real recordings with the run's real 699-byte opening: observation fields, the
-  lookups made (single-page entries only), the `tracked_tx_pending` / `confirmed_tx` logic, and the `tip >= inclusion + 17` finality
+  lookups made (single-page entries only), the `tracked_tx_pending` / `confirmed_tx` logic, and the `tip >= inclusion + 18` finality
   arithmetic at its exact boundaries (funding 280,655, claim 280,676). The claim proved for call height 280,658 was included at
   280,659. Also real: unfunded-opening answers, fee, mempool, epoch anchor, slot hints and the error replies (see the method table);
 
@@ -563,6 +566,67 @@ the "second" node; G4 `live.js claim` does not check receiver or amount against 
 safe to hand to a stranger. The must-fix list in that file (F3 first: a read-only `tick` prints a spend's
 parameters unrecorded, `intent --cancel` ignores the mempool, `live.js` is not tied to the swap file) is the
 next gate.
+
+## The producer-concentration gate (T21, built 2026-11-08)
+
+Design, numbers and the full texts: [`../docs/bob-concentration-gate.md`](../docs/bob-concentration-gate.md). In short: before Bob locks his Ethereum
+leg, `tick` reads who produced the last 2,880 and the last 720 Parano1d blocks from his own node's headers. **It is a screen, not a defence**: it stops
+a swap against a producer that is visibly large, and nothing else.
+
+- **What it does.** Under `production`, `lock_eth` is not offered (the action is `wait`, the reason and a note start with `ALARM:`) while one address
+  produced more than 35 % of either window (a share exactly at the limit passes; the comparison is on integers), or when the headers cannot be read in
+  full, are stale (more than 2 blocks below the tip, or read more than 120 s ago), the chain of `prev_hash` does not link, no summary was read, or the
+  second Parano1d node names another block at the anchor height (three below the lower tip) or could not be read for the cross-check. Under `sepolia`
+  and `rehearsal` (limit 28 %) the same evaluation runs and only prints a `WARNING:` note; the lock is offered as before. The two largest addresses
+  together above 50 % always only warn. In `received` and `funded` the finding is said as information (the lock is decided at `funding_final`).
+- **What reads the headers.** Only `tick`, only Bob's file, only in `received`, `funded` or `funding_final`, only against a live node (`--noid-rpc`;
+  a `--noid-fixture` replay reads none, so a production Bob file replayed from fixtures fails closed unless the flag below is given). `claim`, `intent`
+  and Alice's ticks read none. A tick reads for at most 40 s and goes on at the next one; the reader has its own transport and never writes a header to
+  a `--record-noid` file.
+- **The cache.** `<swap file>.producers`, beside the swap file: one line per height (`height hash parent_hash timestamp miner`), written atomically, mode
+  600. **It holds the miner addresses and stays on this machine.** Nothing the tool prints shows an address: a producer is the first 8 hex characters of
+  the SHA-256 of its address. A cache that is broken, gapped or unlinked is discarded; a cache whose top hash no longer matches the node (a reorg) is
+  repaired from the highest height that still matches (at most 64 deep, else discarded). A warm tick reads one to three headers; a cold one 2,880, in
+  12 batches. If the node refuses a batch (the answer is not an array of the right length) the same heights are read with single calls.
+- **The flag.** `--accept-producer-concentration` (no value) waives the `production` refusals above, the fail-closed ones included; it is printed as an
+  `OVERRIDDEN` warning on every tick that uses it and written once to the swap file's history (`producer_concentration_overridden: ...`, no phase
+  change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is
+  never implied by a profile, and under `sepolia` and `rehearsal` it changes nothing. The helpers pass it only when `ACCEPT_PRODUCER_CONCENTRATION=1`
+  is set in `env.local.sh`.
+- **What is in the observation.** `NoidObservation.producers` (counts, 8-hex ids, `complete`, `second`, `error`; absent when nothing was read) and
+  `accept_producer_concentration`. Both are skipped when empty, so recordings and swap files made before the change load unchanged.
+- **The removed-claim alert.** When a reorg removes Bob's mined NOID claim and the node does not show it pending, the tick adds a note that starts with
+  `ALERT:` (the file goes back to `secret_seen` and the next tick offers `claim_noid` again). Nothing is sent by the tool; `scripts/live/watch.sh` can
+  pass the alert on (`ALERT_URL`, see `../scripts/live/README.md`). An automatic re-send is not built.
+- **Tests.** `tests/producer_gate.rs` (boundaries per profile, every fail-closed case, the texts, the override, the reader against a fake node and a
+  loopback node, the cache repairs, the budget, the second-node check, a whole `tick` through the binary, the alert, and a guard that runs a complete
+  swap under every profile and compares each tick's action and phase with the screen healthy, absent, failing and overridden), plus unit tests in
+  `producer_gate.rs`, `watch/mod.rs` (batch envelope), `watch/exec.rs` (batch over a fake `curl`) and `params.rs` (the `Gates` checks). The simulator
+  gives every Bob tick a healthy summary (`SimProducers`) unless a scenario says otherwise.
+
+## Finality: 18 blocks (corrected 2026-11-08)
+
+The node's rule is `is_final(block_height, tip_height)` = `tip_height >= block_height + CONSENSUS_FINALITY_DEPTH` with
+`CONSENSUS_FINALITY_DEPTH = 18` (`vendor/parano1d/noid_chain/src/consensus/header.rs` and `params.rs`; `fork_choice::reorg_allowed` accepts a
+reorg of up to 18 blocks). An inclusion at height `h` can still be replaced while the tip is `h + 17`; it is final at `h + 18`. Until this
+correction the tool counted 17 (the vendored documents say "at most 17 blocks of rollback"; the code governs).
+
+- `params::NOID_FINALITY_DEPTH` = 18; `params::B_FINAL` = `NOID_FINALITY_DEPTH + 1` = 19 (the design's `B_final = NF + 1`: the inclusion block plus the
+  depth); `params::noid_final(tip, h)` = `tip >= h + 18`.
+- Bob's claim target is `D − 19` (`classify_claim_height`): Alice's refund is first includable when the tip is `D − 1`, and a claim included at `h`
+  is final at tip `h + 18`, so `h + 18 <= D − 1`. `D − 19 < h <= D − 1` is still valid but may not be final when her refund opens.
+- Production `B_safety` is 31 (the adversarial reorg of Bob's close is 18 blocks deep: 21 + the T6 guard 4 + restarts 6); `D_offset` is 738 / 122 / 302
+  (production / rehearsal / sepolia), Bob's lock-by `D − 631` / `D − 69` / `D − 252`, `B_post` 254 / 34 / 34; the full "Alice never reveals" cycle is
+  `D_offset + 18` blocks (756 / 140 / 320). The headline durations at 30 s per block are unchanged to the minute.
+- In the engine this shows as: a funding or a close is final one block later (`tip >= h + 18`); Alice's funding window `tip + b_fund + b_final <= lock-by`
+  is one block stricter; the checks at `D + B_FINAL` (instance gone, `lost`) happen one block later; a claim is on target one block earlier; the
+  production lock-by and `D` move by 2 and 3 blocks. Nothing else in the decision logic changed.
+- `params::tests::finality_depth_matches_the_vendored_node_source` reads the vendored `params.rs`, `header.rs` and `fork_choice.rs` at test time and
+  fails (it never skips) if the depth or either rule changes; `noid_final_is_eighteen_blocks_after_inclusion` states the rule directly.
+- The recordings of live run 1 were taken at inclusion + 17, which that run counted as final; under the node's rule they are one block short, and
+  `tests/watch_parano1d.rs` says so. The run's outcome was not affected.
+- Swap files made before this correction may fail to load: their stored lock-by height and `D` no longer match the profile's numbers. Accepted: no
+  swap is active.
 
 ## What REVIEW-7 changed (2026-11-05)
 
@@ -747,7 +811,7 @@ through `live.js`, R4-5 the signer check of `claim`) are fixed there, not here.
   the other. The helpers passed `--single-node-ok` by default when a second node was missing (opt-in since REVIEW-5), and `single_node_warning` now prints on every
   `node_flags` call (every tick, every claim), and the README says a run with a stranger needs BOTH `NOID_RPC2` and `ETH_RPC2`.
 - **R4-9, `lost` needs the second node.** Where the profile asks for a second node (production, sepolia) and `--single-node-ok` was not given,
-  `lost` is declared only if the second Parano1d node was read, is fresh, has itself reached `D + 18` and does not list the instance. A second
+  `lost` is declared only if the second Parano1d node was read, is fresh, has itself reached `D + 19` (`D + B_FINAL`) and does not list the instance. A second
   node that was configured but cannot be read blocks it whatever the flag says. The note says to recover with the wallet if the instance is still
   listed.
 - **R4-10, a second ledger spend beside a held intent is refused.** The ledger holds one intent. A different ledger spend due beside it (a
@@ -973,7 +1037,7 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
 - **F12.** `--now` with a live RPC is refused. **F14.** `--fast-kdf` and `KdfParams::fast_for_tests` exist only
   under `cfg(test)` or the `dev` feature (a normal or `--release` build rejects the flag); `m_cost_kib`,
   `t_cost`, `p_cost` read from a file are bounded (512 MiB, 16, 8) at load and at use.
-- **F13.** Checked arithmetic on bundle data (`h_create + 735`) and node data (`tip + B_FUND + B_FINAL`);
+- **F13.** Checked arithmetic on bundle data (`h_create + 738`) and node data (`tip + B_FUND + B_FINAL`);
   the harness' `expect` (outside this crate) is wrapped so a panic becomes an error.
 
 - **F2 (done, `src/equiv.rs`).** `new-bob --receipt PATH --equiv-prove BIN [--pinned-image-id HEX]` runs
@@ -1068,7 +1132,7 @@ mempool); `tick --apply` records `abort` (not while a funding or lock decided fo
 reach `lost`; the reveal needs the instance in that very poll; funding finality restarts when the instance is absent from a poll or comes back as
 another incarnation; `refund_noid` is not offered for an instance that is gone, on either path; `done` is *settled* but no longer *terminal*
 (`Phase::is_settled()` vs `is_terminal()`); the formal-model findings: `Gates::validate` checks the two `DE`/`RA` relations and the production
-`B_safety` is 30 (`D_offset` 735).
+`B_safety` is 30 (`D_offset` 735; since the finality correction of 2026-11-08, 31 and 738).
 
 ## The bundle and its carrier check (`bundle_check`)
 
@@ -1276,15 +1340,15 @@ D_offset = B_fund + B_final + B_bob + RHS(I1) + margin
 |---|---|---|---|---|
 | `W_A` / `W_A_min` / `M_A` | 7,200 / 5,400 / 1,800 s | 600 / 480 / 300 s | 4,200 / 3,360 / 1,800 s | `W_A` from ideas idea 3 (rehearsal); `W_A_min` = 0.8 `W_A`; `M_A` must exceed the Ethereum finality; sepolia: `W_A_min − M_A` = 1,560 s ≥ 1,260 s |
 | `Δ_detect`, `2·P_auth` | 300 s, 40 s | 60 s, 40 s | 120 s, 40 s | one fast poll on a local chain; two Sepolia blocks plus one poll of a public RPC; same prover |
-| `B_epoch` budget / `B_fee` / `B_final` / `B_safety` | 144 / 60 / 18 / **30** | 0 / 10 / 18 / 5 | 0 / 10 / 18 / 5 | `B_final` is Parano1d's finality and is not shortened; `B_epoch` 0 accepts the rotation risk in a rehearsal only; production `B_safety` was 20, which the model check (`docs/formal/README.md` §7) showed to be exactly one adversarial reorg of Bob's close with nothing on top, so it is 30 |
+| `B_epoch` budget / `B_fee` / `B_final` / `B_safety` | 144 / 60 / **19** / **31** | 0 / 10 / **19** / 5 | 0 / 10 / **19** / 5 | `B_final` = `NF + 1`: the inclusion block plus Parano1d's finality depth `NF` = 18, and is not shortened; `B_epoch` 0 accepts the rotation risk in a rehearsal only; production `B_safety` was 20, which the model check (`docs/formal/README.md` §7) showed to be exactly one adversarial reorg of Bob's close with nothing on top, so it is 30; the reorg is 18 blocks deep, not 17 (2026-11-08), so the one-reorg term is 21 and `B_safety` is 21 + 4 (T6 guard) + 6 (restarts) = **31** |
 | `DE` / `RA` (Ethereum inclusion delay, Alice's rebroadcast time) | 120 s / 120 s | 60 s / 60 s | 120 s / 120 s | `Gates::validate` demands `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (one Ethereum reorg of Alice's claim can still be answered); 12-s blocks: ten blocks; the local chain mines on demand |
-| `B_post` | 252 | 33 | 33 | `0 + 10 + 18 + 5` |
-| `RHS(I1)` full window | 629 = 377 + 252 | **68** = ⌈(600+60+40)/20⌉ + 33 = 35 + 33 | **251** = ⌈(4,200+120+40)/20⌉ + 33 = 218 + 33 | minimum window: 539, 62 and **209** |
+| `B_post` | 254 | 34 | 34 | `0 + 10 + 19 + 5` |
+| `RHS(I1)` full window | 631 = 377 + 254 | **69** = ⌈(600+60+40)/20⌉ + 34 = 35 + 34 | **252** = ⌈(4,200+120+40)/20⌉ + 34 = 218 + 34 | minimum window: 541, 63 and **210** |
 | `B_fund` / `B_bob` / `margin` | 10 / 60 / 18 | 5 / 20 / 9 | 5 / 20 / 6 | `margin` is a deliberate rounding-up |
-| `D_offset` | **735** = 10+18+60+629+18 | **120** = 5+18+20+68+9 | **300** = 5+18+20+251+6 | 6 h 08 m vs exactly 1 h vs exactly 2 h 30 at 30 s/block |
-| Bob's lock-by (full / minimum window) | `D − 629` / `D − 539` | `D − 68` / `D − 62` | `D − 251` / `D − 209` | |
+| `D_offset` | **738** = 10+19+60+631+18 | **122** = 5+19+20+69+9 | **302** = 5+19+20+252+6 | 6 h 09 m vs 1 h 01 m vs 2 h 31 m at 30 s/block |
+| Bob's lock-by (full / minimum window) | `D − 631` / `D − 541` | `D − 69` / `D − 63` | `D − 252` / `D − 210` | |
 | Alice's reveal cutoff | `T_reveal − 1,800 s` | `T_reveal − 300 s` | `T_reveal − 1,800 s` | |
-| Full "Alice never reveals" cycle (creation to her final refund) | 752 blocks | 137 blocks | 317 blocks (≈ 2 h 40) | `D_offset + 17` |
+| Full "Alice never reveals" cycle (creation to her final refund) | 756 blocks | 140 blocks | 320 blocks (≈ 2 h 40) | `D_offset + 18` |
 | Ethereum finality assumed | 1,140 s | 0 s | 1,140 s | local Hardhat finalizes at once; Sepolia does not |
 | caps | none | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **31337 only** | ≤ 20 NOID, ≤ 0.01 ETH, Ethereum chain **11155111 only** | refused at build, at `new-bob` and at every load |
 
@@ -1300,19 +1364,19 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   `file.public.params.profile.gates()`. The `pub const` values in `params.rs` (`W_A_S`, `M_A_S`, …) are the PRODUCTION numbers kept for the
   tests; the engine does not read them. The fee rule (`F_max`) and the chain facts (finality 18, epoch 144, minimum fee 5,800) are the same in
   every profile and stay global.
-- `Gates::validate()` is the one checker of the §4.2/§4.3 relations (non-zero times and `W_A_min ≤ W_A`; `B_final` = Parano1d's 18; `M_A` >
+- `Gates::validate()` is the one checker of the §4.2/§4.3 relations (non-zero times and `W_A_min ≤ W_A`; `B_final` = `NF + 1` = 19 with Parano1d's finality depth `NF` = 18; `M_A` >
   Ethereum finality; `W_A_min − M_A ≥ finality + Δ_detect`; `M_A ≥ finality + 2·DE + RA` and `W_A_min ≥ DE + finality + RA + M_A` (the per-profile Ethereum inclusion delay `DE` and Alice's rebroadcast time `RA`: one Ethereum reorg of her claim can still be answered); `D_offset` = the formula above; the T6 guard fits in `B_safety`; every non-production
   profile (`rehearsal`, `sepolia`) has all three caps and production none). All three profiles pass it; `params::tests::a_broken_profile_is_rejected`
   lists twenty-five hand-made broken ones (the last three are the `DE`/`RA` relations, each failing alone; five of them sepolia: `M_A` not above the finality, `D_offset` one short, no caps, no chain pin, the
   rehearsal window).
 - Tests: `tests/scenarios.rs` runs, under `rehearsal` and under `sepolia` (`Scenario::with_profile`), the happy path (raw and stock), "Alice never
-  reveals, both refund" (the whole abort cycle is `D_offset + 17` blocks from the creation height: 137 and 317), "Bob never locks" and the reveal
+  reveals, both refund" (the whole abort cycle is `D_offset + 18` blocks from the creation height: 140 and 320), "Bob never locks" and the reveal
   cutoff. For `sepolia` the simulator, which has no time-based finality, is put on a finality lag of 95 Ethereum blocks (95 × 12 s = 1,140 s,
   `SEPOLIA_FINALITY_LAG_BLOCKS` in `tests/common/mod.rs`), and one scenario checks that Alice waits one block short of finality and reveals at the
   finalizing block, before her cutoff. `tests/rehearsal_cli.rs` covers the binary, the caps and the mismatch refusals for both profiles;
-  `params::tests` pin the derived numbers (251, 209, 300, `B_post` 33, rotation guard 4).
-- Not covered by a rehearsal. Epoch rotation: both profiles budget `B_epoch` = 0. With `D_offset` 300 > 144, at least one rotation of the epoch
-  anchor falls inside a `sepolia` window (with `rehearsal`'s 120 one can), and a claim evicted at a rotation must be re-proved; the budget accepts
+  `params::tests` pin the derived numbers (252, 210, 302, `B_post` 34, rotation guard 4).
+- Not covered by a rehearsal. Epoch rotation: both profiles budget `B_epoch` = 0. With `D_offset` 302 > 144, at least one rotation of the epoch
+  anchor falls inside a `sepolia` window (with `rehearsal`'s 122 one can), and a claim evicted at a rotation must be re-proved; the budget accepts
   that risk, and the one-epoch wait that production budgets (144 blocks) is not exercised. The mainnet relay-floor behaviour (Q6) and the
   Ethereum mainnet itself (chain 1) are not covered by either profile; the Sepolia run itself is pending (`docs/runbook-two-party.md` §6).
 

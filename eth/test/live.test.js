@@ -556,6 +556,122 @@ describe("live.js gates (REVIEW-2 F1, F3, F4, F7)", function () {
       expect(ok.lockedBlock).to.equal(l.blockNumber);
     });
 
+    // The reveal cutoff is checked again immediately before signing: the scans, the finality lookup and the fee planning in between can take
+    // minutes on a slow endpoint. The passage of time is simulated by a provider whose `finalized` lookup (the step after the early check)
+    // mines a block with a later timestamp, or moves the mocked wall clock.
+    describe("the cutoff is re-checked just before sending", () => {
+      const chainClock = (ts) =>
+        wrap({
+          getBlock: async (tag, ...r) => {
+            if (tag === "finalized") {
+              await provider.send("evm_setNextBlockTimestamp", ["0x" + ts.toString(16)]);
+              await provider.send("evm_mine", []);
+            }
+            return provider.getBlock(tag, ...r);
+          },
+        });
+      const wallClock = (ts) =>
+        wrap({
+          getBlock: async (tag, ...r) => {
+            if (tag === "finalized") Date.now = () => ts * 1000;
+            return provider.getBlock(tag, ...r);
+          },
+        });
+      const realNow = Date.now;
+      afterEach(() => {
+        Date.now = realNow;
+      });
+      const nonceOf = (a) => provider.getTransactionCount(a, "latest");
+
+      it("a chain clock past the cutoff at send time refuses, sends nothing, and the lock stays open", async () => {
+        const l = await newLock();
+        const cutoff = l.tReveal - 1800;
+        const n0 = await nonceOf(bobAddr);
+        await expect(live.claim(chainClock(cutoff + 10), bob, { ...base(l), secret: l.preimage })).to.be.rejectedWith(
+          new RegExp(`past the reveal cutoff. now ${cutoff + 10} > cutoff ${cutoff} .*re-checked just before sending.*nothing was sent`)
+        );
+        expect(await nonceOf(bobAddr)).to.equal(n0);
+        expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+      });
+
+      it("a wall clock past the cutoff at send time refuses too", async () => {
+        const l = await newLock();
+        const cutoff = l.tReveal - 1800;
+        const n0 = await nonceOf(bobAddr);
+        try {
+          await expect(live.claim(wallClock(cutoff + 10), bob, { ...base(l), secret: l.preimage })).to.be.rejectedWith(/past the reveal cutoff.*re-checked just before sending/);
+        } finally {
+          Date.now = realNow;
+        }
+        expect(await nonceOf(bobAddr)).to.equal(n0);
+        expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+      });
+
+      it("a latest block at the timelock at send time refuses even when the cutoff equals the timelock (--margin-s 0)", async () => {
+        const l = await newLock();
+        const n0 = await nonceOf(bobAddr);
+        await expect(live.claim(chainClock(l.tReveal), bob, { ...base(l), marginS: "0", secret: l.preimage })).to.be.rejectedWith(
+          /timelock \d+ has passed.*re-checked just before sending.*nothing was sent/
+        );
+        expect(await nonceOf(bobAddr)).to.equal(n0);
+        expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.not.equal("claimed");
+      });
+
+      it("a clock inside the cutoff at send time claims as before", async () => {
+        const l = await newLock();
+        const cutoff = l.tReveal - 1800;
+        const r = await live.claim(chainClock(cutoff - 60), bob, { ...base(l), secret: l.preimage });
+        expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+        expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+      });
+
+      it("a latest block that cannot be read at send time refuses (fail closed) and sends nothing", async () => {
+        const l = await newLock();
+        let latestReads = 0;
+        const p = wrap({
+          getBlock: async (tag, ...r) => {
+            if (tag === "latest" && ++latestReads > 1) throw new Error("socket hang up");
+            return provider.getBlock(tag, ...r);
+          },
+        });
+        const n0 = await nonceOf(bobAddr);
+        await expect(live.claim(p, bob, { ...base(l), secret: l.preimage })).to.be.rejectedWith(/could not re-read the latest block just before sending.*nothing was sent/);
+        expect(await nonceOf(bobAddr)).to.equal(n0);
+        expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+      });
+
+      it("--dry-run never runs the guard and reports the same fields", async () => {
+        const l = await newLock();
+        const cutoff = l.tReveal - 1800;
+        const plain = await live.claim(provider, bob, { ...base(l), secret: l.preimage, dryRun: true });
+        let latestReads = 0;
+        const counting = wrap({
+          getBlock: async (tag, ...r) => {
+            if (tag === "latest") latestReads++;
+            return provider.getBlock(tag, ...r);
+          },
+        });
+        await live.claim(counting, bob, { ...base(l), secret: l.preimage, dryRun: true });
+        const readsDry = latestReads;
+        // a clock that jumps past the cutoff after the early check changes nothing in a dry run
+        const jumped = await live.claim(chainClock(cutoff + 10), bob, { ...base(l), secret: l.preimage, dryRun: true });
+        for (const o of [plain, jumped]) {
+          expect(o.dryRun).to.equal(true);
+          expect(o.sent).to.equal(false);
+        }
+        const strip = (o) => {
+          const { secondsToCutoff, finalizedBlock, ...rest } = o;
+          return rest;
+        };
+        expect(strip(jumped)).to.deep.equal(strip(plain));
+        // the real claim reads the latest block exactly once more than the dry run (the guard)
+        latestReads = 0;
+        const l2 = await newLock();
+        await live.claim(counting, bob, { ...base(l2), secret: l2.preimage });
+        expect(latestReads).to.equal(readsDry + 1);
+      });
+    });
+
     it("refuses when the node cannot answer the `finalized` tag", async () => {
       const l = await newLock();
       const throws = wrap({ getBlock: async (tag, ...r) => { if (tag === "finalized") throw new Error("invalid block tag"); return provider.getBlock(tag, ...r); } });
@@ -2645,6 +2761,45 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       const r = await live.claim(provider, alice, { swap, secret: preimage });
       expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
       expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+  });
+
+  describe("R4-3: the re-check just before sending uses the same (late) cutoff as the early check", () => {
+    // The `finalized` lookup runs after the early check; here it mines a block with the given timestamp (time passing during the slow steps).
+    const advancing = (ts) =>
+      new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "getBlock") {
+            return async (tag, ...r) => {
+              if (tag === "finalized") {
+                await provider.send("evm_setNextBlockTimestamp", ["0x" + ts.toString(16)]);
+                await provider.send("evm_mine", []);
+              }
+              return provider.getBlock(tag, ...r);
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+
+    it("past the frozen late cutoff at send time: refused, nothing sent, the lock stays open", async () => {
+      const l = await makeLock({ ttl: 1000 }); // already inside the default 1800 s margin
+      const late = l.tReveal - 100;
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, late), history: ["eth_claim_mined"] });
+      const n0 = await nonce(aliceAddr);
+      await expect(live.claim(advancing(late + 10), alice, { swap, secret: preimage })).to.be.rejectedWith(
+        new RegExp(`past the reveal cutoff. now ${late + 10} > cutoff ${late} \\(the swap file's frozen cutoff.*may already be public.*re-checked just before sending`)
+      );
+      expect(await nonce(aliceAddr)).to.equal(n0);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+    });
+
+    it("between the default and the late cutoff at send time: sent (the late cutoff rules at send time as in the early check)", async () => {
+      const lm = await makeLock({ ttl: 1000 }); // the default cutoff (timelock - 1800) is long past
+      const swap2 = swapFile({ intent: revealIntent(lm.lockId, lm.tReveal, lm.tReveal - 100), history: ["eth_claim_mined"] });
+      const r = await live.claim(advancing(lm.tReveal - 200), alice, { swap: swap2, secret: preimage });
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
     });
   });
 

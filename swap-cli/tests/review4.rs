@@ -30,7 +30,7 @@ fn bob_ready_to_lock() -> Scenario {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.alice_phase(), "funding_final");
     s
@@ -328,7 +328,7 @@ fn r4_9_lost_needs_the_second_node_where_the_profile_asks_for_one() {
         w.single_node_ok = true;
     });
     assert_eq!(s.alice_phase(), "lock_final");
-    // A second node that is behind (its tip below D + 18) cannot vouch.
+    // A second node that is behind (its tip below D + 19) cannot vouch.
     let s = lost_candidate(|w| w.second_tip_lag = 5);
     assert_eq!(s.alice_phase(), "lock_final");
 }
@@ -410,7 +410,7 @@ fn r4_11_the_drop_grace_is_a_profile_value_short_on_the_local_chain() {
         s.tick_alice();
         s.world.borrow_mut().advance_noid(1);
         s.tick_both();
-        s.world.borrow_mut().advance_noid(17);
+        s.world.borrow_mut().advance_noid(18);
         s.tick_alice();
         let rb = s.tick_bob();
         assert_eq!(rb.action.kind(), "lock_eth", "{rb:?}");

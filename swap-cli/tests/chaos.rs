@@ -775,7 +775,7 @@ impl Run {
             "alice_wallet_refund" => self.ev_alice_wallet_refund()?,
             // The simulator closes only its own real instance, so a foreign instance is injected only once the real one
             // exists (before that the parties would take it for the funding and the simulator could not close it).
-            "dust_instance" | "fitting_instance" if self.world.borrow().instance.is_none() || !self.truth.funded_height.is_some_and(|h| tip >= h + 17) => false,
+            "dust_instance" | "fitting_instance" if self.world.borrow().instance.is_none() || !self.truth.funded_height.is_some_and(|h| tip >= h + 18) => false,
             "dust_instance" => {
                 self.tx_seq += 1;
                 let inst = NoidInstance { slot_index: 3 + (self.tx_seq % 5) as u32, creation_id: 500 + self.tx_seq, amount_micronoid: 1_000 };
@@ -900,7 +900,7 @@ impl Run {
 
     fn ev_funding_reorg(&mut self, tip: u64) -> bool {
         let mut w = self.world.borrow_mut();
-        let young = self.truth.funded_height.is_some_and(|h| tip.saturating_sub(h) < 17);
+        let young = self.truth.funded_height.is_some_and(|h| tip.saturating_sub(h) < 18);
         let no_extras = w.instances_before.is_empty() && w.instances_after.is_empty();
         if w.instance.is_some() && young && no_extras && w.mempool.is_empty() && w.noid_payout.is_none() {
             let amount = w.instance.as_ref().unwrap().amount_micronoid;
@@ -988,7 +988,7 @@ impl Run {
             if w.instance.is_some() {
                 None
             } else {
-                w.confirmed.iter().find(|(_, h)| tip.saturating_sub(**h) < 17).map(|(t, _)| t.clone())
+                w.confirmed.iter().find(|(_, h)| tip.saturating_sub(**h) < 18).map(|(t, _)| t.clone())
             }
         };
         let Some(txid) = pick else { return false };
@@ -1004,7 +1004,7 @@ impl Run {
             let w = self.world.borrow();
             w.confirmed
                 .iter()
-                .find(|(_, h)| tip.saturating_sub(**h) < 17 && **h < tip)
+                .find(|(_, h)| tip.saturating_sub(**h) < 18 && **h < tip)
                 .map(|(t, h)| (t.clone(), *h, matches!(w.included[t].0.kind, SimKind::Claim { .. })))
         };
         let Some((txid, h, is_claim)) = pick else { return false };
@@ -1522,7 +1522,8 @@ impl Run {
                 if *hashlock != self.public.hashlock || *receiver != p.eth.alice_receiver || *amount_wei != p.eth.amount_wei {
                     return fail("gate-lock", "lock_eth with other terms than the agreed ones");
                 }
-                let funded = s.funded_height.is_some_and(|h| s.tip >= h + 17);
+                // The node's rule: final iff tip >= height + 18 (`is_final`, CONSENSUS_FINALITY_DEPTH).
+                let funded = s.funded_height.is_some_and(|h| s.tip >= h + 18);
                 if !s.instance || !funded {
                     return fail("gate-lock-funding-not-final", format!("lock_eth at tip {} but the funding (height {:?}) is not final in the world", s.tip, s.funded_height));
                 }

@@ -38,6 +38,7 @@ use serde_json::Value;
 use crate::params::{self, ClaimHeight, ContractVersion, RotationGuard};
 use crate::secret::{check_preimage_for, LockKind};
 use crate::state::{transition, AlicePhase, BobPhase, Event, InvalidTransition, LockSummary, Phase, Role};
+use crate::producer_gate;
 use crate::swapfile::{PendingAction, PendingIntent, SwapFile, SwapFileError};
 use crate::watch::eth::compute_lock_id;
 use crate::watch::{hexbytes, u128dec, EthLock, EthObservation, NoidInstance, NoidInstanceStatus, NoidObservation, WordScan};
@@ -671,6 +672,14 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     };
     // Display only, from the action as finally decided: the lock-by margin while Bob's lock is not yet seen. Read by nothing.
     notes.extend(lock_by_margin_note(file, &phase, &action, noid.tip));
+    // T21: the first time `--accept-producer-concentration` lets a lock through that the screen would have held back, the swap file's history
+    // says so (log only; once). Nothing here changes an event or the action.
+    if matches!(&action, Action::LockEth { .. }) && matches!(&phase, Phase::Bob(BobPhase::FundingFinal { .. })) {
+        let already = file.history.iter().any(|h| h.event.starts_with(producer_gate::OVERRIDE_HISTORY));
+        if !already {
+            log.extend(producer_gate::override_history_entry(file.public.params.profile.gates(), noid, now));
+        }
+    }
     Decision { events, action, notes, log }
 }
 
@@ -1790,7 +1799,7 @@ pub fn external_close_event(file: &SwapFile, noid: &NoidObservation, txid: &str)
 /// What a tick learns about a close that is recorded as included at some height (REVIEW-2 F6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Included {
-    /// Confirmed at the recorded height and the tip is 17 blocks past it.
+    /// Confirmed at the recorded height and the tip is 18 blocks past it ([`params::NOID_FINALITY_DEPTH`]).
     Final,
     /// Confirmed at the recorded height, not final yet.
     Waiting,
@@ -1823,6 +1832,16 @@ fn reorg_note(what: &str, txid: &str, height: u64, still_pending: bool) -> Strin
         "REORG: the {what} {txid} was included at height {height} and is no longer confirmed there; {}",
         if still_pending { "it is back in the mempool" } else { "it is not in the mempool either" }
     )
+}
+
+/// The note that asks the operator to act when a reorg took Bob's mined NOID claim back out of the chain and it is not pending either (his
+/// file goes back to `secret_seen` and the next tick offers `claim_noid` again). Nothing is sent by the tool: the dry run and the submit are
+/// the operator's commands (`claim.sh` of `scripts/live`). The line starts with `ALERT:` so that `scripts/live/watch.sh` can pass it on
+/// (docs/bob-concentration-gate.md section 10); it names no address, amount or transaction.
+pub const CLAIM_REMOVED_ALERT: &str = "ALERT: a reorg removed Bob's NOID claim from the chain and it is not pending. Send it again: `bash $L/bin/claim.sh` is the dry run, check it, then `bash $L/bin/claim.sh --submit` ($L is the helpers' run folder)";
+
+fn claim_removed_alert() -> String {
+    CLAIM_REMOVED_ALERT.to_string()
 }
 
 fn unchecked_note(what: &str, txid: &str, height: u64) -> String {
@@ -2272,6 +2291,10 @@ fn bob_fact(
                     return None;
                 }
                 notes.push(reorg_note("claim", txid, *height, still_pending));
+                // Only when the claim is gone for good (the file goes back to `secret_seen`); a claim that is pending again needs no new send.
+                if !still_pending {
+                    notes.push(claim_removed_alert());
+                }
                 Some(Event::NoidTxReorged { txid: txid.clone(), was_height: *height, still_pending, preimage: secret })
             }
             Included::Unchecked => {
@@ -2386,7 +2409,7 @@ fn bob_claim_action(file: &SwapFile, preimage: &[u8; 32], noid: &NoidObservation
             reason: format!("claim branch closed: next call height {h} >= D {d}; Alice can refund"),
         },
         ClaimHeight::LateButValid => {
-            notes.push(format!("claim at {h} is past the D-18 target; proving anyway"));
+            notes.push(format!("claim at {h} is past the D-19 target; proving anyway"));
             Action::ClaimNoid { call_height: h, fee_micronoid: close_fee_for(params_.contract_version, noid, params_.max_fee_micronoid), preimage: *preimage }
         }
         ClaimHeight::OnTarget => match g.rotation_guard(h) {
@@ -2641,6 +2664,12 @@ fn poseidon_prelock_blocker(file: &SwapFile, noid: &NoidObservation, eth: &EthOb
     None
 }
 
+/// T21: should this poll also read the recent block headers (who produced them)? Only for Bob, and only while he can still decide to lock
+/// (`received`, `funded`, `funding_final`). A dropped lock's re-send is not gated, so `lock_submitted` and later phases read nothing; Alice never does.
+pub fn producer_scan_wanted(file: &SwapFile) -> bool {
+    file.role == Role::Bob && matches!(&file.phase, Phase::Bob(BobPhase::Received | BobPhase::Funded { .. } | BobPhase::FundingFinal { .. }))
+}
+
 /// REVIEW-6 R6-1: should this poll also run the all-`Locked`-logs scan? Only for Bob in a `poseidon` swap and only while he can still decide to
 /// lock: before his lock is seen (`received`, `funded`, `funding_final`) and while a lock he sent may need a re-send (`lock_submitted`). From
 /// `locked` on, and for Alice, nothing depends on the scan, so it is not asked and cannot cost the poll.
@@ -2706,6 +2735,8 @@ fn bob_action(
     let d = params_.deadline_height;
     match p {
         B::Received => {
+            // T21: said while Bob waits, when a summary was read (nothing is decided here; the screen bites at `funding_final`).
+            notes.extend(producer_gate::waiting_notes(g, noid, now));
             // The hard limit is the lock-by height with the minimum reveal window
             // (design step 8 lets Bob shrink W_A down to W_A_min); `lock_by_height`
             // in the file is the nominal one for the full window.
@@ -2717,7 +2748,10 @@ fn bob_action(
             }
             Action::Wait { reason: "waiting for Alice's funding".into() }
         }
-        B::Funded { .. } => Action::Wait { reason: "waiting for funding finality".into() },
+        B::Funded { .. } => {
+            notes.extend(producer_gate::waiting_notes(g, noid, now));
+            Action::Wait { reason: "waiting for funding finality".into() }
+        }
         B::FundingFinal { instance, final_at_tip } => {
             // Step 7: the instance is ours, final, unspent, and we are in time.
             match instance_ok(file, noid) {
@@ -2796,6 +2830,12 @@ fn bob_action(
                     // Bob who is held back still aborts once the last lock height has passed instead of waiting for ever.
                     if let Some(why) = poseidon_prelock_blocker(file, noid, eth, true, now, notes) {
                         notes.push(format!("not lock_eth: {why}"));
+                        return Action::Wait { reason: why };
+                    }
+                    // T21 (docs/bob-concentration-gate.md): the producer-concentration screen. Under `production` a failing or incomplete
+                    // screen holds the lock back (unless the operator accepted the risk); under the other profiles it only warns. It reads the
+                    // observation and changes no state; every other decision is untouched.
+                    if let Some(why) = producer_gate::lock_gate(g, noid, now, notes).wait {
                         return Action::Wait { reason: why };
                     }
                     Action::LockEth {
@@ -3643,6 +3683,7 @@ mod tests {
     use super::*;
     use crate::secret::{Secret, Variant};
     use crate::swapfile::{example_public, KdfParams, Passphrase};
+    use crate::watch::producers::ProducerSummary;
     use crate::watch::{EthClaimed, NoidInstance};
 
     fn alice_file(secret: &Secret) -> SwapFile {
@@ -3671,6 +3712,9 @@ mod tests {
         // REVIEW-2 F5: these older tests are about the gates of one node; the F5 tests below say otherwise on purpose.
         n.single_node_ok = true;
         e.single_node_ok = true;
+        // T21: a healthy producer summary (largest 30 %, two largest 45 %); the producer-gate tests build their own.
+        let g = file.public.params.profile.gates();
+        n.producers.get_or_insert_with(|| ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450));
         if n.instance.is_some() {
             n.instance_matches_opening.get_or_insert(true);
             n.active_authority.get_or_insert_with(|| file.public.claim_authority.clone());
@@ -3721,7 +3765,7 @@ mod tests {
         let d = decide(&file, &noid_at(300_001), &eth_at(1, 1_000), 1_000);
         assert_eq!(d.action, Action::FundNoid { amount_micronoid: 10_000_000 });
         assert!(d.events.is_empty());
-        // Too late: Bob could not lock before his lock-by height (300,106).
+        // Too late: Bob could not lock before his lock-by height (300,107).
         let d = decide(&file, &noid_at(300_080), &eth_at(1, 1_000), 1_000);
         assert!(matches!(d.action, Action::Abort { .. }));
     }
@@ -3736,8 +3780,8 @@ mod tests {
         let d = decide(&file, &funded(300_005, 10_000_000), &eth_at(1, t_b), t_b);
         assert_eq!(d.events.len(), 1);
         file.apply(&d.events[0], 0).unwrap();
-        let d = decide(&file, &funded(300_022, 10_000_000), &eth_at(1, t_b), t_b);
-        assert_eq!(d.events, vec![Event::NoidFundingFinal { tip: 300_022 }]);
+        let d = decide(&file, &funded(300_023, 10_000_000), &eth_at(1, t_b), t_b);
+        assert_eq!(d.events, vec![Event::NoidFundingFinal { tip: 300_023 }]);
         file.apply(&d.events[0], 0).unwrap();
         assert!(matches!(d.action, Action::Wait { .. }));
         // Bob's lock appears, then becomes final: reveal.
@@ -3757,8 +3801,8 @@ mod tests {
         let late = t_reveal - params::M_A_S + 1;
         let d = decide(&file, &funded(300_300, 10_000_000), &eth_at(50, late), late);
         assert!(matches!(d.action, Action::Wait { .. }), "{:?}", d.action);
-        let d = decide(&file, &funded(300_734, 10_000_000), &eth_at(50, late), late);
-        assert_eq!(d.action, Action::RefundNoid { call_height: 300_735, fee_micronoid: 6_000 });
+        let d = decide(&file, &funded(300_737, 10_000_000), &eth_at(50, late), late);
+        assert_eq!(d.action, Action::RefundNoid { call_height: 300_738, fee_micronoid: 6_000 });
         // A lock that pays someone else is rejected.
         let mut file2 = alice_file(&s);
         file2.apply(&Event::NoidInstanceSeen { instance: funded(0, 10_000_000).instance.unwrap(), tip: 300_005 }, 0).unwrap();
@@ -3854,18 +3898,18 @@ mod tests {
         assert_eq!(params::blocks_until_rotation(guarded), 3);
         let d = decide(&file, &funded(guarded - 1, 10_000_000), &eth, 1);
         assert!(matches!(d.action, Action::Wait { .. }));
-        // Late but valid: prove anyway (D = 300,735; next call 300,730).
+        // Late but valid: prove anyway (D = 300,738; the target is D - 19 = 300,719; next call 300,730).
         let d = decide(&file, &funded(300_729, 10_000_000), &eth, 1);
         assert!(matches!(d.action, Action::ClaimNoid { call_height: 300_730, .. }));
         // Too late: the branch flipped; Bob lost. (The ETH lock must be closed in a final block, or the abort waits: REVIEW-4 R4-6.)
-        let d = decide(&file, &funded(300_734, 10_000_000), &eth, 1);
+        let d = decide(&file, &funded(300_737, 10_000_000), &eth, 1);
         assert!(matches!(&d.action, Action::Wait { reason } if reason.contains("not aborting yet")), "{:?}", d.action);
         let mut closed = eth.clone();
         let mut l = lock.clone();
         l.claimed = true;
         closed.lock = Some(l);
         closed.claimed = Some(EthClaimed { lock_id: lock.lock_id, preimage: *s.bytes(), block_number: 5, tx_hash: [3; 32] });
-        let d = decide(&file, &funded(300_734, 10_000_000), &closed, 1);
+        let d = decide(&file, &funded(300_737, 10_000_000), &closed, 1);
         assert!(matches!(d.action, Action::Abort { .. }), "{:?}", d.action);
     }
 
@@ -4023,6 +4067,9 @@ mod tests {
         // REVIEW-2 F5: these tests are about the pinned chain and the lock, not about a second node.
         n.single_node_ok = true;
         e.single_node_ok = true;
+        // T21: a healthy producer summary (largest 30 %, two largest 45 %).
+        let g = file.public.params.profile.gates();
+        n.producers.get_or_insert_with(|| ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450));
         if n.instance.is_some() {
             n.instance_matches_opening = Some(true);
             n.active_authority = Some(file.public.claim_authority.clone());
@@ -4262,9 +4309,11 @@ mod tests {
         let d = super::decide(&file, &n, &e, t);
         assert_eq!(d.action.kind(), "lock_eth");
         assert!(d.notes.iter().any(|x| x == "single node: F5 cross-check not possible"), "{:?}", d.notes);
-        // A second node that agrees: no single-node note, and the flag is irrelevant.
+        // A second node that agrees: no single-node note, and the flag is irrelevant. (T21: the producer cross-check ran against it and agreed.)
         n.single_node_ok = false;
-        n.second = Some(Box::new(NoidObservation { observed_at: Some(t), second: None, ..n.clone() }));
+        n.second = Some(Box::new(NoidObservation { observed_at: Some(t), second: None, producers: None, ..n.clone() }));
+        let tip = n.tip;
+        n.producers.as_mut().unwrap().second = crate::watch::producers::SecondCheck::Agrees { height: tip - 3 };
         let d = super::decide(&file, &n, &e, t);
         assert_eq!(d.action.kind(), "lock_eth", "{:?}", d.notes);
         assert!(d.notes.iter().all(|x| !x.contains("single node")), "{:?}", d.notes);

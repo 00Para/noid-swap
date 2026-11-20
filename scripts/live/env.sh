@@ -84,6 +84,8 @@ ETH_RPC2=${ETH_RPC2:-}                               # a second, distinct Ethere
 NOID_RPC2_REMOTE=${NOID_RPC2_REMOTE:-0}              # 1 = the second Parano1d node runs on another machine and is reached through a local port (an SSH tunnel): passes --noid-rpc2-is-remote, text only (the tool cannot verify it); only with NOID_RPC2
 ETH_RPC2_REMOTE=${ETH_RPC2_REMOTE:-0}                # the same for the second Ethereum node (--eth-rpc2-is-remote), only with ETH_RPC2
 SINGLE_NODE_OK=${SINGLE_NODE_OK:-0}                  # 1 = pass --single-node-ok (waive the F5 second-node rule); opt-in, set it in env.local.sh
+ACCEPT_PRODUCER_CONCENTRATION=${ACCEPT_PRODUCER_CONCENTRATION:-0}  # 1 = pass --accept-producer-concentration (waive the production profile's refusal to lock while one address produced too many recent blocks, threat T21); opt-in, set it in env.local.sh, said on every call
+ALERT_URL=""                                         # optional: a full URL that watch.sh POSTs a short message to when Bob's mined NOID claim was removed by a reorg. Set ONLY in $L/env.local.sh (the environment is ignored); never printed, never in a tracked file
 PROFILE=${PROFILE:-sepolia}
 CHAIN=${CHAIN:-11155111}
 CONTRACT=${CONTRACT:-}                               # the HTLC address on $CHAIN: set it in $L/env.local.sh (no default on purpose)
@@ -127,12 +129,14 @@ load_passphrase() { [ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (
 # Node flags for swap-cli: one or two endpoints per chain; --single-node-ok ONLY when SINGLE_NODE_OK=1 (REVIEW-5, opt-in).
 node_flags() {
   single_node_warning   # said on EVERY call (every tick, every claim), not once in setup
+  producer_concentration_warning
   local f=(--transport curl --noid-rpc "$NOID_RPC" --eth-rpc "$ETH_RPC" --rpc-timeout "$RPC_TIMEOUT")
   if [ -n "$NOID_RPC2" ]; then f+=(--noid-rpc "$NOID_RPC2"); fi
   if [ -n "$NOID_RPC2" ] && [ "$NOID_RPC2_REMOTE" = 1 ]; then f+=(--noid-rpc2-is-remote); fi
   if [ -n "$ETH_RPC2" ]; then f+=(--eth-rpc "$ETH_RPC2"); fi
   if [ -n "$ETH_RPC2" ] && [ "$ETH_RPC2_REMOTE" = 1 ]; then f+=(--eth-rpc2-is-remote); fi
   if [ "$SINGLE_NODE_OK" = 1 ] && { [ -z "$NOID_RPC2" ] || [ -z "$ETH_RPC2" ]; }; then f+=(--single-node-ok); fi
+  if [ "$ACCEPT_PRODUCER_CONCENTRATION" = 1 ]; then f+=(--accept-producer-concentration); fi
   # native: say which curl to spawn (swap-cli's own default is the WSL curl.exe when that file exists, else `curl` from PATH)
   if [ "$LIVE_PLATFORM" = native ]; then f+=(--curl-path "$CURL"); fi
   printf '%s\n' "${f[@]}"
@@ -187,6 +191,45 @@ enter_eth_dir() {
 # Native mode: the "Windows-side copies" are plain local copies in $PUB; make the folder before a script copies into it. Under wsl nothing is made here.
 ensure_pub() { if [ "$LIVE_PLATFORM" = native ]; then mkdir -p "$PUB" 2>/dev/null; fi; return 0; }
 require_parties() { for v in ALICE_NOID BOB_NOID ALICE_ETH BOB_ETH CONTRACT; do [ -n "${!v}" ] || { echo "$v is not set: put the four party addresses and CONTRACT in $L/env.local.sh" >&2; return 2; }; done; }
+# Opt-in only (ACCEPT_PRODUCER_CONCENTRATION=1 in $L/env.local.sh), said on EVERY call that builds the node flags. Nothing when the setting is off.
+producer_concentration_warning() {
+  [ "$ACCEPT_PRODUCER_CONCENTRATION" = 1 ] || return 0
+  echo "WARNING: ACCEPT_PRODUCER_CONCENTRATION=1 (--accept-producer-concentration): the production profile will offer Bob's lock even while one address produced more than 35 % of the recent blocks, or the producer check cannot be completed (threat T21). Amounts must stay trial-sized. The F5 second-node rules are not waived by it" >&2
+}
+# alert_send MESSAGE: one POST to $ALERT_URL. The URL reaches curl on its standard input (one config line), never in its argument list, so it is not
+# in the process list; -f turns an HTTP error into a failure. Returns curl's status.
+alert_send() { printf 'url = "%s"\n' "$ALERT_URL" | "$CURL" -s -f -m 20 -d "$1" -K - >/dev/null 2>&1; }
+# alert_hook: reads a tick's output on stdin; for every line that starts with `ALERT:` it POSTs a SHORT message to $ALERT_URL (set only in
+# $L/env.local.sh; empty = this does nothing). The message is fixed text per kind of alert plus the run number: it never carries the alert line
+# itself, so no address, amount or transaction id can leave. The engine prints each alert on ONE tick only (the tick that takes the transition), so
+# there is no per-line latch (a second removal of the claim later in the run must alert again); the same message twice in one call is sent once.
+# A POST that fails is kept in $L/alert-pending ("TRIES|MESSAGE") and tried again at every later call, up to 20 times, because the line will not
+# be printed again. The URL is never printed, and nothing here can stop a loop: the function always returns 0.
+alert_hook() {
+  [ -n "${ALERT_URL:-}" ] || return 0
+  local line msg v tries pend="$L/alert-pending" seen="|"
+  if [ -s "$pend" ]; then
+    v=$(cat "$pend" 2>/dev/null); tries=${v%%|*}; msg=${v#*|}
+    case "$tries" in ''|*[!0-9]*) rm -f "$pend"; msg="" ;; esac
+    if [ -n "$msg" ]; then
+      if alert_send "$msg"; then rm -f "$pend"
+      elif [ "$tries" -ge 20 ]; then rm -f "$pend"
+      else printf '%s|%s\n' "$((tries + 1))" "$msg" > "$pend" 2>/dev/null
+      fi
+    fi
+  fi
+  while IFS= read -r line; do
+    case "$line" in ALERT:*) ;; *) continue ;; esac
+    case "$line" in
+      *"removed Bob's NOID claim"*) msg="noid-swap run $RUN: claim removed by a reorg; run claim.sh dry run" ;;
+      *) msg="noid-swap run $RUN: an alert was raised; look at the loop log" ;;
+    esac
+    case "$seen" in *"|$msg|"*) continue ;; esac
+    seen="$seen$msg|"
+    alert_send "$msg" || printf '1|%s\n' "$msg" > "$pend" 2>/dev/null
+  done
+  return 0
+}
 single_node_warning() {
   [ -n "$NOID_RPC2" ] && [ -n "$ETH_RPC2" ] && return 0
   if [ "$SINGLE_NODE_OK" = 1 ]; then

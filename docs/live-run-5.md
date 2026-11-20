@@ -50,6 +50,7 @@ tree for this run.
   `4e1a0384316c5a47ac94269b2c388429101846a14fb00c4f157e4da966f01de3`. 21:31:40 Bob: `claim_submitted`, "NOID claim pending";
   21:33:42 `claim_included` (tip 284,302).
 - 21:39:55 Tip 284,317: the claim is final, Bob's file **`done`** ("done: NOID received").
+  Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`is_final`: tip >= height + 18), not 17; the outcome of this run was not affected.
 - 21:48:21 Sepolia has finalized Alice's reveal, tip 284,326: Alice's file **`done`** ("done: ETH received"). Both watch loops
   stopped on the terminal phase. One tick of Bob's loop exited 1 at 21:48:42 (a single failed poll right after Alice's file went
   terminal; the next tick at 21:49:36 was exit 0, `done`); every other tick of both loops exited 0, 48 lines each.

@@ -68,7 +68,7 @@ class Params:
     DET: int        # Delta_detect: Bob learns the secret at most this long after the claim is mined
     PA: int         # P_auth: ticks to prove and submit one claim
     RD: int         # ticks for Bob to notice that his close was evicted / reorged away
-    NF: int         # NOID rollback depth: final once tip >= h_mined + NF (design: 17); B_final = NF + 1
+    NF: int         # NOID rollback depth: final once tip >= h_mined + NF (the chain: 18); B_final = NF + 1
     B_EPOCH: int
     B_FEE: int
     B_SAFETY: int
@@ -899,7 +899,7 @@ def toy():
 def scaled():
     """The production table of docs/protocol-design.md 9.1 (ticks of 20 s) divided by about 10.  Terms that cannot
     shrink (one proof = 1 tick, noticing a drop = 1 tick, one block) are kept; the slack of every model inequality
-    is kept at about its production ratio, and B_safety = NF + 3 exactly as 20 = 17 + 3 (zero slack, as in production)."""
+    is kept at about its production ratio, and B_safety = NF + 3 exactly as 21 = 18 + 3 (zero slack, as in production)."""
     p = Params(name="scaled", D=0, W=36, WMIN=27, MA=11, FE=6, DE=1, RA=1, DET=2, PA=1, RD=1, NF=2,
                B_EPOCH=14, B_FEE=6, B_SAFETY=5, B_FUND=2, B_BOB=6, MARGIN=3, N_NOID=1, N_ETH=1, N_EVICT=1,
                WADV=(1, 5, 8, 9, 10, 11, 17, 18, 19, 20, 26, 27, 28, 36, 47))
@@ -916,8 +916,8 @@ def scaled6():
 
 def production():
     """The real numbers, in ticks of 20 s (state space far too big to enumerate; used for the relations only)."""
-    p = Params(name="production", D=725, W=360, WMIN=270, MA=90, FE=57, DE=5, RA=3, DET=15, PA=1, RD=1, NF=17,
-               B_EPOCH=144, B_FEE=60, B_SAFETY=20, B_FUND=10, B_BOB=60, MARGIN=18, N_NOID=1, N_ETH=1, N_EVICT=1)
+    p = Params(name="production", D=728, W=360, WMIN=270, MA=90, FE=57, DE=5, RA=3, DET=15, PA=1, RD=1, NF=18,
+               B_EPOCH=144, B_FEE=60, B_SAFETY=21, B_FUND=10, B_BOB=60, MARGIN=18, N_NOID=1, N_ETH=1, N_EVICT=1)
     return p
 
 

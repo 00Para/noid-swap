@@ -66,7 +66,8 @@ const RECORDED: [&str; 8] = [
     "recorded_claim_final",
 ];
 // LIVE RUN 1 facts (2026-11-04). Heights: funding included 280,638; claim built for call height 280,658,
-// pending at 280,657, included 280,659; finality = tip >= inclusion + 17.
+// pending at 280,657, included 280,659; finality = tip >= inclusion + 18 (the run itself counted 17, so the recordings
+// named `..._final` were taken one block before the node's rule makes them final).
 const LIVE_ROOT: &str = "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367";
 const LIVE_CLAIM_AUTHORITY: &str = "o1myesz750uxepkx3hfekln7pp7h0f7prn2lu5taswn940g3mws0yqedcswg";
 const LIVE_CLAIM_RECIPIENT: &str = "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r";
@@ -215,7 +216,7 @@ fn fixture_openings_are_what_the_code_builds() {
     let obj = &st.result.as_ref().unwrap()["object"];
     assert_eq!(obj["opening_hex"], json!(open));
     assert_eq!(obj["claim_authority"], json!(CLAIM_AUTHORITY));
-    assert_eq!(obj["deadline_height"], json!(300_735));
+    assert_eq!(obj["deadline_height"], json!(300_738));
     // The "other contract" entry in pending_claim carries the other real opening.
     let pc = load("pending_claim");
     let others: Vec<_> = pc
@@ -523,13 +524,14 @@ fn live_funded_unfinal_instance_is_ours_and_not_yet_final() {
 }
 
 #[test]
-fn live_funded_final_at_exactly_17_blocks_after_inclusion() {
+fn live_funded_recording_at_inclusion_plus_17_is_one_block_short_of_final() {
     let w = watcher("recorded_funded_final");
     let obs = w.observe(None).unwrap();
     assert_eq!(obs, live_funded(280_655, LIVE_ANCHOR_BEFORE));
-    // 280,638 + 17 = 280,655: this tick is the first final one; one block earlier is not.
-    assert!(params::noid_final(obs.tip, LIVE_FUNDING_HEIGHT));
-    assert!(!params::noid_final(obs.tip - 1, LIVE_FUNDING_HEIGHT));
+    // 280,638 + 17 = 280,655: the run called this tick final, but the node's rule is tip >= inclusion + 18 = 280,656, so the
+    // recorded tip is one block short and the next block makes it final.
+    assert!(!params::noid_final(obs.tip, LIVE_FUNDING_HEIGHT));
+    assert!(params::noid_final(obs.tip + 1, LIVE_FUNDING_HEIGHT));
     // Empty mempool: no entry lookups at all, but the status of the instance is still asked.
     assert_eq!(
         methods(&w),
@@ -659,9 +661,9 @@ fn live_claim_included_not_final_instance_gone() {
     assert_eq!(tx["tx_hash"], json!(LIVE_CLAIM_TXID));
     let block_hash = tx["block_hash"].as_str().unwrap();
     assert!(block_hash.starts_with("59eefd12") && block_hash.ends_with("4928"), "{block_hash}");
-    // Final only at tip >= 280,659 + 17 = 280,676; tip 280,662 is not.
+    // Final only at tip >= 280,659 + 18 = 280,677; tip 280,662 is not.
     assert!(!params::noid_final(obs.tip, LIVE_CLAIM_HEIGHT));
-    assert!(!params::noid_final(280_675, LIVE_CLAIM_HEIGHT) && params::noid_final(280_676, LIVE_CLAIM_HEIGHT));
+    assert!(!params::noid_final(280_676, LIVE_CLAIM_HEIGHT) && params::noid_final(280_677, LIVE_CLAIM_HEIGHT));
 }
 
 #[test]
@@ -670,8 +672,9 @@ fn live_claim_final_the_instance_stays_gone_and_nothing_is_ours_in_a_busy_mempoo
     // This tick did not track a txid (no getTx recorded): asking for one would be a fixture gap, not a guess.
     let obs = w.observe(None).unwrap();
     assert_eq!(obs, live_base(280_676, LIVE_ANCHOR_AFTER));
-    assert!(params::noid_final(obs.tip, LIVE_CLAIM_HEIGHT));
-    assert!(!params::noid_final(obs.tip - 1, LIVE_CLAIM_HEIGHT));
+    // The recording was taken at inclusion + 17; the node's rule (inclusion + 18) makes it final one block later.
+    assert!(!params::noid_final(obs.tip, LIVE_CLAIM_HEIGHT));
+    assert!(params::noid_final(obs.tip + 1, LIVE_CLAIM_HEIGHT));
     assert_eq!(obs.tip, LIVE_CLAIM_HEIGHT + 17);
     // 22 entries listed; every single-page one was looked up and none carries our opening.
     let (single, other) = single_page_txids("recorded_claim_final");
@@ -726,16 +729,16 @@ fn live_run_replays_in_order_from_funding_to_final_claim() {
         assert_eq!(w.rpc.remaining(m), 0, "{m}");
     }
 
-    // The engine's finality arithmetic over the run (tip >= inclusion + 17).
+    // The engine's finality arithmetic over the run (tip >= inclusion + 18; the two `..._final` recordings are one block short).
     assert!(!params::noid_final(p1.tip, LIVE_FUNDING_HEIGHT));
-    assert!(params::noid_final(p2.tip, LIVE_FUNDING_HEIGHT));
+    assert!(!params::noid_final(p2.tip, LIVE_FUNDING_HEIGHT) && params::noid_final(p2.tip + 1, LIVE_FUNDING_HEIGHT));
     assert!(p2.instance.is_some() && p3.instance.is_some() && p4.instance.is_none() && p5.instance.is_none());
     assert_eq!(p3.pending_calls.len(), 1);
     assert_eq!(p3.tracked_tx_pending, Some(true));
     let included = p4.confirmed_tx.clone().unwrap();
     assert_eq!((included.txid.as_str(), included.height), (LIVE_CLAIM_TXID, LIVE_CLAIM_HEIGHT));
     assert!(!params::noid_final(p4.tip, included.height));
-    assert!(params::noid_final(p5.tip, included.height));
+    assert!(!params::noid_final(p5.tip, included.height) && params::noid_final(p5.tip + 1, included.height));
     // The epoch anchor rotated between the funded polls and the claim polls (every 144 blocks).
     assert_ne!(p2.epoch_anchor, p3.epoch_anchor);
     assert_eq!(p3.epoch_anchor, p5.epoch_anchor);

@@ -67,8 +67,8 @@ the time of writing); this section covers only the protocol consequences.
 - **Hazard.** A Solidity/portable mismatch makes Alice's `claim` revert *with `s` in calldata*: Bob claims NOID, Alice
   loses both (design §2.3 row 4). Mitigations before any funded use: differential test of the Solidity against
   `equiv/portable` on ≥ 10^5 vectors (the crate is the oracle, it already has 100,000-input parity with vendor), the
-  §0 test vector, a 0-value "canary" lock claimed on the deployed contract, and the existing `eth_call` dry run of
-  `claim` before broadcast (T11), which catches a deterministic bug.
+  §0 test vector, a 0-value "canary" lock claimed on the deployed contract, and the local comparison of `Addr(secret)` with the lock before the claim (the claim itself is never simulated on a remote node:
+  the secret would reach it, T11).
 - **Experiment.** (1) gas number from `docs/poseidon-evm.md`; (2) differential test; (3) one local-Hardhat swap with
   the new contract through `swap-cli` (`EvmLockKind::Poseidon` variant in the swap file and `watch/eth.rs`).
 - **Effort** M (contract exists in progress; swap-cli variant + tests + a Solidity audit item for M4.2). **Risk** medium
@@ -122,14 +122,14 @@ because the virtual machine is short of memory. There are four ways to make that
 working day each. A second set of smaller numbers, computed by the same formula and only usable with tiny amounts, lets
 the same software rehearse an abort in about an hour.
 
-- **Problem.** `D_offset = 725`, `W_A = 7,200 s`, `B_post = 242` (at the time of writing; production is now 735 and 252, design §9.1) are constants in `swap-cli/src/params.rs`. Run 2 funded at
+- **Problem.** `D_offset = 725`, `W_A = 7,200 s`, `B_post = 242` (at the time of writing; production is now 738 and 254, design §9.1) are constants in `swap-cli/src/params.rs`. Run 2 funded at
   15:55 UTC and `D` arrived at about 21:45 UTC. Six M2.7 scenarios remain (Alice-abort before lock, Bob-abort, rotation, `F_max`
   burn, conflicting close, stock) and each needs an abort cycle.
 - **Proposal.** `Profile { w_a, w_a_min, m_a, delta_detect, p_auth, b_epoch, b_fee, b_final, b_safety, b_fund, b_bob,
   margin, d_offset }`, with `mainnet-v1` = today's §9.1 and `rehearsal` derived by the *same* (I1) arithmetic:
   `RHS(I1) = ⌈(W_A + Δ_detect + 2·P_auth)/τ_fast⌉ + B_post`. Example for a local Hardhat chain (finality = latest):
-  `W_A = 600, Δ = 60, 2·P_auth = 40, B_epoch = 0, B_fee = 10, B_final = 18, B_safety = 5` → `B_post = 33`,
-  `RHS = 35 + 33 = 68`; `D_offset = B_fund 5 + B_final 18 + B_bob 20 + 68 + margin 9 = 120` (1 h at 30 s). For Sepolia
+  `W_A = 600, Δ = 60, 2·P_auth = 40, B_epoch = 0, B_fee = 10, B_final = 19, B_safety = 5` → `B_post = 34`,
+  `RHS = 35 + 34 = 69`; `D_offset = B_fund 5 + B_final 19 + B_bob 20 + 69 + margin 9 = 122` (about 1 h at 30 s). For Sepolia
   `M_A` must stay above its ~15 min finality, so `W_A ≥ 1,800` and `D_offset ≈ 200`. `B_epoch = 0` accepts the
   rotation risk *in a rehearsal*; keeping it at 144 makes `D ≥ +270`, still 2 h 15 m instead of 6 h.
 - **Guards.** The profile name is in the swap file and in the bundle; `new-bob` refuses a bundle whose profile differs
@@ -144,7 +144,7 @@ the same software rehearse an abort in about an hour.
   Recommendation: now.
 - **Done 2026-11-04.** `rehearsal` (chain 31337, `D = +120`) and, the same day, a third profile `sepolia`: the same
   rehearsal budgets with the real Ethereum finality (1,140 s) and the production `M_A` (1,800 s, which is also
-  `live.js claim`'s default margin), hence `W_A` 4,200 s and `D = +300` (2 h 30); chain 11155111 only, same caps.
+  `live.js claim`'s default margin), hence `W_A` 4,200 s and `D = +300` (2 h 30; +302 since 2026-11-08); chain 11155111 only, same caps.
   Derivation in `swap-cli/README.md` ("The rehearsal and sepolia profiles"); first use planned as `docs/live-run-3.md`.
 
 ## 4. The free option (T13)

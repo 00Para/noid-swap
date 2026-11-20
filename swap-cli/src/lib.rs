@@ -28,6 +28,7 @@ pub mod contract_params;
 pub mod engine;
 pub mod equiv;
 pub mod params;
+pub mod producer_gate;
 pub mod secret;
 pub mod state;
 pub mod swapfile;

@@ -59,7 +59,7 @@ pub enum AlicePhase {
     FundingSubmitted { txid: Option<String> },
     /// The instance exists at the opening's root; first seen at `seen_at_tip`.
     Funded { instance: NoidInstance, seen_at_tip: u64 },
-    /// Funding is final: `tip >= seen_at_tip + 17`.
+    /// Funding is final: `tip >= seen_at_tip + 18`.
     FundingFinal { instance: NoidInstance, final_at_tip: u64 },
     /// Bob's lock passed the step-9 checks.
     LockSeen { instance: NoidInstance, lock: LockSummary },

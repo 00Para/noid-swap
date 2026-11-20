@@ -27,7 +27,12 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *         claim and refund then revert). Use plain ERC-20s only: no fee
  *         switch, no rebasing, no confiscation.
  *
- *         Hazards (both are delays, not losses, while the token behaves):
+ *         Hazards. On their own, while the token behaves, these are delays
+ *         for a plain transfer. In a cross-chain swap they are losses for
+ *         the party who reveals: a claim() that reverts is still a
+ *         transaction on chain, its calldata carries the preimage, the
+ *         receiver is not paid, and the counterparty can use the preimage on
+ *         the other chain.
  *           - if the token blocks transfers to `receiver` (blacklist, pause),
  *             claim() reverts and the funds wait for the sender's refund after
  *             the timelock;
@@ -36,6 +41,11 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  *             are blocked the funds wait until one of them is unblocked.
  *         A receiver equal to this contract is refused (InvalidReceiver):
  *         the payout would be a self-transfer that strands the tokens.
+ *
+ *         SWAP USE. swap-cli supports ETH only (its lock kinds are HTLC.sol
+ *         and HTLCPoseidonV2.sol; it has no token path). An ERC-20 swap would
+ *         need a vetted token list first: no blacklist, no pause, no fee on
+ *         transfer, no rebase, no confiscation.
  */
 contract HTLCERC20 {
     using SafeERC20 for IERC20;

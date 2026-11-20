@@ -41,7 +41,7 @@ fn restarting_both_parties_before_every_tick_reaches_the_same_outcome() {
     tick_both_fresh!(); // Alice funds
     s.world.borrow_mut().advance_noid(1);
     tick_both_fresh!(); // both see the instance
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     tick_both_fresh!(); // final; Bob locks
     assert_eq!(s.bob_phase(), "lock_submitted");
     s.world.borrow_mut().advance_eth(4);
@@ -51,7 +51,7 @@ fn restarting_both_parties_before_every_tick_reaches_the_same_outcome() {
     tick_both_fresh!(); // Bob sees the preimage and claims
     assert_eq!(s.bob_phase(), "claim_submitted");
     s.world.borrow_mut().advance_eth(4);
-    s.world.borrow_mut().advance_noid(18);
+    s.world.borrow_mut().advance_noid(19);
     tick_both_fresh!();
     tick_both_fresh!();
     assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Done { .. })), "{}", s.alice_phase());
@@ -75,7 +75,7 @@ fn pending_lock_recorded_before_a_crash_is_resent_with_the_same_t_reveal() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     // Bob decides to lock; the process dies right after recording the intent (outcome unknown).
     s.bob.executor.crash_before_effect.insert("lock_eth");
@@ -109,7 +109,7 @@ fn lock_that_took_effect_before_the_crash_is_recognized_not_repeated() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     s.bob.executor.crash_after_effect.insert("lock_eth");
     let rb = s.tick_bob();
@@ -133,7 +133,7 @@ fn unresolved_pending_lock_is_never_dropped_or_turned_into_an_abort() {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     // The lock was sent but the outcome never recorded.
     s.bob.executor.crash_after_effect.insert("lock_eth");
@@ -210,7 +210,7 @@ fn claim_submitted_before_a_crash_keeps_being_tracked() {
     let w = s.world.borrow();
     assert_eq!(w.confirmed.get(&txid).copied(), Some(w.tip), "included in the block just mined");
     drop(w);
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_bob();
     assert!(matches!(s.bob.file.phase, Phase::Bob(BobPhase::Done { .. })));
 }

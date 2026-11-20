@@ -20,7 +20,7 @@ fn at_bob_lock(s: &mut Scenario) {
     s.tick_alice();
     s.world.borrow_mut().advance_noid(1);
     s.tick_both();
-    s.world.borrow_mut().advance_noid(17);
+    s.world.borrow_mut().advance_noid(18);
     s.tick_alice();
     assert_eq!(s.bob_phase(), "funded");
 }

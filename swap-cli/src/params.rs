@@ -17,7 +17,7 @@
 //! carries the NAME of its profile ([`ProfileName`]) in its public section, so
 //! both parties' files and the bundle commit to the same numbers:
 //!
-//! - `production`: the section 9.1 values (`W_A` 7,200 s, `D_offset` 735 ...).
+//! - `production`: the section 9.1 values (`W_A` 7,200 s, `D_offset` 738 ...).
 //!   The default. A file that says nothing about a profile is `production`.
 //! - `rehearsal`: the SAME formulas with smaller budgets, so the "nobody shows
 //!   up" paths can be rehearsed in about an hour, and with hard caps on the
@@ -32,7 +32,7 @@
 //! The `pub const` values below (`W_A_S`, `M_A_S`, `B_POST` ...) are the
 //! PRODUCTION numbers, kept for the tests that pin section 4.3; nothing in the
 //! engine reads them. The fee rule (`F_max`) and the chain facts (Parano1d
-//! finality 18, the 144-block epoch, the 5,800 minimum close fee) are the same
+//! finality 18 (final iff `tip >= height + 18`), the 144-block epoch, the 5,800 minimum close fee) are the same
 //! in both profiles and stay global.
 //!
 //! ## How the rehearsal numbers are derived
@@ -52,22 +52,22 @@
 //! | `2*P_auth` | 40 s | 40 s | the same prover (M0.5 budget, 20 s each) |
 //! | `B_epoch` budget | 144 | 0 | accepts the rotation risk, in a rehearsal only |
 //! | `B_fee` | 60 | 10 | a local node has no relay pressure |
-//! | `B_final` | 18 | 18 | Parano1d finality is a chain fact, never shortened |
-//! | `B_safety` | 30 | 5 | production: one adversarial reorg of Bob's close (17 blocks) plus restarts and the T6 guard (4 blocks), `docs/formal/README.md` section 7; rehearsal: restarts only |
-//! | `B_post` | 252 | 33 = 0 + 10 + 18 + 5 | |
-//! | `RHS(I1)` | 629 = 377 + 252 | 68 = ceil(700/20) + 33 = 35 + 33 | |
+//! | `B_final` | 19 | 19 | the design's `B_final = NF + 1`: the inclusion block plus the finality depth `NF` = 18 ([`NOID_FINALITY_DEPTH`]); a chain fact, never shortened |
+//! | `B_safety` | 31 | 5 | production: one adversarial reorg of Bob's close (18 blocks deep: 21 = `NF + RD + PA + 1`) plus the T6 guard (4 blocks) and restarts (6), `docs/formal/README.md` section 7; rehearsal: restarts only |
+//! | `B_post` | 254 | 34 = 0 + 10 + 19 + 5 | |
+//! | `RHS(I1)` | 631 = 377 + 254 | 69 = ceil(700/20) + 34 = 35 + 34 | |
 //! | `B_fund` | 10 | 5 | |
 //! | `B_bob` | 60 | 20 | |
 //! | `margin` | 18 | 9 | rounding-up of `D_offset`, not an output of the formula |
-//! | `D_offset` | 735 = 10+18+60+629+18 | 120 = 5+18+20+68+9 | one hour at 30 s/block |
+//! | `D_offset` | 738 = 10+19+60+631+18 | 122 = 5+19+20+69+9 | about one hour at 30 s/block (3,660 s) |
 //! | `W_A_min` | 5,400 s | 480 s | 0.8 x `W_A`; leaves Alice at least 180 s at the minimum |
 //! | `M_A` | 1,800 s | 300 s | must exceed `eth_finality_s` (1,140 s vs 0 s) |
 //! | `eth_finality_s` | 1,140 s (19 min) | 0 s | Hardhat mines and finalizes at once |
 //! | `DE` (Ethereum inclusion delay) | 120 s | 60 s | mainnet blocks are 12 s apart: ten blocks; the local chain mines on demand and the runbook mines after every send |
 //! | `RA` (Alice's rebroadcast time) | 120 s | 60 s | two polls (notice a dropped claim, resend it) |
 //!
-//! Lock-by heights follow: full window `D - 68` (production `D - 629`), minimum window
-//! `D - (ceil(580/20) + 33) = D - 62` (production `D - 539`).
+//! Lock-by heights follow: full window `D - 69` (production `D - 631`), minimum window
+//! `D - (ceil(580/20) + 34) = D - 63` (production `D - 541`).
 //!
 //! ## How the sepolia numbers are derived
 //!
@@ -84,19 +84,19 @@
 //! | `W_A` | 600 s | 4,200 s | Alice must see Bob's lock become final (1,140 s) and still reveal before her cutoff |
 //! | `Delta_detect` | 60 s | 120 s | two Sepolia blocks plus one poll of a public RPC |
 //! | `2*P_auth` | 40 s | 40 s | the same prover |
-//! | `B_epoch` budget | 0 | 0 | accepts the rotation risk (see the README: `D_offset` 300 > 144) |
-//! | `B_fee`, `B_final`, `B_safety` | 10, 18, 5 | 10, 18, 5 | unchanged |
-//! | `B_post` | 33 | 33 | |
-//! | `RHS(I1)` | 68 | 251 = ceil(4,360/20) + 33 = 218 + 33 | |
+//! | `B_epoch` budget | 0 | 0 | accepts the rotation risk (see the README: `D_offset` 302 > 144) |
+//! | `B_fee`, `B_final`, `B_safety` | 10, 19, 5 | 10, 19, 5 | unchanged |
+//! | `B_post` | 34 | 34 | |
+//! | `RHS(I1)` | 69 | 252 = ceil(4,360/20) + 34 = 218 + 34 | |
 //! | `B_fund`, `B_bob`, `margin` | 5, 20, 9 | 5, 20, 6 | |
-//! | `D_offset` | 120 | 300 = 5+18+20+251+6 | 2 h 30 at 30 s/block |
+//! | `D_offset` | 122 | 302 = 5+19+20+252+6 | about 2 h 31 at 30 s/block |
 //! | `W_A_min` | 480 s | 3,360 s | 0.8 x `W_A`; `W_A_min - M_A` = 1,560 s >= 1,140 + 120 = 1,260 s |
 //! | `M_A` | 300 s | 1,800 s | production value; live.js's default `--margin-s` |
 //! | `eth_finality_s` | 0 s | 1,140 s | Sepolia finalizes in about 13 min |
 //! | `DE`, `RA` | 60 s, 60 s | 120 s, 120 s | public chain, 12 s blocks (as production); M_A 1,800 >= 1,140 + 240 + 120 = 1,500 and W_A_min 3,360 >= 120 + 1,140 + 120 + 1,800 = 3,180 |
 //!
-//! Lock-by heights: full window `D - 251`, minimum window `D - (ceil(3,520/20) + 33) = D - 209`. A full
-//! "Alice never reveals" cycle takes about `300 + 17` = 317 blocks (about 2 h 40); a happy path still
+//! Lock-by heights: full window `D - 252`, minimum window `D - (ceil(3,520/20) + 34) = D - 210`. A full
+//! "Alice never reveals" cycle takes about `302 + 18` = 320 blocks (about 2 h 40); a happy path still
 //! settles in about 45 minutes. The reveal cutoff is `T_reveal - 1,800 s`.
 //!
 //! [`Gates::validate`] is the one checker for these relations; both profiles
@@ -315,7 +315,7 @@ pub struct Gates {
     /// Budget for one epoch-anchor rotation (blocks). The CHAIN's epoch length is [`B_EPOCH`].
     pub b_epoch_budget: u64,
     pub b_fee: u64,
-    /// Parano1d finality, blocks. Must equal [`B_FINAL`]: a profile cannot change the chain.
+    /// The design's `B_final = NF + 1` (blocks): the inclusion block plus the Parano1d finality depth. Must equal [`B_FINAL`]: a profile cannot change the chain.
     pub b_final: u64,
     pub b_safety: u64,
     /// Blocks Alice allows for her funding to be included.
@@ -332,6 +332,17 @@ pub struct Gates {
     pub max_eth_wei: Option<u128>,
     /// Refuse any Ethereum chain id not in this list (`None` = any).
     pub eth_chain_ids: Option<&'static [u64]>,
+    /// Producer-concentration screen (threat T21, `docs/bob-concentration-gate.md`): the long window, in Parano1d blocks (about 24 hours).
+    pub producer_window_long: u64,
+    /// The short window (about 6 hours, the span of a swap). Both windows must pass.
+    pub producer_window_short: u64,
+    /// The largest share of one address allowed in either window, in permille; a share exactly at the limit passes.
+    pub producer_limit_permille: u64,
+    /// The two largest addresses together above this share of either window (permille) draw a warning, never a refusal.
+    pub producer_top_two_permille: u64,
+    /// `true`: Bob's `lock_eth` is not offered when the screen refuses or cannot be completed (`--accept-producer-concentration` waives that).
+    /// `false`: the same evaluation runs and prints a warning; the lock is offered as before.
+    pub producer_gate_enforced: bool,
 }
 
 /// Section 9.1 as it stood on 2026-11-04.
@@ -351,15 +362,20 @@ pub const PRODUCTION: Gates = Gates {
     abort_after_cancel_s: 3_600,
     b_epoch_budget: 144,
     b_fee: 60,
-    b_final: 18,
-    b_safety: 30,
+    b_final: 19,
+    b_safety: 31,
     b_fund: 10,
     b_bob: 60,
     margin: 18,
-    d_offset: 735,
+    d_offset: 738,
     max_noid_micro: None,
     max_eth_wei: None,
     eth_chain_ids: None,
+    producer_window_long: 2_880,
+    producer_window_short: 720,
+    producer_limit_permille: 350,
+    producer_top_two_permille: 500,
+    producer_gate_enforced: true,
 };
 
 /// The rehearsal profile: derivation in the module documentation. At most 20 NOID, 0.01 ETH, chain 31337.
@@ -379,15 +395,20 @@ pub const REHEARSAL: Gates = Gates {
     abort_after_cancel_s: 600,
     b_epoch_budget: 0,
     b_fee: 10,
-    b_final: 18,
+    b_final: 19,
     b_safety: 5,
     b_fund: 5,
     b_bob: 20,
     margin: 9,
-    d_offset: 120,
+    d_offset: 122,
     max_noid_micro: Some(20_000_000),
     max_eth_wei: Some(10_000_000_000_000_000),
     eth_chain_ids: Some(&[31_337]),
+    producer_window_long: 2_880,
+    producer_window_short: 720,
+    producer_limit_permille: 280,
+    producer_top_two_permille: 500,
+    producer_gate_enforced: false,
 };
 
 /// The sepolia profile: rehearsal budgets with the real Ethereum finality (1,140 s) and the production
@@ -408,15 +429,20 @@ pub const SEPOLIA: Gates = Gates {
     abort_after_cancel_s: 3_600,
     b_epoch_budget: 0,
     b_fee: 10,
-    b_final: 18,
+    b_final: 19,
     b_safety: 5,
     b_fund: 5,
     b_bob: 20,
     margin: 6,
-    d_offset: 300,
+    d_offset: 302,
     max_noid_micro: Some(20_000_000),
     max_eth_wei: Some(10_000_000_000_000_000),
     eth_chain_ids: Some(&[11_155_111]),
+    producer_window_long: 2_880,
+    producer_window_short: 720,
+    producer_limit_permille: 280,
+    producer_top_two_permille: 500,
+    producer_gate_enforced: false,
 };
 
 // ---------------------------------------------------------------- chain facts and production values
@@ -425,8 +451,16 @@ pub const SEPOLIA: Gates = Gates {
 pub const TAU_FAST_S: u64 = PRODUCTION.tau_fast_s;
 /// Parano1d nominal block interval (seconds), for display only.
 pub const TAU_NOM_S: u64 = 30;
-/// Finality: a Parano1d inclusion is final once the tip is 17 blocks past it. A chain fact: every profile.
-pub const B_FINAL: u64 = 18;
+/// Parano1d finality depth `NF`: an inclusion at height `h` is final once `tip >= h + 18`, and a reorg may replace up to 18
+/// descendants of a block. A chain fact, every profile. The vendored rule is `is_final(block_height, tip_height)` =
+/// `tip_height >= block_height + CONSENSUS_FINALITY_DEPTH` with `CONSENSUS_FINALITY_DEPTH = 18`
+/// (`vendor/parano1d/noid_chain/src/consensus/header.rs` and `params.rs`; `fork_choice::reorg_allowed` is `n <= 18`). A test pins this
+/// constant to those sources.
+pub const NOID_FINALITY_DEPTH: u64 = 18;
+/// The design's budget term `B_final = NF + 1` (19): the inclusion block plus the finality depth. It is what `Gates::b_final`,
+/// `B_post`, `D_offset` and the claim target margin use. A chain fact: every profile.
+pub const B_FINAL: u64 = NOID_FINALITY_DEPTH + 1;
+const _: () = assert!(B_FINAL == NOID_FINALITY_DEPTH + 1);
 /// One transaction-epoch anchor rotation (`noid_tx::TX_EPOCH_BLOCKS`): the chain's epoch length, not a budget.
 pub const B_EPOCH: u64 = 144;
 /// Relay-floor / congestion wait budget (blocks), production.
@@ -449,9 +483,11 @@ pub const W_A_MIN_S: u64 = PRODUCTION.w_a_min_s;
 pub const B_FUND: u64 = PRODUCTION.b_fund;
 /// Bob must lock within this many blocks after Alice's funding is final, production.
 pub const B_BOB: u64 = PRODUCTION.b_bob;
-/// ETH pair: `D = H_create + 735` (about 6 h at 30 s/block), production.
+/// ETH pair: `D = H_create + 738` (about 6 h at 30 s/block), production.
 pub const ETH_D_OFFSET: u64 = PRODUCTION.d_offset;
-/// Hard rule: Bob's claim must be included at `h <= D - 1`; target `h <= D - 18`.
+/// Hard rule: Bob's claim must be included at `h <= D - 1`; target `h <= D - 19`. Alice's refund is first includable when the tip is
+/// `D - 1` ([`alice_refund_ready`]), and a claim included at `h` is final at tip `h + 18`, so the latest claim that is final before
+/// her refund can open has `h + 18 <= D - 1`, which is `h + B_FINAL <= D`.
 pub const CLAIM_TARGET_MARGIN: u64 = B_FINAL;
 
 /// `F_max = max(50,000, 3 x estimateFeeDetailed(1,1))`, and at most 1 % of `V`. Fee policy, the
@@ -471,8 +507,8 @@ pub const MIN_CLOSE_FEE: u64 = htlc_harness::MIN_CLOSE_FEE;
 /// v2.1 activation height: owner-authorization V3 -> V4 (harness mirror of
 /// `noid_chain::consensus::params`).
 pub const V2_1_ACTIVATION_HEIGHT: u64 = htlc_harness::V2_1_ACTIVATION_HEIGHT;
-/// Trials start only at `activation + B_final` (PROJECT.md decision 8).
-pub const TRIAL_START_HEIGHT: u64 = V2_1_ACTIVATION_HEIGHT + B_FINAL;
+/// Trials start only at `activation + NF` = `activation + 18` (PROJECT.md decision 8).
+pub const TRIAL_START_HEIGHT: u64 = V2_1_ACTIVATION_HEIGHT + NOID_FINALITY_DEPTH;
 
 /// T6, production: do not start a proof in the last `ceil(P_auth / tau_fast) + 3` blocks of
 /// an epoch; wait for the boundary instead. With `P_auth` = 20 s that is 4.
@@ -640,12 +676,12 @@ impl Gates {
         Ok(span.div_ceil(self.tau_fast_s) + self.b_post())
     }
 
-    /// The blocks (I1) demands for a window `w_a_s`: 629 for the full production window.
+    /// The blocks (I1) demands for a window `w_a_s`: 631 for the full production window.
     pub const fn rhs_i1_eth_for_window(&self, w_a_s: u64) -> u64 {
         (w_a_s + self.delta_detect_s + 2 * self.p_auth_budget_s).div_ceil(self.tau_fast_s) + self.b_post()
     }
 
-    /// Bob's lock-by height for the full window: `D - RHS(I1)(W_A)` (`D - 629` in production).
+    /// Bob's lock-by height for the full window: `D - RHS(I1)(W_A)` (`D - 631` in production).
     pub fn bob_lock_by(&self, d: u64) -> u64 {
         d.saturating_sub(self.rhs_i1_eth_for_window(self.w_a_s))
     }
@@ -787,7 +823,7 @@ impl Gates {
     /// them is not:
     ///
     /// 1. `tau_fast`, `W_A`, `W_A_min`, `M_A`, `P_auth` are non-zero and `W_A_min <= W_A` (I3).
-    /// 2. `B_final` equals the Parano1d finality (18): a profile cannot shorten the chain.
+    /// 2. `B_final` equals `NF + 1` = 19 (the Parano1d finality depth NF is 18): a profile cannot shorten the chain.
     /// 3. (I2) `M_A > eth_finality`: a claim broadcast at the cutoff is final before `T_reveal`.
     /// 4. (I2)+(I3) `W_A_min - M_A >= eth_finality + Delta_detect`: even at the minimum window Alice has
     ///    time to see Bob's lock become final and to act before her cutoff.
@@ -810,7 +846,7 @@ impl Gates {
             return bad(format!("(I3) W_A_min {} > W_A {}", self.w_a_min_s, self.w_a_s));
         }
         if self.b_final != B_FINAL {
-            return bad(format!("B_final {} is not the Parano1d finality {B_FINAL}", self.b_final));
+            return bad(format!("B_final {} is not the Parano1d finality term NF + 1 = {B_FINAL}", self.b_final));
         }
         if self.m_a_s <= self.eth_finality_s {
             return bad(format!("(I2) M_A {} s does not exceed the Ethereum finality {} s", self.m_a_s, self.eth_finality_s));
@@ -889,6 +925,22 @@ impl Gates {
         if self.rotation_guard_blocks() > self.b_safety {
             return bad(format!("the T6 guard ({} blocks) does not fit in B_safety {}", self.rotation_guard_blocks(), self.b_safety));
         }
+        // The producer-concentration screen: sane windows and limits (the thresholds themselves are derived in docs/bob-concentration-gate.md).
+        if self.producer_window_short == 0 || self.producer_window_long < self.producer_window_short {
+            return bad(format!(
+                "producer windows: long {} must be at least short {} and short must be non-zero",
+                self.producer_window_long, self.producer_window_short
+            ));
+        }
+        for (what, limit) in [("single-address limit", self.producer_limit_permille), ("top-two limit", self.producer_top_two_permille)] {
+            if limit == 0 || limit > 999 {
+                return bad(format!("producer {what} {limit} permille is outside 1..=999"));
+            }
+        }
+        // Only the production profile enforces; the others warn (owner decision D3).
+        if self.producer_gate_enforced != (self.name == ProfileName::Production) {
+            return bad("the producer screen is enforced under the production profile and warns under every other one".into());
+        }
         let capped = self.max_noid_micro.is_some() && self.max_eth_wei.is_some() && self.eth_chain_ids.is_some();
         let uncapped = self.max_noid_micro.is_none() && self.max_eth_wei.is_none() && self.eth_chain_ids.is_none();
         match self.name {
@@ -905,15 +957,16 @@ impl Gates {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimHeight {
-    /// `h <= D - 18`: on target.
+    /// `h <= D - 19`: on target. The claim is final (at tip `h + 18 <= D - 1`) before Alice's refund can open.
     OnTarget,
-    /// `D - 18 < h <= D - 1`: valid but may be reorged across `D`; last resort.
+    /// `D - 19 < h <= D - 1`: valid, but Alice's refund can open (tip `D - 1`) before the claim is final, so a reorg may flip it across
+    /// `D`; last resort.
     LateButValid,
     /// `h >= D`: the claim branch is closed; the call would be rejected/evicted.
     TooLate,
 }
 
-/// (I4): classify a candidate inclusion height for Bob's claim. Parano1d finality is 18 blocks in
+/// (I4): classify a candidate inclusion height for Bob's claim. Parano1d finality is 18 blocks after inclusion in
 /// every profile ([`Gates::validate`] insists), so this does not take a profile.
 pub fn classify_claim_height(h: u64, d: u64) -> ClaimHeight {
     if h >= d {
@@ -935,9 +988,9 @@ pub fn bob_eth_refund_ready(block_timestamp: u64, t_reveal: u64) -> bool {
     block_timestamp >= t_reveal
 }
 
-/// Parano1d finality: an inclusion at `h` is final once `tip >= h + 17`.
+/// Parano1d finality: an inclusion at `h` is final once `tip >= h + 18` ([`NOID_FINALITY_DEPTH`]; the node's `is_final`).
 pub fn noid_final(tip: u64, inclusion_height: u64) -> bool {
-    tip >= inclusion_height.saturating_add(B_FINAL - 1)
+    tip >= inclusion_height.saturating_add(NOID_FINALITY_DEPTH)
 }
 
 /// The owner-authorization version a proof must use for inclusion height `h`.
@@ -1051,9 +1104,11 @@ mod tests {
 
     #[test]
     fn section_9_1_constants() {
-        assert_eq!(B_POST, 252);
-        assert_eq!(P.rhs_i1_eth_for_window(W_A_S), 629);
-        assert_eq!(P.rhs_i1_eth_for_window(W_A_MIN_S), 539);
+        assert_eq!(B_POST, 254);
+        assert_eq!(P.rhs_i1_eth_for_window(W_A_S), 631);
+        assert_eq!(P.rhs_i1_eth_for_window(W_A_MIN_S), 541);
+        assert_eq!((NOID_FINALITY_DEPTH, B_FINAL, CLAIM_TARGET_MARGIN), (18, 19, 19));
+        assert_eq!(B_FINAL, NOID_FINALITY_DEPTH + 1);
         assert_eq!(ROTATION_GUARD_BLOCKS, 4);
         assert_eq!(TRIAL_START_HEIGHT, 279_388);
         assert_eq!(MIN_CLOSE_FEE, 5_800);
@@ -1074,32 +1129,41 @@ mod tests {
             assert!(g.w_a_min_s >= g.de_s + g.eth_finality_s + g.ra_s + g.m_a_s, "{}", g.name);
         }
         assert_eq!((P.de_s, P.ra_s, S.de_s, S.ra_s, R.de_s, R.ra_s), (120, 120, 120, 120, 60, 60));
-        assert_eq!((P.b_safety, P.b_post(), P.d_offset), (30, 252, 735));
+        assert_eq!((P.b_safety, P.b_post(), P.d_offset), (31, 254, 738));
+        for g in [P, R, S] {
+            assert_eq!(g.b_final, NOID_FINALITY_DEPTH + 1, "{}", g.name);
+        }
         // ... and `D_offset` really is the section 4.2 formula for each.
-        assert_eq!(P.d_offset_derived(), 735);
-        assert_eq!(R.d_offset_derived(), 120);
-        assert_eq!(R.b_post(), 33);
-        assert_eq!(R.rhs_i1_eth_for_window(R.w_a_s), 68);
-        assert_eq!(R.rhs_i1_eth_for_window(R.w_a_min_s), 62);
-        assert_eq!(R.bob_lock_by(300_120), 300_052);
-        assert_eq!(R.bob_lock_by_min_window(300_120), 300_058);
+        assert_eq!(P.d_offset_derived(), 738);
+        assert_eq!(R.d_offset_derived(), 122);
+        assert_eq!(R.b_post(), 34);
+        assert_eq!(R.rhs_i1_eth_for_window(R.w_a_s), 69);
+        assert_eq!(R.rhs_i1_eth_for_window(R.w_a_min_s), 63);
+        assert_eq!(R.bob_lock_by(300_122), 300_053);
+        assert_eq!(R.bob_lock_by_min_window(300_122), 300_059);
         assert_eq!(R.rotation_guard_blocks(), 4);
-        // The rehearsal D_offset is one hour at 30 s/block.
-        assert_eq!(R.d_offset * TAU_NOM_S, 3_600);
+        // The rehearsal D_offset is about one hour at 30 s/block.
+        assert_eq!(R.d_offset * TAU_NOM_S, 3_660);
+        // lock-by minus h_create = B_fund + B_final + B_bob + margin, and the full "Alice never reveals" cycle is D_offset + NF.
+        for (g, lock_by_offset, cycle) in [(P, 107, 756), (R, 53, 140), (S, 50, 320)] {
+            assert_eq!(g.d_offset - g.rhs_i1_eth_for_window(g.w_a_s), lock_by_offset, "{}", g.name);
+            assert_eq!(g.b_fund + g.b_final + g.b_bob + g.margin, lock_by_offset, "{}", g.name);
+            assert_eq!(g.d_offset + NOID_FINALITY_DEPTH, cycle, "{}", g.name);
+        }
     }
 
     /// ... and rejects hand-made broken ones, one relation at a time.
     #[test]
     fn a_broken_profile_is_rejected() {
         let broken: Vec<(&str, Gates)> = vec![
-            ("D_offset too small", Gates { d_offset: 119, ..REHEARSAL }),
-            ("D_offset too large", Gates { d_offset: 121, ..REHEARSAL }),
-            ("production D_offset off by one", Gates { d_offset: 724, ..PRODUCTION }),
+            ("D_offset too small", Gates { d_offset: 121, ..REHEARSAL }),
+            ("D_offset too large", Gates { d_offset: 123, ..REHEARSAL }),
+            ("production D_offset off by one", Gates { d_offset: 727, ..PRODUCTION }),
             ("W_A_min above W_A", Gates { w_a_min_s: 700, ..REHEARSAL }),
             ("M_A not above the ETH finality", Gates { eth_finality_s: 300, ..REHEARSAL }),
             ("Alice has no time at the minimum window", Gates { w_a_min_s: 350, ..REHEARSAL }),
-            ("B_final shortened", Gates { b_final: 10, d_offset: 112, ..REHEARSAL }),
-            ("T6 guard does not fit in B_safety", Gates { b_safety: 3, d_offset: 118, ..REHEARSAL }),
+            ("B_final shortened (NF + 1 is 19)", Gates { b_final: 10, d_offset: 104, ..REHEARSAL }),
+            ("T6 guard does not fit in B_safety", Gates { b_safety: 3, d_offset: 120, ..REHEARSAL }),
             ("rehearsal without caps", Gates { max_noid_micro: None, ..REHEARSAL }),
             ("rehearsal on any chain", Gates { eth_chain_ids: None, ..REHEARSAL }),
             ("production with a cap", Gates { max_noid_micro: Some(1), ..PRODUCTION }),
@@ -1110,7 +1174,7 @@ mod tests {
             ("R5-5: a late lock after the abort still passes (I3) (sepolia)", Gates { abort_after_cancel_s: 700, min_cancel_age_s: 100, ..SEPOLIA }),
             ("R5-5: cancel constants zero", Gates { min_cancel_age_s: 0, ..SEPOLIA }),
             ("sepolia: M_A not above the ETH finality", Gates { m_a_s: 1_000, ..SEPOLIA }),
-            ("sepolia: D_offset one short", Gates { d_offset: 299, ..SEPOLIA }),
+            ("sepolia: D_offset one short", Gates { d_offset: 301, ..SEPOLIA }),
             ("sepolia without caps", Gates { max_noid_micro: None, max_eth_wei: None, eth_chain_ids: None, ..SEPOLIA }),
             ("sepolia without a chain pin", Gates { eth_chain_ids: None, ..SEPOLIA }),
             ("sepolia with the rehearsal window", Gates { w_a_s: 600, w_a_min_s: 480, d_offset: 120, ..SEPOLIA }),
@@ -1123,8 +1187,8 @@ mod tests {
             assert!(matches!(g.validate(), Err(GateError::BadProfile(_))), "{what}: {:?}", g.validate());
         }
         // Sanity of the "off by one" cases above: the margin is what absorbs a change.
-        Gates { margin: 10, d_offset: 121, ..REHEARSAL }.validate().unwrap();
-        Gates { margin: 7, d_offset: 301, ..SEPOLIA }.validate().unwrap();
+        Gates { margin: 10, d_offset: 123, ..REHEARSAL }.validate().unwrap();
+        Gates { margin: 7, d_offset: 303, ..SEPOLIA }.validate().unwrap();
         // The two relations are tight at their boundary and no tighter: M_A = 1,140 + 2*220 + 220 = 1,800; W_A_min = 220 + 1,140 + 220 + 1,800 = 3,380.
         Gates { de_s: 220, ra_s: 220, w_a_min_s: 3_380, ..SEPOLIA }.validate().unwrap();
         assert!(Gates { de_s: 221, ra_s: 220, w_a_min_s: 3_380, ..SEPOLIA }.validate().is_err());
@@ -1137,19 +1201,19 @@ mod tests {
         assert_eq!(S.name, ProfileName::Sepolia);
         assert_eq!(ProfileName::Sepolia.gates(), S);
         assert_eq!(ProfileName::Sepolia.as_str(), "sepolia");
-        assert_eq!(S.b_post(), 33);
-        assert_eq!(S.rhs_i1_eth_for_window(S.w_a_s), 251);
-        assert_eq!(S.rhs_i1_eth_for_window(S.w_a_min_s), 209);
-        assert_eq!(S.d_offset_derived(), 300);
-        assert_eq!(S.d_offset, 300);
+        assert_eq!(S.b_post(), 34);
+        assert_eq!(S.rhs_i1_eth_for_window(S.w_a_s), 252);
+        assert_eq!(S.rhs_i1_eth_for_window(S.w_a_min_s), 210);
+        assert_eq!(S.d_offset_derived(), 302);
+        assert_eq!(S.d_offset, 302);
         assert_eq!(S.rotation_guard_blocks(), 4);
-        assert_eq!(S.bob_lock_by(300_300), 300_300 - 251);
-        assert_eq!(S.bob_lock_by_min_window(300_300), 300_300 - 209);
+        assert_eq!(S.bob_lock_by(300_302), 300_302 - 252);
+        assert_eq!(S.bob_lock_by_min_window(300_302), 300_302 - 210);
         // Alice's time between the minimum window and her cutoff covers the Sepolia finality plus detection.
         assert_eq!(S.w_a_min_s - S.m_a_s, 1_560);
         assert!(S.w_a_min_s - S.m_a_s >= S.eth_finality_s + S.delta_detect_s);
-        // D_offset is 2 h 30 at 30 s/block; the production finality and M_A are kept.
-        assert_eq!(S.d_offset * TAU_NOM_S, 9_000);
+        // D_offset is about 2 h 31 at 30 s/block; the production finality and M_A are kept.
+        assert_eq!(S.d_offset * TAU_NOM_S, 9_060);
         assert_eq!((S.eth_finality_s, S.m_a_s), (PRODUCTION.eth_finality_s, PRODUCTION.m_a_s));
         assert_eq!(S.reveal_cutoff(10_000), 8_200);
     }
@@ -1190,21 +1254,21 @@ mod tests {
         assert!(matches!(R.check_caps(1, 1, 11_155_111), Err(GateError::ChainNotAllowed { .. })));
     }
 
-    /// The sepolia walk-through: D_offset 300, finality 1,140 s, cutoff T_reveal - 1,800 s.
+    /// The sepolia walk-through: D_offset 302, finality 1,140 s, cutoff T_reveal - 1,800 s.
     #[test]
     fn sepolia_worked_example() {
         let h_create = 300_000;
         let d = S.alice_deadline_eth(h_create).unwrap();
-        assert_eq!(d, 300_300);
-        // Funding final by 300,022; Bob locks at 300,030.
+        assert_eq!(d, 300_302);
+        // Funding final by 300,023; Bob locks at 300,030.
         let (h_b, t_b) = (300_030, 1_794_312_000);
         let t_reveal = t_b + 4_200;
-        // RHS(I1) = ceil((4,200 + 120 + 40)/20) + 33 = 251; available 270; 19 blocks of slack.
+        // RHS(I1) = ceil((4,200 + 120 + 40)/20) + 34 = 252; available 272; 20 blocks of slack.
         let r = S.check_i1_eth(d, h_b, t_reveal, t_b).unwrap();
-        assert_eq!((r.needed, r.available, r.slack), (251, 270, 19));
-        assert_eq!(S.choose_t_reveal(d, h_b, t_b, 300_022).unwrap(), t_reveal);
+        assert_eq!((r.needed, r.available, r.slack), (252, 272, 20));
+        assert_eq!(S.choose_t_reveal(d, h_b, t_b, 300_023).unwrap(), t_reveal);
         // The last Bob can lock (B_bob = 20 after final funding) still passes (I1).
-        assert!(300_022 + S.b_bob <= S.bob_lock_by(d));
+        assert!(300_023 + S.b_bob <= S.bob_lock_by(d));
         // Alice: cutoff T_reveal - 1,800 s = t_b + 2,400; a lock is final about 1,140 s after inclusion.
         assert_eq!(S.reveal_cutoff(t_reveal), t_b + 2_400);
         assert_eq!(S.check_i2_eth(t_b + 2_400, t_reveal, true), Ok(()));
@@ -1212,8 +1276,8 @@ mod tests {
         assert!(S.check_i3(t_b + 3_360, t_b) && !S.check_i3(t_b + 3_359, t_b));
         assert!(S.alice_accepts_t_reveal(t_b, t_b + 1_800) && !S.alice_accepts_t_reveal(t_b + 1, t_b + 1_800));
         // At the minimum-window lock-by height the window shrinks to the minimum; one block later Bob is refused.
-        assert!(matches!(S.choose_t_reveal(d, d - 208, t_b, d - 220), Err(GateError::PastLockBy { .. })));
-        let t = S.choose_t_reveal(d, d - 209, t_b, d - 220).unwrap();
+        assert!(matches!(S.choose_t_reveal(d, d - 209, t_b, d - 220), Err(GateError::PastLockBy { .. })));
+        let t = S.choose_t_reveal(d, d - 210, t_b, d - 220).unwrap();
         assert!(t - t_b >= S.w_a_min_s && t - t_b < S.w_a_s);
         // The rehearsal window (600 s) would be shorter than the Sepolia finality plus Alice's margin.
         assert!(R.w_a_s < S.eth_finality_s + S.delta_detect_s + S.m_a_s);
@@ -1224,19 +1288,19 @@ mod tests {
     fn section_4_3_worked_example_eth() {
         let h_create = 300_000;
         let d = P.alice_deadline_eth(h_create).unwrap();
-        assert_eq!(d, 300_735);
+        assert_eq!(d, 300_738);
         let h_b = 300_040;
         let t_b = 1_794_312_000;
         let t_reveal = t_b + 7_200;
         let r = P.check_i1_eth(d, h_b, t_reveal, t_b).unwrap();
-        assert_eq!(r.needed, 629);
-        assert_eq!(r.available, 695);
-        assert_eq!(r.slack, 66);
-        assert_eq!(P.bob_lock_by(d), 300_106);
-        assert_eq!(P.bob_lock_by_min_window(d), 300_196);
-        // T_max at H_b: 443 blocks of budget -> t_b + 8,520; min with W_A gives t_b + 7,200.
-        assert_eq!(P.t_max_eth(d, h_b, t_b).unwrap(), t_b + 8_520);
-        assert_eq!(P.choose_t_reveal(d, h_b, t_b, 300_022).unwrap(), t_reveal);
+        assert_eq!(r.needed, 631);
+        assert_eq!(r.available, 698);
+        assert_eq!(r.slack, 67);
+        assert_eq!(P.bob_lock_by(d), 300_107);
+        assert_eq!(P.bob_lock_by_min_window(d), 300_197);
+        // T_max at H_b: 444 blocks of budget -> t_b + 8,540; min with W_A gives t_b + 7,200.
+        assert_eq!(P.t_max_eth(d, h_b, t_b).unwrap(), t_b + 8_540);
+        assert_eq!(P.choose_t_reveal(d, h_b, t_b, 300_023).unwrap(), t_reveal);
         // Alice must broadcast by T_reveal - M_A (13:30 UTC in the example).
         assert_eq!(P.reveal_cutoff(t_reveal), t_b + 5_400);
         assert_eq!(P.check_i2_eth(t_b + 5_400, t_reveal, true), Ok(()));
@@ -1247,24 +1311,24 @@ mod tests {
         assert_eq!(P.check_i2_eth(t_b, t_reveal, false), Err(GateError::LockNotFinalized));
     }
 
-    /// The same walk-through under the rehearsal profile (ideas idea 3): `D_offset` 120.
+    /// The same walk-through under the rehearsal profile (ideas idea 3): `D_offset` 122.
     #[test]
     fn rehearsal_worked_example() {
         let h_create = 300_000;
         let d = R.alice_deadline_eth(h_create).unwrap();
-        assert_eq!(d, 300_120);
-        // Funding included by 300,005, final by 300,022; Bob locks at 300,030.
+        assert_eq!(d, 300_122);
+        // Funding included by 300,005, final by 300,023; Bob locks at 300,030.
         let (h_b, t_b) = (300_030, 1_794_312_000);
         let t_reveal = t_b + 600;
-        // RHS(I1) = ceil((600 + 60 + 40)/20) + 33 = 68; available 90; 22 blocks of slack.
+        // RHS(I1) = ceil((600 + 60 + 40)/20) + 34 = 69; available 92; 23 blocks of slack.
         let r = R.check_i1_eth(d, h_b, t_reveal, t_b).unwrap();
-        assert_eq!((r.needed, r.available, r.slack), (68, 90, 22));
-        assert_eq!(R.choose_t_reveal(d, h_b, t_b, 300_022).unwrap(), t_reveal);
-        // The lock-by heights: D - 68 with the full window, D - 62 with the minimum one.
-        assert_eq!(R.bob_lock_by(d), 300_052);
-        assert_eq!(R.bob_lock_by_min_window(d), 300_058);
+        assert_eq!((r.needed, r.available, r.slack), (69, 92, 23));
+        assert_eq!(R.choose_t_reveal(d, h_b, t_b, 300_023).unwrap(), t_reveal);
+        // The lock-by heights: D - 69 with the full window, D - 63 with the minimum one.
+        assert_eq!(R.bob_lock_by(d), 300_053);
+        assert_eq!(R.bob_lock_by_min_window(d), 300_059);
         // The last Bob can lock (B_bob = 20 after final funding) still passes (I1), with margin to spare.
-        let last = 300_022 + R.b_bob;
+        let last = 300_023 + R.b_bob;
         assert!(last <= R.bob_lock_by(d));
         assert_eq!(R.bob_lock_by(d) - last, 10);
         // Alice: cutoff T_reveal - 300 s; a lock with a shorter window than 480 s is not accepted (I3).
@@ -1278,19 +1342,19 @@ mod tests {
 
     #[test]
     fn i1_fails_when_bob_locks_too_late() {
-        let d = 300_735;
+        let d = 300_738;
         // At the lock-by height the full window still fits exactly.
-        assert!(P.check_i1_eth(d, 300_106, 1_000_000 + 7_200, 1_000_000).is_ok());
+        assert!(P.check_i1_eth(d, 300_107, 1_000_000 + 7_200, 1_000_000).is_ok());
         assert_eq!(
-            P.check_i1_eth(d, 300_107, 1_000_000 + 7_200, 1_000_000),
-            Err(GateError::BobUnsafe { d, h_b: 300_107, needed: 629, available: 628 })
+            P.check_i1_eth(d, 300_108, 1_000_000 + 7_200, 1_000_000),
+            Err(GateError::BobUnsafe { d, h_b: 300_108, needed: 631, available: 630 })
         );
         // choose_t_reveal shrinks the window down to W_A_min, then refuses.
         let t = P.choose_t_reveal(d, 300_150, 1_000_000, 300_100).unwrap();
         assert!(t - 1_000_000 < W_A_S && t - 1_000_000 >= W_A_MIN_S);
         assert!(P.check_i1_eth(d, 300_150, t, 1_000_000).is_ok());
         assert!(matches!(
-            P.choose_t_reveal(d, 300_197, 1_000_000, 300_150),
+            P.choose_t_reveal(d, 300_198, 1_000_000, 300_150),
             Err(GateError::PastLockBy { .. })
         ));
         // Bob is allowed only B_bob blocks after funding finality.
@@ -1306,32 +1370,33 @@ mod tests {
 
     #[test]
     fn i1_under_rehearsal_shrinks_then_refuses() {
-        let d = 300_120;
+        let d = 300_122;
         let t = R.choose_t_reveal(d, 300_055, 1_000_000, 300_040).unwrap();
         assert!(t - 1_000_000 < R.w_a_s && t - 1_000_000 >= R.w_a_min_s, "{}", t - 1_000_000);
         assert!(R.check_i1_eth(d, 300_055, t, 1_000_000).is_ok());
-        assert!(matches!(R.choose_t_reveal(d, 300_059, 1_000_000, 300_040), Err(GateError::PastLockBy { .. })));
+        assert!(matches!(R.choose_t_reveal(d, 300_060, 1_000_000, 300_040), Err(GateError::PastLockBy { .. })));
         assert!(matches!(R.choose_t_reveal(d, 300_041, 1_000_000, 300_015), Err(GateError::PastBobWindow { b_bob: 20, .. })));
     }
 
     #[test]
     fn i4_claim_height_classes() {
         let d = 1_000;
-        assert_eq!(classify_claim_height(982, d), ClaimHeight::OnTarget);
-        assert_eq!(classify_claim_height(983, d), ClaimHeight::LateButValid);
+        // D - 19 is the latest on-target height: included there, the claim is final at tip D - 1, when Alice's refund first opens.
+        assert_eq!(classify_claim_height(981, d), ClaimHeight::OnTarget);
+        assert_eq!(classify_claim_height(982, d), ClaimHeight::LateButValid);
         assert_eq!(classify_claim_height(999, d), ClaimHeight::LateButValid);
         assert_eq!(classify_claim_height(1_000, d), ClaimHeight::TooLate);
         assert!(!alice_refund_ready(998, d));
         assert!(alice_refund_ready(999, d));
-        assert!(noid_final(117, 100));
-        assert!(!noid_final(116, 100));
+        assert!(noid_final(118, 100));
+        assert!(!noid_final(117, 100));
     }
 
     #[test]
     fn i5_version_window() {
-        assert_eq!(P.check_i5(300_000, 300_735), Ok(()));
+        assert_eq!(P.check_i5(300_000, 300_738), Ok(()));
         assert!(matches!(
-            P.check_i5(279_000, 279_735),
+            P.check_i5(279_000, 279_738),
             Err(GateError::VersionBoundaryInWindow { .. })
         ));
         // The window end is D + B_post, so D just below the boundary still straddles it.
@@ -1346,7 +1411,7 @@ mod tests {
         assert_eq!(P.check_i5(279_388, 280_113), Ok(()));
         assert_eq!(auth_version_at(279_369), OwnerAuthorizationVersion::V3);
         assert_eq!(auth_version_at(279_370), OwnerAuthorizationVersion::V4);
-        // The rehearsal window is shorter (B_post 33), so it can end closer to the boundary.
+        // The rehearsal window is shorter (B_post 34), so it can end closer to the boundary.
         assert!(matches!(R.check_i5(279_240, 279_360), Err(GateError::VersionBoundaryInWindow { .. })));
         assert!(matches!(R.check_i5(279_200, 279_320), Err(GateError::BeforeTrialStart { .. })));
         assert!(matches!(R.check_i5(279_300, 279_420), Err(GateError::VersionBoundaryInWindow { .. })));
@@ -1435,6 +1500,79 @@ mod tests {
             assert_eq!(g.rotation_guard(288), RotationGuard::WaitForBoundary { blocks: 1 });
             assert_eq!(g.rotation_guard(289), RotationGuard::ProveNow);
         }
+    }
+
+    // ---- the parity test: swap-cli's finality rule is the vendored node's rule
+
+    fn vendored_consensus_source(file: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/parano1d/noid_chain/src/consensus").join(file);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!("the finality parity test must read the vendored node source {}: {e} (this test never skips)", path.display())
+        })
+    }
+
+    /// The text of the function whose signature starts with `signature` (from the signature to the first line that is exactly `}`).
+    fn vendored_fn_body<'a>(source: &'a str, signature: &str) -> &'a str {
+        let start = source.find(signature).unwrap_or_else(|| panic!("`{signature}` not found in the vendored source"));
+        let rest = &source[start..];
+        // CRLF-safe: a line that is exactly `}` ends the function, whatever the line ending of the checkout.
+        let end = rest.find("\n}\n").or_else(|| rest.find("\n}\r\n")).unwrap_or_else(|| panic!("the end of `{signature}` not found"));
+        &rest[..end]
+    }
+
+    /// The statements of a vendored function body without the signature and without any whitespace, so that an exact comparison does not
+    /// depend on indentation or line endings.
+    fn compact_body(body: &str) -> String {
+        let after_brace = body.split_once('{').map(|(_, b)| b).unwrap_or(body);
+        after_brace.split_whitespace().collect::<Vec<_>>().join("")
+    }
+
+    /// `NOID_FINALITY_DEPTH` equals the vendored `CONSENSUS_FINALITY_DEPTH`, `is_final` is `tip >= height + depth` and `reorg_allowed`
+    /// is `<= depth`. If the vendored sources change, this fails and the finality numbers must be re-derived.
+    #[test]
+    fn finality_depth_matches_the_vendored_node_source() {
+        let params_rs = vendored_consensus_source("params.rs");
+        let line = params_rs
+            .lines()
+            .find(|l| l.trim_start().starts_with("pub const CONSENSUS_FINALITY_DEPTH: u64 = "))
+            .expect("pub const CONSENSUS_FINALITY_DEPTH: u64 is declared in the vendored consensus/params.rs");
+        let value: u64 = line.split('=').nth(1).and_then(|v| v.trim().trim_end_matches(';').trim().parse().ok()).expect("the constant is a plain number");
+        assert_eq!(value, NOID_FINALITY_DEPTH, "the node's CONSENSUS_FINALITY_DEPTH is {value}; swap-cli assumes {NOID_FINALITY_DEPTH}");
+
+        let header_rs = vendored_consensus_source("header.rs");
+        let is_final = vendored_fn_body(&header_rs, "pub fn is_final(block_height: u64, tip_height: u64) -> bool");
+        assert_eq!(
+            compact_body(is_final),
+            "tip_height>=block_height+CONSENSUS_FINALITY_DEPTH",
+            "the node's is_final is not exactly `tip_height >= block_height + CONSENSUS_FINALITY_DEPTH`: {is_final}"
+        );
+
+        let fork_choice_rs = vendored_consensus_source("fork_choice.rs");
+        let reorg = vendored_fn_body(&fork_choice_rs, "pub fn reorg_allowed(n_confirmations_to_undo: u64) -> bool");
+        assert_eq!(
+            compact_body(reorg),
+            "n_confirmations_to_undo<=CONSENSUS_FINALITY_DEPTH",
+            "the node's reorg_allowed is not exactly `n <= CONSENSUS_FINALITY_DEPTH`: {reorg}"
+        );
+    }
+
+    /// The rule itself, stated directly: final at `h + 18`, not at `h + 17`; and the claim classes it implies.
+    #[test]
+    fn noid_final_is_eighteen_blocks_after_inclusion() {
+        for h in [0u64, 100, 286_000] {
+            assert!(!noid_final(h + 17, h), "h = {h}: tip h + 17 is not final");
+            assert!(noid_final(h + 18, h), "h = {h}: tip h + 18 is final");
+        }
+        assert!(!noid_final(0, 1));
+        let d = 300_738;
+        assert_eq!(classify_claim_height(d - 19, d), ClaimHeight::OnTarget);
+        assert_eq!(classify_claim_height(d - 18, d), ClaimHeight::LateButValid);
+        assert_eq!(classify_claim_height(d - 1, d), ClaimHeight::LateButValid);
+        assert_eq!(classify_claim_height(d, d), ClaimHeight::TooLate);
+        // An on-target claim is final no later than the tip at which Alice's refund first opens (tip D - 1) ...
+        assert!(noid_final(d - 1, d - 19) && alice_refund_ready(d - 1, d));
+        // ... and a claim one block later is not.
+        assert!(!noid_final(d - 1, d - 18));
     }
 
     #[test]

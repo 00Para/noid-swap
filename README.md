@@ -6,6 +6,17 @@ sides settle or both sides get their own coins back after a deadline, provided e
 acts before its own deadline: a party that goes offline after the reveal can lose its side (design §8). The design, four component
 prototypes, a command-line swap tool and the logs of twelve real runs (numbered 1 to 13; there is no run 7 log), one of them on Ethereum mainnet, are in this repository.
 
+> **Known limit: concentrated mining on Parano1d.** One address has mined between 45 % and 63 % of every day's blocks for the last 20 days
+> (52.7 % of the last 24 hours, read from a node's own block headers on 2026-11-08). The swap assumes that no party holds a majority of the hashrate,
+> and that assumption is false today. Above half of the hashrate a longer window between the reveal and the deadline does not help: a miner who is
+> Alice can keep Bob's NOID claim from becoming final until the deadline and take both legs, and the victim is Bob, the Ethereum side. At a 53 %
+> share and the production window the model gives about 55 % from a clean start and about 90 % or more for a prepared attacker. A smaller miner is limited
+> by the window and by how quickly Bob re-sends his claim after a reorg (an operator who re-sends by hand needs minutes). The `production` profile now
+> refuses to offer Bob's lock while one address produced more than 35 % of the recent blocks (it is a screen, not a defence: it does not see an
+> operator on several addresses, a pool, or a share that grows after the lock). Swaps in which Bob locks ETH against an Alice he does not know are
+> still not recommended, and amounts stay tiny.
+> Model and measurement: [`docs/miner-concentration.md`](docs/miner-concentration.md); the gate: [`docs/bob-concentration-gate.md`](docs/bob-concentration-gate.md).
+
 ## Why Parano1d makes this cheap, and why it decides who goes first
 
 Two words first. A **hashlock** is a lock that opens for whoever shows a secret `s` whose hash `H` is
@@ -29,8 +40,8 @@ the Parano1d address (`Addr(s)`), otherwise the NOID lock could be a decoy. Full
 
 ## What it is not
 
-Not a bridge, no wrapped NOID, nobody holds anybody's coins. Pairwise trades only: NOID against ETH,
-against an ERC-20 such as USDT (`eth/contracts/HTLCERC20.sol`), or against BTC. The counterparty's
+Not a bridge, no wrapped NOID, nobody holds anybody's coins. Pairwise trades only: NOID against ETH (the only pair the swap tool runs today),
+or, by design, against BTC. An ERC-20 contract exists (`eth/contracts/HTLCERC20.sol`) but the tool does not support it: a token that can block or fail a payout would publish the secret without paying, so an ERC-20 swap would need a vetted token list first. The counterparty's
 chain needs nothing more than a hashlock and a timelock, which is why the same design covers Ethereum
 (`HTLC.sol`) and Bitcoin (a P2WSH script, `btc/`). Not a market: the two parties find each other and
 agree on a price elsewhere.
@@ -109,7 +120,7 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 267 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd eth && npm install && npx hardhat test      # 275 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
 cd btc && npm install && npm test              # 91 passing (node --test)
 ```
 

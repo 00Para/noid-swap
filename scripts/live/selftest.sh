@@ -649,6 +649,134 @@ D=$(mkl inst9); printf '{}\n' > "$D/alice.swap.json"
 inst_run "$D" --force
 check "install.sh: --force alone (RUN from the default) installs into a folder with a swap file" "0|$NSCRIPTS" "$IRC|$INB"
 
+# ---- (12) ACCEPT_PRODUCER_CONCENTRATION becomes --accept-producer-concentration (opt-in, said on every call); the ALERT_URL hook
+D=$(mkl accept)
+check "node_flags native: ACCEPT_PRODUCER_CONCENTRATION=1 adds --accept-producer-concentration" "$BASEF --accept-producer-concentration --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 ACCEPT_PRODUCER_CONCENTRATION=1)"
+check "node_flags native: ... it is not set by default" "$BASEF --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1)"
+check "node_flags native: ACCEPT_PRODUCER_CONCENTRATION=0 adds nothing" "$BASEF --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 ACCEPT_PRODUCER_CONCENTRATION=0)"
+check "node_flags native: only the value 1 counts (yes adds nothing)" "$BASEF --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 ACCEPT_PRODUCER_CONCENTRATION=yes)"
+check "node_flags native: SINGLE_NODE_OK=1 does not imply it" "$BASEF --single-node-ok --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 SINGLE_NODE_OK=1)"
+check "node_flags native: it does not imply --single-node-ok either, and both together are both" "$BASEF --single-node-ok --accept-producer-concentration --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 SINGLE_NODE_OK=1 ACCEPT_PRODUCER_CONCENTRATION=1)"
+check "node_flags native: second nodes and the setting" "$BASEF --noid-rpc http://n2 --eth-rpc http://e2 --accept-producer-concentration --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2 ACCEPT_PRODUCER_CONCENTRATION=1)"
+D=$(mkl accept2 'ACCEPT_PRODUCER_CONCENTRATION=1')
+check "node_flags native: the setting in env.local.sh works" "$BASEF --accept-producer-concentration --curl-path curl" "$(run_native "$D" "$NF" NOID_RPC=http://n1 ETH_RPC=http://e1)"
+W1=$(run_native "$D" 'node_flags >/dev/null' NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2 2>&1)
+case "$W1" in *"ACCEPT_PRODUCER_CONCENTRATION=1"*"Amounts must stay trial-sized"*) ok "node_flags: the setting is said on stderr" ;; *) bad "node_flags: the setting is said on stderr" "[$W1]" ;; esac
+W2=$(run_native "$D" 'node_flags >/dev/null 2>&1; node_flags 2>&1 >/dev/null; node_flags 2>&1 >/dev/null' NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2)
+check "node_flags: ... on EVERY call (three calls, two of them counted here)" "2" "$(printf '%s\n' "$W2" | grep -c 'ACCEPT_PRODUCER_CONCENTRATION=1')"
+D=$(mkl accept3)
+W3=$(run_native "$D" 'node_flags 2>&1 >/dev/null' NOID_RPC=http://n1 ETH_RPC=http://e1 NOID_RPC2=http://n2 ETH_RPC2=http://e2)
+check "node_flags: ... and not at all when the setting is off" "0" "$(printf '%s\n' "$W3" | grep -c 'ACCEPT_PRODUCER_CONCENTRATION' || true)"
+
+# The alert hook, against a stub curl that records its arguments and its standard input. A tick line that starts with ALERT: is sent as a fixed short
+# message; the URL travels on curl's standard input, never in its arguments; a failed send is kept and tried again; there is no per-line latch.
+CURLSTUB="$TMP/curlstub"
+cat > "$CURLSTUB" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CURL_LOG"
+cat >> "$CURL_LOG.stdin"
+exit "${CURL_EXIT:-0}"
+STUB
+chmod +x "$CURLSTUB"
+SECRET_URL='http://alert.example/hook-SECRET-9f3a'
+ADDR="o1$(printf 'q%.0s' $(seq 1 58))"; TXID=$(printf 'ab%.0s' $(seq 1 32))
+ALERT_LINE="ALERT: a reorg removed Bob's NOID claim $TXID for 5.0 NOID to $ADDR. Send it again"
+TICK_OUT=$(printf '%s\n' "[bob] tick exit 0 at 12:00:01" "notes: [\"x\"]" "$ALERT_LINE" "intent: {}")
+# alert_run NAME CURL_EXIT 'TICK TEXT' [extra env.local.sh line]: sets AOUT (everything the hook printed), ARC, ALOG (the stub's log), and AD (the folder)
+alert_run() {
+  local name=$1 cx=$2 text=$3; shift 3
+  AD=$(mkl "alert-$name" ${1+"$@"})
+  AOUT=$(printf '%s\n' "$text" | env -i HOME="$TMP/home" PATH="$PATH" L="$AD" HERE="$HERE" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" CURL_EXIT="$cx" RUN=7 \
+    "$BASH" -c 'set -u; . "$HERE/env.sh"; alert_hook' 2>&1); ARC=$?
+  ALOG=$(cat "$AD/curl.log" 2>/dev/null)
+}
+alert_again() {   # the same folder, another input
+  local cx=$1 text=$2
+  AOUT=$(printf '%s\n' "$text" | env -i HOME="$TMP/home" PATH="$PATH" L="$AD" HERE="$HERE" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" CURL_EXIT="$cx" RUN=7 \
+    "$BASH" -c 'set -u; . "$HERE/env.sh"; alert_hook' 2>&1); ARC=$?
+  ALOG=$(cat "$AD/curl.log" 2>/dev/null)
+}
+MSG1="noid-swap run 7: claim removed by a reorg; run claim.sh dry run"
+alert_run sent 0 "$TICK_OUT" "ALERT_URL=$SECRET_URL"
+check "alert_hook: a new ALERT: line is sent once, as the fixed short message, the URL not among the arguments" "-s -f -m 20 -d $MSG1 -K -" "$ALOG"
+check "alert_hook: ... the URL went to curl on its standard input" "url = \"$SECRET_URL\"" "$(cat "$AD/curl.log.stdin")"
+check "alert_hook: ... the hook itself prints nothing (the URL is never echoed) and returns 0" "0|" "$ARC|$AOUT"
+case "$ALOG" in *"$TXID"*|*"$ADDR"*|*"5.0 NOID"*) bad "alert_hook: the message holds no transaction id, address or amount" "$ALOG" ;; *) ok "alert_hook: the message holds no transaction id, address or amount" ;; esac
+check "alert_hook: ... no latch and nothing pending is left" "0|none" "$(ls "$AD"/alert-sent-* 2>/dev/null | wc -l | tr -d ' ')|$([ -e "$AD/alert-pending" ] && echo some || echo none)"
+alert_again 0 "$TICK_OUT"
+check "alert_hook: the same line on a LATER tick is sent again (a second removal of the claim must alert)" "2" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alert_again 0 "$(printf '%s\n' "$TICK_OUT" "$TICK_OUT")"
+check "alert_hook: ... but not twice in one tick output" "3" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alert_again 0 "ALERT: something else happened"
+check "alert_hook: another ALERT: line is sent as the generic message (never the line)" "4|noid-swap run 7: an alert was raised; look at the loop log -K -" "$(printf '%s\n' "$ALOG" | grep -c .)|$(printf '%s\n' "$ALOG" | sed -n 4p | sed -e 's/^-s -f -m 20 -d //')"
+alert_again 0 'notes: ["ALERT: not at the start of a line"] and ALERT: nor here'
+check "alert_hook: only lines that START with ALERT: count" "4" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alert_run nourl 0 "$TICK_OUT"
+check "alert_hook: without ALERT_URL nothing is sent and nothing is made" "none|none" "$([ -e "$AD/curl.log" ] && echo some || echo none)|$([ -e "$AD/alert-pending" ] && echo some || echo none)"
+AD=$(mkl alert-env)
+AOUT=$(printf '%s\n' "$TICK_OUT" | env -i HOME="$TMP/home" PATH="$PATH" L="$AD" HERE="$HERE" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" ALERT_URL="$SECRET_URL" RUN=7 \
+  "$BASH" -c 'set -u; . "$HERE/env.sh"; alert_hook' 2>&1)
+check "alert_hook: ALERT_URL in the environment is ignored (only env.local.sh sets it)" "none" "$([ -e "$AD/curl.log" ] && echo some || echo none)"
+alert_run failing 1 "$TICK_OUT" "ALERT_URL=$SECRET_URL"
+check "alert_hook: a failing curl returns 0, prints nothing and keeps the message pending (the line will not be printed again)" "0||1|$MSG1" "$ARC|$AOUT|$(cat "$AD/alert-pending")"
+alert_again 1 ""
+check "alert_hook: ... a later call with no ALERT line tries it again and counts the try" "2|2|$MSG1" "$(printf '%s\n' "$ALOG" | grep -c .)|$(cut -d'|' -f1 "$AD/alert-pending")|$(cut -d'|' -f2- "$AD/alert-pending")"
+alert_again 0 ""
+check "alert_hook: ... and once curl works the pending message is sent and removed" "3|none" "$(printf '%s\n' "$ALOG" | grep -c .)|$([ -e "$AD/alert-pending" ] && echo some || echo none)"
+printf '20|%s\n' "$MSG1" > "$AD/alert-pending"
+alert_again 1 ""
+check "alert_hook: ... a message that failed 20 times is given up" "none" "$([ -e "$AD/alert-pending" ] && echo some || echo none)"
+printf 'junk\n' > "$AD/alert-pending"
+alert_again 0 ""
+check "alert_hook: ... a damaged pending file is dropped, nothing is sent from it" "none|0" "$([ -e "$AD/alert-pending" ] && echo some || echo none)|$ARC"
+
+# watch.sh with the hook: a stub tick.sh prints the ALERT: line on the first tick only, as the real tool does; the message goes out once, the URL is not printed, the loop line has the alert
+AB="$TMP/watchalert"; mkdir -p "$AB"
+cp "$HERE/env.sh" "$HERE/watch.sh" "$AB/"
+cat > "$AB/tick.sh" <<'STUB'
+#!/bin/sh
+n=$(cat "$STUB_CNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_CNT"
+PH=secret_seen; [ "$n" -lt 3 ] || PH=refunded
+echo "[$1] tick exit 0 at 12:00:0$n"
+echo "noid: tip 281108"; echo "eth : latest 1416"; echo "sources: {}"; echo "events: []"
+echo 'ACTION: {"action": "claim_noid"}'
+echo 'notes: ["REORG", "ALERT: a reorg removed Bob'"'"'s NOID claim from the chain and it is not pending."]'
+[ "$n" -eq 1 ] && echo "ALERT: a reorg removed Bob's NOID claim from the chain and it is not pending."
+echo "applied: True phase_after: $PH"
+STUB
+chmod +x "$AB/tick.sh"
+AD=$(mkl watch-alert "ALERT_URL=$SECRET_URL")
+WAOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AB/watch.sh" bob 0 2>&1 < /dev/null); WARC=$?
+check "watch.sh with ALERT_URL: the alert on the first tick is sent once (the later ticks show none)" "0|1|-s -f -m 20 -d $MSG1 -K -" "$WARC|$(grep -c . "$AD/curl.log")|$(cat "$AD/curl.log")"
+case "$WAOUT" in *hook-SECRET*) bad "watch.sh: the URL is never printed" "$WAOUT" ;; *) ok "watch.sh: the URL is never printed" ;; esac
+check_has "watch.sh: the loop line carries the alert" "ALERT: a reorg removed Bob's NOID claim" "$(cat "$AD/loop-bob.txt")"
+AD=$(mkl watch-noalert)
+env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AB/watch.sh" bob 0 >/dev/null 2>&1 < /dev/null
+check "watch.sh without ALERT_URL: nothing is sent" "none" "$([ -e "$AD/curl.log" ] && echo some || echo none)"
+# a failing curl does not stop the loop
+AD=$(mkl watch-failing "ALERT_URL=$SECRET_URL")
+env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" CURL_EXIT=7 RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AB/watch.sh" bob 0 >/dev/null 2>&1 < /dev/null; WFRC=$?
+check "watch.sh: a failing curl does not stop the loop (it ends by the terminal phase, exit 0, three ticks)" "0|3" "$WFRC|$(grep -c . "$AD/loop-bob.txt")"
+check "watch.sh: ... the failed alert is retried on each later tick (one try for the line, two retries) and stays pending" "3|3" "$(grep -c . "$AD/curl.log")|$(cut -d'|' -f1 "$AD/alert-pending")"
+
+# tick.sh puts each ALERT: note on a line of its own (it summarises the tick's JSON with python3)
+: > "$TMP/pyprobe"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; open(sys.argv[1]).close()' "$TMP/pyprobe" 2>/dev/null; then
+  TB="$TMP/tickbin"; mkdir -p "$TB"; cp "$HERE/env.sh" "$HERE/tick.sh" "$TB/"
+  cat > "$TMP/tickstub" <<'STUB'
+#!/bin/sh
+cat <<'JSON'
+{"noid": {"tip": 5}, "eth": {}, "sources": {}, "events": [], "action": {"kind": "wait"}, "notes": ["one", "ALERT: line one of the notes", "two", "ALERT: line two"], "intent": {}, "events_applied_to_file": true, "phase_after": "secret_seen"}
+JSON
+STUB
+  chmod +x "$TMP/tickstub"
+  D=$(mkl tickalert); mkdir -p "$D/rec" "$D/bob"; echo "selftest-passphrase" > "$D/passphrase.txt"
+  TOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$D" LIVE_PLATFORM=native BIN="$TMP/tickstub" "$BASH" "$TB/tick.sh" bob 2>/dev/null)
+  check "tick.sh: each ALERT: note is a line of its own" "2" "$(printf '%s\n' "$TOUT" | grep -c '^ALERT:')"
+else
+  echo "skip tick.sh ALERT lines (no python3 on this machine that reads this shell's paths)"
+fi
+
 echo
 echo "$PASS ok, $FAILS failed (bash $BASH_VERSION)"
 [ "$FAILS" -eq 0 ]

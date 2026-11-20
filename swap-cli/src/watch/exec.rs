@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{parse_rpc_response, rpc_request, snippet, JsonRpc, RpcError};
+use super::{parse_rpc_batch_response, parse_rpc_response, rpc_batch_request, rpc_request, snippet, JsonRpc, RpcError};
 
 /// The Windows `curl.exe` as seen from WSL, preferred when it exists.
 pub const WSL_WINDOWS_CURL: &str = "/mnt/c/Windows/System32/curl.exe";
@@ -197,6 +197,28 @@ impl JsonRpc for ExecJsonRpc {
             }
         }
     }
+
+    /// One curl run with a JSON array body. Anything but a successful exit with an array of the right length is an `Err`, and the caller
+    /// goes back to single calls (a node that refuses batches answers with one error object, or curl exits non-zero on a 4xx/5xx).
+    fn call_batch(&self, method: &str, params: &[Value]) -> Result<Vec<Result<Value, RpcError>>, RpcError> {
+        if params.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first = self.next_id.fetch_add(params.len() as u64, Ordering::Relaxed);
+        let ids: Vec<u64> = (0..params.len() as u64).map(|i| first + i).collect();
+        let (code, out, err) = self.run(rpc_batch_request(&ids, method, params))?;
+        let err_text = String::from_utf8_lossy(&err).trim().to_string();
+        match code {
+            Some(0) if !out.iter().all(u8::is_ascii_whitespace) => parse_rpc_batch_response(&out, &ids),
+            Some(0) => Err(RpcError::Transport(format!("{} produced no output for a batch", self.program))),
+            other => Err(RpcError::Transport(format!(
+                "{} failed with {} on a batch{}",
+                self.program,
+                other.map_or("a signal".to_string(), |c| format!("exit code {c}")),
+                if err_text.is_empty() { String::new() } else { format!(": {err_text}") },
+            ))),
+        }
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -317,6 +339,30 @@ mod tests {
         let e = rpc.call("m", json!([])).unwrap_err();
         assert!(matches!(&e, RpcError::Transport(m) if m.contains("killed")), "{e:?}");
         assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_batch_is_one_curl_run_with_an_array_body_and_a_refusal_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // The fake curl answers an array in the other order: matched by id.
+        let prog = fake(dir.path(), "batch", r#"echo '[{"jsonrpc":"2.0","id":2,"result":"b"},{"jsonrpc":"2.0","id":1,"result":"a"}]'"#);
+        let rpc = ExecJsonRpc::new("http://x", Some(&prog));
+        let out = rpc.call_batch("paranoid_getBlockHeader", &[json!([5]), json!([6])]).unwrap();
+        assert_eq!(out, vec![Ok(json!("a")), Ok(json!("b"))]);
+        let stdin: Value = serde_json::from_str(&std::fs::read_to_string(dir.path().join("batch.stdin")).unwrap()).unwrap();
+        assert_eq!(
+            stdin,
+            json!([{"jsonrpc": "2.0", "id": 1, "method": "paranoid_getBlockHeader", "params": [5]}, {"jsonrpc": "2.0", "id": 2, "method": "paranoid_getBlockHeader", "params": [6]}])
+        );
+        // A node without batch support answers one error object; a failing curl; no output: all errors, so the caller asks singly.
+        let refuse = r#"echo '{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"no batches"}}'"#;
+        for (name, body) in [("obj", refuse), ("exit", "echo 'curl: (22)' >&2; exit 22"), ("empty", "exit 0")] {
+            let prog = fake(dir.path(), name, body);
+            let e = ExecJsonRpc::new("http://x", Some(&prog)).call_batch("m", &[json!([1]), json!([2])]);
+            assert!(e.is_err(), "{name}: {e:?}");
+        }
+        // An empty batch needs no program.
+        assert_eq!(ExecJsonRpc::new("http://x", Some("/nonexistent/curl")).call_batch("m", &[]).unwrap(), Vec::new());
     }
 
     #[test]
