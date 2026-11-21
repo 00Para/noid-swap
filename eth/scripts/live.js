@@ -96,6 +96,11 @@
  * the secret is already in the public mempool, so it uses the late cutoff T_reveal - DE (the intent's `late_cutoff`, or the profile's DE for
  * an older intent) instead of T_reveal - M_A. A first claim, which has no such transaction, keeps the strict M_A rule.
  *
+ * Reveal sidecar (T21-11): with --swap, a real claim writes FILE.reveal-sent (lock id, the signed hash when a local key shows it, epoch seconds; exclusive,
+ * mode 600, fsynced with its directory) as the last step before the broadcast and sends nothing if that fails. A sidecar of THIS lock beside the file is read
+ * as evidence that the secret may be public, like the history events below (same late cutoff); one of another lock is ignored and reported. swap-cli's
+ * `tick` reads the same file (history name reveal_sidecar_seen).
+ *
  * Keys (REVIEW-4 R4-5): with --swap, claim needs the key of the file's alice_receiver, refund and lock that of bob_sender.
  * Late re-send (REVIEW-4 R4-3): with --swap, when the file's history shows the secret may already be public (reveal_submitted,
  * eth_claim_mined, eth_claim_reorged, eth_reveal_dropped), claim takes the cutoff the intent froze (T_reveal - DE) instead of the
@@ -116,6 +121,7 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { ethers } = require("ethers");
 
 const ARTIFACT_PATHS = {
@@ -142,7 +148,7 @@ const LOG_RANGE_MAX = 50000; // blocks per eth_getLogs request: the cap of publi
 const DEFAULT_MARGIN_S = 1800; // M_A, docs/protocol-design.md section 4.3
 // REVIEW-4 R4-3: swap-cli history events that show Alice's secret may already be public (engine.rs `secret_may_be_public`).
 // (+ REVIEW-6 R6-3 `reveal_reverted_seen`: a claim of this lock was mined and reverted, so its calldata published the secret.)
-const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen"]);
+const SECRET_PUBLIC_EVENTS = new Set(["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen", "reveal_sidecar_seen"]);
 // REVIEW-5 R5-1: DE (Ethereum inclusion delay, seconds) per swap-cli profile (params.rs `de_s`): the late cutoff is T_reveal - DE. Only the
 // fallback for a --replace of a reveal_eth intent recorded before REVIEW-5, which carries no `late_cutoff` of its own.
 const PROFILE_DE_S = { production: 120n, sepolia: 120n, rehearsal: 60n };
@@ -713,7 +719,8 @@ async function requireFundsFor(provider, from, req, gasLimit) {
  * opts.hideData: the calldata carries the secret, so a dry run prints its length only.
  * opts.fees: fee fields (and nonce) already chosen and checked by feePlan; else the command's own flags.
  * opts.preSend: optional async guard, run once everything is prepared and immediately before the transaction is signed and broadcast
- * (never in a dry run). If it throws, nothing is sent. The claim uses it to re-check the reveal cutoff after the slow steps.
+ * (never in a dry run). If it throws, nothing is sent. It is called with the populated transaction (nonce, fees, chain id filled in). The claim uses it
+ * to re-check the reveal cutoff after the slow steps and to write the reveal sidecar (T21-11) just before the broadcast.
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
@@ -724,6 +731,11 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   // calldata (the secret) to the node before the claim itself (review V2-6). The limit is also what the balance must cover at the fee cap.
   const fixedGas = opts.fixedGas !== undefined && opts.fixedGas !== null ? BigInt(opts.fixedGas) : null;
   if (fixedGas !== null) req.gasLimit = fixedGas;
+  // opts.preSend is a guard that must be the LAST thing before the broadcast. Without a fixed gas limit the gas estimate (a network read, which
+  // would also send the calldata, i.e. the secret, to the node) runs inside sendTransaction, after the guard: refuse such a caller outright.
+  if (typeof opts.preSend === "function" && fixedGas === null) {
+    throw new Error("execute: opts.preSend requires opts.fixedGas (otherwise a gas estimate would run between the guard and the broadcast)");
+  }
   // A replacement is estimated against the LATEST state, without its nonce: the pool state (the pending transaction it
   // replaces, e.g. the very claim) would make a pending-state estimate revert (AlreadyClaimed) on some nodes.
   const replacing = req.nonce !== undefined;
@@ -774,7 +786,7 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
     // Fill nonce, chain id and fees first, so that no network read is left between the guard and the broadcast. Only with a fixed gas limit: then
     // nothing is estimated and the calldata (the secret) goes to the node only inside the transaction itself.
     if (fixedGas !== null && typeof signer.populateTransaction === "function") toSend = await signer.populateTransaction(req);
-    await opts.preSend();
+    await opts.preSend(toSend);
   }
   const resp = await signer.sendTransaction(toSend);
   // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
@@ -832,6 +844,157 @@ function readSwapFile(file) {
   } catch (e) {
     if (e instanceof UserError) throw new UserError(`--swap ${abs}: ${e.message}`);
     throw e;
+  }
+}
+
+// ------------------------------------------------ the reveal sidecar (T21-11)
+// `claim --swap FILE` writes `FILE.reveal-sent` just before it broadcasts the claim, so that a reveal which was sent and then dropped (or whose
+// process died before any `swap-cli tick` saw it) is still on record: swap-cli and this script read the file as evidence that the secret MAY be
+// public (the late re-send cutoff T_reveal - DE applies). It holds the lock id, the signed transaction's hash when it is known before the
+// broadcast, and the time; never the secret, a key, or anything of the swap file. Written exclusively (never over a sidecar of this lock),
+// mode 600, fsynced with its directory; if it cannot be written the claim is not sent.
+const REVEAL_SIDECAR_SUFFIX = ".reveal-sent";
+const REVEAL_SIDECAR_MAX_BYTES = 4096;
+const revealSidecarPath = (swapFile) => String(swapFile) + REVEAL_SIDECAR_SUFFIX;
+
+/**
+ * Read the sidecar of a swap file for this lock. state: "absent", "matching" (this lock: evidence), "foreign" (another lock id: ignored) or
+ * "unreadable" (not a sidecar this tool wrote: ignored). Read-only; never throws for a bad file.
+ */
+function readRevealSidecar(swapFile, lockId) {
+  const file = revealSidecarPath(swapFile);
+  const want = String(lockId).toLowerCase().replace(/^0x/, "");
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { state: "absent", file };
+    return { state: "unreadable", file, note: `the reveal sidecar ${file} cannot be examined (${e && e.code ? e.code : "error"}); it is ignored` };
+  }
+  if (!st.isFile() || st.size > REVEAL_SIDECAR_MAX_BYTES) {
+    return { state: "unreadable", file, note: `${file} is not a reveal sidecar written by this tool (not a regular file, or too large); it is ignored` };
+  }
+  let j;
+  try {
+    j = JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return { state: "unreadable", file, note: `${file} is not valid JSON; it is ignored` };
+  }
+  const okShape =
+    j !== null &&
+    typeof j === "object" &&
+    j.version === 1 &&
+    typeof j.lock_id === "string" &&
+    /^[0-9a-f]{64}$/.test(j.lock_id) &&
+    (j.tx_hash === null || (typeof j.tx_hash === "string" && /^[0-9a-f]{64}$/.test(j.tx_hash))) &&
+    Number.isSafeInteger(j.at) &&
+    j.at >= 0;
+  if (!okShape) return { state: "unreadable", file, note: `${file} does not have the reveal sidecar's fields; it is ignored` };
+  if (j.lock_id !== want) {
+    return { state: "foreign", file, note: `${file} belongs to another lock (${j.lock_id}), not this swap's ${want}; it is ignored` };
+  }
+  return { state: "matching", file, txHash: j.tx_hash, at: j.at };
+}
+
+/** Sync a directory entry to disk. Windows cannot open a directory, so nothing more is possible there; elsewhere a real failure is an error. */
+function fsyncDir(dir) {
+  let fd;
+  try {
+    fd = fs.openSync(dir, "r");
+    fs.fsyncSync(fd);
+  } catch (e) {
+    if (process.platform === "win32" || (e && ["EINVAL", "ENOTSUP", "ENOSYS", "EOPNOTSUPP"].includes(e.code))) return;
+    throw e;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* nothing to do */
+      }
+    }
+  }
+}
+
+/**
+ * Record, before the broadcast, that the reveal of `lockId` is about to be sent. Synchronous. A sidecar of THIS lock that already exists is kept
+ * as it is (its time is the earliest attempt); a foreign or unreadable one is moved aside under `.stale-*`, never deleted. Throws a UserError
+ * (and the caller then sends nothing) if the sidecar cannot be written and made durable. Returns { state: "written" | "kept", file }.
+ */
+function writeRevealSidecar(swapFile, lockId, txHash) {
+  const target = revealSidecarPath(swapFile);
+  const lockHex = String(lockId).toLowerCase().replace(/^0x/, "");
+  const hashHex = txHash === null || txHash === undefined ? null : String(txHash).toLowerCase().replace(/^0x/, "");
+  const existing = readRevealSidecar(swapFile, lockHex);
+  if (existing.state === "matching") {
+    // Already there; its directory entry may not be durable yet (a crash between the link and the sync of an earlier attempt).
+    try {
+      fsyncDir(path.dirname(path.resolve(target)));
+    } catch (e) {
+      throw new UserError(`refusing: the reveal sidecar ${target} exists but its directory could not be synced (${e && e.code ? e.code : "error"}); nothing was sent`);
+    }
+    return { state: "kept", file: target };
+  }
+  const at = Math.floor(Date.now() / 1000);
+  const body = JSON.stringify({ version: 1, lock_id: lockHex, tx_hash: hashHex, at }) + "\n";
+  const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+  let state = "written";
+  try {
+    const fd = fs.openSync(tmp, "wx", 0o600);
+    try {
+      fs.writeSync(fd, body);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    if (existing.state !== "absent") {
+      // Not this lock's: keep it for the operator, out of the way.
+      fs.renameSync(target, `${target}.stale-${at}-${crypto.randomBytes(3).toString("hex")}`);
+    }
+    try {
+      fs.linkSync(tmp, target); // atomic and exclusive: an existing name is never replaced
+    } catch (e) {
+      if (e && e.code === "EEXIST") {
+        if (readRevealSidecar(swapFile, lockHex).state !== "matching") throw e;
+        state = "kept"; // another process wrote this lock's sidecar a moment ago
+      } else {
+        // A file system that refuses hard links (a network share such as \wsl.localhost, FAT, some mounts; the error code varies): create the final
+        // name exclusively and write it in place. Still exclusive (never over an existing name); if this fails too, the claim is not sent.
+        const fd2 = fs.openSync(target, "wx", 0o600);
+        try {
+          fs.writeSync(fd2, body);
+          fs.fsyncSync(fd2);
+        } finally {
+          fs.closeSync(fd2);
+        }
+      }
+    }
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* a leftover .tmp holds the same non-secret fields */
+    }
+    fsyncDir(path.dirname(path.resolve(target)));
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* never created, or already gone */
+    }
+    throw new UserError(
+      `refusing: the reveal sidecar ${target} could not be written (${e && e.code ? e.code : "error"}); nothing was sent. It is written before the claim is broadcast so that a lost reveal stays on record; fix the directory and retry`
+    );
+  }
+  return { state, file: target };
+}
+
+/** The hash of the claim as it will be signed, when the signer can show it before the broadcast (a local key; null for any other signer). */
+async function presignedHash(signer, populatedTx) {
+  if (!(signer instanceof ethers.BaseWallet)) return null;
+  try {
+    return ethers.Transaction.from(await signer.signTransaction(populatedTx)).hash;
+  } catch {
+    return null;
   }
 }
 
@@ -1381,7 +1544,10 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   // REVIEW-4 R4-3: once the file shows the secret may already be public (swap-cli's late re-send, review H1), a re-send
   // publishes nothing new and the cutoff the intent froze (T_reveal - DE) is the authority, not the stricter default margin.
   // An explicit --margin-s still tightens it. Without that evidence the earlier of the two stays the rule.
-  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || replaced !== null) && !marginGiven;
+  // T21-11: a reveal sidecar of THIS lock beside the file (written just before an earlier claim was broadcast) is the same kind of evidence.
+  const sidecar = sw ? readRevealSidecar(sw.file, lockId) : null;
+  const sidecarEvidence = sidecar !== null && sidecar.state === "matching";
+  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || replaced !== null || sidecarEvidence) && !marginGiven;
   if (lateResend) {
     // The cutoff the intent froze, or the later T_reveal - DE it froze for exactly this case (a secret that is public already).
     const late = intentLateCutoff !== null && intentLateCutoff > intentCutoff ? intentLateCutoff : intentCutoff;
@@ -1390,8 +1556,12 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       replaced !== null
         ? "T_reveal - DE: the pending claim of this lock at the signer's oldest nonce shows the secret is already public (REVIEW-5 R5-1)"
         : late === intentCutoff
-          ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
-          : "the swap file's late cutoff T_reveal - DE (the file shows the secret may already be public)";
+          ? sw.secretMayBePublic
+            ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
+            : "the swap file's frozen cutoff (the reveal sidecar beside the file shows the secret may already be public)"
+          : sw.secretMayBePublic
+            ? "the swap file's late cutoff T_reveal - DE (the file shows the secret may already be public)"
+            : "the swap file's late cutoff T_reveal - DE (the reveal sidecar beside the file shows the secret may already be public)";
   } else if (intentCutoff !== null && intentCutoff < cutoff) {
     cutoff = intentCutoff;
     cutoffRule = "the swap file's frozen cutoff";
@@ -1454,6 +1624,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     finalizedBlock: finalized.number,
     codeHash: target.codeHash,
     secretProvided: secret !== null,
+    ...(sidecar !== null ? { revealSidecar: sidecar.state, revealSidecarFile: sidecar.file, ...(sidecar.note ? { revealSidecarNote: sidecar.note } : {}) } : {}),
   };
   // REVIEW-4 R4-1: the fee cap (or the --replace plan) is decided and checked before anything is signed, also without the secret.
   const fp = await feePlan(provider, signer, args, { name: "claim", contractAddr, lockId }, replaced);
@@ -1477,10 +1648,11 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   const tx = { to: contractAddr, data: iface.encodeFunctionData("claim", [lockId, secret]) };
   if (kind === "poseidon") assertPoseidonClaimCalldata(iface, tx.data, lockId, secret);
   let r;
+  let sidecarWritten = null;
   try {
     // The event scans, the finality lookup and the fee planning above can take minutes on a slow public endpoint: the cutoff is read again
     // (wall clock and latest block, the later one) immediately before the claim is signed, against the same cutoff the early check ended with.
-    const preSend = async () => {
+    const preSend = async (populated) => {
       let late;
       try {
         late = await latestBlock(provider);
@@ -1502,6 +1674,8 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
             `(a late claim publishes the secret and lets the counterparty take both legs; nothing was sent)`
         );
       }
+      // T21-11: the last step before the broadcast. If the sidecar cannot be written and made durable this throws and nothing is sent.
+      if (sw) sidecarWritten = writeRevealSidecar(sw.file, lockId, await presignedHash(signer, populated));
     };
     r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend });
   } catch (e) {
@@ -1520,13 +1694,19 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
           `Tell swap-cli: tick FILE ... --reveal-tx ${e.hash} --apply (it checks the transaction on the node, then judges a re-send by the late cutoff T_reveal - DE). ` +
           "Do not assume the swap is safe; if the lock is still open and the late cutoff has not passed, the claim can be re-sent (live.js claim --swap FILE after that tick)",
         swapCliFlag: `--reveal-tx ${e.hash}`,
+        ...(sidecarWritten ? { revealSidecar: sidecarWritten.state, revealSidecarFile: sidecarWritten.file } : {}),
         ...fp.report,
       };
+    }
+    if (sidecarWritten) {
+      // The sidecar was written before the broadcast and stays: whether the claim reached the network is not known here.
+      const base = e instanceof UserError ? redact(e.message) : explain(e);
+      throw new UserError(`${base} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; run tick --apply)`);
     }
     throw e;
   }
   if (r.dry) return r.out;
-  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...fp.report };
+  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...(sidecarWritten ? { revealSidecar: sidecarWritten.state, revealSidecarFile: sidecarWritten.file } : {}), ...fp.report };
 }
 
 async function refund(provider, signer, args0) {
@@ -1760,6 +1940,7 @@ module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
+  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

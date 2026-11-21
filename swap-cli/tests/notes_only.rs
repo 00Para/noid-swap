@@ -61,12 +61,12 @@ fn the_parano1d_agreement_note_is_not_said_when_the_nodes_disagree_or_the_rule_i
     let r = s.tick_bob_with(|n, _| n.second_label = Some(NOID_LABEL.into()));
     assert_eq!(r.action.kind(), "wait", "{r:?}");
     assert!(notes_with(&r.notes, "node agrees").is_empty(), "{:?}", r.notes);
-    // Waived (--single-node-ok): the single-node note, nothing new.
+    // Waived (--single-node-ok, and under production the producer-check override too): the single-node note, nothing new.
     let mut s = Scenario::new(Variant::Raw);
     at_bob_lock(&mut s);
     s.world.borrow_mut().single_node = true;
     s.world.borrow_mut().single_node_ok = true;
-    let r = s.tick_bob();
+    let r = s.tick_bob_with(|n, _| n.accept_producer_concentration = true);
     assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
     assert!(r.notes.iter().any(|n| n == "single node: F5 cross-check not possible"), "{:?}", r.notes);
     assert!(notes_with(&r.notes, "node agrees").is_empty(), "{:?}", r.notes);

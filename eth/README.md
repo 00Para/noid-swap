@@ -350,6 +350,19 @@ claim in the mempool while a `reveal_eth` intent is held); the same events as `s
 new, and the intent's own cutoff (`T_reveal - DE`, which `swap-cli` froze for exactly that case) rules even when it is later than
 `timelock - 1800 s`. An explicit `--margin-s` still tightens it. The plan prints `revealCutoffRule`.
 
+#### The reveal sidecar (T21-11)
+
+`claim --swap FILE` writes `FILE.reveal-sent` as its last step before the broadcast (after the cutoff re-check, with the transaction populated and,
+for a local key, signed to get its hash): one small JSON file `{"version":1,"lock_id":"<64 hex>","tx_hash":"<64 hex>|null","at":<epoch seconds>}`,
+created exclusively (a temporary file and a hard link, so an existing name is never replaced; a file system without hard links gets an exclusive in-place create), mode 600, fsynced together with its directory (on Windows neither mode nor directory sync exists). It never
+holds the secret, a key, or anything of the swap file. If it cannot be written the command refuses and sends nothing. A sidecar of this lock that
+exists already is kept (the first attempt's time stays); a foreign or unreadable one is moved aside to `FILE.reveal-sent.stale-*`, never deleted. The
+file is written only for a real send, not for a dry run, a refused claim or a claim without `--swap`. `claim` reads it too: a sidecar of THIS lock
+is evidence that the secret may be public, exactly like the history events above (the intent's `late_cutoff` rules; an intent without one keeps its
+frozen cutoff; `--margin-s` still tightens). A sidecar of another lock or one not in the format is ignored and reported (`revealSidecar`,
+`revealSidecarNote` in the plan). The result of a send prints `revealSidecar: "written" | "kept"` and `revealSidecarFile`. `swap-cli tick` reads the same
+file and records `reveal_sidecar_seen` (`swap-cli/README.md`, "Residual window").
+
 `--chain-id` comes from your own records, not from the counterparty: the chain id of the network you mean
 to use. The code hash is not typed at all (REVIEW-3 F1): it is the hash of this repo's compiled artifact, so a
 look-alike contract deployed by the other side is refused whatever hash they send. `deploy` reports

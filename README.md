@@ -120,7 +120,7 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 275 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd eth && npm install && npx hardhat test      # 286 passing; solc falls back to the npm solc@0.8.24 package if the download is blocked
 cd btc && npm install && npm test              # 91 passing (node --test)
 ```
 

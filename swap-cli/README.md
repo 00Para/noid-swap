@@ -71,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 570 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 588 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -238,7 +238,7 @@ secret is in it. With ONE node configured:
 | Profile | `lock_eth` / `reveal_eth` with one node |
 |---|---|
 | `production`, `sepolia` | `Wait`: "a second node is required before this step (F5); pass --noid-rpc / --eth-rpc twice, or --single-node-ok to accept the risk" |
-| `production` or `sepolia` + `--single-node-ok` | proceeds, note "single node: F5 cross-check not possible" |
+| `production` or `sepolia` + `--single-node-ok` | proceeds, note "single node: F5 cross-check not possible" (for Bob's `lock_eth` under `production` the producer check of threat T21 additionally needs the second node: `--single-node-ok` does not relax it, only `--accept-producer-concentration` does) |
 | `rehearsal` | proceeds, the same note |
 
 (`sepolia` joined `production` in REVIEW-3: a swap with a stranger there has real value on the NOID side.)
@@ -740,6 +740,35 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
      `late_cutoff` (an older intent: the profile's `DE`) even with no marker in the history, because the pending transaction itself proves the secret
      is out. A first claim keeps the strict rule. See `eth/README.md`.
   Residual: the marker rests on the receiver key having a pending transaction; a key used for something else during the swap could set it wrongly.
+  Residual window (found by an outside read, 2026-11-08; closed by the reveal sidecar, T21-11): without the sidecar the file learns that the claim
+  was sent only from the next `tick --apply` whose Ethereum node shows the receiver key's pending nonce above its latest nonce. A claim that was
+  sent and then left the pool (dropped, a node restart, an endpoint the tick does not read) before such a tick leaves only
+  `intent_decided:reveal_eth`, and a re-send past `T_reveal - M_A` would be judged as a first publication while the secret may already be known to
+  anyone who watched the pool.
+  *The reveal sidecar* (`swap-cli/src/reveal_sidecar.rs`, `eth/scripts/live.js`): `live.js claim --swap FILE` writes `FILE.reveal-sent` as the last
+  step before it broadcasts (after the cutoff re-check, with the transaction populated): created exclusively through a temporary file and a hard link
+  (an existing name is never replaced), mode 600, fsynced together with its directory. It holds `version` 1, the lock id (64 lower-case hex), the
+  signed transaction's hash (64 hex, or `null` when the signer is not a local key and the hash is not known before the broadcast) and the UTC epoch
+  seconds; never the secret, a key, or anything of the swap file. If it cannot be written and made durable `live.js` sends nothing. A sidecar of this
+  lock that exists already is kept as it is (its time is the first attempt); a foreign or unreadable one is moved aside under `.stale-*`, never
+  deleted. `tick` (read-only or `--apply`, so the watch loop too) reads it before it decides: for Alice's file, a sidecar whose lock id equals the
+  lock of her phase writes `reveal_sidecar_seen` once (read-only: in memory only), and a re-send is judged by the late cutoff `T_reveal - DE` (the
+  intent's `cutoff`, and the check in the engine); `live.js` reads the same file for the same purpose (and the history name `reveal_sidecar_seen`).
+  The marker is evidence that a send was STARTED, like `reveal_maybe_sent`, not that the secret is public: it is deliberately NOT in
+  `secret_may_be_public`, so the rules that wait for real evidence (the recorded instance must be visible, CHAOS F-13; no reveal with two fitting
+  instances, R4-4) are not relaxed by it. It does count as reveal evidence for `lost`. A sidecar of another
+  lock, not in the format, not a regular file or larger than 4 KiB is ignored and the tick's notes say so; Bob's file never reads one. The marker is
+  in the saved file, so deleting the sidecar later changes nothing. A sidecar proves that a send was STARTED, not that it succeeded: a claim the node
+  refused, an unreachable endpoint or a crash before the send leaves one too. The cost: after such a failure the FIRST reveal can be sent as late as
+  `T_reveal - DE` (about two minutes before the timelock under production), and a claim not mined by `T_reveal` reverts with the secret in its calldata,
+  which can cost Alice both legs. When `live.js` reports a send error that you know never left the machine (connection refused, a local error),
+  re-send with `live.js claim --swap FILE ... --margin-s 1800` run by hand (`reveal.sh` has no such flag), which keeps the strict rule whatever the file says; or delete the sidecar BEFORE the next tick, because the first
+  `tick --apply` (the watch loop runs one every 30 s by default) writes the marker into the file for good and deleting the sidecar afterwards changes
+  nothing. When in doubt, leave it: an unknown outcome is exactly what it is for.
+  Platform note: on Windows (the default path of `reveal.sh`, through the `\\wsl.localhost` share) a directory cannot be synced and the mode bits are
+  not applied, so there the sidecar is durable as far as the file's own fsync and the share allow, and not forced to mode 600; the content is not secret. What it does not cover: a reveal sent by any program other than `live.js claim --swap`
+  (a wallet, `cast`, `live.js` without `--swap`) leaves no sidecar. Keep running `tick --apply` at once after every reveal as well (belt and braces:
+  it also sees the claim in the pool).
   Use the receiver key for nothing else (the cancel guard already assumes this).
 - **R5-2, `--replace` replaces only what it identified (`live.js`).** The old transaction is looked for with `--replace-tx`, in the node's pending
   block and in `txpool_contentFrom`; if it cannot be found and shown to be this claim / refund of this lock, the command refuses and asks for

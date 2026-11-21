@@ -93,7 +93,7 @@ _(filled in during the run: times, heights, txids, what differed from the plan)_
 - 14:22 `new-bob` first refused: the bundle carries `code_hash: null` (Alice's `new-alice` was not given
   `--eth-code-hash`), so Bob's `--eth-code-hash` did not match "his terms"; rewritten without the pin (the watcher
   still checks chain id and that the sender is an EOA). Lesson: pass `--eth-code-hash` to BOTH `new-alice` and `new-bob`.
-- 14:23 **Funded** (owner's go-ahead 09:0x "Go, fund 10 NOID"): `parano1d-cli contract fund swap.object.json 10.000000`
+- 14:23 **Funded** (after the owner's go-ahead, "Go, fund 10 NOID"): `parano1d-cli contract fund swap.object.json 10.000000`
   at tip 280,635 → txid `267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780`, fee 9,000 μNOID
   (1 input, 2 outputs). Pre-checks: active index 0, spendable 2,148.96 NOID, object file OK, proof verified, Bob's file written.
 - 14:26 Funding included at height 280,638 (admitted 280,636; the 280,637 block missed it): instance slot 9,750,400,

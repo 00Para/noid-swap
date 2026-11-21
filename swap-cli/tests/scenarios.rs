@@ -2713,9 +2713,13 @@ fn f5_production_with_one_node_waits_before_the_lock_and_the_reveal_unless_singl
     assert_eq!(wait_reason(&r), NEEDS_SECOND_NODE);
     assert_eq!(s.bob.executor.count("lock_eth"), 0);
     assert!(s.world.borrow().lock_pending.is_none());
-    // The operator accepts the risk: the lock goes out, with a note.
+    // The operator accepts the F5 risk: under production the producer check (T21) still needs the second node, so the lock still waits...
     s.world.borrow_mut().single_node_ok = true;
     let r = s.tick_bob();
+    assert!(wait_reason(&r).starts_with("ALARM: producer check needs a second Parano1d node"), "{r:?}");
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    // ...until the operator accepts that risk too (the printed concentration override): the lock goes out, with the F5 note.
+    let r = s.tick_bob_with(|n, _| n.accept_producer_concentration = true);
     assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
     assert!(r.notes.iter().any(|n| n == "single node: F5 cross-check not possible"), "{:?}", r.notes);
 

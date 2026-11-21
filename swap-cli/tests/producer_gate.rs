@@ -1005,19 +1005,23 @@ fn tick_reads_the_headers_into_a_cache_beside_the_swap_file_and_prints_no_addres
     example_bob_file(example_public(&Secret::from_bytes(seq_bytes(0x33)), Variant::Raw), 1).unwrap().save(&b).unwrap();
     let fx = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
     let eth_fx = fx.join("eth/locked.json");
-    let replay = swap_cli::watch::FixtureRpc::from_file(&fx.join("parano1d/idle.json")).unwrap();
-    // The node serves the fixture's chain state and a synthetic header for every height up to its tip (280,517).
-    let node = MockNode::spawn(move |m, p| {
-        if m == "paranoid_getBlockHeader" {
-            let h = p[0].as_u64().unwrap();
-            if h > 280_517 {
-                return Ok(Value::Null);
+    // Two nodes (production needs the second node's cross-check for the producer check): each serves the fixture's chain state and a synthetic
+    // header for every height up to its tip (280,517), the same chain.
+    let spawn_node = || {
+        let replay = swap_cli::watch::FixtureRpc::from_file(&fx.join("parano1d/idle.json")).unwrap();
+        MockNode::spawn(move |m, p| {
+            if m == "paranoid_getBlockHeader" {
+                let h = p[0].as_u64().unwrap();
+                if h > 280_517 {
+                    return Ok(Value::Null);
+                }
+                return Ok(plain_header(h));
             }
-            return Ok(plain_header(h));
-        }
-        JsonRpc::call(&replay, m, p.clone())
-    });
-    let flags = ["--eth-fixture", s(&eth_fx), "--noid-rpc", node.url.as_str(), "--single-node-ok"];
+            JsonRpc::call(&replay, m, p.clone())
+        })
+    };
+    let (node, node2) = (spawn_node(), spawn_node());
+    let flags = ["--eth-fixture", s(&eth_fx), "--noid-rpc", node.url.as_str(), "--noid-rpc", node2.url.as_str()];
     let swap_before = std::fs::read(&b).unwrap();
     let (ok, out, err) = run(bin().args(["tick", s(&b)]).args(flags));
     assert!(ok, "{err}");
@@ -1026,7 +1030,7 @@ fn tick_reads_the_headers_into_a_cache_beside_the_swap_file_and_prints_no_addres
     assert_eq!(p["complete"], true, "{p}");
     assert_eq!(p["window_long"], 2_880);
     assert_eq!(p["tip"], 280_517);
-    assert_eq!(p["second"]["state"], "not_configured");
+    assert_eq!(p["second"]["state"], "agrees", "{p}");
     assert!(p["headers_read"].as_u64().unwrap() >= 2_880);
     assert!(v["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().starts_with("producer concentration ok (T21 screen, not a defence): largest producer ")), "{}", v["notes"]);
     // No address on stdout; the cache is the local file beside the swap file.
@@ -1044,6 +1048,16 @@ fn tick_reads_the_headers_into_a_cache_beside_the_swap_file_and_prints_no_addres
     assert!(ok, "{err}");
     let v3: Value = serde_json::from_str(&out3).unwrap();
     assert_eq!(v3["noid"]["accept_producer_concentration"], true);
+    // One node only, with --single-node-ok (which waives the F5 second-node rule): under production the producer check is not relaxed by it.
+    let (ok, out5, err) = run(bin().args(["tick", s(&b)]).args(["--eth-fixture", s(&eth_fx), "--noid-rpc", node.url.as_str(), "--single-node-ok"]));
+    assert!(ok, "{err}");
+    let v5: Value = serde_json::from_str(&out5).unwrap();
+    assert_eq!(v5["noid"]["producers"]["second"]["state"], "not_configured");
+    assert!(
+        v5["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("producer check needs a second Parano1d node")),
+        "{}",
+        v5["notes"]
+    );
     // The reader is not used for a fixture node.
     let (ok, out4, err) = run(bin().args(["tick", s(&b), "--noid-fixture", s(&fx.join("parano1d/idle.json")), "--eth-fixture", s(&eth_fx), "--now", "1794312000"]));
     assert!(ok, "{err}");
@@ -1123,4 +1137,65 @@ fn a_header_never_shows_its_miner_address_in_debug_output() {
     let shown = format!("{h:?} {:?}", vec![h.clone()]);
     no_address(&shown);
     assert!(shown.contains(&producer_id(A)), "{shown}");
+}
+
+// ---------------------------------------------------------------- production needs the second node for the producer check
+
+#[test]
+fn production_needs_a_second_node_for_the_producer_check_whatever_single_node_ok_says_and_only_the_override_waives_it() {
+    // One node, F5 waived by --single-node-ok: under production the producer check still waits, with its own reason.
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().single_node = true;
+    s.world.borrow_mut().single_node_ok = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob();
+    let want = "ALARM: producer check needs a second Parano1d node, not locking (T21): this profile enforces the producer check, only one --noid-rpc was given and --single-node-ok was passed; --single-node-ok does not relax this check. Give a second, independent Parano1d node as a second --noid-rpc (another machine or provider), or pass --accept-producer-concentration to accept the risk";
+    assert_eq!(wait_reason(&r), want);
+    assert!(r.notes.contains(&want.to_string()), "{:?}", r.notes);
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    assert_eq!(s.bob_phase(), "funding_final", "the file waits, it does not abort");
+    no_address(&wait_reason(&r));
+    // The printed concentration override waives it (and prints that it did); the F5 rule is waived by --single-node-ok as before.
+    let r = s.tick_bob_with(|n, _| n.accept_producer_concentration = true);
+    assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
+    let overridden = note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN");
+    assert_eq!(overridden.len(), 1, "{:?}", r.notes);
+    assert!(overridden[0].contains("producer check needs a second Parano1d node"), "{}", overridden[0]);
+    assert!(s.bob.file.history.iter().any(|h| h.event == format!("{OVERRIDE_HISTORY}: producer check needs a second Parano1d node")), "{:?}", s.bob.file.history);
+    // The override alone does not make a missing second node's F5 rule go away: without --single-node-ok F5 still holds the lock.
+    let mut s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().single_node = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| n.accept_producer_concentration = true);
+    assert_ne!(r.action.kind(), "lock_eth", "{r:?}");
+    // With a second node the check passes as before.
+    let mut s = Scenario::new(Variant::Raw);
+    at_bob_lock(&mut s);
+    let r = s.tick_bob();
+    assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(note_starting(&r, "producer concentration ok").iter().any(|n| n.contains("second node holds the same block")), "{:?}", r.notes);
+}
+
+#[test]
+fn sepolia_and_rehearsal_still_lock_on_one_node_and_say_the_cross_check_is_not_possible() {
+    // Sepolia: F5 needs --single-node-ok for one node; the producer screen only warns anyway and says it could not cross-check.
+    let mut s = scenario(ProfileName::Sepolia);
+    s.world.borrow_mut().single_node = true;
+    s.world.borrow_mut().single_node_ok = true;
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 700, 170, 900, 220); // 24 % and 23.6 %, under the 28 % limit
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+    });
+    assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(note_starting(&r, "producer concentration ok").iter().any(|n| n.contains("single node, the producer cross-check is not possible")), "{:?}", r.notes);
+    // Rehearsal accepts one node outright.
+    let mut s = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
+    s.world.borrow_mut().single_node = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 700, 170, 900, 220); // 24 % and 23.6 %, under the 28 % limit
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+    });
+    assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
+    assert!(note_starting(&r, "producer concentration ok").iter().any(|n| n.contains("single node, the producer cross-check is not possible")), "{:?}", r.notes);
 }

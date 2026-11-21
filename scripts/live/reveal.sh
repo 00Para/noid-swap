@@ -42,6 +42,7 @@ load_passphrase || exit 2
 "$BIN" secret "$ALICE_FILE" 2>/dev/null | "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err"
 EC=${PIPESTATUS[1]}
 echo "claim exit $EC at $(date +%T)"; head -c 600 "$L/eth-claim.err"; echo
+reveal_sent_note "$L/eth-claim.err"
 python3 - "$L/eth-claim.json" "$L/reveal-reverted-tx.txt" <<'PY'
 import sys, json
 try: d = json.load(open(sys.argv[1]))

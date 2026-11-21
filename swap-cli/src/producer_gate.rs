@@ -31,6 +31,7 @@ pub const OVERRIDE_HISTORY: &str = "producer_concentration_overridden";
 const HEADLINE_CANNOT: &str = "producer concentration cannot be checked";
 const HEADLINE_STALE: &str = "producer concentration data is stale";
 const HEADLINE_DISAGREE: &str = "the two Parano1d nodes disagree about the producers";
+const HEADLINE_ONE_NODE: &str = "producer check needs a second Parano1d node";
 
 /// The result of looking at one summary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,6 +177,17 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
                 return cannot("a second Parano1d node is configured but the producer cross-check did not run".into());
             }
         }
+    } else if g.producer_gate_enforced && noid.single_node_ok {
+        // Production: the headers come from one node that could be lying; the cross-check against a second node is part of the check, and
+        // `--single-node-ok` (which waives the F5 second-node rule) does not relax it. Only the printed concentration override does. (Without
+        // `--single-node-ok` F5 itself holds the lock with its own, older reason a step later, so this screen does not speak first.)
+        return screen(Finding::Unverifiable {
+            headline: HEADLINE_ONE_NODE,
+            detail: "this profile enforces the producer check, only one --noid-rpc was given and --single-node-ok was passed; --single-node-ok does not relax this check".into(),
+        });
+    } else if g.producer_gate_enforced {
+        // Production without `--single-node-ok`: F5 holds the lock a step later; say that this check needs the second node as well.
+        "single node, the producer cross-check is not possible (F5 holds the lock; under production this check needs the second node too, whatever --single-node-ok says)".to_string()
     } else {
         "single node, the producer cross-check is not possible".to_string()
     };
@@ -270,6 +282,8 @@ fn describe(g: &Gates, finding: &Finding) -> (&'static str, String, String) {
                     ". The gate fails closed: no lock until the last {} headers have been read from the node itself",
                     group(g.producer_window_long)
                 )
+            } else if *headline == HEADLINE_ONE_NODE {
+                format!(". Give a second, independent Parano1d node as a second --noid-rpc (another machine or provider), or pass {OVERRIDE_FLAG} to accept the risk")
             } else {
                 String::new()
             };

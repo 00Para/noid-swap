@@ -112,8 +112,8 @@ const USAGE: &str = "usage:
   heights within 64). Under the production and sepolia profiles a single node blocks those two steps unless --single-node-ok; rehearsal accepts one with a note. The second endpoint must differ from the first (REVIEW-3 G3); a second node that runs on another machine and is reached through a local port (an SSH tunnel) can be declared with --noid-rpc2-is-remote / --eth-rpc2-is-remote, which changes the text of the same-host note and nothing else. An unknown tip header time blocks every NOID-side spend (REVIEW-3 F5). The same applies to declaring a swap `lost` (REVIEW-4 R4-9). With two Ethereum nodes Bob reads the secret from either one, and while he waits for it every tick compares the Ethereum head time with the clock (REVIEW-4 R4-8).
   Producer concentration (threat T21, docs/bob-concentration-gate.md): before Bob locks, `tick` reads the Parano1d block headers from his own node (--noid-rpc, never a
   fixture), keeps them in FILE.producers, and counts who produced the last 2,880 and the last 720 blocks. Under the production profile `lock_eth` is not offered while one
-  address produced more than 35 % of either window, or when the headers cannot be read in full, are stale, or the second Parano1d node disagrees; under sepolia and rehearsal
-  the same check only warns. The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives the production refusals: it
+  address produced more than 35 % of either window, or when the headers cannot be read in full, are stale, or the second Parano1d node disagrees or is missing (under production
+  --single-node-ok does not relax the second-node part of this check); under sepolia and rehearsal the same check only warns. The two largest addresses together above 50 % always only warn. --accept-producer-concentration (tick) waives the production refusals: it
   prints a warning on every tick and writes one history entry; it is never implied by a profile. It is a screen, not a defence.";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
@@ -611,6 +611,8 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     if apply {
         store_eth_from_block(&mut work, obs.eth_from_block_flag, now);
     }
+    // T21-11: a reveal sidecar of this lock beside the file counts like a claim seen in the pool; read first, so this decision uses it.
+    let sidecar_notes = swap_cli::reveal_sidecar::note_sidecar(&mut work, &path, now);
     let mut closed_event = None;
     if let Some(txid) = &closed_by {
         // Every refusal returns here, before anything is saved.
@@ -624,6 +626,7 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     let mut decision = outcome.decision;
     decision.notes.extend(obs.source_notes.iter().cloned());
+    decision.notes.extend(sidecar_notes);
     let closed_height = match &closed_event {
         Some(swap_cli::state::Event::NoidClosedExternally { height, .. }) => Some(*height),
         _ => None,

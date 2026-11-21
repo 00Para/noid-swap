@@ -466,7 +466,7 @@ fn eth_tx_dropped(eth: &EthObservation, since: u64, now: u64, grace: u64, what: 
 }
 
 /// Position of the last history entry named `event` (`None` if there is none).
-fn last_history(file: &SwapFile, event: &str) -> Option<usize> {
+pub(crate) fn last_history(file: &SwapFile, event: &str) -> Option<usize> {
     file.history.iter().rposition(|h| h.event == event)
 }
 
@@ -1395,7 +1395,7 @@ fn reverted_claim_evidence(eth: &EthObservation, lock_id: Option<[u8; 32]>) -> R
 }
 
 /// Alice's lock id as far as her phase knows it.
-fn alice_lock_id(file: &SwapFile) -> Option<[u8; 32]> {
+pub(crate) fn alice_lock_id(file: &SwapFile) -> Option<[u8; 32]> {
     match &file.phase {
         Phase::Alice(p) => p.lock().map(|l| l.lock_id),
         Phase::Bob(_) => None,
@@ -1416,13 +1416,32 @@ fn note_reverted_reveal(file: &mut SwapFile, eth: &EthObservation, now: u64) {
 /// outcome, [`REVEAL_MAYBE_SENT`]). Used only for the CUTOFF of a re-send (`T_reveal - DE` instead of `T_reveal - M_A`): not for the
 /// two-instances rule, which waits for evidence and not for a crash that may have sent nothing.
 fn reveal_may_have_been_sent(file: &SwapFile) -> bool {
-    secret_may_be_public(file) || last_history(file, REVEAL_MAYBE_SENT).is_some()
+    secret_may_be_public(file) || last_history(file, REVEAL_MAYBE_SENT).is_some() || reveal_pending_unknown(file) || reveal_sidecar_seen(file)
+}
+
+/// T21-11: the file carries [`REVEAL_SIDECAR_SEEN`]. Like [`REVEAL_MAYBE_SENT`] it says a reveal send was STARTED, not that it reached the network.
+fn reveal_sidecar_seen(file: &SwapFile) -> bool {
+    last_history(file, REVEAL_SIDECAR_SEEN).is_some()
+}
+
+/// The [`Runner`] saves a `reveal_eth` as a pending action with `maybe_sent: true` BEFORE it hands the reveal to the executor, and the marker
+/// [`REVEAL_MAYBE_SENT`] is written only when the executor returns. A process that dies between the broadcast and that save leaves this pending
+/// record and no marker, so the record itself counts: the reveal may be in the mempool, the secret may be public, and a re-send is judged by the
+/// late cutoff (`T_reveal - DE`). A record whose executor said "nothing was sent" has `maybe_sent: false` and does not count.
+fn reveal_pending_unknown(file: &SwapFile) -> bool {
+    file.pending_action.as_ref().is_some_and(|p| p.kind == "reveal_eth" && p.maybe_sent)
 }
 
 /// REVIEW-5 R5-1, CLI path: Alice's receiver key had a transaction in the Ethereum mempool (pending nonce above the latest) while a
 /// `reveal_eth` intent was held, so the claim was most likely sent and her secret is in the public mempool. Written once by
 /// [`tick_apply`]; `secret_may_be_public` counts it, `live.js` reads the same name.
 pub const REVEAL_PENDING_SEEN: &str = "reveal_pending_seen";
+/// T21-11: `live.js claim --swap FILE` wrote the reveal sidecar (`<swap file>.reveal-sent`) for THIS lock just before it broadcast the claim, so
+/// the secret may be public although no tick saw the claim in the pool. Written once by `tick` (see `reveal_sidecar`). It is evidence that a send
+/// was STARTED, like [`REVEAL_MAYBE_SENT`], so it relaxes the CUTOFF of a re-send only (`T_reveal - DE` instead of `T_reveal - M_A`, in
+/// [`reveal_may_have_been_sent`] and [`reveal_cutoff_for`]) and counts as reveal evidence for `lost`; it is NOT in [`secret_may_be_public`], so the
+/// instance-visible rule (CHAOS F-13) and the two-instances rule (R4-4) keep waiting for real evidence. `live.js` reads the same name.
+pub const REVEAL_SIDECAR_SEEN: &str = "reveal_sidecar_seen";
 /// REVIEW-5 R5-1, library path: the [`Runner`] handed the reveal to its executor and the executor said the outcome is unknown (it may have
 /// been sent). Written once. A failure the executor knows sent nothing leaves no marker.
 pub const REVEAL_MAYBE_SENT: &str = "reveal_maybe_sent";
@@ -1449,7 +1468,7 @@ fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
 /// be public (Review H1).
 pub fn reveal_cutoff_for(file: &SwapFile, t_reveal: u64) -> u64 {
     let g = file.public.params.profile.gates();
-    if secret_may_be_public(file) {
+    if secret_may_be_public(file) || reveal_sidecar_seen(file) {
         t_reveal.saturating_sub(g.de_s)
     } else {
         g.reveal_cutoff(t_reveal)
@@ -1461,7 +1480,7 @@ fn reveal_evidence(file: &SwapFile) -> bool {
     let decided = last_history(file, "intent_decided:reveal_eth");
     let cancelled = last_history(file, "intent_cancelled:reveal_eth");
     (decided.is_some() && decided > cancelled)
-        || file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_reveal_dropped"))
+        || file.history.iter().any(|h| matches!(h.event.as_str(), "reveal_submitted" | "eth_reveal_dropped" | REVEAL_SIDECAR_SEEN))
 }
 
 /// CHAOS F-17: once the recorded instance has been seen at the contract in a poll where Bob's claim could no longer be included
@@ -2029,7 +2048,7 @@ fn alice_action(
         }
         A::Refunded { .. } => Action::Wait {
             reason: if file.history.iter().any(|h| h.event == "reveal_submitted" || h.event == "eth_claim_mined") {
-                "done: NOID refunded after the reveal; Bob never claimed it, so both legs ended with Alice".into()
+                "done: NOID refunded after the reveal; Bob never claimed it (as far as this tool saw, the refund closed the instance, so it was still unspent), so both legs ended with Alice".into()
             } else {
                 "done: NOID refunded".into()
             },
@@ -2420,6 +2439,25 @@ fn bob_claim_action(file: &SwapFile, preimage: &[u8; 32], noid: &NoidObservation
                 Action::ClaimNoid { call_height: h, fee_micronoid: close_fee_for(params_.contract_version, noid, params_.max_fee_micronoid), preimage: *preimage }
             }
         },
+    }
+}
+
+/// Bob's claim is pending and not mined while the claim branch runs out: say so on every tick, loudly (notes only; no action changes, and there is
+/// nothing Bob could send instead, the mempool being first-seen). Past the `D - 19` target a claim mined now cannot be final before Alice's
+/// refund opens at `D` (a reorg can still take it out, the T21 case); at or past `D` it can no longer be mined validly at all, and the node
+/// evicts it. Before this, a stuck claim looked like any other pending one until the node dropped it.
+fn claim_pending_deadline_notes(file: &SwapFile, noid: &NoidObservation, notes: &mut Vec<String>) {
+    let d = file.public.params.deadline_height;
+    let h = noid.next_call_height;
+    match params::classify_claim_height(h, d) {
+        ClaimHeight::OnTarget => {}
+        ClaimHeight::LateButValid => notes.push(format!(
+            "ALARM: the NOID claim is still pending (not seen mined) and the next call height {h} is past the D-{} target (D {d}): if it is mined now it is not final before Alice's refund opens at D, and a reorg can still take it out; nothing can be sent instead of it (first-seen mempool)",
+            params::B_FINAL
+        )),
+        ClaimHeight::TooLate => notes.push(format!(
+            "ALARM: the NOID claim is still pending but the claim branch is closed (next call height {h} >= D {d}): it can no longer be mined validly, Alice can refund, and the node evicts the pending claim"
+        )),
     }
 }
 
@@ -2925,6 +2963,7 @@ fn bob_action(
             action
         }
         B::ClaimSubmitted { lock, .. } => {
+            claim_pending_deadline_notes(file, noid, notes);
             bob_with_eth_left(Action::Wait { reason: "NOID claim pending".into() }, bob_eth_left(file, lock, eth), notes)
         }
         B::ClaimIncluded { lock, .. } => {
@@ -3605,7 +3644,15 @@ impl<E: Executor> Runner<E> {
             maybe_sent: true,
             detail: serde_json::to_value(&action).unwrap_or_default(),
         });
-        self.file.save(&self.path)?;
+        if let Err(e) = self.file.save(&self.path) {
+            // Nothing was handed to the executor, so the record must not say "outcome unknown" (it would relax the reveal cutoff, see
+            // `reveal_pending_unknown`): mark it not sent, try once more to say so on disk, and report the failure.
+            if let Some(p) = self.file.pending_action.as_mut() {
+                p.maybe_sent = false;
+            }
+            let _ = self.file.save(&self.path);
+            return Err(e.into());
+        }
         let (outcome, exec_error) = match self.executor.execute(&self.file, &action, now) {
             Ok(Some(ev)) => {
                 self.file.apply(&ev, now)?;
@@ -3712,9 +3759,14 @@ mod tests {
         // REVIEW-2 F5: these older tests are about the gates of one node; the F5 tests below say otherwise on purpose.
         n.single_node_ok = true;
         e.single_node_ok = true;
-        // T21: a healthy producer summary (largest 30 %, two largest 45 %); the producer-gate tests build their own.
+        // T21: a healthy, cross-checked producer summary (largest 30 %, two largest 45 %; production needs the second node's check, which these
+        // tests are not about); the producer-gate tests build their own.
         let g = file.public.params.profile.gates();
-        n.producers.get_or_insert_with(|| ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450));
+        n.producers.get_or_insert_with(|| {
+            let mut p = ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450);
+            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3) };
+            p
+        });
         if n.instance.is_some() {
             n.instance_matches_opening.get_or_insert(true);
             n.active_authority.get_or_insert_with(|| file.public.claim_authority.clone());
@@ -4067,9 +4119,13 @@ mod tests {
         // REVIEW-2 F5: these tests are about the pinned chain and the lock, not about a second node.
         n.single_node_ok = true;
         e.single_node_ok = true;
-        // T21: a healthy producer summary (largest 30 %, two largest 45 %).
+        // T21: a healthy, cross-checked producer summary (largest 30 %, two largest 45 %).
         let g = file.public.params.profile.gates();
-        n.producers.get_or_insert_with(|| ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450));
+        n.producers.get_or_insert_with(|| {
+            let mut p = ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450);
+            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3) };
+            p
+        });
         if n.instance.is_some() {
             n.instance_matches_opening = Some(true);
             n.active_authority = Some(file.public.claim_authority.clone());

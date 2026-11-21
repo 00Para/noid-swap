@@ -17,6 +17,7 @@
 //! - `watch`    : Parano1d and Ethereum watchers producing `NoidObservation` / `EthObservation`.
 //! - `child_env`: the environment allow-list of spawned children (REVIEW-3 F4).
 //! - `equiv`    : runs the equivalence-proof verifier (`equiv-prove verify`) for `new-bob --receipt`.
+//! - `reveal_sidecar`: the sidecar `live.js claim` writes before it broadcasts Alice's reveal (T21-11), read by `tick`.
 //! - `engine`   : the automatic actions: decide from (role, swap file, observations, now).
 //! - `contract_params` : the Parano1d contract definition/params of a swap, for the stock wallet.
 //! - `client`   : client R (raw secret, `noid_gkr` + `ObjectIntent`) and client S (stock wallet script).
@@ -29,6 +30,7 @@ pub mod engine;
 pub mod equiv;
 pub mod params;
 pub mod producer_gate;
+pub mod reveal_sidecar;
 pub mod secret;
 pub mod state;
 pub mod swapfile;

@@ -22,7 +22,7 @@ which only observes and records (`tick --apply` writes events and intents into t
 | `tick.sh ROLE [--apply]` | either | one tick; read-only without `--apply` (then a spend's parameters are withheld, REVIEW-3 F3); records every node answer | no |
 | `watch.sh [alice\|bob\|both] [s]` | either | `tick --apply` loop, one summary line per tick in `$L/loop-ROLE.txt` (each long part is cut on its own; the ACTION and `applied: ... phase_after: ...` are always kept whole at the end); stops when every watched file is terminal | no |
 | `lock.sh [--dry-run]` | Bob | `live.js lock --swap bob.swap.json`: the lock Bob's file recorded as `lock_eth`; passes the mainnet / gas-price fee flags (`MAX_FEE_GWEI`, `GAS_PRICE_GWEI`); no `--replace` (live.js has none for a lock); the result records the lock block's time, read again for a few seconds if the node does not serve the block yet, else `blockTimestamp: null` with a `blockTimestampNote` | **yes** without `--dry-run` |
-| `reveal.sh [--dry-run] [--replace [TXHASH]]` | Alice | `swap-cli secret \| live.js claim --swap alice.swap.json --secret-stdin`: the reveal; `--replace` re-sends a stuck claim (see below) | **yes** without `--dry-run` |
+| `reveal.sh [--dry-run] [--replace [TXHASH]]` | Alice | `swap-cli secret \| live.js claim --swap alice.swap.json --secret-stdin`: the reveal; `--replace` re-sends a stuck claim (see below); **run `tick.sh alice --apply` right after every reveal that was sent** (the watch loop does it on its next pass) | **yes** without `--dry-run` |
 | `claim.sh [--submit]` | Bob | `swap-cli claim`: proves and prints the close (the whole output, bar the long `opening_hex` / `intent_hex` lines); `--submit` sends it to the node, and to `NOID_RPC2` too when that is set (`--submit-rpc`: the same intent to both; the claim is submitted when one node accepts it, and the other node may list it under `nodes.rejected` because it already had it from the first) | **yes** with `--submit` |
 | `refund-eth.sh [--dry-run] [--replace [TXHASH]]` | Bob | `live.js refund --swap bob.swap.json` after `T_reveal` (abort path); the same fee flags and `--replace` as `reveal.sh` | **yes** without `--dry-run` |
 | `recover-noid.sh [--dry-run]` | Alice | the NOID recovery after `D` (abort path), for every instance at the contract root: preview, check, send chained with `--expected-txid`, a marker per instance; txids in `$L/recovered-txids.txt`, then `tick.sh alice --closed-by TXID --apply`. Not yet run live in this form | **REAL NOID** without `--dry-run` |
@@ -162,6 +162,12 @@ Design and texts: `docs/bob-concentration-gate.md`. Two settings in `$L/env.loca
 - **Late re-send.** No margin flag is needed or passed. When the swap file's history shows the secret may already be public (a
   mined, reorged or dropped claim, or `reveal_pending_seen`), `live.js claim --swap` takes the late cutoff (`T_reveal - DE`) and not
   the stricter `T_reveal - 1800 s`, so `swap-cli`'s late re-send can actually be sent. Without that evidence the earlier cutoff rules.
+- **The reveal sidecar (T21-11).** `reveal.sh` (that is, `live.js claim --swap FILE`) writes `FILE.reveal-sent` next to the swap file just before it
+  broadcasts: the lock id, the signed transaction's hash when it is known, the time; never the secret. If it cannot be written, nothing is sent.
+  `swap-cli tick` (so `tick.sh` and `watch.sh`) and `live.js` read it as evidence that the secret may be public, for a sidecar of this swap's
+  lock only, so a reveal that was sent and then dropped before any tick saw it still gets the late cutoff on a re-send. The plan and the full
+  result file (`eth-claim.json`) print `revealSidecar` (`absent`, `matching`, `foreign`, `unreadable`, `written`, `kept`). A sidecar means a send was started,
+  not that it reached the network; after a send error that never left the machine see `swap-cli/README.md` ("Residual window") before the next tick. Run `tick --apply` at once after every reveal anyway.
 - **Keys.** With `--swap`, `claim` needs the key of the file's `alice_receiver` (`ALICE_KEY`, default `keys/alice.key`), `refund` and
   `lock` that of `bob_sender` (`BOB_KEY`, default `keys/bob.key`; both paths are relative to `eth/`); another key is refused. For mainnet
   set `BOB_KEY` / `ALICE_KEY` in `env.local.sh` to the mainnet key files.

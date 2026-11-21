@@ -730,6 +730,15 @@ printf 'junk\n' > "$AD/alert-pending"
 alert_again 0 ""
 check "alert_hook: ... a damaged pending file is dropped, nothing is sent from it" "none|0" "$([ -e "$AD/alert-pending" ] && echo some || echo none)|$ARC"
 
+# reveal_sent_note: printed only when live.js's stderr has the "sent: HASH" line (the claim was broadcast), also when the claim is then stuck
+RS=$(mkl revealnote)
+printf 'sent: 0x%s nonce 3 maxFeePerGas 20 gwei maxPriorityFeePerGas 1 gwei (waiting for the receipt; if it stays pending: claim --replace)\n' "$(printf 'ab%.0s' $(seq 1 32))" > "$RS/sent.err"
+printf 'refusing: past the reveal cutoff\n' > "$RS/refused.err"
+RN1=$(env -i HOME="$TMP/home" PATH="$PATH" L="$RS" HERE="$HERE" LIVE_PLATFORM=native RUN=7 "$BASH" -c 'set -u; . "$HERE/env.sh"; reveal_sent_note "$L/sent.err"' 2>&1)
+RN2=$(env -i HOME="$TMP/home" PATH="$PATH" L="$RS" HERE="$HERE" LIVE_PLATFORM=native RUN=7 "$BASH" -c 'set -u; . "$HERE/env.sh"; reveal_sent_note "$L/refused.err"; reveal_sent_note "$L/missing.err"' 2>&1)
+check_has "reveal_sent_note: a sent claim gets the reminder to run tick.sh alice --apply" "tick.sh alice --apply right now" "$RN1"
+check "reveal_sent_note: ... and a refused or missing claim does not" "" "$RN2"
+
 # watch.sh with the hook: a stub tick.sh prints the ALERT: line on the first tick only, as the real tool does; the message goes out once, the URL is not printed, the loop line has the alert
 AB="$TMP/watchalert"; mkdir -p "$AB"
 cp "$HERE/env.sh" "$HERE/watch.sh" "$AB/"

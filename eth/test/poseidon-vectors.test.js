@@ -116,6 +116,12 @@ describe("Poseidon2b EVM vs vendor vectors (equiv-ref addr-vectors)", function (
     await chain.recycle();
   });
 
+  it("the selected range covers at least one vector (an empty slice would pass every comparison for nothing)", () => {
+    expect(total, "the vectors file is empty").to.be.greaterThan(0);
+    expect(indices.length, "POSEIDON_START / POSEIDON_COUNT select no vector (or are not numbers)").to.be.greaterThan(0);
+    for (const i of indices) expect(Number.isInteger(i) && i >= 0 && i < total, `vector index ${i} is outside the file`).to.equal(true);
+  });
+
   it("the vectors file is intact and its secrets are the documented ones", () => {
     expect(raw.length % 64, "file size must be a multiple of 64").to.equal(0);
     expect(total).to.equal(N_STRUCTURED + N_RANDOM);

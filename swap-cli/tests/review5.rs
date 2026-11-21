@@ -148,6 +148,81 @@ fn r5_1_library_path_a_reveal_of_unknown_outcome_may_be_re_sent_past_the_cutoff_
     assert_ne!(r.action.kind(), "reveal_eth", "{r:?}");
 }
 
+#[test]
+fn r5_1_a_pending_reveal_of_unknown_outcome_left_by_a_dead_process_counts_for_the_cutoff_on_both_sides_of_the_two_cutoffs() {
+    // The process died after the broadcast and before the outcome was saved: the file holds the pending record (saved before the send) and no
+    // `reveal_maybe_sent` marker. The record alone must relax the cutoff, as the marker would.
+    let pending = |maybe_sent: bool, created_at: u64| swap_cli::swapfile::PendingAction {
+        kind: "reveal_eth".into(),
+        created_at,
+        attempt: 1,
+        maybe_sent,
+        detail: serde_json::json!({}),
+    };
+    let setup = |maybe_sent: bool| {
+        let mut s = Scenario::new(Variant::Raw);
+        s.run_to_lock_final();
+        let now = s.now();
+        s.alice.file.set_pending(pending(maybe_sent, now));
+        assert!(!has(&s.alice.file, "reveal_maybe_sent"), "no marker: the process died before it could write one");
+        s
+    };
+    // (1) Between T_reveal - M_A and T_reveal - DE: the unknown-outcome record allows the re-send under the late cutoff.
+    let mut s = setup(true);
+    let (_, t_reveal) = lock_of(&s);
+    let g = *s.gates();
+    assert!(!secret_may_be_public(&s.alice.file), "the record relaxes the cutoff only, not the two-instances rule");
+    s.world.borrow_mut().warp_eth_to(t_reveal - g.m_a_s + 100);
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "reveal_eth", "{r:?}");
+    assert!(r.notes.iter().any(|n| n.contains("past the M_A cutoff")), "{:?}", r.notes);
+    // (2) Past T_reveal - DE even the late cutoff has gone: no re-send. Exactly at T_reveal - DE it is still allowed; one second later it is not.
+    let mut s = setup(true);
+    s.world.borrow_mut().warp_eth_to(t_reveal - g.de_s);
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "reveal_eth", "exactly at T_reveal - DE: {r:?}");
+    let mut s = setup(true);
+    s.world.borrow_mut().warp_eth_to(t_reveal - g.de_s + 1);
+    let r = s.tick_alice();
+    assert_ne!(r.action.kind(), "reveal_eth", "one second past T_reveal - DE: {r:?}");
+    // (3) A record whose executor knew nothing was sent keeps the strict M_A cutoff.
+    let mut s = setup(false);
+    s.world.borrow_mut().warp_eth_to(t_reveal - g.m_a_s + 100);
+    let r = s.tick_alice();
+    assert_ne!(r.action.kind(), "reveal_eth", "{r:?}");
+    // (4) Before the M_A cutoff nothing changes: the reveal goes out under the ordinary rule.
+    let mut s = setup(true);
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "reveal_eth", "{r:?}");
+}
+
+#[test]
+fn r5_1_a_pre_send_save_that_fails_leaves_no_unknown_outcome_record_and_the_cutoff_stays_strict() {
+    // The record is saved BEFORE the reveal goes to the executor. If that save fails, nothing was handed over, so the record must say "not sent":
+    // otherwise the next tick would allow a first publication under the late cutoff.
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    let (_, t_reveal) = lock_of(&s);
+    let g = *s.gates();
+    // A first tick that the executor refuses (known not sent) applies the pending events, so the next tick has nothing to save but the pre-send record.
+    s.alice.executor.offline_for.insert("reveal_eth");
+    assert!(s.tick_alice().exec_error.is_some());
+    s.alice.executor.offline_for.clear();
+    s.alice.file.clear_pending();
+    let good = s.alice.path.clone();
+    s.alice.path = s.dir.path().join("no-such-directory").join("alice.swap.json");
+    let (n, e, now) = observe(&s);
+    let r = s.alice.tick(&n, &e, now);
+    assert!(r.is_err(), "the save must fail: {r:?}");
+    assert!(s.alice.executor.executed.iter().all(|a| a.kind() != "reveal_eth"), "nothing may have been sent");
+    let p = s.alice.file.pending_action.clone().expect("the pending record stays in memory");
+    assert!(!p.maybe_sent, "{p:?}");
+    s.alice.path = good;
+    s.world.borrow_mut().warp_eth_to(t_reveal - g.m_a_s + 100);
+    let r = s.tick_alice();
+    assert_ne!(r.action.kind(), "reveal_eth", "a first publication past M_A stays refused: {r:?}");
+}
+
 // ------------------------------------------------------------------------------------------------------------------------ R5-3
 
 #[test]

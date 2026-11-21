@@ -18,6 +18,7 @@ Thumbs.db
 # the lock file is the engine's exclusive-access marker. None of them belongs in the repository.
 *.swap.json
 *.swap.json.lock
+*.swap.json.reveal-sent*
 *.producers
 *.producers.tmp
 *.receipt

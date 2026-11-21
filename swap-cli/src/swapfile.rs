@@ -86,6 +86,31 @@ impl fmt::Display for SwapFileError {
 
 impl std::error::Error for SwapFileError {}
 
+/// Is this the answer of a file system that cannot sync a directory (so there is nothing more to do), and not a failed sync?
+#[cfg(unix)]
+fn dir_sync_unsupported(e: &std::io::Error) -> bool {
+    matches!(e.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput)
+}
+
+/// The directory a file is in; for a bare file name (`alice.swap.json`) the current directory, not the empty path.
+#[cfg(unix)]
+pub(crate) fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    }
+}
+
+/// Sync a directory so that a rename in it survives a power cut. `Ok` also for a file system that does not support it; any other error is returned.
+#[cfg(unix)]
+pub(crate) fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    let d = std::fs::File::open(dir)?;
+    match d.sync_all() {
+        Err(e) if dir_sync_unsupported(&e) => Ok(()),
+        other => other,
+    }
+}
+
 fn io_err(e: std::io::Error) -> SwapFileError {
     SwapFileError::Io(e.to_string())
 }
@@ -1009,12 +1034,11 @@ impl SwapFile {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
+        // The rename is only durable once the directory entry is: a pending action or an intent saved before a send must survive a power cut. A
+        // failure is an error (the caller does not go on to send). A file system that cannot sync a directory at all says so with
+        // `Unsupported`/`InvalidInput`; that alone is let through.
         #[cfg(unix)]
-        if let Some(dir) = path.parent() {
-            if let Ok(d) = std::fs::File::open(dir) {
-                let _ = d.sync_all();
-            }
-        }
+        sync_dir(parent_dir(path)).map_err(|e| SwapFileError::Io(format!("the swap file was written but its directory could not be synced: {e}")))?;
         Ok(())
     }
 
@@ -1478,6 +1502,29 @@ mod tests {
     use super::*;
     use crate::state::{AlicePhase, BobPhase};
     use crate::watch::NoidInstance;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_directory_sync_is_an_error_and_only_an_unsupported_one_is_let_through() {
+        use std::io::{Error, ErrorKind};
+        // A directory that exists syncs; one that does not is an error (the save must fail, not pretend the rename is durable).
+        let dir = tempfile::tempdir().unwrap();
+        sync_dir(dir.path()).unwrap();
+        let gone = dir.path().join("not-there");
+        assert_eq!(sync_dir(&gone).unwrap_err().kind(), ErrorKind::NotFound);
+        // A bare file name (`swap-cli claim bob.swap.json`) has the empty path as its parent, which cannot be opened: the current directory is meant.
+        assert_eq!(parent_dir(Path::new("alice.swap.json")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("./alice.swap.json")), Path::new("."));
+        assert_eq!(parent_dir(Path::new("runs/alice.swap.json")), Path::new("runs"));
+        assert_eq!(parent_dir(Path::new("/alice.swap.json")), Path::new("/"));
+        sync_dir(parent_dir(Path::new("alice.swap.json"))).unwrap();
+        // The classification: a file system that cannot sync a directory says Unsupported or InvalidInput; an I/O error does not.
+        assert!(dir_sync_unsupported(&Error::from(ErrorKind::Unsupported)));
+        assert!(dir_sync_unsupported(&Error::from(ErrorKind::InvalidInput)));
+        for kind in [ErrorKind::Other, ErrorKind::PermissionDenied, ErrorKind::NotFound, ErrorKind::OutOfMemory, ErrorKind::BrokenPipe] {
+            assert!(!dir_sync_unsupported(&Error::from(kind)), "{kind:?}");
+        }
+    }
 
     fn fresh() -> Secret {
         Secret::generate().unwrap()

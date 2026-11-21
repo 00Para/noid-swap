@@ -2029,7 +2029,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       },
     });
 
-  function swapFile({ intent = null, chain = 31337, history, hash = hashlock } = {}) {
+  function swapFile({ intent = null, chain = 31337, history, hash = hashlock, alice: aliceAddress = aliceAddr } = {}) {
     const j = {
       version: 1,
       role: "bob",
@@ -2037,7 +2037,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
         hashlock: hash,
         claim_authority: "o1test",
         params: {
-          eth: { chain_id: chain, contract: htlcAddr.toLowerCase(), code_hash: tgt.codeHash, amount_wei: amount.toString(), alice_receiver: aliceAddr.toLowerCase(), bob_sender: bobAddr.toLowerCase() },
+          eth: { chain_id: chain, contract: htlcAddr.toLowerCase(), code_hash: tgt.codeHash, amount_wei: amount.toString(), alice_receiver: String(aliceAddress).toLowerCase(), bob_sender: bobAddr.toLowerCase() },
         },
       },
       secret: { ciphertext: "not-read-by-live.js" },
@@ -2054,9 +2054,9 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
   const refundIntent = (lockId) => wrapIntent("refund_eth", { lock_id: lockId });
   const lockIntent = (tReveal, hash = hashlock) => wrapIntent("lock_eth", { hashlock: hash, t_reveal: tReveal, receiver: aliceAddr.toLowerCase(), amount_wei: amount.toString() });
 
-  async function makeLock({ ttl = 2 * HOUR } = {}) {
+  async function makeLock({ ttl = 2 * HOUR, receiver = aliceAddr } = {}) {
     const tReveal = (await latestTs()) + ttl;
-    const l = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock, tReveal: String(tReveal), receiver: aliceAddr, amountWei: amount.toString() });
+    const l = await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock, tReveal: String(tReveal), receiver, amountWei: amount.toString() });
     return { tReveal, ...l };
   }
 
@@ -2739,7 +2739,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       const weak = swapFile({ intent, history: ["intent_decided:reveal_eth", "lock_final"] });
       await expect(live.claim(provider, alice, { swap: weak, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
       // each of swap-cli's own public-secret events does
-      for (const ev of ["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen"]) {
+      for (const ev of ["reveal_submitted", "eth_claim_mined", "eth_claim_reorged", "eth_reveal_dropped", "reveal_pending_seen", "reveal_reverted_seen", "reveal_sidecar_seen"]) {
         const swap = swapFile({ intent, history: ["lock_final", ev] });
         const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
         expect(p.revealCutoff, ev).to.equal(String(late));
@@ -2793,6 +2793,8 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       );
       expect(await nonce(aliceAddr)).to.equal(n0);
       expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+      // T21-11: refused at the send-time re-check, so the sidecar (written after it) does not exist
+      expect(fs.existsSync(swap + live.REVEAL_SIDECAR_SUFFIX)).to.equal(false);
     });
 
     it("between the default and the late cutoff at send time: sent (the late cutoff rules at send time as in the early check)", async () => {
@@ -3070,6 +3072,230 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
   });
 
   // ------------------------------------------------------------------ R4-5
+  // ------------------------------------------------------------------ T21-11: the reveal sidecar
+  describe("T21-11: claim --swap writes FILE.reveal-sent before it broadcasts, and reads it as evidence that the secret may be public", () => {
+    const sideOf = (swap) => swap + live.REVEAL_SIDECAR_SUFFIX;
+    const leftovers = (swap) => fs.readdirSync(path.dirname(swap)).filter((n) => n.startsWith(path.basename(swap) + ".") && n !== path.basename(sideOf(swap)));
+    const sidecarBody = (lockId, txHash = null, at = 1700000000) => JSON.stringify({ version: 1, lock_id: lockId.slice(2).toLowerCase(), tx_hash: txHash, at }) + "\n";
+    async function walletLock(opts = {}) {
+      const wallet = ethers.Wallet.createRandom().connect(provider);
+      await alice.sendTransaction({ to: wallet.address, value: ethers.parseEther("1") });
+      const l = await makeLock({ ...opts, receiver: wallet.address });
+      return { wallet, l };
+    }
+    /** A wallet whose sendTransaction first runs `before(tx)` (which may throw instead of letting the send happen). */
+    const spying = (wallet, before) =>
+      new Proxy(wallet, {
+        get(t, prop) {
+          if (prop === "sendTransaction") {
+            return async (tx) => {
+              await before(tx);
+              return t.sendTransaction(tx);
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+
+    it("the sidecar exists, with exactly the lock id, the signed transaction's hash and a time, when the broadcast begins; mode 600; no secret; no leftovers", async () => {
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      let atSend = null;
+      const t0 = Math.floor(Date.now() / 1000);
+      const r = await live.claim(provider, spying(wallet, () => (atSend = fs.readFileSync(sideOf(swap), "utf8"))), { swap, secret: preimage });
+      expect(atSend, "the sidecar was there when the broadcast was attempted").to.be.a("string");
+      const j = JSON.parse(atSend);
+      expect(Object.keys(j).sort()).to.deep.equal(["at", "lock_id", "tx_hash", "version"]);
+      expect(j.version).to.equal(1);
+      expect(j.lock_id).to.equal(l.lockId.slice(2).toLowerCase());
+      expect(j.tx_hash, "a local key shows the hash before the broadcast").to.equal(r.txHash.slice(2).toLowerCase());
+      expect(j.at).to.be.within(t0 - 2, t0 + 600);
+      expect(atSend.toLowerCase()).to.not.include(preimage.slice(2).toLowerCase());
+      if (process.platform !== "win32") expect(fs.statSync(sideOf(swap)).mode & 0o777).to.equal(0o600);
+      expect(leftovers(swap)).to.deep.equal([]);
+      expect(r.revealSidecar).to.equal("written");
+      expect(r.revealSidecarFile).to.equal(sideOf(swap));
+      expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
+      expect(live.readRevealSidecar(swap, "0x" + "11".repeat(32)).state).to.equal("foreign");
+    });
+
+    it("a dry run, a refused claim and a claim without --swap write nothing", async () => {
+      const l = await makeLock();
+      const past = (await latestTs()) - 5; // the frozen cutoff has passed: the claim is refused
+      const refused = swapFile({ intent: revealIntent(l.lockId, l.tReveal, past) });
+      await expect(live.claim(provider, alice, { swap: refused, secret: preimage })).to.be.rejectedWith(/past the reveal cutoff/);
+      expect(fs.existsSync(sideOf(refused))).to.equal(false);
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      const dry = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
+      expect(dry.revealSidecar).to.equal("absent");
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      const r = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage });
+      expect(r.revealSidecar).to.equal(undefined);
+      expect(fs.readdirSync(dir).filter((n) => n.includes(".reveal-sent"))).to.deep.equal([]);
+    });
+
+    it("if the sidecar cannot be written and made durable, nothing is broadcast and no half file is left", async () => {
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      const n0 = await nonce(wallet.address);
+      let sent = false;
+      const real = fs.fsyncSync;
+      fs.fsyncSync = () => {
+        throw Object.assign(new Error("simulated I/O failure"), { code: "EIO" });
+      };
+      try {
+        await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EIO\); nothing was sent/);
+      } finally {
+        fs.fsyncSync = real;
+      }
+      expect(sent).to.equal(false);
+      expect(await nonce(wallet.address)).to.equal(n0);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+      // with the directory working again, the same claim goes through
+      const ok = await live.claim(provider, wallet, { swap, secret: preimage });
+      expect(ok.revealSidecar).to.equal("written");
+    });
+
+    it("if the directory cannot be synced, nothing is broadcast (not on Windows, where a directory cannot be synced at all)", async function () {
+      if (process.platform === "win32") this.skip();
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      const n0 = await nonce(wallet.address);
+      const real = fs.fsyncSync;
+      let calls = 0;
+      fs.fsyncSync = (fd) => {
+        calls += 1;
+        if (calls === 2) throw Object.assign(new Error("simulated directory sync failure"), { code: "EIO" }); // the file's sync is the first call
+        return real(fd);
+      };
+      try {
+        await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written (EIO); nothing was sent/);
+      } finally {
+        fs.fsyncSync = real;
+      }
+      expect(await nonce(wallet.address)).to.equal(n0);
+    });
+
+    it("on a file system without hard links the sidecar is created exclusively in place", async () => {
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      const real = fs.linkSync;
+      fs.linkSync = () => {
+        throw Object.assign(new Error("no links here"), { code: "UNKNOWN" });
+      };
+      let r;
+      try {
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        fs.linkSync = real;
+      }
+      expect(r.revealSidecar).to.equal("written");
+      expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("a crash after the write but before the send leaves the sidecar; the next claim keeps it (the earliest time) and sends", async () => {
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, l.tReveal - 100), alice: wallet.address });
+      const n0 = await nonce(wallet.address);
+      await expect(
+        live.claim(
+          provider,
+          spying(wallet, () => {
+            throw new Error("process died");
+          }),
+          { swap, secret: preimage }
+        )
+      ).to.be.rejectedWith(/process died.*reveal sidecar .* was written before the send and stays/);
+      expect(await nonce(wallet.address)).to.equal(n0);
+      const first = fs.readFileSync(sideOf(swap), "utf8");
+      expect(JSON.parse(first).lock_id).to.equal(l.lockId.slice(2).toLowerCase());
+      // a second reveal attempt: the sidecar is kept as it is, the claim is sent
+      await new Promise((resolve) => setTimeout(resolve, 1100));
+      const plan = await live.claim(provider, wallet, { swap, secret: preimage, dryRun: true });
+      expect(plan.revealSidecar).to.equal("matching");
+      const r = await live.claim(provider, wallet, { swap, secret: preimage });
+      expect(r.revealSidecar).to.equal("kept");
+      expect(fs.readFileSync(sideOf(swap), "utf8")).to.equal(first);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("a dropped transaction: the sidecar of an earlier, vanished claim makes the re-send use T_reveal - DE; without it the strict cutoff refuses", async () => {
+      const l = await makeLock({ ttl: 1000 }); // inside the default 1800 s margin
+      const late = l.tReveal - 100;
+      const intent = revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, late);
+      await expect(live.claim(provider, alice, { swap: swapFile({ intent }), secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
+      const swap = swapFile({ intent });
+      fs.writeFileSync(sideOf(swap), sidecarBody(l.lockId, "ab".repeat(32)));
+      const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
+      expect(p.revealCutoff).to.equal(String(late));
+      expect(p.revealCutoffRule).to.match(/late cutoff T_reveal - DE \(the reveal sidecar beside the file shows the secret may already be public\)/);
+      expect(p.revealSidecar).to.equal("matching");
+      // an explicit --margin-s still tightens it
+      await expect(live.claim(provider, alice, { swap, secret: preimage, dryRun: true, marginS: "1800" })).to.be.rejectedWith(/past the reveal cutoff/);
+      // an intent with no late cutoff keeps its frozen one, as for the history marker
+      const noLate = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      fs.writeFileSync(sideOf(noLate), sidecarBody(l.lockId));
+      await expect(live.claim(provider, alice, { swap: noLate, secret: preimage, dryRun: true })).to.be.rejectedWith(/past the reveal cutoff/);
+      // inside the late cutoff the re-send is a real, mined claim
+      const real = await live.claim(provider, alice, { swap, secret: preimage });
+      expect(real.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(real.revealSidecar).to.equal("kept");
+    });
+
+    it("the late cutoff still binds: past T_reveal - DE a sidecar relaxes nothing, and nothing is sent", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const past = (await latestTs()) - 5;
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, past, past) });
+      fs.writeFileSync(sideOf(swap), sidecarBody(l.lockId));
+      const n0 = await nonce(aliceAddr);
+      await expect(live.claim(provider, alice, { swap, secret: preimage })).to.be.rejectedWith(/past the reveal cutoff/);
+      expect(await nonce(aliceAddr)).to.equal(n0);
+    });
+
+    it("a sidecar of another lock or not in the format is not evidence and is said so", async () => {
+      const { wallet, l } = await walletLock({ ttl: 1000 }); // inside the margin: only evidence could relax the cutoff
+      const intent = revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, l.tReveal - 100);
+      for (const [what, body] of [
+        ["foreign", sidecarBody("0x" + "11".repeat(32))],
+        ["garbage", "not json at all"],
+        ["wrong fields", JSON.stringify({ version: 1, lock_id: l.lockId.slice(2).toUpperCase(), tx_hash: null, at: 1 })],
+        ["too large", " ".repeat(5000)],
+      ]) {
+        const swap = swapFile({ intent, alice: wallet.address });
+        fs.writeFileSync(sideOf(swap), body);
+        await expect(live.claim(provider, wallet, { swap, secret: preimage, dryRun: true }), what).to.be.rejectedWith(/past the reveal cutoff/);
+      }
+    });
+
+    it("a foreign sidecar is reported in the plan; a real claim moves it aside (never deletes it) and writes its own", async () => {
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      fs.writeFileSync(sideOf(swap), sidecarBody("0x" + "11".repeat(32)));
+      const plan = await live.claim(provider, wallet, { swap, secret: preimage, dryRun: true });
+      expect(plan.revealSidecar).to.equal("foreign");
+      expect(plan.revealSidecarNote).to.match(/belongs to another lock.*ignored/);
+      const r = await live.claim(provider, wallet, { swap, secret: preimage });
+      expect(r.revealSidecar).to.equal("written");
+      expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
+      const stale = fs.readdirSync(dir).filter((n) => n.includes(".reveal-sent.stale-"));
+      expect(stale.length).to.equal(1);
+      expect(JSON.parse(fs.readFileSync(path.join(dir, stale[0]), "utf8")).lock_id).to.equal("11".repeat(32));
+    });
+
+    it("the history marker swap-cli writes from the sidecar (reveal_sidecar_seen) selects the late cutoff like the other markers", async () => {
+      const l = await makeLock({ ttl: 1000 });
+      const late = l.tReveal - 100;
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800, late), history: ["lock_final", "reveal_sidecar_seen"] });
+      const p = await live.claim(provider, alice, { swap, secret: preimage, dryRun: true });
+      expect(p.revealCutoff).to.equal(String(late));
+    });
+  });
+
   describe("R4-5: the signing key is the swap file's party", () => {
     it("claim needs alice_receiver's key (dry run or not); refund needs bob_sender's; nothing is sent", async () => {
       const l = await makeLock();

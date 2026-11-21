@@ -230,11 +230,18 @@ alert_hook() {
   done
   return 0
 }
+# reveal_sent_note ERRFILE: live.js writes "sent: HASH ..." to its stderr the moment the claim is broadcast (before the wait for the receipt), so the
+# line is there even when the claim then sticks or is dropped and nothing reaches stdout. The file learns that the secret may be public only from a tick
+# that sees the claim; until then a re-send past the first-publication cutoff is judged as a first publication.
+reveal_sent_note() {
+  grep -q '^sent: ' "$1" 2>/dev/null || return 0
+  echo "NOTE: the claim was broadcast. Run tick.sh alice --apply right now (watch.sh does it on its next pass): the swap file learns that the secret may be public only from a tick that sees this claim, and a re-send is judged by what the file knows."
+}
 single_node_warning() {
   [ -n "$NOID_RPC2" ] && [ -n "$ETH_RPC2" ] && return 0
   if [ "$SINGLE_NODE_OK" = 1 ]; then
-    echo "WARNING: one node per chain and SINGLE_NODE_OK=1 (--single-node-ok): the F5 cross-checks are OFF (no second Parano1d node for the lock, no second Ethereum node for the reveal or the secret). Fine against a counterparty you control; a swap with a STRANGER needs BOTH NOID_RPC2 and ETH_RPC2 in $L/env.local.sh and no SINGLE_NODE_OK" >&2
+    echo "WARNING: one node per chain and SINGLE_NODE_OK=1 (--single-node-ok): the F5 cross-checks are OFF (no second Parano1d node for the lock, no second Ethereum node for the reveal or the secret). Fine against a counterparty you control; a swap with a STRANGER needs BOTH NOID_RPC2 and ETH_RPC2 in $L/env.local.sh and no SINGLE_NODE_OK$([ -z "$NOID_RPC2" ] && echo ". Under the production profile Bob's lock also needs NOID_RPC2 for the producer-concentration check (T21): SINGLE_NODE_OK does not relax that, only ACCEPT_PRODUCER_CONCENTRATION=1 does")" >&2
   else
-    echo "NOTE: no second node for $([ -z "$NOID_RPC2" ] && echo "Parano1d (NOID_RPC2)")$([ -z "$NOID_RPC2" ] && [ -z "$ETH_RPC2" ] && echo " and ")$([ -z "$ETH_RPC2" ] && echo "Ethereum (ETH_RPC2)"), and SINGLE_NODE_OK is not 1: --single-node-ok is NOT passed, so the engine will WAIT before Bob's lock and before Alice's reveal (F5) until the second nodes are in $L/env.local.sh (or, for a run against a counterparty you control, SINGLE_NODE_OK=1 there)" >&2
+    echo "NOTE: no second node for $([ -z "$NOID_RPC2" ] && echo "Parano1d (NOID_RPC2)")$([ -z "$NOID_RPC2" ] && [ -z "$ETH_RPC2" ] && echo " and ")$([ -z "$ETH_RPC2" ] && echo "Ethereum (ETH_RPC2)"), and SINGLE_NODE_OK is not 1: --single-node-ok is NOT passed, so the engine will WAIT before Bob's lock and before Alice's reveal (F5) until the second nodes are in $L/env.local.sh (or, for a run against a counterparty you control, SINGLE_NODE_OK=1 there; under the production profile Bob's lock then still needs NOID_RPC2 for the producer-concentration check, or ACCEPT_PRODUCER_CONCENTRATION=1)" >&2
   fi
 }
