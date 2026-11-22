@@ -23,7 +23,7 @@ himself. If either side stops, the timeouts give each party their own funds back
 | Bob (Sepolia sender) | `0x6f8560EC1185f50104f5B64Df21e858dBd592883` (`eth/keys/bob.key`, throwaway) |
 | Alice (Sepolia receiver) | `0x49877DaCE5b72f4E8768FbF5Cb7eE1573c9fF9eA` (`eth/keys/alice.key`, throwaway) |
 | ETH amount | 0.001 ETH = 1,000,000,000,000,000 wei |
-| Ethereum chain | **Fallback used: local Hardhat node** `http://127.0.0.1:8545`, chain id 31337, empty blocks every 12 s (`HARDHAT_INTERVAL_MINING_MS`), started from the local dev-server launcher. Sepolia (`https://ethereum-sepolia-rpc.publicnode.com`, 11155111) was the plan; the faucets refused the request |
+| Ethereum chain | **Fallback used: local Hardhat node** `http://127.0.0.1:8545`, chain id 31337, empty blocks every 12 s (`HARDHAT_INTERVAL_MINING_MS`), started locally. Sepolia (`https://ethereum-sepolia-rpc.publicnode.com`, 11155111) was the plan; the faucets refused the request |
 | Parano1d node | wallet app's node, `http://127.0.0.1:9601`, mainnet, synced |
 | HTLC contract | `0x489228d5b89EC1B2e441fc5FFF5517Cb79C6Ec48` (local chain, block 4, deployer Bob, `codeHash 0xa906117f…545e2f`, matches the artifact). Bob and Alice funded with 1 test ETH each from Hardhat account #0 |
 | Swap files | `~/live-run-1/alice.swap.json`, `~/live-run-1/bob.swap.json` in WSL (never committed) |

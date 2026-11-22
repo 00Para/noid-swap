@@ -13,8 +13,9 @@
 //! - **The address never leaves the cache file.** The cache holds the miner address of every block (it has to, to count), and that
 //!   file stays on this machine. Everything that is printed or put in the observation shows a producer as the first 8 hex characters
 //!   of the SHA-256 of its address ([`producer_id`]).
-//! - **A tick never waits long.** A read stops after one wall-clock budget (40 s by default, the second node's header included) and
-//!   goes on at the next tick; a call already under way when the budget ends can overrun it by at most [`PER_CALL_TIMEOUT`]. With a
+//! - **A tick never waits long.** A read stops after one wall-clock budget (40 s by default, the second node's headers included) and
+//!   goes on at the next tick; a call already under way when the budget ends can overrun it by at most [`PER_CALL_TIMEOUT`]. The second node
+//!   is asked for the anchor block and for [`SECOND_SAMPLE_COUNT`] sampled blocks, and compared on hash and producer. With a
 //!   warm cache a tick reads one to three headers.
 //! - **Anything doubtful is an error, never a pass.** A call that failed, a reply that does not decode, a missing height, a header
 //!   that does not link to the one below it (its `prev_hash` is not the hash of the header below), a chain shorter than the window:
@@ -47,15 +48,77 @@ pub const WALK_STEP: usize = 8;
 pub const MAX_MISMATCH_DEPTH: u64 = 64;
 /// Heights kept in the cache below the window's first height.
 pub const KEEP_BELOW_WINDOW: u64 = 64;
-/// Default wall-clock budget of one tick's reading (the first node and the second node's one header together).
+/// Default wall-clock budget of one tick's reading (the first node and the second node's headers together).
 pub const DEFAULT_BUDGET: Duration = Duration::from_secs(40);
 /// The longest a single call may take (the transport timeout of the reader). A call that starts just before the budget ends can overrun it by this much.
 pub const PER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
-/// Time kept back from the budget for the second node's one header when a second node is configured.
+/// Time kept back from the budget for the second node's headers (the anchor block, then one batch of sampled blocks) when a second node is
+/// configured. The total budget is unchanged by the sample, except for the one second ask of the anchor after a sample that showed a hash
+/// difference below the anchor, which has its own [`PER_CALL_TIMEOUT`] and can extend that tick by at most that much.
 pub const SECOND_RESERVE: Duration = Duration::from_secs(5);
 /// The second node is asked for the header this many blocks below the lower of the two tips (so that a block still being settled does not
 /// make two honest nodes disagree).
 pub const SECOND_ANCHOR_BACK: u64 = 3;
+/// After the anchor block agrees, the second node is also asked for blocks drawn afresh on every tick, from two ranges: this many distinct
+/// heights from the short window's range up to the anchor and this many from the long window's range up to the anchor (a height drawn in both
+/// is asked once), and their hashes and producers are compared with the first node's (`docs/bob-concentration-gate.md`, section 11 item 4).
+/// Both windows count because the screen refuses on either. Not a command-line option. A lying first node that hides a producer of 52 % under
+/// the 35 % limit in one window must relabel at least 17 points of that window; a draw of 32 from that range then misses every relabelled
+/// block with chance 0.83^32, about 0.3 %. A range of fewer heights than this is sampled completely.
+pub const SECOND_SAMPLE_COUNT: usize = 32;
+
+/// Chooses the heights to ask the second node for: `(lo, hi, k)` gives up to `k` distinct heights in `lo..=hi`, or an error text. The reader
+/// uses [`os_sample_heights`]; a test passes a seeded one.
+pub type HeightSampler = Box<dyn Fn(u64, u64, usize) -> Result<Vec<u64>, String>>;
+
+/// A uniform number in `0..n` (`n >= 1`) from `next`, without modulo bias: a draw at or above the largest multiple of `n` that fits in 64 bits
+/// is thrown away. A generator that keeps returning such draws is cut off after 64 tries (chance below 2^-64 for a real one at `n <= 2^63`),
+/// so that a broken source cannot hold a tick forever.
+fn uniform_below(n: u64, next: &mut dyn FnMut() -> Result<u64, String>) -> Result<u64, String> {
+    let limit = (u64::MAX / n) * n;
+    for _ in 0..64 {
+        let r = next()?;
+        if r < limit {
+            return Ok(r % n);
+        }
+    }
+    Ok(next()? % n)
+}
+
+/// Up to `k` distinct heights chosen uniformly from `lo..=hi`, ascending. When the range holds `k` heights or fewer, every height once. Uses a
+/// partial Fisher-Yates shuffle over the range (kept sparse, so the range is never allocated): every subset of `k` heights is equally likely.
+/// `next` is the source of 64-bit random numbers.
+pub fn sample_heights(lo: u64, hi: u64, k: usize, next: &mut dyn FnMut() -> Result<u64, String>) -> Result<Vec<u64>, String> {
+    if hi < lo || k == 0 {
+        return Ok(Vec::new());
+    }
+    let n = hi - lo; // the range holds n + 1 heights
+    if n < k as u64 {
+        return Ok((lo..=hi).collect());
+    }
+    let total = n.saturating_add(1);
+    let mut moved: HashMap<u64, u64> = HashMap::new();
+    let mut out: Vec<u64> = Vec::with_capacity(k);
+    for i in 0..k as u64 {
+        let j = i + uniform_below(total - i, next)?;
+        let at_i = moved.get(&i).copied().unwrap_or(i);
+        let at_j = moved.get(&j).copied().unwrap_or(j);
+        moved.insert(j, at_i);
+        out.push(lo + at_j);
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// The sampler the tool uses: [`sample_heights`] over the operating system's random generator, the source the secrets come from.
+pub fn os_sample_heights(lo: u64, hi: u64, k: usize) -> Result<Vec<u64>, String> {
+    let mut next = || {
+        let mut b = [0u8; 8];
+        getrandom::getrandom(&mut b).map_err(|e| format!("the operating system's random generator failed: {e}"))?;
+        Ok(u64::from_le_bytes(b))
+    };
+    sample_heights(lo, hi, k, &mut next)
+}
 
 /// The first 8 hex characters of the SHA-256 of a miner address: how a producer is shown. Never the address itself.
 pub fn producer_id(miner: &str) -> String {
@@ -89,11 +152,29 @@ pub enum SecondCheck {
     /// No second node was configured (F5 decides whether that is allowed).
     #[default]
     NotConfigured,
-    /// The second node holds the same block at `height` (equal hashes: the same chain below it, as far as a header's hash covers its miner;
-    /// the reader does not recompute a hash, so this does not catch a node that reports a true hash beside a false producer).
-    Agrees { height: u64 },
-    /// The two nodes name different blocks at `height` (8-hex hashes).
+    /// The second node holds the same block at the anchor `height` (equal hashes: the same chain below it, as far as a header's hash covers its
+    /// miner) and names the same producer for it and for `sampled` heights drawn on this tick from the short and the long window (equal hashes
+    /// too). `sampled` counts DISTINCT heights compared besides the anchor: 64 when the two draws of 32 do not overlap, fewer when a height was
+    /// drawn in both or a range holds fewer than 32 heights. The reader does not recompute a hash, and a sample is not the whole window: see
+    /// `docs/bob-concentration-gate.md`, section 2. The second-check summary is built afresh on every tick and is not stored in the swap file
+    /// or the cache; `sampled` is 0 only in an older JSON output that is parsed again (`#[serde(default)]`), and the screen does not accept 0
+    /// as a cross-check.
+    Agrees {
+        height: u64,
+        #[serde(default)]
+        sampled: u64,
+    },
+    /// The two nodes name different blocks at `height` (8-hex hashes), at the anchor or at a sampled height.
     Differs { height: u64, first: String, second: String },
+    /// The two nodes hold the same block (equal hashes) at `height` but name different producers for it: one of them is misreporting. Holds no
+    /// address, only the height, so that the operator can look at both nodes.
+    ProducerDiffers { height: u64 },
+    /// The two nodes hold different blocks (different hashes) at the SAMPLED height `height`, which lies below the anchor block, and the second node
+    /// named the same anchor block (hash and producer) before the sample and again after its answers arrived. Two honest nodes that agree on a
+    /// block agree on every block below it, and an honest reorg would have moved the anchor, so this is evidence that one node misreports (a
+    /// first node can give a relabelled block a made-up hash, with a matching false `prev_hash` on the block above it, because the reader
+    /// recomputes no hash). Remembered like `ProducerDiffers`. A different hash AT the anchor stays a plain `Differs`. Holds no address.
+    SampledDiffers { height: u64 },
     /// A second node is configured and could not be read, or the check could not be made.
     Unreadable { reason: String },
 }
@@ -313,11 +394,21 @@ pub struct ReaderConfig {
     pub clock: fn() -> u64,
     /// Display label of the node read (`scheme://host:port`).
     pub source: Option<String>,
+    /// Chooses the heights the second node is asked for ([`os_sample_heights`] unless a test sets another).
+    pub sampler: HeightSampler,
 }
 
 impl ReaderConfig {
     pub fn new(window_long: u64, window_short: u64) -> Self {
-        Self { window_long, window_short, budget: DEFAULT_BUDGET, batch: BATCH_SIZE, clock: super::system_now, source: None }
+        Self {
+            window_long,
+            window_short,
+            budget: DEFAULT_BUDGET,
+            batch: BATCH_SIZE,
+            clock: super::system_now,
+            source: None,
+            sampler: Box::new(os_sample_heights),
+        }
     }
 }
 
@@ -404,6 +495,123 @@ impl Fetcher<'_> {
             }
         }
         (out, None)
+    }
+}
+
+/// The second half of the cross-check, run only after the anchor block agreed in hash and producer: two samples are drawn by `cfg.sampler`,
+/// afresh on every tick, each of up to [`SECOND_SAMPLE_COUNT`] distinct heights: one from the SHORT window's range up to the anchor
+/// (`short_lo..=anchor`) and one from the LONG window's range (`lo..=anchor`). Never above the anchor, where the two tips may differ; never
+/// below the window. The union (a height drawn in both is asked once) goes to the second node in one batch (the fetcher falls back to single
+/// calls) under the reading's own deadline, and the hash and the producer of each height are compared with the first node's entry. A
+/// different hash AT the anchor is `Differs` (never remembered); the same hash with another producer is `ProducerDiffers` (remembered); a different
+/// hash at a sampled height BELOW the anchor is `SampledDiffers` (remembered) when the second node names the same anchor block again after the
+/// sampled answers, otherwise `Differs` at the anchor or `Unreadable` (ordinary); a second node that does not return every height in time,
+/// or answers with an error, is `Unreadable`. If one sample shows both a producer difference and a hash difference the outcome is the remembered
+/// `ProducerDiffers`. A range of fewer heights than the count is sampled completely.
+fn sample_check(f2: &mut Fetcher<'_>, entries: &[Header], lo: u64, short_lo: u64, anchor: u64, cfg: &ReaderConfig) -> SecondCheck {
+    let unreadable = |reason: String| SecondCheck::Unreadable { reason };
+    if anchor < short_lo {
+        return unreadable(format!("the anchor height {anchor} is below the short window's first height {short_lo}"));
+    }
+    // The reader does not trust its sampler blindly: the right number of distinct heights, all inside the range and not above the anchor.
+    let draw = |from: u64, what: &str| -> Result<Vec<u64>, String> {
+        let want = (anchor - from + 1).min(SECOND_SAMPLE_COUNT as u64) as usize;
+        let heights = (cfg.sampler)(from, anchor, SECOND_SAMPLE_COUNT)
+            .map_err(|e| format!("no heights could be chosen for the producer cross-check ({e})"))?;
+        let mut checked = heights.clone();
+        checked.sort_unstable();
+        checked.dedup();
+        if heights.len() != want || checked.len() != want || checked.iter().any(|h| *h < from || *h > anchor) {
+            return Err(format!("the height sampler returned an unusable choice of heights for the {what} window"));
+        }
+        Ok(heights)
+    };
+    let mut heights = match draw(short_lo, "short") {
+        Ok(h) => h,
+        Err(e) => return unreadable(e),
+    };
+    match draw(lo, "long") {
+        Ok(h) => heights.extend(h),
+        Err(e) => return unreadable(e),
+    }
+    heights.sort_unstable();
+    heights.dedup();
+    let (got, stop) = f2.fetch(&heights);
+    match stop {
+        Some(Stop::Error(e)) => return unreadable(e),
+        Some(Stop::Budget) => return unreadable("the second node did not answer in time".into()),
+        None => {}
+    }
+    if got.len() != heights.len() {
+        return unreadable(format!("the second node returned {} of {} sampled headers", got.len(), heights.len()));
+    }
+    // Classify the answers. Three things can be seen: a producer difference under an equal hash (evidence by itself: equal hashes are the same
+    // block), a hash difference at the anchor height itself (the second node's anchor moved since it was first asked, which an honest reorg near
+    // the tip can cause: never remembered), and a hash difference at a sampled height below the anchor.
+    let mut producer_differs: Option<u64> = None;
+    let mut anchor_moved: Option<SecondCheck> = None;
+    let mut below_differs: Option<u64> = None;
+    for (h, theirs) in heights.iter().zip(&got) {
+        let Some(mine) = entries.iter().find(|e| e.height == *h) else {
+            return unreadable(format!("the sampled height {h} is not in the first node's headers"));
+        };
+        if theirs.hash != mine.hash {
+            if *h == anchor {
+                anchor_moved.get_or_insert(SecondCheck::Differs { height: *h, first: short_hash(&mine.hash), second: short_hash(&theirs.hash) });
+            } else if below_differs.is_none() {
+                below_differs = Some(*h);
+            }
+        } else if theirs.miner != mine.miner && producer_differs.is_none() {
+            producer_differs = Some(*h);
+        }
+    }
+    // A remembered kind never loses to an ordinary result: a producer difference under an equal hash stands whatever else was seen.
+    if let Some(height) = producer_differs {
+        return SecondCheck::ProducerDiffers { height };
+    }
+    if let Some(moved) = anchor_moved {
+        return moved;
+    }
+    let Some(height) = below_differs else {
+        return SecondCheck::Agrees { height: anchor, sampled: heights.len() as u64 };
+    };
+    // A different hash below the anchor is evidence of a misreporting node only if the second node still names the same anchor block now that its
+    // sampled answers have arrived: honest nodes that agree on a block agree on every block below it, and an honest reorg would have moved the
+    // anchor. So ask for the anchor once more, AFTER the sample. If that cannot be read in time, or the anchor changed, the result is ordinary for
+    // this tick (`Unreadable` / `Differs` at the anchor), never remembered.
+    //
+    // Why the first node's entries below the anchor are not stale after a reorg (checked in `read_producers`): every entry in `lo..=anchor` is one
+    // chain of headers each naming the hash of the one below it (checked when read, and when a cache file is parsed), and its top was fetched in
+    // this tick (the cache top is read again and its hash must equal the cached one; a mismatch walks down to a matching height and drops what is
+    // above it). For an honest first node, equal hashes at the top mean the same chain below it. What the cache cannot do is forget a lie: a lower
+    // entry written by a source that lied earlier survives while the top hash matches. That can only make a difference show (a refusal, never a
+    // wrongly allowed lock), and the entry is deliberately NOT re-read from the first node before remembering: a lying node would simply answer
+    // that one call truthfully and never be remembered. The operator who clears a marker deletes the header cache beside it too (the docs say so).
+    let Some(anchor_entry) = entries.iter().find(|e| e.height == anchor) else {
+        return unreadable(format!("the anchor height {anchor} is not in the first node's headers"));
+    };
+    // This one call gets its OWN time, a fresh `now + PER_CALL_TIMEOUT`, not the reading's shared deadline. The shared deadline is spent by the
+    // FIRST node too (its calls, and the walk-down of a faked reorg, take what they take), so a lying first node could otherwise time its last
+    // answer so that the anchor ask and the sample batch fit and this second ask does not: a sample that hit would then be `Unreadable` (not
+    // remembered) while a sample that missed is `Agrees`, and the chance would compound over the ticks again. With its own time only the second
+    // node's own failure or slowness can make this ask unreadable. Cost: this call can extend a tick beyond its budget by at most one per-call
+    // timeout, and only on a tick whose sample showed a hash difference below the anchor. Nothing else between "the sample answers arrived with a
+    // difference" and "remembered" depends on the shared deadline: the classification above is pure, and this is the only further call. (If the
+    // sample batch itself did not finish in time the tick is `Unreadable`; the first node cannot choose that AFTER seeing whether the sample hit,
+    // because it never sees the sample.)
+    let mut again = Fetcher { rpc: f2.rpc, deadline: Instant::now() + PER_CALL_TIMEOUT, fetched: 0 };
+    match again.fetch(&[anchor]) {
+        (g, None) if g.len() == 1 => {
+            if g[0].hash != anchor_entry.hash {
+                SecondCheck::Differs { height: anchor, first: short_hash(&anchor_entry.hash), second: short_hash(&g[0].hash) }
+            } else if g[0].miner != anchor_entry.miner {
+                SecondCheck::ProducerDiffers { height: anchor }
+            } else {
+                SecondCheck::SampledDiffers { height }
+            }
+        }
+        (_, Some(Stop::Error(e))) => unreadable(e),
+        _ => unreadable("the second node did not answer in time".into()),
     }
 }
 
@@ -565,7 +773,9 @@ pub fn read_producers(
         }
     }
 
-    // 6. The second node: the same block at the anchor height means the same chain below it, producers included.
+    // 6. The second node: the same block at the anchor height means the same chain below it, producers included, if each node reports the real
+    // hash of its header. The reader does not recompute a hash, so a first node could report true hashes beside false producers: the anchor
+    // block and a fresh sample of other heights of the window are therefore compared on the producer too (`sample_check`).
     if let Some((rpc2, tip2)) = second {
         summary.second = if !summary.complete {
             SecondCheck::Unreadable { reason: "not checked: the first node's headers are not complete".into() }
@@ -577,10 +787,12 @@ pub fn read_producers(
                     let mut f2 = Fetcher { rpc: rpc2, deadline, fetched: 0 };
                     match f2.fetch(&[anchor]) {
                         (g, None) if g.len() == 1 => {
-                            if g[0].hash == mine.hash {
-                                SecondCheck::Agrees { height: anchor }
-                            } else {
+                            if g[0].hash != mine.hash {
                                 SecondCheck::Differs { height: anchor, first: short_hash(&mine.hash), second: short_hash(&g[0].hash) }
+                            } else if g[0].miner != mine.miner {
+                                SecondCheck::ProducerDiffers { height: anchor }
+                            } else {
+                                sample_check(&mut f2, &entries, lo, tip + 1 - cfg.window_short, anchor, cfg)
                             }
                         }
                         (_, Some(Stop::Error(e))) => SecondCheck::Unreadable { reason: e },

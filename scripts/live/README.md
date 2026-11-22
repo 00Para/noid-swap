@@ -15,7 +15,7 @@ which only observes and records (`tick --apply` writes events and intents into t
 | `env.sh` | — | run number, platform (`LIVE_PLATFORM`), paths, nodes, amounts, fee settings; the four party addresses and the HTLC contract address have no default and come from `$L/env.local.sh` (also second nodes, another RPC) | no |
 | `selftest.sh` | — | no-network self-test of the shell layer (`env.sh`: fee flags, node flags, `read_lines`, platform choice, frozen copy) in a temporary folder; prints `ok` / `FAIL` per case, exits non-zero on a failure | no |
 | `install.sh [--force] [RUN]` | — | freezes a copy of this folder under `$L/bin` (run 3 lesson: never edit a helper while a loop calls it); refuses with exit 3, copying nothing, when `$L` already holds a swap file, a `last-tick-*.json` or `loop-*.txt` file, a `funded.marker` or the operator console's lock file (a run under way keeps the helpers it started with); `--force` skips that check, only for a run folder you know is not in use | no |
-| `setup.sh` | — | `$L` with a fresh passphrase (kept if present), `bob/`, `rec/`, the HTLC deployment block for `--eth-from-block` | no |
+| `setup.sh` | — | `$L` with a fresh passphrase (kept if present), `bob/`, `rec/`, the log start for `--eth-from-block` in `eth-deploy-block.txt`: a recent finalized block read from the Ethereum node now (see "The Ethereum log start" below), or `DEPLOY_BLOCK` when given. Reads the node (a read-only `eth_getBlockByNumber`), sends nothing | no |
 | `prepare.sh` | both | `new-alice`, the equivalence proof (secret over a pipe), `new-bob --receipt`, the contract definition; copies the bundle and definition to `$PUB` for the owner. With `LOCK_KIND=poseidon` (`env.sh`; raw variant only; `CONTRACT` must be a `HTLCPoseidonV2` deployment) it skips the proof and the receipt, passes `--eth-lock-kind poseidon` to both tools, and `new-bob` runs the client R self-test | no |
 | `check-object.sh [OBJ]` | Alice | `alice-params --check-object`: the object `parano1d-cli contract create` wrote must be byte-for-byte the swap file's opening | no |
 | `fund.sh [--dry-run]` | Alice | the funding, **exactly once**: copies the object file to a private copy of its own per process (`$L/fund-object.XXXXXX/fund-object.json`, mode 600, removed when the script ends) and works on that copy only (check, hash, instance listing, funding), runs `check-object.sh`, reads the amount from the swap file's top-level `amount_micronoid` line and requires it to equal `AMOUNT` (plain decimal, no leading zero), refuses a contract that already has an instance, then writes **three markers** before it calls the wallet CLI's `contract fund`: `$HOME/.noid-swap/funded/<contract root>` (this user), `funded-<contract root>.marker` next to the original object file, and `$L/funded.marker` (this run folder). The run folder's marker records the time, `stage: calling wallet CLI`, the wallet CLI's output (the txid) and `wallet exit <code>`; a marker without an exit line means the call may or may not have gone out: check the txid and `contract instances`, then delete all three by hand. `--dry-run` makes no marker and leaves nothing behind The wallet call is piped through `tee -i`, so an interrupt cannot cut the `Funding submitted` line out of the marker (the markers then show the stage and the txid and no exit line). (run 9: a double click funded the contract twice and the swap had to stop; run 11: first live use under WSL, one instance) | **REAL NOID** without `--dry-run` |
@@ -40,7 +40,7 @@ live; the scratch version, with the same checks, was.** A swap with one instance
 
 ```
 bash scripts/live/install.sh 4            # RUN=4 → ~/live-run-4/bin
-bash ~/live-run-4/bin/setup.sh            # passphrase, folders, eth-deploy-block.txt (12066295 = the Sepolia HTLC's deployment)
+bash ~/live-run-4/bin/setup.sh            # passphrase, folders, eth-deploy-block.txt (a recent finalized Sepolia block, read from the node now)
 bash ~/live-run-4/bin/prepare.sh          # Alice's file + proof (20–36 min) + Bob's file + swap.def.json → copied to C:\Users\00\Documents\live-run-4
 # Windows:  parano1d-cli contract create swap.def.json --out swap.object.json   (local, no fee)
 bash ~/live-run-4/bin/check-object.sh     # "object file OK: … fund exactly this address"
@@ -82,12 +82,47 @@ The object file of the Parano1d wallet CLI (`prepare.sh` end, `check-object.sh`)
 
 **Verified so far** (2026-11-05, no network, nothing sent): `bash -n` on every script; `selftest.sh` (59 cases) from Git Bash with bash 5.3; the settings above printed from Git Bash with
 `LIVE_PLATFORM=native` (flags, paths, empty-array expansions under `set -u`); the same settings under WSL printed identically to the
-previous `env.sh`. On a Mac (2026-11-06): `/bin/bash scripts/live/selftest.sh` printed `60 ok, 0 failed (bash 3.2.57(1)-release)`.
+previous `env.sh`. On a Mac (2026-11-06): `/bin/bash scripts/live/selftest.sh` printed `60 ok, 0 failed (bash 3.2.57(1)-release)`. **Current (2026-11-09): `selftest.sh` is 321 cases under bash 5.2 (WSL) and 315 under bash 5.3 in Git Bash (the tick.sh cases skip without a usable python3); not yet re-run on a Mac.**
 **Run live on a Mac (2026-11-06, runs 9, 10 and 11, `docs/live-run-9-10.md`, `docs/live-run-11.md`):** `install.sh`, `setup.sh`, `watch.sh` / `tick.sh` (about 400 ticks),
 `lock.sh`, `refund-eth.sh` and, in run 11, `claim.sh` (dry run and `--submit`, both exit 0), each dry run and send, under the system bash 3.2, with no helper error. The abort path after Bob's lock
 was settled that way (run 10), and so was a complete swap with Bob's claim from the Mac (run 11); the BSD tool calls inside those scripts worked.
 **Still not run on a Mac:** `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh` (these are Alice's scripts;
 her side ran on the other machine, under WSL). `fund.sh` has run live under WSL (run 11: exactly one instance).
+
+## The Ethereum log start (run 14, finding 1)
+
+Every Ethereum read of the engine (`eth_getLogs` for the lock, the claim and the refund) starts at one block, `--eth-from-block`; the helpers pass
+the number in `$L/eth-deploy-block.txt`. Public endpoints prune old logs (run 14: `rpc error 4444: pruned history unavailable` from the old
+default, the contract's deployment block) and cap the range, so the start must be recent.
+
+**`setup.sh` now chooses it** when the file is absent: the **finalized** block of the configured Ethereum node (`ETH_RPC`) minus `ETH_START_MARGIN`
+(default 2400 blocks, about 8 hours on Sepolia); if the node does not serve `finalized`, its latest block minus 256, minus the margin. Never below 0.
+Each configured node must answer `eth_chainId` with `$CHAIN`, or nothing is chosen. With a second node (`ETH_RPC2`) both are read and the **lower**
+value is used. Order of precedence: an existing `eth-deploy-block.txt` is kept; else `DEPLOY_BLOCK` (environment or `$L/env.local.sh`, a whole block
+number) wins and the node is not asked; else the node is read. **If a configured node cannot be read, or is on another chain, setup stops with exit 2
+and writes no start** (a guess could start after Bob's lock and hide it): fix the endpoint (`ETH_RPC` / `CHAIN` in `$L/env.local.sh`, then run
+`setup.sh` again; it is idempotent) or give `DEPLOY_BLOCK`.
+
+**Why it is safe, on both machines.** A swap's lock does not exist when its run folder is set up: the lock is sent after the bundle, the object
+file and the funding, all of which come after `setup.sh`. A block that was already final at setup time is therefore before that lock, on every
+chain history, and the margin puts the start about eight hours earlier still. **Each machine picks its own start at its own setup**; there is
+nothing to agree on, and the two numbers may differ. The engine uses the start to find this swap's own events (its lock, claim and refund) and, for
+Bob in a `poseidon` swap, his own earlier locks on the same lock word (the pre-lock check); `live.js lock` repeats that check from the swap file's
+start. It does not need the contract's deployment block, but the boundary of those checks is the moment the run folder was set up, not the moment the
+secret was made: a lock Bob sent from another folder or by hand before this folder was set up is seen only if it is within the margin.
+
+**Rules.**
+1. Do not run `setup.sh` for a run folder after Bob's lock was sent. A start later than the lock hides it. Bob's tick then fails loudly once the lock id
+   is known (`getLock shows this lock but eth_getLogs returned no Locked event`); **Alice's discovery of Bob's lock does not fail, it finds nothing**,
+   she waits, does not reveal, and the swap aborts (funds are safe). A folder that already holds a swap file gets no new guess from `setup.sh` (the
+   swap file carries its stored start). To rebuild a folder after the lock, give `DEPLOY_BLOCK` set to the lock's block number minus a margin (the block
+   is in Bob's tick output and in the lock result).
+2. A start in `eth-deploy-block.txt` that is **higher** than the one a swap file in the folder already carries is **not passed** (`from_block_flags`
+   prints a note and the stored start is used): the flag would replace the stored start, and a rebuilt folder must not move a good one past the lock.
+3. The start ages: a public endpoint serves logs for a limited time and caps the range at 50,000 blocks (about a week on Sepolia), so set up the run
+   folder within a day or two of the swap. A start that has aged out fails loudly on the first tick; put the lock's block number minus a margin (or,
+   before the lock, a block a few thousand below the head) in the file, or pass `--eth-from-block N` once on `tick --apply` (this replaces the stored
+   start; take care that it is not after the lock).
 
 ## Two nodes (REVIEW-3 F5)
 
@@ -134,6 +169,17 @@ Design and texts: `docs/bob-concentration-gate.md`. Two settings in `$L/env.loca
   is read only from `$L/env.local.sh`** (an `ALERT_URL` in the environment is ignored), is never printed by the helpers, and must never be put in a
   tracked file. The alert only asks you to look: run the dry run (`bash $L/bin/claim.sh`), check it, then `--submit`. Nothing is sent to a chain
   automatically; an opt-in automatic re-send is a later item (`TASKS.md` T21-8).
+  **After a re-send, look at the next tick** (the alert text says the same): the claim must be in the pool or included; if it is gone, send it again.
+  The Parano1d node does not re-admit orphaned transactions after a reorg and removes any copy of the same transaction already in its pool when it
+  handles one, so a claim re-sent just before that can vanish again (T21-16). A claim or refund built near the end of a 144-block epoch can expire
+  unconfirmed and must be built again (design T6).
+- **The stuck-claim message (T21-12).** With the same `ALERT_URL`, `watch.sh` also sends **one** fixed message per swap file and kind when
+  `tick.sh` prints `ALARM: the NOID claim is still pending ...`: Bob's claim is in the pool but not mined and the next call height is past the
+  `D - 19` target (kind `late`: "Bob's NOID claim is still pending past its target; look at the loop log") or at or past `D` (kind `closed`: "... the
+  claim branch is closed ..."). The engine prints that alarm on every tick while it holds, so a latch file in the run folder, `$L/alarm-sent-ROLE-KIND`
+  (empty; created atomically with `noclobber` before the send), keeps it to one message per episode: a complete tick that no longer shows the kind clears the latch, so a later episode (the claim reorged out, re-sent and stuck again) is announced again. If the send fails the latch is removed and the next tick
+  tries again (a failing send never stops the loop). Delete the latch file to have the message sent again. The message is fixed text and the run
+  number; the URL, addresses, amounts and transaction ids are never in the message, the latch or the output.
 
 ## The reveal: fee cap, a stuck claim, a late re-send (REVIEW-4 R4-1, R4-3, R4-5; REVIEW-5 R5-1, R5-2)
 
@@ -193,8 +239,9 @@ Design and texts: `docs/bob-concentration-gate.md`. Two settings in `$L/env.loca
 - `live.js lock`, `claim` and `refund` take `--swap FILE` (a `\\wsl.localhost\…` path, `wslpath -w`): no more typed
   `--hashlock`, `--t-reveal`, `--receiver`, `--amount-wei`, `--lock-id`, `--code-hash`, `--from-block`.
 - No `--eth-code-hash` on `new-alice`/`new-bob`, no `--pinned-image-id` on `new-bob`: both are constants of the build.
-- `--eth-from-block` is still passed from `$L/eth-deploy-block.txt` (harmless: the flag wins and is stored again); after
-  the first `tick --apply` the swap file carries it and the file could be dropped.
+- `--eth-from-block` is still passed from `$L/eth-deploy-block.txt` (the flag wins and is stored again); after
+  the first `tick --apply` the swap file carries it and the file could be dropped; a file value HIGHER than the stored one is not passed. Since 2026-11-09 `setup.sh` writes a recent finalized block there
+  instead of the Sepolia deployment block ("The Ethereum log start" above).
 - A read-only `tick` no longer prints a spend's parameters, so `watch.sh` always applies.
 - `watch.sh` stops by itself on a terminal phase (`done`, `refunded`, `lost`, `aborted`).
 

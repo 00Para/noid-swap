@@ -161,8 +161,83 @@ check_fee_settings() {
   fi
   return 0
 }
-# --eth-from-block from $L/eth-deploy-block.txt when it exists (the flag wins over the stored value and is stored again).
-from_block_flags() { if [ -s "$L/eth-deploy-block.txt" ]; then echo "--eth-from-block"; tr -dc '0-9' < "$L/eth-deploy-block.txt"; echo; fi; }
+# --eth-from-block from $L/eth-deploy-block.txt when it exists. The flag wins over the value stored in a swap file and is stored again, so a start that is HIGHER
+# than the one a swap file in this folder already carries is not passed (a rebuilt folder must not move a good stored start past a lock): the stored one is used.
+from_block_flags() {
+  [ -s "$L/eth-deploy-block.txt" ] || return 0
+  local n s f
+  n=$(tr -dc '0-9' < "$L/eth-deploy-block.txt")
+  [ -n "$n" ] || return 0
+  for f in "$ALICE_FILE" "$BOB_FILE"; do
+    s=$(grep -o '"eth_from_block": *[0-9][0-9]*' "$f" 2>/dev/null | head -n 1 | tr -dc '0-9')
+    if [ -n "$s" ] && [ "$s" -lt "$n" ]; then
+      echo "NOTE: $L/eth-deploy-block.txt ($n) is later than the log start stored in $(basename "$f") ($s): --eth-from-block is NOT passed, the stored start is used" >&2
+      return 0
+    fi
+  done
+  echo "--eth-from-block"; echo "$n"
+}
+# eth_rpc_raw URL METHOD PARAMS_JSON: the node's answer with all white space removed; fails (status 1, nothing printed) when the node cannot be reached, curl
+# reports an HTTP error, or the answer holds an "error" member. The URL goes to curl on its standard input (it may carry a key), never in its argument list.
+eth_rpc_raw() {
+  local out
+  out=$(printf 'url = "%s"\n' "$1" | "$CURL" -s -f -m "$RPC_TIMEOUT" -H 'Content-Type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}" -K - 2>/dev/null) || return 1
+  out=$(printf '%s' "$out" | tr -d ' \t\r\n')
+  case "$out" in *'"error"'*) return 1 ;; esac
+  printf '%s\n' "$out"
+}
+# eth_rpc_block URL TAG: the number (decimal) of the Ethereum block TAG ("finalized" or "latest") as the node at URL reports it; fails (status 1, nothing
+# printed) when the node cannot be reached, answers an error or null, or the answer holds no block number. Used by setup.sh only (no key, nothing sent).
+eth_rpc_block() {
+  local out hex
+  out=$(eth_rpc_raw "$1" eth_getBlockByNumber "[\"$2\",false]") || return 1
+  hex=$(printf '%s' "$out" | sed -n 's/.*"number":"\(0x[0-9a-fA-F]\{1,16\}\)".*/\1/p')
+  [ -n "$hex" ] || return 1
+  printf '%d\n' "$hex" 2>/dev/null
+}
+# eth_rpc_chain URL: the node's chain id (decimal); fails like eth_rpc_block.
+eth_rpc_chain() {
+  local out hex
+  out=$(eth_rpc_raw "$1" eth_chainId "[]") || return 1
+  hex=$(printf '%s' "$out" | sed -n 's/.*"result":"\(0x[0-9a-fA-F]\{1,16\}\)".*/\1/p')
+  [ -n "$hex" ] || return 1
+  printf '%d\n' "$hex" 2>/dev/null
+}
+# default_eth_from_block: a safe log start for a swap that does not exist yet, read from the configured Ethereum node(s) (ETH_RPC, and ETH_RPC2 when set).
+# Each node must be on chain $CHAIN (eth_chainId) or nothing is chosen. The start is the FINALIZED block (no reorg can move it) minus ETH_START_MARGIN
+# (default 2400 blocks, about 8 hours on Sepolia: a retry from a folder set up later still starts before an earlier lock, and it is far inside the
+# provider's range cap); a node that does not serve "finalized" gives its latest block minus 256 (more than the 64 blocks Ethereum needs to finalize)
+# minus the margin. Never below 0. With two nodes the LOWER value wins. Prints the number on stdout and a one-line account on stderr. Fails closed
+# (status 1, nothing on stdout) when any configured node cannot be read or is on another chain: a guess here could start AFTER Bob's lock and hide it.
+# Why it is safe: a swap's lock is sent after its run folder is set up, so a block that was already final at setup time is before it.
+default_eth_from_block() {
+  local url k=0 n c best="" how="" w margin=${ETH_START_MARGIN:-2400}
+  case "$margin" in ''|*[!0-9]*) echo "ETH_START_MARGIN must be a whole number of blocks, not '$margin'" >&2; return 1 ;; esac
+  for url in "$ETH_RPC" ${ETH_RPC2:+"$ETH_RPC2"}; do
+    k=$((k + 1))
+    if ! c=$(eth_rpc_chain "$url"); then
+      echo "cannot read the chain id of Ethereum node $k ($([ "$k" = 1 ] && echo ETH_RPC || echo ETH_RPC2)): the log start is not chosen. Give DEPLOY_BLOCK in $L/env.local.sh (a block before your swap's lock) or fix the endpoint" >&2
+      return 1
+    fi
+    if [ "$c" != "$CHAIN" ]; then
+      echo "Ethereum node $k ($([ "$k" = 1 ] && echo ETH_RPC || echo ETH_RPC2)) is on chain $c but this run is chain $CHAIN (CHAIN / ETH_RPC in $L/env.local.sh or the environment): the log start is not chosen" >&2
+      return 1
+    fi
+    if n=$(eth_rpc_block "$url" finalized); then w="finalized block minus $margin"
+    elif n=$(eth_rpc_block "$url" latest); then
+      if [ "$n" -gt 256 ]; then n=$((n - 256)); else n=0; fi
+      w="latest block minus 256 minus $margin"
+    else
+      echo "cannot read the Ethereum node $k (neither its finalized nor its latest block): the log start is not chosen. Give DEPLOY_BLOCK in $L/env.local.sh (a block before your swap's lock) or fix the endpoint" >&2
+      return 1
+    fi
+    if [ "$n" -gt "$margin" ]; then n=$((n - margin)); else n=0; fi
+    if [ -z "$best" ] || [ "$n" -lt "$best" ]; then best=$n; how=$w; fi
+  done
+  echo "log start $best ($how, read from the configured Ethereum node$([ -n "${ETH_RPC2:-}" ] && echo "s, the lower of the two"))" >&2
+  printf '%s\n' "$best"
+}
 # REVIEW-6 R6-3: --reveal-tx HASH for swap-cli tick / claim when reveal.sh saw its claim MINED AND REVERTED (the secret is public although no
 # Claimed event exists): the hash is in $L/reveal-reverted-tx.txt. swap-cli reads the transaction and its receipt from the node, checks it is
 # a claim of THIS lock from alice_receiver whose preimage opens the lock word, and only then records "the secret is public" (Alice's late
@@ -228,6 +303,35 @@ alert_hook() {
     seen="$seen$msg|"
     alert_send "$msg" || printf '1|%s\n' "$msg" > "$pend" 2>/dev/null
   done
+  return 0
+}
+# alarm_hook ROLE: reads a tick's output on stdin; for a line that starts with `ALARM: the NOID claim is still pending` (Bob's claim is in the pool but not
+# mined and the claim branch is running out or closed, T21-12) it POSTs ONE short fixed message to $ALERT_URL per swap file (ROLE) and kind
+# (late = past the D-19 target; closed = at or past D). Unlike an ALERT: line the alarm is printed on EVERY tick while it holds, so a latch file in
+# the run folder ($L/alarm-sent-ROLE-KIND) keeps it to one message per episode (a complete tick that no longer shows the kind clears the latch). The latch is created atomically (noclobber, O_EXCL) BEFORE the send, so two loops
+# cannot both send; if the send fails the latch is removed and the next tick that prints the alarm tries again (the same failure behaviour as
+# alert_hook: nothing here can stop a loop, the function always returns 0). The message is fixed text and the run number; the URL, an address, an amount
+# or a transaction id are never in the latch, the message or the output. Empty ALERT_URL = does nothing.
+alarm_hook() {
+  [ -n "${ALERT_URL:-}" ] || return 0
+  local role=${1:-bob} line kind msg latch complete=0 saw_late=0 saw_closed=0
+  while IFS= read -r line; do
+    case "$line" in "applied:"*) complete=1 ;; esac
+    case "$line" in "ALARM: the NOID claim is still pending"*) ;; *) continue ;; esac
+    case "$line" in
+      *"claim branch is closed"*) kind=closed; saw_closed=1; msg="noid-swap run $RUN: Bob's NOID claim is still pending and the claim branch is closed; look at the loop log" ;;
+      *) kind=late; saw_late=1; msg="noid-swap run $RUN: Bob's NOID claim is still pending past its target; look at the loop log" ;;
+    esac
+    latch="$L/alarm-sent-$role-$kind"
+    ( set -C; : > "$latch" ) 2>/dev/null || continue
+    alert_send "$msg" || rm -f "$latch" 2>/dev/null
+  done
+  # Re-arm: a COMPLETE tick (it printed its `applied:` line) that no longer shows a kind ends that episode, so a later one (the claim mined, reorged out,
+  # sent again and stuck again) is announced again. A tick that failed or printed nothing re-arms nothing.
+  if [ "$complete" = 1 ]; then
+    [ "$saw_late" = 1 ] || rm -f "$L/alarm-sent-$role-late" 2>/dev/null
+    [ "$saw_closed" = 1 ] || rm -f "$L/alarm-sent-$role-closed" 2>/dev/null
+  fi
   return 0
 }
 # reveal_sent_note ERRFILE: live.js writes "sent: HASH ..." to its stderr the moment the claim is broadcast (before the wait for the receipt), so the

@@ -352,4 +352,4 @@ T17, T19; section 9.1 (gas money, minimum amount); section 10 M2 (stock variant 
   an `s` the EVM accepts and the prover refuses would be the same attack (review F7, "related").
 * Gas is Hardhat's. Real networks, rollups and zkEVM limits are untested; the floor must be re-measured after gas
   repricing forks. At small swap sizes the fee dominates on L1 (section 5).
-* Q8 (Poseidon2b with unusually small round constants) needs a cryptographer; it is systemic to Parano1d.
+* Q8 (Poseidon2b with small round constants, which are the designers' reference constants: `docs/review-packet.md` section 5.1) needs a cryptographer; it is systemic to Parano1d.

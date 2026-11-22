@@ -153,8 +153,8 @@ per gas for a MUL-heavy transaction; not measured.
   resistance of `Addr`, no longer SHA-256's. That is the same assumption Parano1d itself already
   rests on (every NOID address is `Addr(s)`), so the swap adds no *new* assumption; but it does
   remove SHA-256 as an independent second line. Open question **Q8** applies in full: Poseidon2b's
-  constants are unusually small (round constants and full-round MDS entries <= 0x7, the partial-round MDS diagonal 0x20, 0x2000, 0x200, 0x800; all in a subfield) and the preimage margin has not
-  been assessed by a cryptographer. An attacker who finds `s'` with `Addr(s') = A` takes the ETH
+  constants are small (round constants and full-round MDS entries <= 0x7, the partial-round MDS diagonal 0x20, 0x2000, 0x200, 0x800; all in a subfield; they are the designers' reference constants, `docs/review-packet.md` section 5.1) and the preimage margin has not
+  been assessed by a cryptographer for this project. An attacker who finds `s'` with `Addr(s') = A` takes the ETH
   (and, on Parano1d, could already take the NOID). `A` is 256 bits (two lanes), so generic attacks
   are out of reach; the question is structural.
 * **Lock id / tooling.** `swap-cli` would gain a second ETH contract and a `lockAddr` field; the

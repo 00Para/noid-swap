@@ -289,6 +289,7 @@ impl<R: JsonRpc> NoidWatcher<R> {
             single_node_ok: false,
             producers: None,
             accept_producer_concentration: false,
+            producer_marker: Default::default(),
         })
     }
 }

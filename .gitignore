@@ -21,6 +21,7 @@ Thumbs.db
 *.swap.json.reveal-sent*
 *.producers
 *.producers.tmp
+*.producer-differs*
 *.receipt
 passphrase.txt
 

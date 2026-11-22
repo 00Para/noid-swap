@@ -3083,20 +3083,110 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       const l = await makeLock({ ...opts, receiver: wallet.address });
       return { wallet, l };
     }
-    /** A wallet whose sendTransaction first runs `before(tx)` (which may throw instead of letting the send happen). */
-    const spying = (wallet, before) =>
-      new Proxy(wallet, {
+    /**
+     * A wallet that shows the moment of the broadcast. With a local key the claim signs locally and hands the bytes to `signer.provider.broadcastTransaction`,
+     * so `before(raw)` runs there (and in `sendTransaction`, which a non-wallet path would use); it may throw instead of letting the send happen.
+     * afterSign(n) runs after the n-th local signature (the claim signs once for the sidecar's hash, when there is a swap file, and once to broadcast).
+     */
+    const spying = (wallet, before, { afterSign } = {}) => {
+      const seen = new Proxy(wallet.provider, {
         get(t, prop) {
-          if (prop === "sendTransaction") {
-            return async (tx) => {
-              await before(tx);
-              return t.sendTransaction(tx);
+          if (prop === "broadcastTransaction") {
+            return async (raw) => {
+              await before(raw);
+              return t.broadcastTransaction(raw);
             };
           }
           const v = t[prop];
           return typeof v === "function" ? v.bind(t) : v;
         },
       });
+      let signs = 0;
+      return new Proxy(wallet, {
+        get(t, prop) {
+          if (prop === "provider") return seen;
+          if (prop === "sendTransaction") {
+            return async (tx) => {
+              await before(tx);
+              return t.sendTransaction(tx);
+            };
+          }
+          if (prop === "signTransaction") {
+            return async (tx) => {
+              const raw = await t.signTransaction(tx);
+              signs += 1;
+              if (afterSign) afterSign(signs);
+              return raw;
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+    };
+    const EIO = () => Object.assign(new Error("simulated I/O failure"), { code: "EIO" });
+    /**
+     * Narrow, restorable stubs on `fs` (it is process-global and Hardhat and mocha use it too). Every handler acts only on the sidecar's files (a path
+     * containing ".reveal-sent": the final name, its .tmp files and its .stale-* names) and on the directory's own handle, found by wrapping openSync.
+     * t.opens lists every open; t.fds maps an open handle to { path, kind: "file" | "dir" }; t.real holds the real functions.
+     */
+    function patchFs() {
+      const real = {};
+      const names = ["openSync", "closeSync", "writeSync", "fsyncSync", "linkSync", "renameSync", "readFileSync", "lstatSync"];
+      for (const k of names) real[k] = fs[k];
+      const isSide = (p) => String(p).includes(".reveal-sent");
+      const t = {
+        fds: new Map(),
+        opens: [],
+        real,
+        onWrite: null, // (f, fd, [buf, off, len]) -> bytes written
+        onFsync: null, // (f, fd)
+        onLink: null, // (from, to)
+        onRename: null, // (from, to)
+        onRead: null, // (path, restOfArgs)
+        onLstat: null, // (path, restOfArgs)
+        restore() {
+          for (const k of names) fs[k] = real[k];
+        },
+      };
+      fs.openSync = (p, ...rest) => {
+        const fd = real.openSync(p, ...rest);
+        const s = String(p);
+        t.opens.push({ path: s, flags: rest[0] });
+        if (isSide(s)) t.fds.set(fd, { path: s, kind: "file" });
+        else if (path.resolve(s) === path.resolve(dir)) t.fds.set(fd, { path: s, kind: "dir" });
+        return fd;
+      };
+      fs.closeSync = (fd) => {
+        t.fds.delete(fd);
+        return real.closeSync(fd);
+      };
+      fs.writeSync = (fd, ...a) => {
+        const f = t.fds.get(fd);
+        return f && f.kind === "file" && t.onWrite ? t.onWrite(f, fd, a) : real.writeSync(fd, ...a);
+      };
+      fs.fsyncSync = (fd) => {
+        const f = t.fds.get(fd);
+        return f && t.onFsync ? t.onFsync(f, fd) : real.fsyncSync(fd);
+      };
+      fs.linkSync = (a, b) => (isSide(b) && t.onLink ? t.onLink(a, b) : real.linkSync(a, b));
+      fs.renameSync = (a, b) => ((isSide(a) || isSide(b)) && t.onRename ? t.onRename(a, b) : real.renameSync(a, b));
+      fs.readFileSync = (p, ...rest) => (isSide(p) && t.onRead ? t.onRead(String(p), rest) : real.readFileSync(p, ...rest));
+      fs.lstatSync = (p, ...rest) => (isSide(p) && t.onLstat ? t.onLstat(String(p), rest) : real.lstatSync(p, ...rest));
+      return t;
+    }
+    /** Nothing was sent: the signer's nonce is unchanged and the lock is still open. */
+    async function expectUnsent(wallet, l, n0) {
+      expect(await nonce(wallet.address)).to.equal(n0);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.match(/^open/);
+    }
+    async function freshClaim() {
+      preimage = rand32(); // a new secret each time: a hashlock can be locked once per sender
+      hashlock = sha256Raw(preimage);
+      const { wallet, l } = await walletLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
+      return { wallet, l, swap, n0: await nonce(wallet.address) };
+    }
 
     it("the sidecar exists, with exactly the lock id, the signed transaction's hash and a time, when the broadcast begins; mode 600; no secret; no leftovers", async () => {
       const { wallet, l } = await walletLock();
@@ -3160,42 +3250,664 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       expect(ok.revealSidecar).to.equal("written");
     });
 
-    it("if the directory cannot be synced, nothing is broadcast (not on Windows, where a directory cannot be synced at all)", async function () {
-      if (process.platform === "win32") this.skip();
-      const { wallet, l } = await walletLock();
-      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
-      const n0 = await nonce(wallet.address);
-      const real = fs.fsyncSync;
-      let calls = 0;
-      fs.fsyncSync = (fd) => {
-        calls += 1;
-        if (calls === 2) throw Object.assign(new Error("simulated directory sync failure"), { code: "EIO" }); // the file's sync is the first call
-        return real(fd);
+    it("if the directory cannot be synced, nothing is broadcast and the file this call made is removed (the non-Windows branch of fsyncDir, run everywhere by reporting the platform as linux)", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const original = Object.getOwnPropertyDescriptor(process, "platform");
+      const t = patchFs();
+      // fsyncDir ignores every error on win32 (a directory cannot be flushed there), so the platform is switched for this test only. The directory
+      // handle is found by wrapping openSync; only that handle fails, so the file's own sync works.
+      t.onFsync = (f, fd) => {
+        if (f.kind === "dir") throw EIO();
+        return t.real.fsyncSync(fd);
       };
       try {
-        await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written (EIO); nothing was sent/);
+        Object.defineProperty(process, "platform", { value: "linux", configurable: true }); // inside the try: a throw here cannot leak the override
+        await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EIO\); nothing was sent/);
       } finally {
-        fs.fsyncSync = real;
+        Object.defineProperty(process, "platform", original);
+        t.restore();
       }
-      expect(await nonce(wallet.address)).to.equal(n0);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.existsSync(sideOf(swap)), "a sidecar that is not known good must not stay as evidence").to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+      expect((await live.claim(provider, wallet, { swap, secret: preimage })).revealSidecar).to.equal("written");
     });
 
-    it("on a file system without hard links the sidecar is created exclusively in place", async () => {
+    it("on a file system without hard links the finished temporary file is renamed onto the sidecar's name (never written in place)", async () => {
       const { wallet, l } = await walletLock();
       const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800), alice: wallet.address });
-      const real = fs.linkSync;
-      fs.linkSync = () => {
+      const t = patchFs();
+      t.onLink = () => {
         throw Object.assign(new Error("no links here"), { code: "UNKNOWN" });
       };
       let r;
       try {
         r = await live.claim(provider, wallet, { swap, secret: preimage });
       } finally {
-        fs.linkSync = real;
+        t.restore();
       }
       expect(r.revealSidecar).to.equal("written");
       expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
       expect(leftovers(swap)).to.deep.equal([]);
+      const writeOpens = t.opens.filter((o) => o.path.includes(".reveal-sent") && o.flags !== "r");
+      expect(writeOpens.length).to.be.greaterThan(0);
+      expect(writeOpens.every((o) => o.path.endsWith(".tmp")), "the final name is never opened for writing (the old in-place code did)").to.equal(true);
+    });
+
+    it("a write that makes no progress is an error: nothing is broadcast, no sidecar, no leftover", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const t = patchFs();
+      t.onWrite = () => 0;
+      let sent = false;
+      try {
+        await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(
+          /reveal sidecar .* could not be written \(ESHORTWRITE\); nothing was sent/
+        );
+      } finally {
+        t.restore();
+      }
+      expect(sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("a write that takes only a few bytes at a time is looped until every byte is out: the sidecar is byte-exact", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const t = patchFs();
+      let calls = 0;
+      t.onWrite = (f, fd, [buf, off, len]) => {
+        calls += 1;
+        return t.real.writeSync(fd, buf, off, Math.min(7, len));
+      };
+      let r;
+      try {
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        t.restore();
+      }
+      expect(calls, "the body is longer than 7 bytes").to.be.greaterThan(5);
+      const raw = fs.readFileSync(sideOf(swap), "utf8");
+      const j = JSON.parse(raw);
+      expect(raw.endsWith("\n")).to.equal(true);
+      expect(raw).to.equal(JSON.stringify({ version: 1, lock_id: l.lockId.slice(2).toLowerCase(), tx_hash: r.txHash.slice(2).toLowerCase(), at: j.at }) + "\n");
+      expect(r.revealSidecar).to.equal("written");
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("a write that reports the full length but stores half is caught by the read-back: refused, nothing broadcast, the file this call made is removed", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const t = patchFs();
+      t.onWrite = (f, fd, [buf, off, len]) => {
+        t.real.writeSync(fd, buf, off, Math.floor(len / 2));
+        return len;
+      };
+      let sent = false;
+      try {
+        await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(
+          /reveal sidecar .* could not be written \(EREADBACK\); nothing was sent/
+        );
+      } finally {
+        t.restore();
+      }
+      expect(sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("without hard links a failed file sync leaves nothing at the final name (the final name is never opened for writing); the retry is 'written', not 'kept'", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const t = patchFs();
+      t.onLink = () => {
+        throw Object.assign(new Error("no links here"), { code: "ENOTSUP" });
+      };
+      let failedOnce = false;
+      t.onFsync = (f, fd) => {
+        if (f.kind === "file" && !failedOnce) {
+          failedOnce = true;
+          throw EIO();
+        }
+        return t.real.fsyncSync(fd);
+      };
+      let sent = false;
+      let r;
+      try {
+        await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(
+          /reveal sidecar .* could not be written \(EIO\); nothing was sent/
+        );
+        expect(sent).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(fs.existsSync(sideOf(swap)), "no file at the target name").to.equal(false);
+        expect(leftovers(swap)).to.deep.equal([]);
+        // the retry, with the sync working and hard links still refused
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        t.restore();
+      }
+      expect(r.revealSidecar).to.equal("written");
+      expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
+      expect(leftovers(swap)).to.deep.equal([]);
+      const writeOpens = t.opens.filter((o) => o.path.includes(".reveal-sent") && o.flags !== "r");
+      expect(writeOpens.length).to.be.greaterThan(0);
+      expect(writeOpens.every((o) => o.path.endsWith(".tmp")), "only .tmp names are opened for writing").to.equal(true);
+    });
+
+    it("the read-back must match: a new sidecar that does not read back as written is refused and removed; a kept one is refused and left as it was", async () => {
+      // new sidecar
+      {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const t = patchFs();
+        let published = false;
+        t.onLink = (a, b) => {
+          t.real.linkSync(a, b);
+          published = true;
+        };
+        t.onRead = (p, rest) => (published && !p.endsWith(".tmp") ? Buffer.from("not what was written\n") : t.real.readFileSync(p, ...rest));
+        try {
+          await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EREADBACK\); nothing was sent/);
+        } finally {
+          t.restore();
+        }
+        await expectUnsent(wallet, l, n0);
+        expect(fs.existsSync(sideOf(swap))).to.equal(false);
+        expect(leftovers(swap)).to.deep.equal([]);
+      }
+      // kept sidecar
+      {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const original = sidecarBody(l.lockId, "ab".repeat(32));
+        fs.writeFileSync(sideOf(swap), original);
+        const t = patchFs();
+        let published = false;
+        t.onRename = (a, b) => {
+          t.real.renameSync(a, b);
+          if (String(b).endsWith(live.REVEAL_SIDECAR_SUFFIX)) published = true;
+        };
+        t.onRead = (p, rest) => (published && !p.endsWith(".tmp") ? Buffer.from("not what was written\n") : t.real.readFileSync(p, ...rest));
+        try {
+          await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/existing reveal sidecar .* could not be made durable again \(EREADBACK\).*kept.*nothing was sent/);
+        } finally {
+          t.restore();
+        }
+        await expectUnsent(wallet, l, n0);
+        expect(fs.readFileSync(sideOf(swap), "utf8")).to.equal(original);
+        expect(leftovers(swap)).to.deep.equal([]);
+      }
+    });
+
+    it("a sidecar of this lock that is already there is written again, byte for byte (its time is kept), through a temporary file that is synced and renamed over it", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const original = sidecarBody(l.lockId, "ab".repeat(32), 1700000000);
+      fs.writeFileSync(sideOf(swap), original);
+      const inoBefore = fs.statSync(sideOf(swap)).ino;
+      const t = patchFs();
+      const tmpSynced = [];
+      const renames = [];
+      t.onFsync = (f, fd) => {
+        if (f.kind === "file") tmpSynced.push(f.path);
+        return t.real.fsyncSync(fd);
+      };
+      t.onRename = (a, b) => {
+        renames.push([String(a), String(b)]);
+        return t.real.renameSync(a, b);
+      };
+      let r;
+      try {
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        t.restore();
+      }
+      expect(r.revealSidecar).to.equal("kept");
+      expect(fs.readFileSync(sideOf(swap), "utf8")).to.equal(original);
+      expect(tmpSynced.some((p) => p.endsWith(".tmp"))).to.equal(true);
+      expect(renames.some(([a, b]) => a.endsWith(".tmp") && path.resolve(b) === path.resolve(sideOf(swap)))).to.equal(true);
+      if (process.platform !== "win32") expect(fs.statSync(sideOf(swap)).ino, "a new inode: the entry was replaced by the durable copy").to.not.equal(inoBefore);
+      expect(leftovers(swap)).to.deep.equal([]);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("a sidecar that was already there survives a failed re-publish untouched: a failed sync of the new copy, or a failed rename", async () => {
+      for (const [what, arm] of [
+        [
+          "sync",
+          (t) => {
+            t.onFsync = (f, fd) => {
+              if (f.kind === "file") throw EIO();
+              return t.real.fsyncSync(fd);
+            };
+          },
+        ],
+        [
+          "rename",
+          (t) => {
+            t.onRename = (a, b) => {
+              if (String(b).endsWith(live.REVEAL_SIDECAR_SUFFIX)) throw EIO();
+              return t.real.renameSync(a, b);
+            };
+          },
+        ],
+      ]) {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const original = sidecarBody(l.lockId, "cd".repeat(32), 1700000000);
+        fs.writeFileSync(sideOf(swap), original);
+        const t = patchFs();
+        arm(t);
+        let sent = false;
+        try {
+          await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage }), what).to.be.rejectedWith(
+            /existing reveal sidecar .* could not be made durable again \(EIO\).*kept.*nothing was sent/
+          );
+        } finally {
+          t.restore();
+        }
+        expect(sent, what).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(fs.readFileSync(sideOf(swap), "utf8"), what).to.equal(original);
+        expect(leftovers(swap), what).to.deep.equal([]);
+      }
+    });
+
+    it("the cutoff is re-checked against the wall clock after the sidecar is written: if the time ran out, nothing is sent; a sidecar made by this call is removed, an older one stays", async () => {
+      for (const preExisting of [false, true]) {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const original = sidecarBody(l.lockId, "ab".repeat(32), 1700000000);
+        if (preExisting) fs.writeFileSync(sideOf(swap), original);
+        const realNow = Date.now;
+        const jump = l.tReveal - 1800 - Math.floor(realNow() / 1000) + 60; // the wall clock ends 60 s past the cutoff, still before the timelock
+        let offset = 0; // milliseconds
+        const t = patchFs();
+        // the offset stays 0 until the sidecar's temporary file is synced, so every earlier check passes
+        t.onFsync = (f, fd) => {
+          if (f.kind === "file") offset = jump * 1000;
+          return t.real.fsyncSync(fd);
+        };
+        let sent = false;
+        let err;
+        try {
+          Date.now = () => realNow() + offset; // inside the try: a throw before it cannot leak the stub
+          err = await live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage }).then(
+            () => null,
+            (e) => e
+          );
+        } finally {
+          Date.now = realNow;
+          t.restore();
+        }
+        const tag = preExisting ? "a sidecar was there" : "no sidecar before";
+        expect(err, tag).to.be.an.instanceOf(Error);
+        expect(err.message, tag).to.match(/past the reveal cutoff.*re-checked against the wall clock immediately before the broadcast, after the reveal sidecar was written/);
+        expect(err.message, tag).to.match(/nothing was sent/);
+        expect(err.message, tag).to.not.match(/may have reached the network/);
+        expect(sent, tag).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        if (preExisting) {
+          expect(err.message).to.match(/that was there before is kept/);
+          expect(fs.readFileSync(sideOf(swap), "utf8")).to.equal(original);
+        } else {
+          expect(err.message).to.match(/was removed again/);
+          expect(fs.existsSync(sideOf(swap))).to.equal(false);
+        }
+        expect(leftovers(swap), tag).to.deep.equal([]);
+      }
+    });
+
+    it("with a local key nothing is requested from the node between the sidecar and the broadcast: the signed bytes are the first thing sent", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const log = [];
+      const realSend = provider.send;
+      const realBroadcast = provider.broadcastTransaction;
+      const t = patchFs();
+      // the last read of the sidecar is the read-back that ends the sidecar write
+      t.onRead = (p, rest) => {
+        const got = t.real.readFileSync(p, ...rest);
+        if (p.endsWith(live.REVEAL_SIDECAR_SUFFIX)) log.push("sidecar-readback");
+        return got;
+      };
+      let r;
+      try {
+        provider.send = function (method, params) {
+          log.push("req:" + method);
+          return realSend.call(this, method, params);
+        };
+        provider.broadcastTransaction = function (raw) {
+          log.push("broadcast");
+          return realBroadcast.call(this, raw);
+        };
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        delete provider.send;
+        delete provider.broadcastTransaction;
+        t.restore();
+      }
+      const lastRead = log.lastIndexOf("sidecar-readback");
+      const at = log.indexOf("broadcast", lastRead);
+      expect(lastRead, JSON.stringify(log)).to.be.greaterThan(-1);
+      expect(at, JSON.stringify(log)).to.be.greaterThan(lastRead);
+      // (the old path, signer.sendTransaction, populated the transaction again here, which asks the node for the network first)
+      expect(log.slice(lastRead + 1, at), "no request between the sidecar and the broadcast").to.deep.equal([]);
+      expect(log.slice(at), "the raw transaction is sent").to.include("req:eth_sendRawTransaction");
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("the clock jumps past the cutoff while the claim is signed (after preSend): the last check refuses, nothing is broadcast, the sidecar this call made is removed", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const realNow = Date.now;
+      const jump = l.tReveal - 1800 - Math.floor(realNow() / 1000) + 60; // 60 s past the cutoff, before the timelock
+      let offset = 0; // milliseconds
+      let sent = false;
+      let err;
+      try {
+        Date.now = () => realNow() + offset;
+        // the claim signs once for the sidecar's hash (inside preSend) and once to broadcast: jump after the second
+        const spy = spying(wallet, () => (sent = true), { afterSign: (n) => (n === 2 ? (offset = jump * 1000) : 0) });
+        err = await live.claim(provider, spy, { swap, secret: preimage }).then(
+          () => null,
+          (e) => e
+        );
+      } finally {
+        Date.now = realNow;
+      }
+      expect(err).to.be.an.instanceOf(Error);
+      expect(err.message).to.match(/past the reveal cutoff.*re-checked against the wall clock immediately before the broadcast, after the reveal sidecar was written.*was removed again.*nothing was sent/);
+      expect(err.message).to.not.match(/may have reached the network/);
+      expect(sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("a claim without --swap is refused by the last check too when the clock jumps after preSend", async () => {
+      const { wallet, l } = await walletLock();
+      const n0 = await nonce(wallet.address);
+      const realNow = Date.now;
+      const jump = l.tReveal - 1800 - Math.floor(realNow() / 1000) + 60;
+      let offset = 0;
+      let sent = false;
+      let err;
+      try {
+        Date.now = () => realNow() + offset;
+        // no swap file: the only signature is the one that is broadcast
+        const spy = spying(wallet, () => (sent = true), { afterSign: (n) => (n === 1 ? (offset = jump * 1000) : 0) });
+        err = await live.claim(provider, spy, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage }).then(
+          () => null,
+          (e) => e
+        );
+      } finally {
+        Date.now = realNow;
+      }
+      expect(err).to.be.an.instanceOf(Error);
+      expect(err.message).to.match(/past the reveal cutoff.*re-checked against the wall clock immediately before the broadcast.*no reveal sidecar was involved.*nothing was sent/);
+      expect(sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+    });
+
+    it("a signer that is not a local key still claims, through sendTransaction", async () => {
+      const l = await makeLock();
+      const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, l.tReveal - 1800) });
+      let viaSend = 0;
+      const counting = new Proxy(alice, {
+        get(t, prop) {
+          if (prop === "sendTransaction") {
+            return async (tx) => {
+              viaSend += 1;
+              return t.sendTransaction(tx);
+            };
+          }
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      const r = await live.claim(provider, counting, { swap, secret: preimage });
+      expect(viaSend).to.equal(1);
+      expect(r.revealSidecar).to.equal("written");
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("two claims racing for one swap file: the one whose read-back finds the other's record refuses and leaves that record in place", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const other = sidecarBody(l.lockId, "ef".repeat(32), 1700000001);
+      const t = patchFs();
+      t.onLink = () => {
+        throw Object.assign(new Error("no links here"), { code: "ENOTSUP" });
+      };
+      // right after this call's rename, the other claim's record lands on the same name (its own rename over ours)
+      t.onRename = (a, b) => {
+        t.real.renameSync(a, b);
+        if (String(b).endsWith(live.REVEAL_SIDECAR_SUFFIX)) fs.writeFileSync(b, other);
+      };
+      let sent = false;
+      try {
+        await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(
+          /another claim for this swap seems to be running.*left in place.*nothing was sent.*never run at the same time/
+        );
+      } finally {
+        t.restore();
+      }
+      expect(sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.readFileSync(sideOf(swap), "utf8"), "the other record is still there, byte for byte").to.equal(other);
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("without hard links, a failure AFTER the rename removes the file this call made: a failed directory sync, or a read-back that does not match", async () => {
+      // (i) the directory sync fails (the platform is reported as linux for this case, as in the directory test above)
+      {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const original = Object.getOwnPropertyDescriptor(process, "platform");
+        const t = patchFs();
+        t.onLink = () => {
+          throw Object.assign(new Error("no links here"), { code: "ENOTSUP" });
+        };
+        t.onFsync = (f, fd) => {
+          if (f.kind === "dir") throw EIO();
+          return t.real.fsyncSync(fd);
+        };
+        let sent = false;
+        try {
+          Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+          await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EIO\); nothing was sent/);
+        } finally {
+          Object.defineProperty(process, "platform", original);
+          t.restore();
+        }
+        expect(sent).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(fs.existsSync(sideOf(swap)), "(i) nothing at the final name").to.equal(false);
+        expect(leftovers(swap)).to.deep.equal([]);
+      }
+      // (ii) the read-back does not match
+      {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const t = patchFs();
+        let published = false;
+        t.onLink = () => {
+          throw Object.assign(new Error("no links here"), { code: "ENOTSUP" });
+        };
+        t.onRename = (a, b) => {
+          t.real.renameSync(a, b);
+          if (String(b).endsWith(live.REVEAL_SIDECAR_SUFFIX)) published = true;
+        };
+        t.onRead = (p, rest) => (published && !p.endsWith(".tmp") ? Buffer.from("not what was written\n") : t.real.readFileSync(p, ...rest));
+        let sent = false;
+        try {
+          await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EREADBACK\); nothing was sent/);
+        } finally {
+          t.restore();
+        }
+        expect(sent).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(fs.existsSync(sideOf(swap)), "(ii) nothing at the final name").to.equal(false);
+        expect(leftovers(swap)).to.deep.equal([]);
+      }
+    });
+
+    it("a sidecar that cannot be examined or read is an I/O problem, not bad content: the claim is refused and the file is neither moved nor deleted; the plan only reports it", async () => {
+      for (const [what, arm] of [
+        [
+          "lstat",
+          (t) => {
+            t.onLstat = () => {
+              throw EIO();
+            };
+          },
+        ],
+        [
+          "read",
+          (t) => {
+            t.onRead = () => {
+              throw EIO();
+            };
+          },
+        ],
+      ]) {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const original = sidecarBody(l.lockId, "ab".repeat(32), 1700000000);
+        fs.writeFileSync(sideOf(swap), original);
+        const t = patchFs();
+        arm(t);
+        let sent = false;
+        let plan;
+        try {
+          plan = await live.claim(provider, wallet, { swap, secret: preimage, dryRun: true });
+          await expect(live.claim(provider, spying(wallet, () => (sent = true)), { swap, secret: preimage }), what).to.be.rejectedWith(
+            /existing reveal sidecar .* could not be examined or read \(EIO\).*neither moved nor deleted.*nothing was sent/
+          );
+        } finally {
+          t.restore();
+        }
+        expect(plan.revealSidecar, what).to.equal("unreadable");
+        expect(plan.revealSidecarNote, what).to.match(/EIO/);
+        expect(sent, what).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(fs.readFileSync(sideOf(swap), "utf8"), what).to.equal(original);
+        expect(fs.readdirSync(dir).filter((n) => n.includes(".stale-")), what).to.deep.equal([]);
+        expect(leftovers(swap), what).to.deep.equal([]);
+      }
+    });
+
+    it("execute: opts.preSend without opts.fixedGas is refused outright and sends nothing (a gas estimate would run between the guard and the broadcast)", async () => {
+      const n0 = await nonce(aliceAddr);
+      let called = false;
+      await expect(
+        live.execute(provider, alice, {}, { to: aliceAddr, data: "0x" }, {}, {
+          preSend: async () => {
+            called = true;
+          },
+        })
+      ).to.be.rejectedWith(/preSend requires opts\.fixedGas/);
+      expect(called).to.equal(false);
+      expect(await nonce(aliceAddr)).to.equal(n0);
+    });
+
+    // ---- the library's own retry on HTTP 429 must not repeat the claim's send
+    /**
+     * A local HTTP JSON-RPC bridge to the in-process node. bridge.seen lists the methods of every request that arrived (a request is a batch).
+     * bridge.throttle(methods) -> true makes it answer HTTP 429 with retry-after 1 (the request is then NOT forwarded).
+     */
+    async function startBridge() {
+      const bridge = { seen: [], throttle: () => false, throttled: 0, url: null, close: null };
+      const handle = async (rq) => {
+        try {
+          return { jsonrpc: "2.0", id: rq.id, result: await hre.network.provider.send(rq.method, rq.params || []) };
+        } catch (e) {
+          return { jsonrpc: "2.0", id: rq.id, error: { code: e.code || -32603, message: e.message, data: typeof e.data === "string" ? e.data : e.data && e.data.data } };
+        }
+      };
+      const server = http.createServer((req, res) => {
+        const chunks = [];
+        req.on("data", (c) => chunks.push(c));
+        req.on("end", async () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          const methods = (Array.isArray(body) ? body : [body]).map((rq) => rq.method);
+          bridge.seen.push(methods);
+          if (bridge.throttle(methods)) {
+            bridge.throttled += 1;
+            res.writeHead(429, { "content-type": "text/plain", "retry-after": "1" });
+            res.end("slow down");
+            return;
+          }
+          const out = Array.isArray(body) ? await Promise.all(body.map(handle)) : await handle(body);
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify(out));
+        });
+      });
+      await new Promise((r) => server.listen(0, "127.0.0.1", r));
+      bridge.url = `http://127.0.0.1:${server.address().port}`;
+      bridge.close = () =>
+        new Promise((r) => {
+          server.close(r);
+          server.closeAllConnections();
+        });
+      bridge.count = (method) => bridge.seen.filter((m) => m.includes(method)).length;
+      return bridge;
+    }
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
+    it("HTTP 429 to the request that carries the claim: the library does not repeat it; the claim fails, says the sidecar stays and that the send was throttled; the raw transaction was offered once", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const bridge = await startBridge();
+      const p = live.makeProvider(bridge.url);
+      let err;
+      try {
+        bridge.throttle = (methods) => methods.includes("eth_sendRawTransaction") && bridge.throttled === 0;
+        err = await live.claim(p, wallet.connect(p), { swap, secret: preimage }).then(
+          () => null,
+          (e) => e
+        );
+        await pause(3500); // well past the retry-after: a library retry would have landed by now
+        expect(bridge.count("eth_sendRawTransaction"), "the raw transaction reached the endpoint exactly once").to.equal(1);
+        expect(bridge.throttled).to.equal(1);
+      } finally {
+        p.destroy();
+        await bridge.close();
+      }
+      expect(err, "the claim is rejected").to.be.an.instanceOf(Error);
+      expect(err.message).to.match(/refused the send as throttled \(HTTP 429\), so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself\. To send it again as a first reveal, run the claim again now with --margin-s 1800 \(the strict cutoff, whatever the sidecar says\)/);
+      expect(err.message, "no advice that would make a throttled first reveal count as sent").to.match(/run tick --apply before the claim only if you think it did reach the network\)$/);
+      expect(err.message).to.match(/reveal sidecar .* was written before the send and stays: the claim may have reached the network/);
+      expect(live.sendGuard.noRetry, "the switch is back to normal").to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(live.readRevealSidecar(swap, l.lockId).state).to.equal("matching");
+    });
+
+    it("control: HTTP 429 to an earlier request (a read) is retried by the library and the claim succeeds; only the send lost its retry", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const bridge = await startBridge();
+      const p = live.makeProvider(bridge.url);
+      let r;
+      try {
+        bridge.throttle = (methods) => methods.includes("eth_call") && bridge.throttled === 0;
+        r = await live.claim(p, wallet.connect(p), { swap, secret: preimage });
+      } finally {
+        p.destroy();
+        await bridge.close();
+      }
+      expect(bridge.throttled).to.equal(1);
+      expect(bridge.count("eth_call"), "the throttled read was sent again by the library").to.be.greaterThan(1);
+      expect(r.revealSidecar).to.equal("written");
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("after a claim through the command line's provider the switch is back to normal: a later throttled read is retried", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const bridge = await startBridge();
+      const p = live.makeProvider(bridge.url);
+      try {
+        await live.claim(p, wallet.connect(p), { swap, secret: preimage });
+        expect(live.sendGuard.noRetry).to.equal(false);
+        const before = bridge.count("eth_getBlockByNumber");
+        bridge.throttle = (methods) => methods.includes("eth_getBlockByNumber") && bridge.throttled === 0;
+        const b = await p.getBlock("latest");
+        expect(b, "the read succeeded after the library's retry").to.not.equal(null);
+        expect(bridge.throttled).to.equal(1);
+        expect(bridge.count("eth_getBlockByNumber") - before).to.be.greaterThan(1);
+      } finally {
+        p.destroy();
+        await bridge.close();
+      }
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
     });
 
     it("a crash after the write but before the send leaves the sidecar; the next claim keeps it (the earliest time) and sends", async () => {

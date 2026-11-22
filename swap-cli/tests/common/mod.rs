@@ -235,7 +235,7 @@ impl World {
                 let g = self.profile.gates();
                 let mut s = ProducerSummary::synthetic(self.tip, g.producer_window_long, g.producer_window_short, self.eth_time, 300, 450);
                 if !self.single_node {
-                    s.second = SecondCheck::Agrees { height: self.tip.saturating_sub(3) };
+                    s.second = SecondCheck::Agrees { height: self.tip.saturating_sub(3), sampled: 64 };
                 }
                 Some(s)
             }
@@ -309,6 +309,7 @@ impl World {
             single_node_ok: false,
             producers: None,
             accept_producer_concentration: false,
+            producer_marker: Default::default(),
         }
     }
 

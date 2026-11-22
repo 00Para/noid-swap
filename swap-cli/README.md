@@ -71,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 588 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 625 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -576,7 +576,8 @@ a swap against a producer that is visibly large, and nothing else.
 - **What it does.** Under `production`, `lock_eth` is not offered (the action is `wait`, the reason and a note start with `ALARM:`) while one address
   produced more than 35 % of either window (a share exactly at the limit passes; the comparison is on integers), or when the headers cannot be read in
   full, are stale (more than 2 blocks below the tip, or read more than 120 s ago), the chain of `prev_hash` does not link, no summary was read, or the
-  second Parano1d node names another block at the anchor height (three below the lower tip) or could not be read for the cross-check. Under `sepolia`
+  second Parano1d node names another block or another producer at the anchor height (three below the lower tip) or at a sampled height, or could
+  not be read for the cross-check, or an earlier such finding is on record beside the swap file (below). Under `sepolia`
   and `rehearsal` (limit 28 %) the same evaluation runs and only prints a `WARNING:` note; the lock is offered as before. The two largest addresses
   together above 50 % always only warn. In `received` and `funded` the finding is said as information (the lock is decided at `funding_final`).
 - **What reads the headers.** Only `tick`, only Bob's file, only in `received`, `funded` or `funding_final`, only against a live node (`--noid-rpc`;
@@ -588,6 +589,23 @@ a swap against a producer that is visibly large, and nothing else.
   the SHA-256 of its address. A cache that is broken, gapped or unlinked is discarded; a cache whose top hash no longer matches the node (a reorg) is
   repaired from the highest height that still matches (at most 64 deep, else discarded). A warm tick reads one to three headers; a cold one 2,880, in
   12 batches. If the node refuses a batch (the answer is not an array of the right length) the same heights are read with single calls.
+- **The second node's sample (T21-13, built 2026-11-09).** Before, the second node was asked for one block hash, and a first node could report
+  true hashes beside false producers. Now, after the anchor block agrees in hash and producer, the tick draws 32 distinct heights from the short
+  window's range up to the anchor and 32 from the long window's (afresh on every tick, from the operating system's randomness), asks the second
+  node for their union in one batch and compares hash and producer with the first node's entries. The ok note says how many heights were compared
+  (64 when the two draws do not overlap). A missing height, an error or a timeout is "could not be read" (fail closed under `production`, as
+  before). Two findings cannot come from two honest nodes: another producer under an equal hash, and another hash at a sampled height below an
+  anchor that the second node names again, unchanged, after the sample. Either refuses that tick and is **remembered** in
+  `<swap file>.producer-differs` (a version, the height, the time and the kind; no address, no hash; created exclusively, also on a read-only
+  tick; never changed or deleted by the tool), with one history entry `producer_differs_seen` on the next `--apply`. While that file exists
+  `production` does not offer the lock for the rest of the swap, `sepolia` and `rehearsal` warn on every tick, and
+  `--accept-producer-concentration` waives it like the rest of the screen; a marker that cannot be read counts as present. A difference at the
+  anchor itself is never remembered (a reorg near the tip can cause it between honest nodes). To clear a marker after finding the cause, delete
+  it and `<swap file>.producers` together, by hand; move or copy the swap file only together with both. Producers are compared byte for byte,
+  so check once, on a copy of the swap file, that the two real nodes agree before a two-node run (`docs/runbook-two-party.md`). It stays a
+  screen, not a defence: one party on several addresses, two lying nodes or one shared upstream are not covered, and a node that hides a
+  producer only a few points over the limit is missed often (`docs/bob-concentration-gate.md`, section 4, gives the chance per swap by share).
+  The remembered refusal is a new rule of Bob's lock gate (decision 2026-11-09).
 - **The flag.** `--accept-producer-concentration` (no value) waives the `production` refusals above, the fail-closed ones included; it is printed as an
   `OVERRIDDEN` warning on every tick that uses it and written once to the swap file's history (`producer_concentration_overridden: ...`, no phase
   change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is
@@ -597,7 +615,11 @@ a swap against a producer that is visibly large, and nothing else.
   `accept_producer_concentration`. Both are skipped when empty, so recordings and swap files made before the change load unchanged.
 - **The removed-claim alert.** When a reorg removes Bob's mined NOID claim and the node does not show it pending, the tick adds a note that starts with
   `ALERT:` (the file goes back to `secret_seen` and the next tick offers `claim_noid` again). Nothing is sent by the tool; `scripts/live/watch.sh` can
-  pass the alert on (`ALERT_URL`, see `../scripts/live/README.md`). An automatic re-send is not built.
+  pass the alert on (`ALERT_URL`, see `../scripts/live/README.md`). An automatic re-send is not built. The alert text says what to do: send the claim again, then check on the next tick that it is
+  in the pool or included, and repeat if it is gone (the node does not re-admit orphaned transactions after a reorg and removes a copy of the same
+  transaction already in its pool, so a claim re-sent just before the node handles a reorg can vanish again; T21-16), and a claim or refund built near
+  the end of a 144-block epoch can expire unconfirmed and must be built again (design T6). A claim that stays pending past the `D - 19` target, or
+  when the claim branch is closed, draws `ALARM: the NOID claim is still pending ...` on every tick; `watch.sh` forwards that alarm once (T21-12).
 - **Tests.** `tests/producer_gate.rs` (boundaries per profile, every fail-closed case, the texts, the override, the reader against a fake node and a
   loopback node, the cache repairs, the budget, the second-node check, a whole `tick` through the binary, the alert, and a guard that runs a complete
   swap under every profile and compares each tick's action and phase with the screen healthy, absent, failing and overridden), plus unit tests in
@@ -735,7 +757,11 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
      two-instances rule (R4-4). A reveal that was only decided and never sent leaves no marker: it stays a first publication with the strict cutoff.
      *Library path:* a `Runner` whose executor reports an unknown outcome for a `reveal_eth` (it may have been sent) writes `reveal_maybe_sent`;
      that relaxes only the CUTOFF of the re-send (the two-instances rule waits for evidence, not for a crash). A failure the executor knows sent
-     nothing leaves no marker.
+     nothing leaves no marker. Since 2026-11-09 the cutoff that `tick --apply` freezes into a `reveal_eth` intent uses the same evidence as the
+     decision (this marker and the `Runner`'s pending `reveal_eth` record with an unknown outcome included): before, a file handed from the
+     `Runner` to the command line was offered the reveal with a strict cutoff that had already passed. `live.js` itself does not read these two
+     (it reads the history events of `secret_may_be_public`, `reveal_sidecar_seen` and the sidecar), so for such a file its default `--margin-s`
+     still refuses and the operator re-sends with an explicit `--margin-s`, which the intent's cutoff now allows down to `DE`.
   3. *`live.js claim --replace --swap FILE`* that has found and identified the signer's pending claim of THIS lock uses the intent's
      `late_cutoff` (an older intent: the profile's `DE`) even with no marker in the history, because the pending transaction itself proves the secret
      is out. A first claim keeps the strict rule. See `eth/README.md`.
@@ -746,12 +772,23 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
   `intent_decided:reveal_eth`, and a re-send past `T_reveal - M_A` would be judged as a first publication while the secret may already be known to
   anyone who watched the pool.
   *The reveal sidecar* (`swap-cli/src/reveal_sidecar.rs`, `eth/scripts/live.js`): `live.js claim --swap FILE` writes `FILE.reveal-sent` as the last
-  step before it broadcasts (after the cutoff re-check, with the transaction populated): created exclusively through a temporary file and a hard link
-  (an existing name is never replaced), mode 600, fsynced together with its directory. It holds `version` 1, the lock id (64 lower-case hex), the
+  step before it broadcasts (after the cutoff re-check, with the transaction populated). The bytes go to a temporary file beside it (mode 600,
+  written in a loop until every byte is out, fsynced); that file is published with a hard link (an existing name is never replaced) or, where hard
+  links are refused (the `\\wsl.localhost` share), renamed onto the final name (atomic, not exclusive; the final name is never written in place);
+  the directory is synced and the file is read back and compared byte for byte. Then the cutoff is checked once more against the wall clock, and
+  only then is the claim sent. It holds `version` 1, the lock id (64 lower-case hex), the
   signed transaction's hash (64 hex, or `null` when the signer is not a local key and the hash is not known before the broadcast) and the UTC epoch
-  seconds; never the secret, a key, or anything of the swap file. If it cannot be written and made durable `live.js` sends nothing. A sidecar of this
-  lock that exists already is kept as it is (its time is the first attempt); a foreign or unreadable one is moved aside under `.stale-*`, never
-  deleted. `tick` (read-only or `--apply`, so the watch loop too) reads it before it decides: for Alice's file, a sidecar whose lock id equals the
+  seconds; never the secret, a key, or anything of the swap file. If it cannot be written and made durable `live.js` sends nothing, and a file this
+  call had created is removed again (nothing was sent, so it is not evidence; only while the file still holds this call's own bytes, so a
+  record another process put there is left alone); the same when the last wall-clock check refuses. A sidecar of this
+  lock that exists already is evidence of an earlier attempt and is never deleted: its own bytes (so its time, the first attempt) are written
+  again through a new fsynced temporary file and renamed over it, and if that fails nothing is sent and the old file stays. A file at that name
+  whose content is not a sidecar of this lock (another lock, not the format, not a regular file, too large) is moved aside under `.stale-*`,
+  never deleted; one that cannot be examined or read at all (an I/O error) is left where it is and the claim is refused. Two `claim` commands
+  for one swap file must never run at the same time: each can replace, or after a refusal remove, the record the other relies on
+  (`TASKS.md` T21-17). With a local key the claim is signed locally and the signed bytes are handed to the node directly, so that no network
+  read sits between that last check and the send. (Hardened 2026-11-09 after an outside read: before, a short write was not noticed, and on
+  the share a failed fsync left a half-made file that a retry accepted.) `tick` (read-only or `--apply`, so the watch loop too) reads it before it decides: for Alice's file, a sidecar whose lock id equals the
   lock of her phase writes `reveal_sidecar_seen` once (read-only: in memory only), and a re-send is judged by the late cutoff `T_reveal - DE` (the
   intent's `cutoff`, and the check in the engine); `live.js` reads the same file for the same purpose (and the history name `reveal_sidecar_seen`).
   The marker is evidence that a send was STARTED, like `reveal_maybe_sent`, not that the secret is public: it is deliberately NOT in
@@ -765,8 +802,15 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
   re-send with `live.js claim --swap FILE ... --margin-s 1800` run by hand (`reveal.sh` has no such flag), which keeps the strict rule whatever the file says; or delete the sidecar BEFORE the next tick, because the first
   `tick --apply` (the watch loop runs one every 30 s by default) writes the marker into the file for good and deleting the sidecar afterwards changes
   nothing. When in doubt, leave it: an unknown outcome is exactly what it is for.
-  Platform note: on Windows (the default path of `reveal.sh`, through the `\\wsl.localhost` share) a directory cannot be synced and the mode bits are
-  not applied, so there the sidecar is durable as far as the file's own fsync and the share allow, and not forced to mode 600; the content is not secret. What it does not cover: a reveal sent by any program other than `live.js claim --swap`
+  Platform note: on Windows (the default path of `reveal.sh`, through the `\\wsl.localhost` share) a directory cannot be synced from Node and the
+  mode bits are not applied. Measured 2026-11-09: there the file's own fsync is requested and reports success, hard links are refused, a rename
+  over an existing file works; whether that fsync reaches the disk inside the Linux VM is not known. So on that path the sidecar's durability is
+  best effort, and it is not forced to mode 600; the content is not secret. The read-back catches a short or corrupted write, not a lost flush.
+  What makes the evidence permanent is the follow-up `tick --apply`: it writes `reveal_sidecar_seen` into the swap file, with the swap file's own
+  durable write. The swap file and `FILE.reveal-sent` move together: a swap file copied or moved to another folder or machine without its
+  sidecar has lost that evidence unless a `tick --apply` recorded the marker first, and a sidecar is read only beside the file it was written for.
+  A `tick --apply` that runs in the instant between the write of a sidecar and its removal after a refusal would record the marker although
+  nothing was sent (a few milliseconds; the cost is the one described above). What it does not cover: a reveal sent by any program other than `live.js claim --swap`
   (a wallet, `cast`, `live.js` without `--swap`) leaves no sidecar. Keep running `tick --apply` at once after every reveal as well (belt and braces:
   it also sees the claim in the pool).
   Use the receiver key for nothing else (the cancel guard already assumes this).
@@ -949,8 +993,11 @@ others follow).
      file; when given they must equal it (the code hash must in addition equal the local artifact's, see F1 below). `lock` needs a `lock_eth` intent whose `t_reveal` is used (a different `--t-reveal`,
      `--hashlock`, `--receiver` or `--amount-wei` is refused) and the key must be the file's `bob_sender`. `claim` needs a `reveal_eth` intent
      and the intent's `lock_id`; the lock on chain must have the file's receiver, sender, amount and hashlock and the `t_reveal` the intent
-     froze; the cutoff is the earlier of `timelock - --margin-s` and the `cutoff` the engine froze into the intent from the file's `M_A` (the
-     flag can tighten it, never loosen it). `refund` needs a `refund_eth` intent and its `lock_id`, and the same lock check. Every refusal
+     froze; the cutoff is the earlier of `timelock - --margin-s` and the `cutoff` the engine froze into the intent: from the file's `M_A` for a first
+     reveal, or `T_reveal - DE` once the file shows the reveal may already have been sent (`reveal_cutoff_for`). The flag can tighten the
+     frozen cutoff, never loosen it; since 2026-11-09 the frozen cutoff itself is the late one also for a file with `reveal_maybe_sent` or the
+     `Runner`'s pending `reveal_eth` record, which `live.js` does not read, so for such a file a `--margin-s` below the default is honoured down
+     to `DE` (R5-1 above). `refund` needs a `refund_eth` intent and its `lock_id`, and the same lock check. Every refusal
      names the two values that disagree. Without `--swap` the command line prints
      `warning: no --swap FILE, the swap file's intent is not checked (REVIEW-3 F3)` and behaves as before (so deploy and test flows keep
      working). The engine now writes `t_reveal` and `cutoff` into the `reveal_eth` intent; an intent recorded before this change lacks them and
@@ -1106,8 +1153,10 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
     fits). While `done` and the NOID is still there, the wait reason says when `refund_noid` opens. The phase path is the existing one
     (`refund_submitted` -> `refund_included` -> `refunded`, a rollback falls back as in F6); `tick --closed-by` now also accepts the
     wallet CLI's recovery close from these three phases (the existing `h >= D` rule still refuses an earlier close, which paid Bob).
-    The final `refunded` reason says "NOID refunded after the reveal; Bob never claimed it, so both legs ended with Alice" when the
-    history shows a reveal.
+    The final `refunded` reason says "NOID refunded after the reveal; Bob never claimed it, so both legs ended with Alice" only when the
+    history shows the ETH claim mined (final, or mined and not removed by a reorg since). With any other reveal evidence (a decided intent, a
+    sent or dropped reveal, a reverted claim, the sidecar, an unknown outcome) it says that the file shows a reveal that was started or sent,
+    that this tool did not see the ETH claim mined, and to check the ETH lock (2026-11-09, found by an outside read).
   - **Intent ledger.** A `refund_noid` or `refund_eth` intent now resolves only when its own chain shows it (the recorded instance is
     gone; the named lock is refunded or claimed), not when the phase moves for another reason (`revealed` -> `done`, a claim submitted).
     `claim_noid` is never held back by a pending `refund_eth` intent (they spend different things).

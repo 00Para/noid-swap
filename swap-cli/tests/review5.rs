@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use swap_cli::engine::{cancel_intent, secret_may_be_public, tick_apply, Action, Executor, IntentStatus};
+use swap_cli::engine::{cancel_intent, reveal_cutoff_for, secret_may_be_public, tick_apply, Action, Executor, IntentStatus, REVEAL_MAYBE_SENT, REVEAL_SIDECAR_SEEN};
 use swap_cli::params::{Gates, ProfileName};
 use swap_cli::secret::Variant;
 use swap_cli::state::{BobPhase, Phase};
@@ -485,4 +485,153 @@ fn r5_7_a_reveal_intent_whose_lock_was_refunded_resolves_and_no_longer_holds_the
     let out = apply(&s, &mut alice, &path);
     assert_eq!(out.decision.action.kind(), "refund_noid", "{:?}", out.decision);
     assert!(matches!(out.intent, IntentStatus::Recorded(_)), "{:?}", out.intent);
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ cutoff hand-over
+
+/// The record the library `Runner` saves before it hands a reveal to its executor.
+fn runner_pending(maybe_sent: bool, created_at: u64) -> swap_cli::swapfile::PendingAction {
+    swap_cli::swapfile::PendingAction { kind: "reveal_eth".into(), created_at, attempt: 1, maybe_sent, detail: serde_json::json!({}) }
+}
+
+/// Alice's file at `lock_final`, as the library `Runner` could have left it, to be driven by the command-line path next.
+fn runner_left(evidence: &str) -> (Scenario, SwapFile, std::path::PathBuf) {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    let now = s.now();
+    let mut file = s.alice.file.clone();
+    match evidence {
+        "pending record, outcome unknown" => file.set_pending(runner_pending(true, now)),
+        "pending record, known not sent" => file.set_pending(runner_pending(false, now)),
+        "reveal_maybe_sent marker" => file.log(REVEAL_MAYBE_SENT, now),
+        "no evidence" => {}
+        other => panic!("{other}"),
+    }
+    let path = s.dir.path().join("alice-ops.swap.json");
+    (s, file, path)
+}
+
+#[test]
+fn a_file_the_runner_left_with_reveal_evidence_gets_the_late_cutoff_in_the_intent_the_cli_path_freezes() {
+    // `tick_apply` has no rule against a `pending_action` record, so the hand-over is driven directly: the Runner's leftovers, then one CLI tick.
+    for (evidence, relaxed) in [
+        ("pending record, outcome unknown", true),
+        ("reveal_maybe_sent marker", true),
+        ("pending record, known not sent", false),
+        ("no evidence", false),
+    ] {
+        let (s, mut file, path) = runner_left(evidence);
+        let (_, t_reveal) = lock_of(&s);
+        let g = *s.gates();
+        // Past T_reveal - M_A, before T_reveal - DE.
+        s.world.borrow_mut().warp_eth_to(t_reveal - g.m_a_s + 100);
+        let out = apply(&s, &mut file, &path);
+        if relaxed {
+            assert_eq!(out.decision.action.kind(), "reveal_eth", "{evidence}: {:?}", out.decision);
+            let IntentStatus::Recorded(i) = &out.intent else { panic!("{evidence}: {:?}", out.intent) };
+            let cutoff = i.params["cutoff"].as_u64().unwrap();
+            assert_eq!(cutoff, t_reveal - g.de_s, "{evidence}: the intent freezes the cutoff the decision used");
+            assert!(s.now() <= cutoff, "{evidence}: the frozen cutoff has not passed");
+            assert_eq!(i.params["late_cutoff"], i.params["cutoff"], "{evidence}");
+        } else {
+            assert_ne!(out.decision.action.kind(), "reveal_eth", "{evidence}: a first publication past M_A is refused: {:?}", out.decision);
+            assert_eq!(out.intent, IntentStatus::None, "{evidence}");
+            assert_eq!(reveal_cutoff_for(&file, t_reveal), t_reveal - g.m_a_s, "{evidence}");
+        }
+    }
+}
+
+#[test]
+fn reveal_cutoff_for_is_the_late_one_for_each_kind_of_evidence_and_the_strict_one_for_none() {
+    let (s, clean, _) = runner_left("no evidence");
+    let (_, t_reveal) = lock_of(&s);
+    let g = *s.gates();
+    let now = s.now();
+    assert_eq!(reveal_cutoff_for(&clean, t_reveal), t_reveal - g.m_a_s);
+    for what in ["secret may be public", "reveal_maybe_sent marker", "pending record, outcome unknown", "reveal sidecar seen"] {
+        let mut f = clean.clone();
+        match what {
+            "secret may be public" => f.log("eth_reveal_dropped", now),
+            "reveal_maybe_sent marker" => f.log(REVEAL_MAYBE_SENT, now),
+            "pending record, outcome unknown" => f.set_pending(runner_pending(true, now)),
+            _ => f.log(REVEAL_SIDECAR_SEEN, now),
+        }
+        assert_eq!(reveal_cutoff_for(&f, t_reveal), t_reveal - g.de_s, "{what}");
+        // Only the first of them is the secret being public: the others relax the cutoff and nothing else.
+        assert_eq!(secret_may_be_public(&f), what == "secret may be public", "{what}");
+    }
+    let mut f = clean.clone();
+    f.set_pending(runner_pending(false, now));
+    assert_eq!(reveal_cutoff_for(&f, t_reveal), t_reveal - g.m_a_s, "a record whose executor knew nothing was sent");
+    let mut f = clean;
+    f.set_pending(swap_cli::swapfile::PendingAction { kind: "fund_noid".into(), created_at: now, attempt: 1, maybe_sent: true, detail: serde_json::json!({}) });
+    assert_eq!(reveal_cutoff_for(&f, t_reveal), t_reveal - g.m_a_s, "a pending record of another kind");
+}
+
+// ------------------------------------------------------------------------------------------------------------------------ the `refunded` wording
+
+/// Alice's file ends in `refunded` with no reveal at all: Bob never locks, she takes the NOID back at D.
+fn alice_refunded_without_a_reveal() -> Scenario {
+    let mut s = Scenario::new(Variant::Raw);
+    s.bob.executor.offline_for.insert("lock_eth");
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    s.world.borrow_mut().advance_noid(18);
+    s.tick_both();
+    s.world.borrow_mut().advance_noid(200);
+    s.tick_bob();
+    let tip = s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(s.public.params.deadline_height - 1 - tip);
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "refund_noid", "{r:?}");
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(18);
+    s.tick_alice();
+    assert_eq!(s.alice_phase(), "refunded");
+    s
+}
+
+fn refunded_reason(s: &mut Scenario) -> String {
+    match s.tick_alice().action {
+        Action::Wait { reason } => reason,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_refunded_reason_says_both_legs_ended_with_alice_only_when_the_eth_claim_was_seen_mined() {
+    let both = "both legs ended with Alice";
+    let unseen = "did not see the ETH claim mined";
+    let mut s = alice_refunded_without_a_reveal();
+    let r = refunded_reason(&mut s);
+    assert_eq!(r, "done: NOID refunded");
+    // A reveal was sent and no claim was seen: no claim about the ETH leg.
+    s.alice.file.log("reveal_submitted", 1);
+    let r = refunded_reason(&mut s);
+    assert!(r.contains(unseen) && !r.contains(both), "{r}");
+    // A claim seen mined and then taken back by a reorg is not a received claim.
+    s.alice.file.log("eth_claim_mined", 2);
+    let r = refunded_reason(&mut s);
+    assert!(r.contains(both) && !r.contains(unseen), "{r}");
+    s.alice.file.log("eth_claim_reorged", 3);
+    let r = refunded_reason(&mut s);
+    assert!(r.contains(unseen) && !r.contains(both), "{r}");
+    // Mined again after the reorg: seen mined.
+    s.alice.file.log("eth_claim_mined", 4);
+    let r = refunded_reason(&mut s);
+    assert!(r.contains(both) && !r.contains(unseen), "{r}");
+    // Final alone (no mined entry in a trimmed history) counts too.
+    let mut s = alice_refunded_without_a_reveal();
+    s.alice.file.log("eth_claim_final", 1);
+    let r = refunded_reason(&mut s);
+    assert!(r.contains(both), "{r}");
+    // Every other kind of reveal evidence gives the same hint, never the plain "done" and never "both legs".
+    for marker in ["reveal_sidecar_seen", "reveal_maybe_sent", "reveal_reverted_seen", "reveal_pending_seen", "eth_reveal_dropped", "intent_decided:reveal_eth"] {
+        let mut s = alice_refunded_without_a_reveal();
+        s.alice.file.log(marker, 1);
+        let r = refunded_reason(&mut s);
+        assert!(r.contains(unseen) && !r.contains(both), "{marker}: {r}");
+    }
 }

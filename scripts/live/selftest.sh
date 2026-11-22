@@ -786,6 +786,233 @@ else
   echo "skip tick.sh ALERT lines (no python3 on this machine that reads this shell's paths)"
 fi
 
+
+# ---- (13) setup.sh picks a recent log start (run 14 finding 1), against a stub curl that answers eth_getBlockByNumber from a map file (no network)
+RPCSTUB="$TMP/rpcstub"
+cat > "$RPCSTUB" <<'STUB'
+#!/bin/sh
+url=$(sed -n 's/^url = "\(.*\)"$/\1/p')
+body=""; while [ $# -gt 0 ]; do if [ "$1" = -d ]; then body=$2; fi; shift; done
+case "$body" in *eth_chainId*) tag=chainId ;; *) tag=$(printf '%s' "$body" | sed -n 's/.*"params":\["\([a-z]*\)".*/\1/p') ;; esac
+printf '%s %s\n' "$url" "$tag" >> "$RPC_LOG"
+line=$(grep -F "$url $tag " "$RPC_MAP" | head -n 1)
+if [ -z "$line" ]; then
+  # no map entry: the chain id defaults to Sepolia (0xaa36a7 = 11155111), everything else is an HTTP error
+  if [ "$tag" = chainId ]; then echo '{"jsonrpc":"2.0","id":1,"result":"0xaa36a7"}'; exit 0; fi
+  exit 22
+fi
+printf '%s\n' "${line#"$url $tag "}"
+STUB
+chmod +x "$RPCSTUB"
+blk() { printf '{"jsonrpc":"2.0","id":1,"result":{"number":"%s","hash":"0xab","transactions":[]}}' "$1"; }
+# setup_run NAME 'MAP TEXT' [VAR=value ...]: runs setup.sh in a new run folder with the stub; sets SD (folder), SOUT (stdout+stderr), SRC (status), SLOG (nodes asked)
+setup_run() {
+  local name=$1 map=$2; shift 2
+  SD=$(mkl "setup-$name"); printf '%s\n' "$map" > "$SD/rpc.map"; rm -f "$SD/rpc.log"
+  SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/rpc.map" RPC_LOG="$SD/rpc.log" RUN=7 ETH_RPC=http://e1 ${1+"$@"} \
+    "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+  SLOG=$(cat "$SD/rpc.log" 2>/dev/null)
+}
+sb() { cat "$SD/eth-deploy-block.txt" 2>/dev/null || echo none; }
+setup_run fin "http://e1 finalized $(blk 0x1d4c0)"
+check "setup.sh: the log start is the finalized block (0x1d4c0 = 120000) minus the margin 2400 = 117600; the chain id was checked first" "0|117600|http://e1 chainId,http://e1 finalized" "$SRC|$(sb)|$(printf '%s\n' "$SLOG" | paste -sd, -)"
+check_has "setup.sh: ... said on the screen" "log start 117600 (finalized block minus 2400" "$SOUT"
+check "setup.sh: ... the passphrase is made and the run line shows the start" "1|1" "$([ -s "$SD/passphrase.txt" ] && echo 1 || echo 0)|$(printf '%s\n' "$SOUT" | grep -c 'eth from block 117600')"
+check "setup.sh: from_block_flags passes it on" "--eth-from-block 117600" "$(run_native "$SD" 'echo $(from_block_flags)' ETH_RPC=http://e1)"
+setup_run margin0 "http://e1 finalized $(blk 0x1d4c0)" ETH_START_MARGIN=0
+check "setup.sh: ETH_START_MARGIN=0 gives the finalized block itself" "0|120000" "$SRC|$(sb)"
+setup_run bigmargin "http://e1 finalized $(blk 0x1d4c0)" ETH_START_MARGIN=999999
+check "setup.sh: a margin larger than the block number gives 0" "0|0" "$SRC|$(sb)"
+setup_run wrongchain "http://e1 chainId {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}
+http://e1 finalized $(blk 0x1d4c0)"
+check "setup.sh: a node on another chain (mainnet 0x1 against CHAIN 11155111): exit 2, no start file" "2|none" "$SRC|$(sb)"
+check_has "setup.sh: ... the message says both chains and does not print the URL" "is on chain 1 but this run is chain 11155111" "$SOUT"
+setup_run chainmatch "http://e1 chainId {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}
+http://e1 finalized $(blk 0x1d4c0)" CHAIN=1
+check "setup.sh: ... and the same node is fine when the run is chain 1" "0|117600" "$SRC|$(sb)"
+setup_run nochain "http://e1 chainId {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}
+http://e1 finalized $(blk 0x1d4c0)"
+check "setup.sh: a node whose chain id cannot be read: exit 2, no start file" "2|none" "$SRC|$(sb)"
+setup_run nofin "http://e1 finalized {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"unsupported\"}}
+http://e1 latest $(blk 0x1d4c0)"
+check "setup.sh: no finalized block served -> the latest block minus 256 minus the margin 2400 (120000 - 256 - 2400 = 117344)" "0|117344" "$SRC|$(sb)"
+setup_run nullfin "http://e1 finalized {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":null}
+http://e1 latest $(blk 0x1d4c0)" ETH_START_MARGIN=1000
+check "setup.sh: a null finalized answer falls back too, and ETH_START_MARGIN is honoured (120000 - 256 - 1000 = 118744)" "0|118744" "$SRC|$(sb)"
+setup_run small "http://e1 finalized {\"result\":null}
+http://e1 latest $(blk 0x64)"
+check "setup.sh: a latest block below the margin gives 0, not a negative number" "0|0" "$SRC|$(sb)"
+setup_run two "http://e1 finalized $(blk 0x1d4c0)
+http://e2 finalized $(blk 0x1d000)" ETH_RPC2=http://e2
+check "setup.sh: with two nodes the LOWER start wins (0x1d000 - 2400 = 116384); both nodes were asked, chain id and block each" "0|116384|4" "$SRC|$(sb)|$(printf '%s\n' "$SLOG" | grep -c .)"
+setup_run two2 "http://e1 finalized $(blk 0x1d000)
+http://e2 finalized $(blk 0x1d4c0)" ETH_RPC2=http://e2
+check "setup.sh: ... whichever node it is" "0|116384" "$SRC|$(sb)"
+setup_run twobad "http://e1 finalized $(blk 0x1d4c0)" ETH_RPC2=http://e2
+check "setup.sh: a second node that cannot be read stops the choice (fail closed, no file, exit 2)" "2|none" "$SRC|$(sb)"
+setup_run down ""
+check "setup.sh: an unreadable node: exit 2, no start file" "2|none" "$SRC|$(sb)"
+check_has "setup.sh: ... with a message that names DEPLOY_BLOCK" "DEPLOY_BLOCK" "$SOUT"
+setup_run garbage "http://e1 finalized <html>bad gateway</html>
+http://e1 latest <html>bad gateway</html>"
+check "setup.sh: a non-JSON answer is not a block: exit 2, no start file" "2|none" "$SRC|$(sb)"
+setup_run errlatest "http://e1 finalized {\"error\":{\"code\":4444,\"message\":\"pruned history unavailable\"}}
+http://e1 latest {\"error\":{\"code\":-1,\"message\":\"x\",\"number\":\"0x5\"}}"
+check "setup.sh: an error object is never read for a number" "2|none" "$SRC|$(sb)"
+setup_run badmargin "http://e1 finalized $(blk 0x1d4c0)" ETH_START_MARGIN=ten
+check "setup.sh: a bad ETH_START_MARGIN is refused, no start file" "2|none" "$SRC|$(sb)"
+setup_run explicit "http://e1 finalized $(blk 0x1d4c0)" DEPLOY_BLOCK=12095751
+check "setup.sh: an explicit DEPLOY_BLOCK wins and the node is not asked" "0|12095751|" "$SRC|$(sb)|$SLOG"
+D=$(mkl setup-envlocal 'DEPLOY_BLOCK=5000')
+SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$D" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$D/none" RPC_LOG="$D/rpc.log" RUN=7 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+check "setup.sh: DEPLOY_BLOCK in env.local.sh counts too" "0|5000|none" "$SRC|$(cat "$D/eth-deploy-block.txt")|$([ -e "$D/rpc.log" ] && echo some || echo none)"
+setup_run badexplicit "" DEPLOY_BLOCK=12abc
+check "setup.sh: a DEPLOY_BLOCK that is not a number is refused" "2|none" "$SRC|$(sb)"
+# an existing start file is kept, the node is not asked
+SD=$(mkl setup-kept); echo 424242 > "$SD/eth-deploy-block.txt"; : > "$SD/rpc.map"
+SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/rpc.map" RPC_LOG="$SD/rpc.log" RUN=7 ETH_RPC=http://e1 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+check "setup.sh: an existing eth-deploy-block.txt is kept and the node is not asked" "0|424242|none" "$SRC|$(sb)|$([ -e "$SD/rpc.log" ] && echo some || echo none)"
+# a run folder that already holds a swap file gets no fresh guess (its lock may be on chain already)
+SD=$(mkl setup-swapfile); mkdir -p "$SD/bob"; echo '{}' > "$SD/bob/bob.swap.json"; printf '%s\n' "http://e1 finalized $(blk 0x1d4c0)" > "$SD/rpc.map"
+SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/rpc.map" RPC_LOG="$SD/rpc.log" RUN=7 ETH_RPC=http://e1 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+check "setup.sh: a folder with a swap file and no start file: no guess, no file, no node call, exit 0" "0|none|none" "$SRC|$(sb)|$([ -e "$SD/rpc.log" ] && echo some || echo none)"
+check_has "setup.sh: ... and it says why" "carries its own stored start" "$SOUT"
+check "setup.sh: ... and from_block_flags then prints nothing (the swap file's stored start is used)" "" "$(run_native "$SD" 'echo $(from_block_flags)')"
+# the URL travels on curl's standard input, not in its arguments (an endpoint may carry a key)
+KURL='http://node.example/v2/KEY-SECRET-77'
+ARGSTUB="$TMP/argstub"
+cat > "$ARGSTUB" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$ARG_LOG"; cat >> "$ARG_LOG.stdin"
+case "$*" in *eth_chainId*) echo '{"result":"0xaa36a7"}' ;; *) echo '{"result":{"number":"0x10"}}' ;; esac
+STUB
+chmod +x "$ARGSTUB"
+SD=$(mkl setup-urlarg); SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$ARGSTUB" ARG_LOG="$SD/args.log" RUN=7 ETH_START_MARGIN=0 ETH_RPC="$KURL" "$BASH" "$HERE/setup.sh" 2>&1)
+case "$(cat "$SD/args.log")" in *KEY-SECRET*) bad "setup.sh: the node URL is not among curl's arguments" ;; *) ok "setup.sh: the node URL is not among curl's arguments" ;; esac
+check "setup.sh: ... it went to curl's standard input, and the start is 16 (margin 0) after two calls" "2|16" "$(grep -c 'KEY-SECRET-77' "$SD/args.log.stdin")|$(sb)"
+
+# ---- (14) the once-per-stuck-claim phone message (T21-12): alarm_hook and watch.sh
+ALARM_LATE="ALARM: the NOID claim is still pending (not seen mined) and the next call height 99 is past the D-19 target (D 100): if it is mined now it is not final before Alice's refund opens at D"
+ALARM_CLOSED="ALARM: the NOID claim is still pending but the claim branch is closed (next call height 100 >= D 100): it can no longer be mined validly"
+AMSG_LATE="noid-swap run 7: Bob's NOID claim is still pending past its target; look at the loop log"
+AMSG_CLOSED="noid-swap run 7: Bob's NOID claim is still pending and the claim branch is closed; look at the loop log"
+alarm_run() {   # alarm_run CURL_EXIT 'TEXT' [ROLE]: in the folder AD; sets AOUT, ARC, ALOG
+  local cx=$1 text=$2 role=${3:-bob}
+  AOUT=$(printf '%s\n' "$text" | env -i HOME="$TMP/home" PATH="$PATH" L="$AD" HERE="$HERE" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" CURL_EXIT="$cx" RUN=7 \
+    "$BASH" -c 'set -u; . "$HERE/env.sh"; alarm_hook '"$role" 2>&1); ARC=$?
+  ALOG=$(cat "$AD/curl.log" 2>/dev/null)
+}
+nlatch() { ls "$AD" | grep -c '^alarm-sent' || true; }
+AD=$(mkl alarm "ALERT_URL=$SECRET_URL")
+alarm_run 0 "$(printf '%s\n' 'notes: ["x"]' "$ALARM_LATE")"
+check "alarm_hook: the late alarm is sent once, as the fixed message, the URL not among the arguments" "0||-s -f -m 20 -d $AMSG_LATE -K -" "$ARC|$AOUT|$ALOG"
+check "alarm_hook: ... the URL went to curl on its standard input" "url = \"$SECRET_URL\"" "$(cat "$AD/curl.log.stdin")"
+check "alarm_hook: ... an empty latch file was made" "1|0" "$(nlatch)|$(wc -c < "$AD/alarm-sent-bob-late" | tr -d ' ')"
+alarm_run 0 "$ALARM_LATE"; alarm_run 0 "$ALARM_LATE"
+check "alarm_hook: the same alarm on later ticks is not sent again" "1" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alarm_run 0 "$(printf '%s\n' "$ALARM_LATE" "$ALARM_LATE")"
+check "alarm_hook: ... nor twice in one tick output" "1" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alarm_run 0 "$ALARM_CLOSED"
+check "alarm_hook: the other kind (claim branch closed) is a new message, once" "2|$AMSG_CLOSED -K -" "$(printf '%s\n' "$ALOG" | grep -c .)|$(printf '%s\n' "$ALOG" | sed -n 2p | sed -e 's/^-s -f -m 20 -d //')"
+alarm_run 0 "$ALARM_CLOSED"
+check "alarm_hook: ... and not again" "2" "$(printf '%s\n' "$ALOG" | grep -c .)"
+case "$ALOG" in *"D 100"*|*"99"*|*"Alice"*) bad "alarm_hook: nothing of the alarm text leaves in the message" "$ALOG" ;; *) ok "alarm_hook: nothing of the alarm text leaves in the message" ;; esac
+AD=$(mkl alarm-filter "ALERT_URL=$SECRET_URL")
+alarm_run 0 "ALARM: this lock's T_reveal is beyond the engine's own bound"
+alarm_run 0 'notes: ["ALARM: the NOID claim is still pending (not at the start of a line)"]'
+alarm_run 0 "ALERT: a reorg removed Bob's NOID claim"
+check "alarm_hook: other ALARM notes, a note inside the notes line and ALERT lines are not forwarded by it (fresh folder, no latch)" "none|0" "$([ -e "$AD/curl.log" ] && echo some || echo none)|$(nlatch)"
+AD="$TMP/alarm"   # back to the first folder (both kinds already latched there)
+alarm_run 0 "$ALARM_LATE" alice
+check "alarm_hook: the latch is per swap file (role): Alice's file has its own" "3" "$(printf '%s\n' "$ALOG" | grep -c .)"
+AD=$(mkl alarm-nourl)
+alarm_run 0 "$ALARM_LATE"
+check "alarm_hook: without ALERT_URL nothing is sent and no latch is made" "none|0" "$([ -e "$AD/curl.log" ] && echo some || echo none)|$(nlatch)"
+AD=$(mkl alarm-fail "ALERT_URL=$SECRET_URL")
+alarm_run 1 "$ALARM_LATE"
+check "alarm_hook: a failing curl returns 0, prints nothing and leaves no latch (so the next tick tries again)" "0||1|0" "$ARC|$AOUT|$(printf '%s\n' "$ALOG" | grep -c .)|$(nlatch)"
+alarm_run 1 "$ALARM_LATE"
+check "alarm_hook: ... and it does try again on the next tick" "2" "$(printf '%s\n' "$ALOG" | grep -c .)"
+alarm_run 0 "$ALARM_LATE"; alarm_run 0 "$ALARM_LATE"
+check "alarm_hook: ... once curl works it is sent and latched (three tries in all)" "3|1" "$(printf '%s\n' "$ALOG" | grep -c .)|$(nlatch)"
+AD=$(mkl alarm-held "ALERT_URL=$SECRET_URL"); : > "$AD/alarm-sent-bob-late"
+alarm_run 0 "$ALARM_LATE"
+check "alarm_hook: an existing latch (another loop, or an earlier pass of this one) blocks the send" "none" "$([ -e "$AD/curl.log" ] && echo some || echo none)"
+AD=$(mkl alarm-nofolder "ALERT_URL=$SECRET_URL")
+AOUT=$(printf '%s\n' "$ALARM_LATE" | env -i HOME="$TMP/home" PATH="$PATH" L="$AD" HERE="$HERE" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl2.log" RUN=7 "$BASH" -c 'set -u; . "$HERE/env.sh"; L="$L/gone"; alarm_hook bob' 2>&1); ARC=$?
+check "alarm_hook: a latch that cannot be made means no send (never a message on every tick) and still exit 0" "0|none" "$ARC|$([ -e "$AD/curl2.log" ] && echo some || echo none)"
+
+# watch.sh: the alarm printed on every tick is forwarded once; a failing curl does not stop the loop and is tried on each tick
+AW="$TMP/watchalarm"; mkdir -p "$AW"
+cp "$HERE/env.sh" "$HERE/watch.sh" "$AW/"
+cat > "$AW/tick.sh" <<'STUB'
+#!/bin/sh
+n=$(cat "$STUB_CNT" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$STUB_CNT"
+PH=claim_submitted; [ "$n" -lt 4 ] || PH=done
+echo "[$1] tick exit 0 at 12:00:0$n"
+echo "noid: tip 281108"; echo "eth : latest 1416"; echo "sources: {}"; echo "events: []"
+echo 'ACTION: {"action": "wait"}'
+echo 'notes: ["ALARM: the NOID claim is still pending (not seen mined) and the next call height 99 is past the D-19 target (D 100)"]'
+echo "ALARM: the NOID claim is still pending (not seen mined) and the next call height 99 is past the D-19 target (D 100): if it is mined now it is not final before Alice's refund opens at D"
+echo "applied: True phase_after: $PH"
+STUB
+chmod +x "$AW/tick.sh"
+AD=$(mkl watch-alarm "ALERT_URL=$SECRET_URL")
+WAOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AW/watch.sh" bob 0 2>&1 < /dev/null); WARC=$?
+check "watch.sh: the pending-claim alarm printed on four ticks is sent once" "0|1|-s -f -m 20 -d $AMSG_LATE -K -" "$WARC|$(grep -c . "$AD/curl.log")|$(cat "$AD/curl.log")"
+case "$WAOUT" in *hook-SECRET*) bad "watch.sh: the URL is never printed (alarm)" "$WAOUT" ;; *) ok "watch.sh: the URL is never printed (alarm)" ;; esac
+AD=$(mkl watch-alarm-fail "ALERT_URL=$SECRET_URL")
+env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" CURL_EXIT=7 RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AW/watch.sh" bob 0 >/dev/null 2>&1 < /dev/null; WFRC=$?
+check "watch.sh: a failing curl does not stop the loop (four ticks, exit 0), the alarm is tried on each tick, no latch kept" "0|4|4|0" "$WFRC|$(grep -c . "$AD/loop-bob.txt")|$(grep -c . "$AD/curl.log")|$(nlatch)"
+AD=$(mkl watch-alarm-nourl)
+env -i HOME="$TMP/home" PATH="$PATH" L="$AD" LIVE_PLATFORM=native CURL="$CURLSTUB" CURL_LOG="$AD/curl.log" RUN=7 STUB_CNT="$AD/cnt" "$BASH" "$AW/watch.sh" bob 0 >/dev/null 2>&1 < /dev/null
+check "watch.sh without ALERT_URL: the alarm sends nothing" "none" "$([ -e "$AD/curl.log" ] && echo some || echo none)"
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import sys; open(sys.argv[1]).close()' "$TMP/pyprobe" 2>/dev/null; then
+  cat > "$TMP/tickstub2" <<'STUB'
+#!/bin/sh
+cat <<'JSON'
+{"noid": {"tip": 5}, "eth": {}, "sources": {}, "events": [], "action": {"kind": "wait"}, "notes": ["one", "ALARM: the NOID claim is still pending (not seen mined) and the next call height 99", "ALARM: another thing", "two"], "intent": {}, "events_applied_to_file": true, "phase_after": "claim_submitted"}
+JSON
+STUB
+  chmod +x "$TMP/tickstub2"
+  D=$(mkl tickalarm); mkdir -p "$D/rec" "$D/bob"; echo "selftest-passphrase" > "$D/passphrase.txt"
+  TOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$D" LIVE_PLATFORM=native BIN="$TMP/tickstub2" "$BASH" "$TB/tick.sh" bob 2>/dev/null)
+  check "tick.sh: the pending-claim ALARM note is a line of its own, other ALARM notes are not" "1|0" "$(printf '%s\n' "$TOUT" | grep -c '^ALARM: the NOID claim is still pending')|$(printf '%s\n' "$TOUT" | grep -c '^ALARM: another' || true)"
+else
+  echo "skip tick.sh ALARM lines (no python3 on this machine that reads this shell's paths)"
+fi
+
+# alarm re-arm: a COMPLETE tick (its `applied:` line) that no longer shows a kind ends the episode, so the next one is announced again
+AD=$(mkl alarm-rearm "ALERT_URL=$SECRET_URL")
+alarm_run 0 "$ALARM_LATE"
+alarm_run 0 "$(printf '%s\n' 'noid: tip 1' 'applied: True phase_after: claim_submitted')"
+check "alarm_hook: a tick that fails or prints no applied: line re-arms nothing; a complete tick without the alarm does" "1|0" "$(printf '%s\n' "$ALOG" | grep -c .)|$(nlatch)"
+alarm_run 0 "$ALARM_LATE"
+check "alarm_hook: ... and the next episode of the same kind is sent again" "2|1" "$(printf '%s\n' "$ALOG" | grep -c .)|$(nlatch)"
+alarm_run 0 "$(printf '%s\n' "$ALARM_LATE" 'applied: True phase_after: claim_submitted')"
+check "alarm_hook: ... a complete tick that still shows the alarm keeps the latch (no repeat)" "2|1" "$(printf '%s\n' "$ALOG" | grep -c .)|$(nlatch)"
+alarm_run 0 "tick exit 1 and no output at all"
+check "alarm_hook: ... an unreadable tick keeps the latch" "1" "$(nlatch)"
+
+# from_block_flags never passes a start higher than the one a swap file in the folder already carries (a rebuilt folder must not move it past a lock)
+FB=$(mkl fromblock); echo 5000000 > "$FB/eth-deploy-block.txt"
+check "from_block_flags: no swap file: the file's value is passed" "--eth-from-block 5000000" "$(run_native "$FB" 'echo $(from_block_flags)')"
+mkdir -p "$FB/bob"; printf '{\n  "phase": "x",\n  "eth_from_block": 1000000\n}\n' > "$FB/bob/bob.swap.json"
+check "from_block_flags: a swap file with a LOWER stored start: nothing is passed, the stored start is used" "" "$(run_native "$FB" 'echo $(from_block_flags)' 2>/dev/null)"
+check_has "from_block_flags: ... and it says so on stderr" "is NOT passed, the stored start is used" "$(run_native "$FB" 'from_block_flags 2>&1 >/dev/null')"
+printf '{\n  "eth_from_block": 9000000\n}\n' > "$FB/bob/bob.swap.json"
+check "from_block_flags: a swap file with a HIGHER stored start: the file's (lower) value is passed" "--eth-from-block 5000000" "$(run_native "$FB" 'echo $(from_block_flags)')"
+printf '{\n  "eth_from_block": null\n}\n' > "$FB/bob/bob.swap.json"
+check "from_block_flags: a swap file with no stored start: the file's value is passed" "--eth-from-block 5000000" "$(run_native "$FB" 'echo $(from_block_flags)')"
+FA=$(mkl fromblock-alice); echo 5000000 > "$FA/eth-deploy-block.txt"; printf '{"eth_from_block": 42}\n' > "$FA/alice.swap.json"
+check "from_block_flags: Alice's swap file counts too" "" "$(run_native "$FA" 'echo $(from_block_flags)' 2>/dev/null)"
+# setup.sh with Alice's swap file present and no start file: no guess
+SD=$(mkl setup-aliceswap); printf '{}\n' > "$SD/alice.swap.json"; printf '%s\n' "http://e1 finalized $(blk 0x1d4c0)" > "$SD/rpc.map"
+SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/rpc.map" RPC_LOG="$SD/rpc.log" RUN=7 ETH_RPC=http://e1 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+check "setup.sh: Alice's swap file blocks the guess too" "0|none|none" "$SRC|$(sb)|$([ -e "$SD/rpc.log" ] && echo some || echo none)"
+SD=$(mkl setup-swapexplicit2); printf '{}\n' > "$SD/alice.swap.json"
+SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/none" RPC_LOG="$SD/rpc.log" RUN=7 DEPLOY_BLOCK=777 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
+check "setup.sh: an explicit DEPLOY_BLOCK is honoured even with a swap file present (the operator's word)" "0|777" "$SRC|$(sb)"
 echo
 echo "$PASS ok, $FAILS failed (bash $BASH_VERSION)"
 [ "$FAILS" -eq 0 ]

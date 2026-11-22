@@ -1413,8 +1413,10 @@ fn note_reverted_reveal(file: &mut SwapFile, eth: &EthObservation, now: u64) {
 }
 
 /// REVIEW-5 R5-1, library path: the reveal may have left the process ([`secret_may_be_public`], or an executor that reported an unknown
-/// outcome, [`REVEAL_MAYBE_SENT`]). Used only for the CUTOFF of a re-send (`T_reveal - DE` instead of `T_reveal - M_A`): not for the
-/// two-instances rule, which waits for evidence and not for a crash that may have sent nothing.
+/// outcome, [`REVEAL_MAYBE_SENT`], a pending `reveal_eth` record, the reveal sidecar). Used only for the CUTOFF of a re-send (`T_reveal - DE`
+/// instead of `T_reveal - M_A`): not for the two-instances rule, which waits for evidence and not for a crash that may have sent nothing.
+/// The decision and the cutoff frozen into the `reveal_eth` intent ([`reveal_cutoff_for`]) both use this one predicate, so a file that the
+/// library [`Runner`] left with such evidence and the command-line path then drives is offered the reveal and judged by the same cutoff.
 fn reveal_may_have_been_sent(file: &SwapFile) -> bool {
     secret_may_be_public(file) || last_history(file, REVEAL_MAYBE_SENT).is_some() || reveal_pending_unknown(file) || reveal_sidecar_seen(file)
 }
@@ -1464,11 +1466,11 @@ fn note_reveal_pending(file: &mut SwapFile, eth: &EthObservation, now: u64) {
     }
 }
 
-/// The latest time Alice's reveal may still be sent under this file's profile: the `M_A` cutoff, or `T_reveal - DE` once the secret may
-/// be public (Review H1).
+/// The latest time Alice's reveal may still be sent under this file's profile: the `M_A` cutoff, or `T_reveal - DE` once the reveal may
+/// already have been sent ([`reveal_may_have_been_sent`], the predicate the decision uses too; Review H1). The intent freezes this value.
 pub fn reveal_cutoff_for(file: &SwapFile, t_reveal: u64) -> u64 {
     let g = file.public.params.profile.gates();
-    if secret_may_be_public(file) || reveal_sidecar_seen(file) {
+    if reveal_may_have_been_sent(file) {
         t_reveal.saturating_sub(g.de_s)
     } else {
         g.reveal_cutoff(t_reveal)
@@ -1857,7 +1859,7 @@ fn reorg_note(what: &str, txid: &str, height: u64, still_pending: bool) -> Strin
 /// file goes back to `secret_seen` and the next tick offers `claim_noid` again). Nothing is sent by the tool: the dry run and the submit are
 /// the operator's commands (`claim.sh` of `scripts/live`). The line starts with `ALERT:` so that `scripts/live/watch.sh` can pass it on
 /// (docs/bob-concentration-gate.md section 10); it names no address, amount or transaction.
-pub const CLAIM_REMOVED_ALERT: &str = "ALERT: a reorg removed Bob's NOID claim from the chain and it is not pending. Send it again: `bash $L/bin/claim.sh` is the dry run, check it, then `bash $L/bin/claim.sh --submit` ($L is the helpers' run folder)";
+pub const CLAIM_REMOVED_ALERT: &str = "ALERT: a reorg removed Bob's NOID claim from the chain and it is not pending. Send it again: `bash $L/bin/claim.sh` is the dry run, check it, then `bash $L/bin/claim.sh --submit` ($L is the helpers' run folder). Then check on the next tick that the claim is in the pool or included, and send it again if it is gone (the node can drop a claim sent just before it handles a reorg); a claim built near the end of a 144-block epoch can expire unconfirmed and must be built again";
 
 fn claim_removed_alert() -> String {
     CLAIM_REMOVED_ALERT.to_string()
@@ -2047,10 +2049,19 @@ fn alice_action(
             }
         }
         A::Refunded { .. } => Action::Wait {
-            reason: if file.history.iter().any(|h| h.event == "reveal_submitted" || h.event == "eth_claim_mined") {
-                "done: NOID refunded after the reveal; Bob never claimed it (as far as this tool saw, the refund closed the instance, so it was still unspent), so both legs ended with Alice".into()
-            } else {
-                "done: NOID refunded".into()
+            reason: {
+                // The ETH claim counts as seen mined when it is final, or when its last `eth_claim_mined` is not followed by an
+                // `eth_claim_reorged` (a claim that was mined and then taken back by a reorg is not a received claim).
+                let claim_seen = last_history(file, "eth_claim_final").is_some() || last_history(file, "eth_claim_mined") > last_history(file, "eth_claim_reorged");
+                if claim_seen {
+                    "done: NOID refunded after the reveal; Bob never claimed it (as far as this tool saw, the refund closed the instance, so it was still unspent), so both legs ended with Alice".into()
+                } else if reveal_evidence(file) || reveal_may_have_been_sent(file) {
+                    // Every kind of reveal evidence counts here (a decided intent, a sent or dropped reveal, a reverted claim, the sidecar,
+                    // an unknown outcome): the reveal was at least started, and no mined claim is on record.
+                    "done: NOID refunded; this file shows a reveal that was started or sent, and this tool did not see the ETH claim mined (never, or it was removed by a reorg), so check the ETH lock yourself (if Bob refunded it, each side got its own funds back)".into()
+                } else {
+                    "done: NOID refunded".into()
+                }
             },
         },
         A::Lost { reason, .. } => Action::Wait { reason: format!("lost: {reason}") },
@@ -3764,7 +3775,7 @@ mod tests {
         let g = file.public.params.profile.gates();
         n.producers.get_or_insert_with(|| {
             let mut p = ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450);
-            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3) };
+            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3), sampled: 64 };
             p
         });
         if n.instance.is_some() {
@@ -4123,7 +4134,7 @@ mod tests {
         let g = file.public.params.profile.gates();
         n.producers.get_or_insert_with(|| {
             let mut p = ProducerSummary::synthetic(n.tip, g.producer_window_long, g.producer_window_short, now, 300, 450);
-            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3) };
+            p.second = crate::watch::producers::SecondCheck::Agrees { height: n.tip.saturating_sub(3), sampled: 64 };
             p
         });
         if n.instance.is_some() {
@@ -4369,7 +4380,7 @@ mod tests {
         n.single_node_ok = false;
         n.second = Some(Box::new(NoidObservation { observed_at: Some(t), second: None, producers: None, ..n.clone() }));
         let tip = n.tip;
-        n.producers.as_mut().unwrap().second = crate::watch::producers::SecondCheck::Agrees { height: tip - 3 };
+        n.producers.as_mut().unwrap().second = crate::watch::producers::SecondCheck::Agrees { height: tip - 3, sampled: 64 };
         let d = super::decide(&file, &n, &e, t);
         assert_eq!(d.action.kind(), "lock_eth", "{:?}", d.notes);
         assert!(d.notes.iter().all(|x| !x.contains("single node")), "{:?}", d.notes);

@@ -55,9 +55,9 @@ raw variant only, `docs/runbook-two-party.md`) there is no equivalence proof and
    `bash scripts/fetch-vendor.sh`. It ends with `vendor/parano1d at d29b801`. Never edit anything in `vendor/`.
 4. Anonymity on this machine (rules of `PROJECT.md`; the repository holds no name, place, language or timezone):
    `git config user.name 00` and `git config user.email 352887559+00Para@users.noreply.github.com`
-   (the address of `docs/release-checklist.md`). If you ever commit here, fix the dates too:
+   (the project's public no-reply address). If you ever commit here, fix the dates too:
    `export GIT_AUTHOR_DATE=2026-11-06T00:00:00+0000 GIT_COMMITTER_DATE=2026-11-06T00:00:00+0000`
-   (a fixed UTC value, as the release checklist does). Normal Bob use does not commit at all.
+   (a fixed UTC value). Normal Bob use does not commit at all.
    Also: do not sign in to a personal Apple, Google, GitHub or email account in the browser profile or the
    Terminal you use for the swap; make a separate macOS user or browser profile for it. Look at the Mac's
    name (`scutil --get ComputerName`): if it holds a real name, do not paste terminal output with the prompt into public places.

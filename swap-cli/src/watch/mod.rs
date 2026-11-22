@@ -517,6 +517,10 @@ pub struct NoidObservation {
     /// the `production` profile only; printed on every tick that uses it. Never implied by a profile.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub accept_producer_concentration: bool,
+    /// T21-13: the producer-differs marker beside Bob's swap file (`crate::producer_marker`): an earlier tick saw the two nodes name different
+    /// producers for a block with equal hashes. `Absent` (and not serialized) for Alice, a fixture, the library and the simulator. Holds no address.
+    #[serde(default, skip_serializing_if = "crate::producer_marker::MarkerState::is_absent")]
+    pub producer_marker: crate::producer_marker::MarkerState,
 }
 
 impl NoidObservation {

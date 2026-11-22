@@ -713,6 +713,27 @@ async function requireFundsFor(provider, from, req, gasLimit) {
   }
 }
 
+// ------------------------------------------------ no library retry for the claim's send
+// ethers re-sends a request by itself when the endpoint answers HTTP 429 (a backoff or the `retry-after` value, up to the request's 300 s timeout).
+// For a read that is fine. For the request that carries the signed claim it is not: a throttled first attempt was never accepted by the node, so the
+// library's repeat minutes later would be the real publication, possibly after the reveal cutoff. `execute` therefore sets `sendGuard.noRetry` for
+// that one send; the provider built by `makeProvider` has a `retryFunc` that reads it (`_getConnection()` hands out clones of the request, and
+// `clone()` copies the retry function, so the closure over this shared object reaches every clone). Every other request keeps the retry.
+// A provider not built by `makeProvider` (an in-process node in a test) has no such function: the switch is simply unused.
+const sendGuard = { noRetry: false };
+
+/** The provider the command line uses: a JSON-RPC provider over HTTP whose automatic retry on HTTP 429 is switched off while `sendGuard.noRetry` is set. */
+function makeProvider(url) {
+  const request = new ethers.FetchRequest(url);
+  request.retryFunc = async () => !sendGuard.noRetry;
+  return new ethers.JsonRpcProvider(request, undefined, { cacheTimeout: -1 });
+}
+
+/** True when the error is the endpoint's HTTP 429 answer (a server error of the library with that status). */
+function isThrottledAnswer(e) {
+  return !!e && e.code === "SERVER_ERROR" && !!e.response && e.response.statusCode === 429;
+}
+
 /**
  * Dry-run or send one transaction. Returns { dry: true, out } or
  * { dry: false, resp, receipt, chainId, from }. Never includes keys.
@@ -721,6 +742,10 @@ async function requireFundsFor(provider, from, req, gasLimit) {
  * opts.preSend: optional async guard, run once everything is prepared and immediately before the transaction is signed and broadcast
  * (never in a dry run). If it throws, nothing is sent. It is called with the populated transaction (nonce, fees, chain id filled in). The claim uses it
  * to re-check the reveal cutoff after the slow steps and to write the reveal sidecar (T21-11) just before the broadcast.
+ * opts.lastCheck: optional SYNCHRONOUS guard, only together with opts.preSend; if it throws, nothing is sent. With a local key (an ethers.BaseWallet)
+ * the transaction is signed locally after preSend, lastCheck runs, and the very next call hands the signed bytes to `provider.broadcastTransaction`:
+ * nothing but the local signature and this synchronous check sits between the sidecar and the bytes going to the node. With any other signer it runs
+ * just before `signer.sendTransaction`, which does its own network reads before it broadcasts, so the check is weaker there.
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
@@ -782,13 +807,49 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
     return { dry: true, out };
   }
   let toSend = req;
+  let resp;
   if (typeof opts.preSend === "function") {
     // Fill nonce, chain id and fees first, so that no network read is left between the guard and the broadcast. Only with a fixed gas limit: then
     // nothing is estimated and the calldata (the secret) goes to the node only inside the transaction itself.
     if (fixedGas !== null && typeof signer.populateTransaction === "function") toSend = await signer.populateTransaction(req);
     await opts.preSend(toSend);
+    const sendVia = signer.provider || provider;
+    if (signer instanceof ethers.BaseWallet && sendVia && typeof sendVia.broadcastTransaction === "function") {
+      // A local key: sign here (local work, no network) and hand the signed bytes to the node ourselves. `signer.sendTransaction` would populate
+      // the transaction a second time, and that re-detects the network (an eth_chainId request with a long timeout) before anything is signed
+      // or sent: a stalled endpoint could then delay the broadcast past the cutoff after every check had passed.
+      const raw = await signer.signTransaction(toSend);
+      // Nothing but the synchronous check below may sit between the last cutoff check and the call that sends the bytes: no await, no other call.
+      // The send is one HTTP request and the library never repeats it: the library's own retry (it re-sends a request by itself when the endpoint
+      // answers HTTP 429, with a backoff, for up to the request's 300 s timeout) is switched off for this one send (see sendGuard). A throttled
+      // first attempt was never accepted by the node, so a repeat minutes later would be the real publication, long after the last check; instead
+      // the send fails and the claim says so. What remains, and is NOT fixed here (TASKS.md T21-17): the request's own duration. The node has the
+      // bytes as soon as the request is delivered, but a stalled connection can delay the delivery, and that delay has no firm bound: the
+      // library's 300 s is an inactivity timer on the socket (any traffic resets it), the name lookup and the connect have no library timeout,
+      // and on a timeout the library rejects without aborting the request. A redirect answer (301, 302, 307, 308) is also followed by the
+      // library at once, to the address the endpoint names.
+      if (typeof opts.lastCheck === "function") opts.lastCheck();
+      sendGuard.noRetry = true;
+      try {
+        resp = await sendVia.broadcastTransaction(raw);
+      } finally {
+        sendGuard.noRetry = false; // the receipt polling after the send keeps the library's normal retry behaviour
+      }
+    } else {
+      // Any other signer (a node-held account, a hardware or remote signer) does its own network reads inside `sendTransaction` before it
+      // broadcasts, so the last check is weaker here. The command line always uses a local key (`loadSigner` builds an ethers.Wallet).
+      // The library's retry on HTTP 429 is off for the whole call here too (it covers those reads as well).
+      if (typeof opts.lastCheck === "function") opts.lastCheck();
+      sendGuard.noRetry = true;
+      try {
+        resp = await signer.sendTransaction(toSend);
+      } finally {
+        sendGuard.noRetry = false;
+      }
+    }
+  } else {
+    resp = await signer.sendTransaction(toSend);
   }
-  const resp = await signer.sendTransaction(toSend);
   // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
   if (typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
   let receipt;
@@ -851,32 +912,36 @@ function readSwapFile(file) {
 // `claim --swap FILE` writes `FILE.reveal-sent` just before it broadcasts the claim, so that a reveal which was sent and then dropped (or whose
 // process died before any `swap-cli tick` saw it) is still on record: swap-cli and this script read the file as evidence that the secret MAY be
 // public (the late re-send cutoff T_reveal - DE applies). It holds the lock id, the signed transaction's hash when it is known before the
-// broadcast, and the time; never the secret, a key, or anything of the swap file. Written exclusively (never over a sidecar of this lock),
-// mode 600, fsynced with its directory; if it cannot be written the claim is not sent.
+// broadcast, and the time; never the secret, a key, or anything of the swap file.
+// The rule: the sidecar is durable first, then the send; if it cannot be made durable, nothing is sent. A sidecar that exists without a send
+// having been attempted would relax a later cutoff wrongly; a send without a durable sidecar would lose the evidence.
+// A NEW sidecar: the bytes go to a temporary file beside it (mode 600, written in a loop until every byte is out, fsynced, closed); a foreign or
+// not-a-sidecar file at the final name is moved aside under `.stale-*` (never deleted); the temporary file is published with a hard link (atomic, and
+// never over an existing name) or, where hard links are refused, renamed onto the final name (atomic, not exclusive); the directory is synced; the
+// final file is read back and compared byte for byte. The final name is never opened for writing, so a half-written file cannot appear there. If any
+// step fails, what this call created is removed (it is not evidence: nothing was sent) and the claim is refused; it is removed only if it still
+// holds what this call wrote (or debris), never another process's record. A file at the name that cannot be examined or read (an I/O error) is
+// never moved aside: it may be a good sidecar, so the claim is refused. Two claims for one swap file at the same time are not supported.
+// A sidecar of this lock that ALREADY exists is evidence of an earlier attempt and is never deleted or truncated by this code, whatever fails: its
+// own bytes are written again through a new temporary file (fsynced, checked) and renamed over it, so that the data and the entry are made
+// durable now, whatever happened to the earlier attempt's own flush. If that fails, the claim is refused and the old file stays.
+// Limits, stated plainly: the read-back is served from the page cache, so it catches a short or corrupted write but does not prove what is on the
+// disk. On Windows (Node, measured on local NTFS and on a `\\wsl.localhost` share alike) fsync on a handle opened for writing succeeds, a directory
+// cannot be flushed at all, and whether a successful fsync through the share reaches the disk inside the Linux VM is not known: there the
+// durability is best effort.
 const REVEAL_SIDECAR_SUFFIX = ".reveal-sent";
 const REVEAL_SIDECAR_MAX_BYTES = 4096;
 const revealSidecarPath = (swapFile) => String(swapFile) + REVEAL_SIDECAR_SUFFIX;
+const codeOf = (e) => (e && e.code ? e.code : "error");
 
 /**
- * Read the sidecar of a swap file for this lock. state: "absent", "matching" (this lock: evidence), "foreign" (another lock id: ignored) or
- * "unreadable" (not a sidecar this tool wrote: ignored). Read-only; never throws for a bad file.
+ * Judge the text of a sidecar for this lock (the one rule used by the reader and by the re-publish). state: "matching" (this lock: evidence),
+ * "foreign" (another lock id: ignored) or "unreadable" (not a sidecar this tool wrote: ignored).
  */
-function readRevealSidecar(swapFile, lockId) {
-  const file = revealSidecarPath(swapFile);
-  const want = String(lockId).toLowerCase().replace(/^0x/, "");
-  let st;
-  try {
-    st = fs.lstatSync(file);
-  } catch (e) {
-    if (e && e.code === "ENOENT") return { state: "absent", file };
-    return { state: "unreadable", file, note: `the reveal sidecar ${file} cannot be examined (${e && e.code ? e.code : "error"}); it is ignored` };
-  }
-  if (!st.isFile() || st.size > REVEAL_SIDECAR_MAX_BYTES) {
-    return { state: "unreadable", file, note: `${file} is not a reveal sidecar written by this tool (not a regular file, or too large); it is ignored` };
-  }
+function classifyRevealSidecarText(text, want, file) {
   let j;
   try {
-    j = JSON.parse(fs.readFileSync(file, "utf8"));
+    j = JSON.parse(text);
   } catch {
     return { state: "unreadable", file, note: `${file} is not valid JSON; it is ignored` };
   }
@@ -896,7 +961,43 @@ function readRevealSidecar(swapFile, lockId) {
   return { state: "matching", file, txHash: j.tx_hash, at: j.at };
 }
 
-/** Sync a directory entry to disk. Windows cannot open a directory, so nothing more is possible there; elsewhere a real failure is an error. */
+/**
+ * Read the sidecar of a swap file for this lock. state: "absent", "matching" (this lock: evidence), "foreign" (another lock id: ignored) or
+ * "unreadable" (not a sidecar this tool wrote: ignored). Read-only; never throws for a bad file.
+ * An "unreadable" result with io: true (and the error code) means the file could not be examined or read at all: an I/O problem, not bad content.
+ * Readers ignore it like any unreadable file, but it may be a good sidecar of this lock, so the writer refuses to move it aside.
+ */
+function readRevealSidecar(swapFile, lockId) {
+  const file = revealSidecarPath(swapFile);
+  const want = String(lockId).toLowerCase().replace(/^0x/, "");
+  let st;
+  try {
+    st = fs.lstatSync(file);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return { state: "absent", file };
+    return { state: "unreadable", io: true, code: codeOf(e), file, note: `the reveal sidecar ${file} cannot be examined (${codeOf(e)}); it is ignored` };
+  }
+  if (!st.isFile() || st.size > REVEAL_SIDECAR_MAX_BYTES) {
+    return { state: "unreadable", file, note: `${file} is not a reveal sidecar written by this tool (not a regular file, or too large); it is ignored` };
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch (e) {
+    return { state: "unreadable", io: true, code: codeOf(e), file, note: `the reveal sidecar ${file} could not be read (${codeOf(e)}); it is ignored` };
+  }
+  return classifyRevealSidecarText(text, want, file);
+}
+
+/**
+ * Flush a directory entry. With Node on Windows (measured on local NTFS and on a `\\wsl.localhost` share alike) a directory can be opened for
+ * reading but fsync on it fails with EPERM, so the entry cannot be flushed from Node there and this returns without doing anything. (fsync on a
+ * handle opened for writing succeeds there, on one opened read-only it fails with EPERM.) Whether a successful fsync through the share reaches the
+ * disk inside the Linux VM is not known. So on Windows, and above all on the share, the durability of the sidecar is best effort: the data flush is
+ * requested and reported successful, the directory entry is not flushed. On Windows EVERY error is ignored here, a failed open included (that is
+ * what the code does: the platform check covers the whole try block). Elsewhere a file system that cannot sync a directory (EINVAL, ENOTSUP,
+ * ENOSYS, EOPNOTSUPP) is let pass and any other error is thrown.
+ */
 function fsyncDir(dir) {
   let fd;
   try {
@@ -916,76 +1017,204 @@ function fsyncDir(dir) {
   }
 }
 
+/** Write every byte of `buf` to `fd`. A write that makes no progress (returns 0 or something that is not a count) is an error, never a quiet short file. */
+function writeAllSync(fd, buf) {
+  let off = 0;
+  while (off < buf.length) {
+    const n = fs.writeSync(fd, buf, off, buf.length - off);
+    if (!Number.isInteger(n) || n <= 0 || n > buf.length - off) {
+      throw Object.assign(new Error(`write made no progress (returned ${n} with ${buf.length - off} bytes left)`), { code: "ESHORTWRITE" });
+    }
+    off += n;
+  }
+}
+
+/** Create `tmp` exclusively (mode 600), write all of `buf`, fsync it, close it. The caller removes `tmp` on failure. */
+function writeTmpDurably(tmp, buf) {
+  const fd = fs.openSync(tmp, "wx", 0o600);
+  try {
+    writeAllSync(fd, buf);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Read `file` back (raw bytes) and require it to equal `buf` byte for byte. Served from the page cache: it catches a short or corrupted write, it does not prove what is on the disk. */
+function requireBytes(file, buf, what) {
+  const got = fs.readFileSync(file);
+  if (!Buffer.isBuffer(got) || !got.equals(buf)) {
+    throw Object.assign(new Error(`${what} ${file} does not read back as written`), { code: "EREADBACK" });
+  }
+}
+
+const sidecarTmpName = (target) => `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
+
+function unlinkQuiet(file) {
+  try {
+    fs.unlinkSync(file);
+  } catch {
+    /* never created, or already gone */
+  }
+}
+
 /**
- * Record, before the broadcast, that the reveal of `lockId` is about to be sent. Synchronous. A sidecar of THIS lock that already exists is kept
- * as it is (its time is the earliest attempt); a foreign or unreadable one is moved aside under `.stale-*`, never deleted. Throws a UserError
- * (and the caller then sends nothing) if the sidecar cannot be written and made durable. Returns { state: "written" | "kept", file }.
+ * Take back a sidecar that THIS call created and that must not count as evidence (nothing was sent), and sync the directory (best effort). It is
+ * removed only if it still holds exactly the bytes this call wrote, or holds debris that is not a sidecar of any lock (what a short or corrupted
+ * write of ours leaves). A file that is a valid sidecar record (of this lock with other bytes, or of another lock) is another process's: it is left
+ * where it is. Returns { outcome: "removed" } | { outcome: "other" } | { outcome: "failed", code }.
+ */
+function removeCreatedRevealSidecar(file, bytes, lockId) {
+  const want = String(lockId).toLowerCase().replace(/^0x/, "");
+  let res = { outcome: "removed" };
+  try {
+    let holds = null;
+    try {
+      holds = fs.readFileSync(file);
+    } catch (e) {
+      if (e && e.code === "ENOENT") return res; // already gone
+      throw e;
+    }
+    const mine = Buffer.isBuffer(bytes) && Buffer.isBuffer(holds) && holds.equals(bytes);
+    const anotherRecord = !mine && ["matching", "foreign"].includes(classifyRevealSidecarText(Buffer.isBuffer(holds) ? holds.toString("utf8") : "", want, file).state);
+    if (anotherRecord) {
+      res = { outcome: "other" };
+    } else {
+      fs.unlinkSync(file);
+    }
+  } catch (e) {
+    res = { outcome: "failed", code: codeOf(e) };
+  }
+  try {
+    fsyncDir(path.dirname(path.resolve(file)));
+  } catch {
+    /* best effort */
+  }
+  return res;
+}
+
+/** What to tell the operator about a sidecar this call had created and then took back (see removeCreatedRevealSidecar). */
+function removalFate(res, file) {
+  if (res.outcome === "removed") return "the reveal sidecar this call had just written was removed again (nothing was sent, so it is not evidence)";
+  if (res.outcome === "other") return `the reveal sidecar ${file} now holds another record and was left in place (it is not this call's)`;
+  return `the reveal sidecar ${file} this call had just written could NOT be removed (${res.code}) and stays: delete it by hand, because it would count as evidence of a send that was not made`;
+}
+
+/**
+ * A sidecar of this lock already exists: it is evidence of an earlier attempt and is never deleted or truncated here. Its own bytes are written
+ * again through a new temporary file (fsynced, read back before the swap), renamed over it (atomic), the directory is synced and the result is
+ * read back. Any failure leaves the old file where it is and refuses the claim.
+ */
+function republishRevealSidecar(target, lockHex) {
+  const tmp = sidecarTmpName(target);
+  try {
+    const st = fs.lstatSync(target);
+    if (!st.isFile() || st.size > REVEAL_SIDECAR_MAX_BYTES) throw Object.assign(new Error("not a sidecar"), { code: "ENOTSIDECAR" });
+    const bytes = fs.readFileSync(target);
+    if (bytes.length > REVEAL_SIDECAR_MAX_BYTES || classifyRevealSidecarText(bytes.toString("utf8"), lockHex, target).state !== "matching") {
+      throw Object.assign(new Error("the file is no longer a sidecar of this lock"), { code: "ECHANGED" });
+    }
+    writeTmpDurably(tmp, bytes);
+    requireBytes(tmp, bytes, "the new copy"); // before it replaces anything: a bad copy must never take the place of good evidence
+    fs.renameSync(tmp, target);
+    fsyncDir(path.dirname(path.resolve(target)));
+    requireBytes(target, bytes, "the reveal sidecar");
+  } catch (e) {
+    unlinkQuiet(tmp);
+    throw new UserError(
+      `refusing: the existing reveal sidecar ${target} could not be made durable again (${codeOf(e)}); it is kept as it is (it is evidence of an earlier attempt and is never deleted); nothing was sent. Fix the directory and retry`
+    );
+  }
+  return { state: "kept", file: target, created: false };
+}
+
+/**
+ * Record, before the broadcast, that the reveal of `lockId` is about to be sent. Synchronous. Throws a UserError (and the caller then sends
+ * nothing) if the sidecar cannot be written and made durable. Returns { state: "written" | "kept", file, created, bytes? }: "written" = this call
+ * made the file (bytes = what it wrote); "kept" = a sidecar of this lock was there before (its bytes, so its time and hash, are kept and were
+ * written durably again; it is never deleted). created is true only when this call created the file. A file whose CONTENT is not a sidecar of
+ * this lock (another lock, bad JSON, wrong fields, not a regular file, too large) is moved aside under `.stale-*`, never deleted; a file that
+ * cannot even be examined or read (an I/O error) is neither moved nor deleted: the claim is refused. If a step fails after this call created the
+ * file, the file is removed again (only if it still holds what this call wrote or debris, see removeCreatedRevealSidecar): it would otherwise
+ * count as evidence of a send that was not made. Two claims for one swap file must never run at the same time (not supported, see the rename below).
  */
 function writeRevealSidecar(swapFile, lockId, txHash) {
   const target = revealSidecarPath(swapFile);
   const lockHex = String(lockId).toLowerCase().replace(/^0x/, "");
   const hashHex = txHash === null || txHash === undefined ? null : String(txHash).toLowerCase().replace(/^0x/, "");
   const existing = readRevealSidecar(swapFile, lockHex);
-  if (existing.state === "matching") {
-    // Already there; its directory entry may not be durable yet (a crash between the link and the sync of an earlier attempt).
-    try {
-      fsyncDir(path.dirname(path.resolve(target)));
-    } catch (e) {
-      throw new UserError(`refusing: the reveal sidecar ${target} exists but its directory could not be synced (${e && e.code ? e.code : "error"}); nothing was sent`);
-    }
-    return { state: "kept", file: target };
+  if (existing.state === "matching") return republishRevealSidecar(target, lockHex);
+  if (existing.io) {
+    // An I/O problem is not bad content: the file may be a good sidecar of this lock, so it must not be hidden under `.stale-*`.
+    throw new UserError(
+      `refusing: the existing reveal sidecar ${target} could not be examined or read (${existing.code}); it is neither moved nor deleted, because it may be evidence of an earlier attempt; nothing was sent. Fix the directory and retry`
+    );
   }
   const at = Math.floor(Date.now() / 1000);
-  const body = JSON.stringify({ version: 1, lock_id: lockHex, tx_hash: hashHex, at }) + "\n";
-  const tmp = `${target}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`;
-  let state = "written";
+  const body = Buffer.from(JSON.stringify({ version: 1, lock_id: lockHex, tx_hash: hashHex, at }) + "\n", "utf8");
+  const tmp = sidecarTmpName(target);
+  let created = false;
+  let raced = false;
   try {
-    const fd = fs.openSync(tmp, "wx", 0o600);
-    try {
-      fs.writeSync(fd, body);
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
+    writeTmpDurably(tmp, body);
     if (existing.state !== "absent") {
-      // Not this lock's: keep it for the operator, out of the way.
+      // Its content is not a sidecar of this lock: keep it for the operator, out of the way.
       fs.renameSync(target, `${target}.stale-${at}-${crypto.randomBytes(3).toString("hex")}`);
     }
     try {
-      fs.linkSync(tmp, target); // atomic and exclusive: an existing name is never replaced
+      // Atomic and exclusive: an existing name is never replaced. (Edge: a link that succeeded on a server but reported an error is treated below
+      // as another process's file: it is kept, never removed by this call.)
+      fs.linkSync(tmp, target);
+      created = true;
     } catch (e) {
-      if (e && e.code === "EEXIST") {
-        if (readRevealSidecar(swapFile, lockHex).state !== "matching") throw e;
-        state = "kept"; // another process wrote this lock's sidecar a moment ago
+      if (readRevealSidecar(swapFile, lockHex).state === "matching") {
+        raced = true; // another process wrote this lock's sidecar a moment ago: it is the evidence, ours is dropped
+      } else if (e && e.code === "EEXIST") {
+        throw e; // something else sits at the name: never touched
       } else {
-        // A file system that refuses hard links (a network share such as \wsl.localhost, FAT, some mounts; the error code varies): create the final
-        // name exclusively and write it in place. Still exclusive (never over an existing name); if this fails too, the claim is not sent.
-        const fd2 = fs.openSync(target, "wx", 0o600);
-        try {
-          fs.writeSync(fd2, body);
-          fs.fsyncSync(fd2);
-        } finally {
-          fs.closeSync(fd2);
-        }
+        // A file system that refuses hard links (the usual case for a Windows process writing to a `\wsl.localhost` share; also FAT and some
+        // mounts; the error code varies): rename the finished temporary file onto the final name. The final name is never opened for writing. A
+        // rename is atomic but not exclusive. A foreign sidecar was already moved aside above, and a record of this same lock replaced by a record
+        // of this same lock loses nothing but a later `at`. Concurrent claims for one swap file are NOT supported: two of them could each replace
+        // the other's record, and the one whose read-back then fails leaves the other's record in place (see below) while the other goes on to send.
+        fs.renameSync(tmp, target);
+        created = true;
       }
     }
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      /* a leftover .tmp holds the same non-secret fields */
+    if (!raced) {
+      unlinkQuiet(tmp); // after a link; a leftover .tmp would hold the same non-secret fields
+      fsyncDir(path.dirname(path.resolve(target)));
+      requireBytes(target, body, "the reveal sidecar");
     }
-    fsyncDir(path.dirname(path.resolve(target)));
   } catch (e) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      /* never created, or already gone */
+    unlinkQuiet(tmp);
+    if (!created) {
+      throw new UserError(
+        `refusing: the reveal sidecar ${target} could not be written (${codeOf(e)}); nothing was sent. It is written before the claim is broadcast so that a lost reveal stays on record; fix the directory and retry.`
+      );
     }
+    // Nothing was sent: a sidecar that is not known to be good must not count as evidence later. But only what is ours is removed.
+    const res = removeCreatedRevealSidecar(target, body, lockHex);
+    if (res.outcome === "other" && e && e.code === "EREADBACK") {
+      throw new UserError(
+        `refusing: another claim for this swap seems to be running: the reveal sidecar ${target} holds a different record than the one this call wrote; it was left in place; nothing was sent. Two claims for one swap file must never run at the same time`
+      );
+    }
+    const note =
+      res.outcome === "other"
+        ? ` The file now holds another record and was left in place.`
+        : res.outcome === "failed"
+          ? ` The half-made file ${target} could not be removed (${res.code}): it stays and must be deleted by hand before retrying, because it would count as evidence of a send that was not made.`
+          : "";
     throw new UserError(
-      `refusing: the reveal sidecar ${target} could not be written (${e && e.code ? e.code : "error"}); nothing was sent. It is written before the claim is broadcast so that a lost reveal stays on record; fix the directory and retry`
+      `refusing: the reveal sidecar ${target} could not be written (${codeOf(e)}); nothing was sent. It is written before the claim is broadcast so that a lost reveal stays on record; fix the directory and retry.${note}`
     );
   }
-  return { state, file: target };
+  if (raced) {
+    unlinkQuiet(tmp);
+    return republishRevealSidecar(target, lockHex);
+  }
+  return { state: "written", file: target, created: true, bytes: body };
 }
 
 /** The hash of the claim as it will be signed, when the signer can show it before the broadcast (a local key; null for any other signer). */
@@ -1674,10 +1903,29 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
             `(a late claim publishes the secret and lets the counterparty take both legs; nothing was sent)`
         );
       }
-      // T21-11: the last step before the broadcast. If the sidecar cannot be written and made durable this throws and nothing is sent.
+      // T21-11: the sidecar is the last thing preSend does. If it cannot be written and made durable this throws and nothing is sent. With a local
+      // key, only the local signature and the synchronous `lastCheck` below sit between this point and the bytes going to the node.
       if (sw) sidecarWritten = writeRevealSidecar(sw.file, lockId, await presignedHash(signer, populated));
     };
-    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend });
+    // The fsyncs and the signature can take time (on a network share above all): the cutoff is checked once more against the WALL CLOCK only, in a
+    // synchronous guard that runs immediately before the broadcast (for every claim, with or without --swap). No network read can happen after it.
+    // If the time ran out, nothing has been sent.
+    const lastCheck = () => {
+      const wallLast = BigInt(Math.floor(Date.now() / 1000));
+      if (!(wallLast > cutoff || wallLast >= l.timelock)) return;
+      let fate = "no reveal sidecar was involved (no --swap)";
+      if (sidecarWritten !== null) {
+        fate = sidecarWritten.created
+          ? removalFate(removeCreatedRevealSidecar(sidecarWritten.file, sidecarWritten.bytes, lockId), sidecarWritten.file)
+          : `the reveal sidecar ${sidecarWritten.file} that was there before is kept (it is evidence of an earlier attempt)`;
+      }
+      const afterSidecar = sidecarWritten !== null ? ", after the reveal sidecar was written" : "";
+      sidecarWritten = null; // the outer catch must not say the claim may have reached the network: it did not
+      throw new UserError(
+        `refusing: past the reveal cutoff. now ${wallLast} > cutoff ${cutoff} or >= timelock ${l.timelock} (${cutoffRule}; re-checked against the wall clock immediately before the broadcast${afterSidecar}, which took too long); ${fate}; nothing was sent`
+      );
+    };
+    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend, lastCheck });
   } catch (e) {
     // REVIEW-6 R6-3: a claim that was mined and REVERTED (it came too late, or lost a race with the refund) paid nobody and still published the
     // secret in its calldata. Say so in the result, with the hash, instead of a bare failure: the caller must treat the secret as public.
@@ -1701,7 +1949,15 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     if (sidecarWritten) {
       // The sidecar was written before the broadcast and stays: whether the claim reached the network is not known here.
       const base = e instanceof UserError ? redact(e.message) : explain(e);
-      throw new UserError(`${base} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; run tick --apply)`);
+      // A throttled answer (HTTP 429) most likely means the endpoint did NOT accept the claim. The sidecar stays all the same (the outcome is not
+      // proven), and with it a re-run would be judged by the late cutoff: so the advice is to re-run with the strict margin given by hand, which
+      // rules whatever the sidecar or the file says, and not to treat the reveal as sent unless the operator has a reason to.
+      const throttledAnswer = isThrottledAnswer(e);
+      const throttled = throttledAnswer
+        ? ` The endpoint refused the send as throttled (HTTP 429), so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself. To send it again as a first reveal, run the claim again now with --margin-s ${DEFAULT_MARGIN_S} (the strict cutoff, whatever the sidecar says).`
+        : "";
+      const next = throttledAnswer ? "run tick --apply before the claim only if you think it did reach the network" : "run tick --apply";
+      throw new UserError(`${base}${throttled} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; ${next})`);
     }
     throw e;
   }
@@ -1910,7 +2166,7 @@ async function main(argv) {
   if (args.priorityFeeGwei !== undefined) process.stderr.write(PRIORITY_FEE_WARNING);
   // Under --mainnet a missing --swap is a refusal (requireSwapOnMainnet), not a warning.
   if (["lock", "claim", "refund"].includes(command) && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_WARNING);
-  const provider = command === "keygen" ? null : new ethers.JsonRpcProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545", undefined, { cacheTimeout: -1 });
+  const provider = command === "keygen" ? null : makeProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545");
   try {
     const signer = SPECS[command].signer ? loadSigner(provider, args.keyFile) : null;
     if (signer) {
@@ -1940,7 +2196,7 @@ module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
-  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX,
+  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, execute, makeProvider, sendGuard,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

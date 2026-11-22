@@ -339,7 +339,10 @@ published the secret, so `M_A` (which protects a first publication) no longer ap
 that found and identified the signer's pending claim of this lock uses the late cutoff `T_reveal - DE` (the intent's
 `late_cutoff`, which `swap-cli` freezes in every `reveal_eth` intent; an older intent gets the profile's `DE`), whether or not the
 file's history has a marker. The plan prints `revealCutoffRule`. A first claim, which has no pending transaction, keeps the strict
-`M_A` rule, and an explicit `--margin-s` still tightens either.
+`M_A` rule, and an explicit `--margin-s` still tightens either. One case where the flag reaches below `M_A` (since 2026-11-09): `swap-cli`
+freezes the late cutoff into the intent also for a file that its library `Runner` left with a reveal of unknown outcome (`reveal_maybe_sent`,
+or a pending `reveal_eth` record). This script does not read those two, so by default it still applies `timelock - 1800 s`; an explicit
+`--margin-s` below that is then limited only by the intent's cutoff `T_reveal - DE`. Use it only when that reveal may really have been sent.
 
 #### Late re-send (REVIEW-4 R4-3)
 
@@ -354,9 +357,23 @@ new, and the intent's own cutoff (`T_reveal - DE`, which `swap-cli` froze for ex
 
 `claim --swap FILE` writes `FILE.reveal-sent` as its last step before the broadcast (after the cutoff re-check, with the transaction populated and,
 for a local key, signed to get its hash): one small JSON file `{"version":1,"lock_id":"<64 hex>","tx_hash":"<64 hex>|null","at":<epoch seconds>}`,
-created exclusively (a temporary file and a hard link, so an existing name is never replaced; a file system without hard links gets an exclusive in-place create), mode 600, fsynced together with its directory (on Windows neither mode nor directory sync exists). It never
-holds the secret, a key, or anything of the swap file. If it cannot be written the command refuses and sends nothing. A sidecar of this lock that
-exists already is kept (the first attempt's time stays); a foreign or unreadable one is moved aside to `FILE.reveal-sent.stale-*`, never deleted. The
+written to a temporary file first (mode 600, in a loop until every byte is out, fsynced), then published with a hard link (an existing name is never
+replaced) or, on a file system without hard links, renamed onto the final name (atomic, not exclusive; the final name is never written in place);
+the directory is synced, the file is read back and compared byte for byte, and the cutoff is checked once more against the wall clock before the
+send (on Windows neither mode nor directory sync exists, and durability through the `\\wsl.localhost` share is best effort: `swap-cli/README.md`,
+"Residual window"). It never
+holds the secret, a key, or anything of the swap file. If it cannot be written and checked, or the last wall-clock check refuses, the command sends
+nothing and removes a file this call had created (nothing was sent, so it is not evidence; only while the file still holds this call's own
+bytes). With a local key the claim is then signed locally and the signed bytes are handed to the node directly (`broadcastTransaction`), so no
+network read sits between the last check and the send. That send is one HTTP request which the library never repeats: its automatic retry on
+an HTTP 429 answer is switched off for this one request (a throttled first attempt was not accepted, and a repeat minutes later would be the
+real publication, after the last check). A throttled send fails with the sidecar in place; the endpoint most likely did not accept the claim,
+so run the claim again with `--margin-s 1800`, which keeps the strict cutoff whatever the sidecar says. Not bounded: how long a stalled
+connection takes to deliver that one request (`TASKS.md` T21-17). A sidecar of this lock that
+exists already is never deleted: its own bytes are written again through a new fsynced temporary file and renamed over it (the first attempt's time
+stays), and if that fails nothing is sent. A file there whose content is not a sidecar of this lock is moved aside to
+`FILE.reveal-sent.stale-*`, never deleted; one that cannot be examined or read (an I/O error) is left alone and the claim is refused. Never run
+two `claim` commands for one swap file at the same time. The
 file is written only for a real send, not for a dry run, a refused claim or a claim without `--swap`. `claim` reads it too: a sidecar of THIS lock
 is evidence that the secret may be public, exactly like the history events above (the intent's `late_cutoff` rules; an intent without one keeps its
 frozen cutoff; `--margin-s` still tightens). A sidecar of another lock or one not in the format is ignored and reported (`revealSidecar`,

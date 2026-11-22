@@ -439,8 +439,33 @@ fn observe_tracking(producer_cache: Option<&Path>, file: &SwapFile, flags: &Hash
     // T21: who produced the recent blocks, from Bob's own node's headers. Bob only, before his lock, and only against a live node.
     if let (Some(path), true) = (producer_cache, swap_cli::engine::producer_scan_wanted(file)) {
         if let Some(urls) = flags.get("noid-rpc") {
-            noid.producers = Some(read_producers_for(path, file, &net, urls, &noid));
+            let summary = read_producers_for(path, file, &net, urls, &noid);
+            // T21-13: evidence that cannot come from two honest nodes (equal hashes with different producers; or a different hash at a sampled
+            // height below an anchor block the second node named again after the sample) is remembered, also on a read-only tick. A record that
+            // cannot be written relaxes nothing: this tick refuses on the summary itself.
+            if let Some((height, kind)) = swap_cli::producer_marker::remembered(&summary.second) {
+                if let Err(e) = swap_cli::producer_marker::record(path, height, now_unix(), kind) {
+                    let seen = match kind {
+                        swap_cli::producer_marker::MarkerKind::Producer => "the two nodes named different producers for one block",
+                        swap_cli::producer_marker::MarkerKind::Hash => "the two nodes held different blocks below an anchor block they agreed on",
+                    };
+                    source_notes.push(if e.created {
+                        format!(
+                            "WARNING (T21): the record of what was seen at height {height} ({seen}) was created but its write or sync was not confirmed ({}); it exists, and an empty or partial record reads as unreadable, which counts as a detection, so later ticks still refuse until you have looked at it and removed it by hand",
+                            e.what
+                        )
+                    } else {
+                        format!(
+                            "WARNING (T21): the record of what was seen at height {height} ({seen}) was not created ({}); this tick refuses, but later ticks will not remember it. Fix the folder and tick again",
+                            e.what
+                        )
+                    });
+                }
+            }
+            noid.producers = Some(summary);
         }
+        // The remembered detection of an earlier tick (or of this one), read on every tick of Bob's file in the phases the screen applies to.
+        noid.producer_marker = swap_cli::producer_marker::read(path);
     }
     // Bob knows his lock id as soon as he chose T_reveal; Alice discovers Bob's
     // lock by the agreed parties and her hashlock until she has recorded it.
@@ -613,6 +638,8 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     // T21-11: a reveal sidecar of this lock beside the file counts like a claim seen in the pool; read first, so this decision uses it.
     let sidecar_notes = swap_cli::reveal_sidecar::note_sidecar(&mut work, &path, now);
+    // T21-13: a producer-differs marker beside Bob's file is recorded once in the history (saved with `--apply`, in memory otherwise).
+    swap_cli::producer_marker::note_marker(&mut work, &noid.producer_marker, now);
     let mut closed_event = None;
     if let Some(txid) = &closed_by {
         // Every refusal returns here, before anything is saved.

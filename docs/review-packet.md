@@ -25,7 +25,7 @@ size before an external review.
 The four questions that matter most, in order of what rests on them:
 
 1. **Is `Addr` preimage resistant enough to be a hashlock?** `Addr(s)` is one Poseidon2b permutation over GF(2^128)
-   with unusually small constants (section 5.1). The NOID lock opens for anyone who finds any `s'` with
+   with small constants, which are the designers' reference constants (section 5.1). The NOID lock opens for anyone who finds any `s'` with
    `Addr(s') = A`. With the proof-free `poseidon` lock kind, the Ethereum lock opens on the same condition. This is
    the whole security of the hashlock.
 2. **Can Bob's NOID claim be stalled past the deadline?** Parano1d's mempool is first-seen per input, with no fee
@@ -276,14 +276,25 @@ Ordered by how much rests on them.
 - **Why it matters.** It is the hashlock. A preimage lets anyone claim the NOID before the reveal (still paying
   Bob), and with the `poseidon` kind also claim Bob's ETH. The same attack would break every Parano1d address
   (`docs/protocol-design.md` §8 T8).
-- **What was checked.** Only implementation equality: the portable code and the Solidity port against the vendor
-  crate (`equiv/README.md` §3; `docs/poseidon-leg.md` §7). No cryptanalysis.
+- **What was checked.** Implementation equality: the portable code and the Solidity port against the vendor
+  crate (`equiv/README.md` §3; `docs/poseidon-leg.md` §7). And, on 2026-11-09, where the constants come from: the
+  round constants (4 × 66), the full-round matrix and the partial-round matrix in the vendor file are identical,
+  compared as text, to the designers' reference code (`https://github.com/Poseidon-Hash/Poseidon2b` at commit
+  `7072a94`, file `binius_poseidon2b/crates/circuits/src/hades/poseidon2b_x7_128_512.rs`), the round schedule reads
+  the same (8 full and 58 partial rounds, `x^7`), and the vendor file's header says it is adapted from that
+  reference. So the instance is the designers' reference instance (IACR ePrint 2025/1893, first version 2025/058),
+  not a variant made by Parano1d, and its margin rests on the designers' analysis and on public cryptanalysis.
+  No cryptanalysis was done here. **Not done:** the two implementations were not run on the same inputs, and the
+  papers were not read in full.
+- **To be read.** IACR ePrint 2026/306 and 2026/1792 (cryptanalysis), and the upstream author's public reply to
+  2026/306, which is his own assessment: `https://ethresear.ch/t/poseidon2b-is-secure/25865`.
 - **Not known.** Whether the small constants inside a subfield give a Frobenius-type symmetry that lowers the margin.
   `docs/protocol-design.md` §8 T8 notes that the IV lanes are "not obviously fixed by the subfield Frobenius, but
   that is not an analysis". The sources stated the size of the constants in two ways; the vendor file settles it
   (section 11, item 1).
 - **What would settle it.** A written analysis of preimage resistance of this truncated single-permutation
-  construction with these constants (`TASKS.md` M4.1).
+  construction with these constants (`TASKS.md` M4.1), in the light of the papers above. A cryptographer's review
+  is still needed before amounts leave trial size.
 
 ### 5.2 A claim stalled by a minimum-fee close (Q1)
 
@@ -623,7 +634,7 @@ cd equiv && cargo test --release                     # 23 tests; EQUIV_PARITY_N=
 cd equiv/zkvm && cargo test -p equiv-guest-core      # 3 tests; proving needs rzup (equiv/README.md §5)
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=<dir with raw.receipt, stock.receipt> cargo test --release -p equiv-host
 cd swap-cli && cargo test --offline                  # 532 tests (+1 ignored)
-bash scripts/live/selftest.sh                        # 204 cases, no network
+bash scripts/live/selftest.sh                        # 321 cases, no network
 # the Pruv contract, from the vendor workspace:
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   verify parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json --z3 "$(which z3)"

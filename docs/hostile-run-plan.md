@@ -155,8 +155,8 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   `new-bob` runs the client R self-test, which sends nothing), then one read-only `tick.sh`-equivalent
   `swap-cli tick FILE --transport curl --noid-rpc … --eth-rpc … --eth-from-block N --single-node-ok`
   (`--transport curl` because the Sepolia endpoint is https; `--eth-from-block` is given once on a live non-local
-  chain, per the `tick` usage in `swap-cli/src/main.rs`, and is the deploy block of the contract, the content of
-  `eth-deploy-block.txt` of a run folder).
+  chain, per the `tick` usage in `swap-cli/src/main.rs`, and is a block before the lock (the content of
+  `eth-deploy-block.txt` of a run folder, a recent finalized block that `setup.sh` picks).
   Expected (pinned offline by `g4_the_first_tick_of_a_replayed_bundle_is_an_abort_not_a_lock`): `new-bob` accepts; the tick
   says `abort` with `"last lock height … passed before Alice's funding was final"` (`engine.rs:2634`). Do not pass
   `--apply`. Record what `new-bob` said.
@@ -172,7 +172,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Afterwards delete the scratch files (the scratch folders of this check, the bundles, the Bob and Alice scratch swap
   files and their sealed secrets): none of them is a swap that may be run.
 
-### L1 (run 14). A6: Alice prepares and never funds
+### L1 (run 15). A6: Alice prepares and never funds
 
 - Proves: Bob's tool ends `aborted` on real nodes without any spend.
 1. Alice's machine: setup, prepare, object check as usual. Hand over the bundle. **Do not run `fund.sh`.**
@@ -202,7 +202,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Record: both final phases, the two abort texts, the tip at each, whether Alice's loop had recorded a `fund_noid`
   intent and how it was dropped.
 
-### L2 (run 15). A2: Alice funds the wrong amount
+### L2 (run 16). A2: Alice funds the wrong amount
 
 - Proves: Bob's tool refuses a real instance of another amount; Alice's NOID comes back by hand.
 1. Alice's machine: setup, prepare, object check. `fund.sh --dry-run` (expected OK for 5 NOID). Then the deviation.
@@ -239,7 +239,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Abort path: this run is the abort path. Cost: 9,000 + 5,800 μNOID. Duration: about 2 h 40.
 - Record: the instance listing, every refusal text, the recovery receipt.
 
-### L3 (run 16). B5 and B8: Bob locks with a too-short timelock
+### L3 (run 17). B5 and B8: Bob locks with a too-short timelock
 
 - Proves: Alice's (I3) check on a real lock; Bob's tool with a lock of his own sender made outside it; an early
   refund refused.
@@ -280,7 +280,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   price (about 0.0006 ETH for the lock alone at 1 gwei); 14,800 μNOID. Duration: about 2 h 40.
 - Record: the I3 text with the real block timestamp, Bob's file phases, both refusals of step 5.
 
-### L4 (run 17). T1 and A9: a third party closes to Bob first
+### L4 (run 18). T1 and A9: a third party closes to Bob first
 
 - Proves: a close made by someone other than Bob, from the secret Alice published, pays Bob; Bob's real tool reads
   it and records it with `--closed-by`. The third party is the copy of Bob's file that `prepare.sh` made on Alice's
@@ -312,7 +312,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   or two blocks.
 - Record: whether Bob's tool saw the close pending, the exact texts, Bob's net payout (amount - 5,800).
 
-### L5 (run 18). C5: the second node goes away at Bob's lock
+### L5 (run 19). C5: the second node goes away at Bob's lock
 
 - Proves the fail-closed half of `live-scenarios.md` 8. Two nodes per chain, no `SINGLE_NODE_OK`, the tunnel of
   `mac-setup.md` 6.
@@ -326,7 +326,7 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Abort path: if the tunnel cannot be restored before the hard lock-by (`h_create + 92`), Bob does not lock and the
   run ends as run 4 (Alice's `recover-noid.sh` at `D`). Cost: as a normal swap. Duration: about 1 hour.
 
-### L6 (run 19). C1: an epoch rotation around Bob's claim
+### L6 (run 20). C1: an epoch rotation around Bob's claim
 
 Run `live-scenarios.md` 6 as written, on raw v1 `poseidon`: pick the boundary `B` (a multiple of 144), set `HC_LEAD`,
 fund promptly, delay `reveal.sh` until `tip >= B - 6` (still well before the cutoff), and expect Bob's `claim.sh`
