@@ -12,8 +12,9 @@
 //!   The screen fails closed.
 //! - **A remembered detection, hard under `production`:** an earlier tick saw evidence that cannot come from two honest nodes, either two
 //!   different producers named for a block with equal hashes, or a different hash at a sampled height below an anchor block that the second
-//!   node named again after the sample, and wrote the marker `<swap file>.producer-differs` (`crate::producer_marker`); while it exists (or cannot be read) the
-//!   screen refuses, whatever the later ticks say.
+//!   node named again after the sample, and wrote the marker `<swap file>.producer-differs` and, with `tick --apply`, the history entry
+//!   `producer_differs_seen` (`crate::producer_marker`); while the marker exists (or cannot be read), or the history holds the entry, the screen
+//!   refuses, whatever the later ticks say. Removing the marker does not reopen it: the ways on are the override flag below, or a new swap file.
 //! - **Top two above 50 %: a warning in every profile**, never a refusal.
 //! - Under `sepolia` and `rehearsal` the same evaluation runs and everything above is a warning; the lock is offered as before.
 //! - `--accept-producer-concentration` waives the hard refusals under `production` (and nothing else): every tick that uses it
@@ -40,6 +41,15 @@ const HEADLINE_ONE_NODE: &str = "producer check needs a second Parano1d node";
 const HEADLINE_MARKER: &str = "an earlier tick saw the two Parano1d nodes name different producers for one block";
 const HEADLINE_MARKER_HASH: &str = "an earlier tick saw the two Parano1d nodes hold different blocks below a block they agree on";
 const HEADLINE_MARKER_UNREADABLE: &str = "the record of a producer disagreement between the two Parano1d nodes cannot be read";
+const HEADLINE_MARKER_REMEMBERED: &str = "the swap file's history records a producer disagreement between the two Parano1d nodes";
+
+/// The sentence that says what can be done after a remembered detection. There is no way to clear it for a swap file: removing the marker does not
+/// reopen the screen.
+fn ways_on() -> String {
+    format!(
+        "It cannot be cleared for this swap file. The ways on are to pass {OVERRIDE_FLAG} (printed as OVERRIDDEN on every tick and recorded in the history), or to end this swap (if no lock was sent there is nothing to refund) and start a new one with a new swap file"
+    )
+}
 
 /// The result of looking at one summary.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,8 +147,9 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
             return screen(Finding::Unverifiable {
                 headline,
                 detail: format!(
-                    "at Unix time {at} {seen}; compare the two nodes by hand for that block. The file <swap file>{} beside the swap file records it, the tool never removes it, and it keeps this screen closed on every tick until you remove it yourself after finding the cause (delete the header cache <swap file>.producers beside it too: it may still hold what the misreporting node said)",
-                    crate::producer_marker::SUFFIX
+                    "at Unix time {at} {seen}; compare the two nodes by hand for that block. The file <swap file>{} beside the swap file records it, the tool never removes it, and with tick --apply the swap file's history records it too, which keeps this screen closed on every tick for the rest of this swap file, even if the marker file is removed or the swap file is moved. {} (the header cache <swap file>.producers may still hold what the misreporting node said)",
+                    crate::producer_marker::SUFFIX,
+                    ways_on()
                 ),
             });
         }
@@ -146,7 +157,18 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
             return screen(Finding::Unverifiable {
                 headline: HEADLINE_MARKER_UNREADABLE,
                 detail: format!(
-                    "{reason}; it counts as a detection until you have looked at it (it records that two nodes once named different producers for a block with equal hashes, or held different blocks below a block they agreed on) and removed or repaired it yourself"
+                    "{reason}; it counts as a detection (it records that two nodes once named different producers for a block with equal hashes, or held different blocks below a block they agreed on), and with tick --apply the swap file's history records it too, so removing or repairing the file does not reopen the screen. {}",
+                    ways_on()
+                ),
+            });
+        }
+        MarkerState::Remembered { at } => {
+            return screen(Finding::Unverifiable {
+                headline: HEADLINE_MARKER_REMEMBERED,
+                detail: format!(
+                    "the swap file's history records, at Unix time {at}, that an earlier tick saw evidence that cannot come from two honest nodes (different producers for a block with equal hashes, or different blocks below a block they agree on); the file <swap file>{} beside the swap file is missing (it was removed, or the swap file was moved), and the history entry cannot be removed by the tool. Compare the two nodes by hand. {}",
+                    crate::producer_marker::SUFFIX,
+                    ways_on()
                 ),
             });
         }
@@ -364,6 +386,65 @@ fn overridden_note(finding: &Finding) -> String {
     };
     format!(
         "WARNING: producer concentration gate OVERRIDDEN by {OVERRIDE_FLAG} (T21): {what}. This is the exposure the gate exists to prevent. Amounts must stay trial-sized"
+    )
+}
+
+/// What the screen says about a `lock_eth` intent that was recorded earlier and is still pending (not yet seen on chain).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingLockFinding {
+    /// `true`: the screen refuses the lock now (enforced profile, no override), so the pending lock must not be sent (an `ALERT:`). `false`: the
+    /// profile only warns, and the cause is a remembered detection (a `WARNING:`).
+    pub hard: bool,
+    /// The short reason, the headline of the finding. Never an address.
+    pub headline: &'static str,
+}
+
+/// Does the screen, asked now, refuse (or, under a profile that only warns, hold a remembered detection against) the `lock_eth` that an
+/// earlier tick recorded as an intent? The decision is the one [`lock_gate`] makes (`wait.is_some()`), asked with a scratch note list so that
+/// the notes it pushes are not printed twice. `None` when the screen passes, when the override waives a refusal, when a warning-only profile
+/// has no remembered detection (its ordinary warning is already in the notes), and when no summary and no marker were read at all (a fixture
+/// replay: the screen was not asked, as for [`waiting_notes`]).
+pub fn pending_lock_finding(g: &Gates, noid: &NoidObservation, now: u64) -> Option<PendingLockFinding> {
+    if noid.producers.is_none() && noid.producer_marker.is_absent() {
+        return None;
+    }
+    let mut scratch: Vec<String> = Vec::new();
+    let hard = lock_gate(g, noid, now, &mut scratch).wait.is_some();
+    if !hard && (g.producer_gate_enforced || noid.producer_marker.is_absent()) {
+        return None;
+    }
+    let headline = match evaluate(g, noid, now).finding {
+        Finding::Pass => return None,
+        Finding::Concentrated { .. } => "producer concentration too high",
+        Finding::Unverifiable { headline, .. } => headline,
+    };
+    Some(PendingLockFinding { hard, headline })
+}
+
+const PENDING_LOCK_WHAT_TO_DO: &str = "Do NOT send that lock (do not run lock.sh or live.js lock). If nothing was sent, cancel the intent with `swap-cli intent FILE --cancel` (with the same chain flags as tick). If it may already have been sent, look at the contract";
+
+/// The note for a pending `lock_eth` intent (decided at `decided_at`, Unix time). Starts with `ALERT:` when the screen refuses now (the
+/// engine prints it on one tick only, as `scripts/live` expects of an alert), with `WARNING:` when the profile only warns.
+pub fn pending_lock_note(f: &PendingLockFinding, decided_at: u64) -> String {
+    if f.hard {
+        format!(
+            "ALERT: the producer screen refuses to lock now (T21: {}), but a lock_eth intent decided at {decided_at} (Unix time) is still pending. {PENDING_LOCK_WHAT_TO_DO}",
+            f.headline
+        )
+    } else {
+        format!(
+            "WARNING: the producer screen holds a remembered detection (T21: {}); this profile only warns, but production would refuse, and a lock_eth intent decided at {decided_at} (Unix time) is still pending. {PENDING_LOCK_WHAT_TO_DO}",
+            f.headline
+        )
+    }
+}
+
+/// The reason of the `wait` that holds a pending `lock_eth` intent while the screen refuses it: the usual "reuse the printed parameters" advice
+/// of the intent ledger would send the lock the screen has just refused.
+pub fn pending_lock_wait_reason(f: &PendingLockFinding, decided_at: u64) -> String {
+    format!(
+        "intent lock_eth pending since {decided_at} (unix) but the producer screen refuses to lock now ({}): do NOT send it; if nothing was sent, `swap-cli intent FILE --cancel` (with the same chain flags as tick)",
+        f.headline
     )
 }
 

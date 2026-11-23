@@ -675,7 +675,10 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     // T21: the first time `--accept-producer-concentration` lets a lock through that the screen would have held back, the swap file's history
     // says so (log only; once). Nothing here changes an event or the action.
     if matches!(&action, Action::LockEth { .. }) && matches!(&phase, Phase::Bob(BobPhase::FundingFinal { .. })) {
-        let already = file.history.iter().any(|h| h.event.starts_with(producer_gate::OVERRIDE_HISTORY));
+        // Once per swap, and again after each recorded detection: the live.js lock accepts the override only when its entry comes AFTER the
+        // detection entry (an outside read, 2026-11-10: an older override for a concentration must not waive a later disagreement).
+        let last_detection = file.history.iter().rposition(|h| h.event == crate::producer_marker::HISTORY);
+        let already = file.history.iter().enumerate().any(|(i, h)| h.event.starts_with(producer_gate::OVERRIDE_HISTORY) && last_detection.is_none_or(|d| i > d));
         if !already {
             log.extend(producer_gate::override_history_entry(file.public.params.profile.gates(), noid, now));
         }
@@ -3206,8 +3209,37 @@ pub fn tick_apply(
                 if decision.action.has_side_effect() || matches!(decision.action, Action::Wait { .. }) {
                     decision.notes.push(format!("held: fresh decision was {}", decision.action.kind()));
                 }
+                // T21: a `lock_eth` intent that an earlier tick recorded while the producer screen passed is still pending (Bob's file, the lock
+                // not seen yet), and the screen refuses now (or, under a profile that only warns, holds a remembered detection). The operator's
+                // lock helper sends the frozen parameters, so say plainly that this lock must not be sent. The fresh decision already pushed
+                // its own ALARM note (when `bob_action` reached the screen); the finding is asked again here only to know whether to alert, and
+                // adds no second copy of those notes. The `ALERT:` line is printed on the first tick that sees the refusal only (the alert hook of
+                // `scripts/live` sends one message per line and expects one tick per alert); the latch is a log-only history entry, written
+                // by `tick --apply`, per intent. Later ticks keep the changed `wait` reason and the ALARM note.
+                let mut screen_refuses: Option<producer_gate::PendingLockFinding> = None;
+                if intent.action == "lock_eth" && producer_scan_wanted(file) {
+                    if let Some(f) = producer_gate::pending_lock_finding(file.public.params.profile.gates(), noid, now) {
+                        if f.hard {
+                            let latch = format!("producer_alert_lock_pending:{}", intent.decided_at);
+                            if !file.history.iter().any(|h| h.event == latch) {
+                                decision.notes.push(producer_gate::pending_lock_note(&f, intent.decided_at));
+                                if record {
+                                    file.log(latch, now);
+                                }
+                            }
+                            screen_refuses = Some(f);
+                        } else {
+                            decision.notes.push(producer_gate::pending_lock_note(&f, intent.decided_at));
+                        }
+                    }
+                }
                 decision.notes.push(format!("frozen parameters of the pending {}: {}", intent.action, intent.params));
-                decision.action = Action::Wait { reason: intent_wait_reason(&intent) };
+                decision.action = Action::Wait {
+                    reason: match &screen_refuses {
+                        Some(f) => producer_gate::pending_lock_wait_reason(f, intent.decided_at),
+                        None => intent_wait_reason(&intent),
+                    },
+                };
             }
         }
         if status == IntentStatus::None {

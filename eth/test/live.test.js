@@ -1132,7 +1132,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
   const nonce = (a) => provider.getTransactionCount(a);
 
   /** A swap file with only the parts live.js reads (plus a `secret` it must never touch). Returns its path. */
-  function swapFile({ intent = null, eth = {}, hash, ethFromBlock, profile } = {}) {
+  function swapFile({ intent = null, eth = {}, hash, ethFromBlock, profile, history } = {}) {
     const j = {
       version: 1,
       role: "bob",
@@ -1156,6 +1156,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
     };
     if (intent) j.pending_intent = intent;
     if (ethFromBlock !== undefined) j.eth_from_block = ethFromBlock;
+    if (history !== undefined) j.history = history;
     const file = path.join(dir, `swap-${nSwap++}.json`);
     fs.writeFileSync(file, JSON.stringify(j, null, 2));
     return file;
@@ -1291,6 +1292,214 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       await expect(live.lock(provider, bob, { ...flags, swap: empty })).to.be.rejectedWith(/is it a swap-cli swap file/);
       // Without --swap the in-process function behaves as before (the command line prints the warning).
       expect((await live.lock(provider, bob, flags)).dryRun).to.equal(true);
+    });
+
+    // T21: the producer screen of swap-cli remembers a detection (marker file or history entry); `lock` must refuse under production, also in a dry run.
+    describe("the producer screen's remembered detection (T21)", () => {
+      const MARKER = ".producer-differs";
+      const SEEN = [{ at: 5, event: "producer_differs_seen", from: "x", to: "y" }];
+      const OVERRIDDEN = [{ at: 6, event: "producer_concentration_overridden: largest 60 % of 720", from: "x", to: "y" }];
+      const REFUSAL = /refusing: the producer screen of swap-cli remembers .*under the production profile that screen refuses the lock\. This is a screen, not a defence\. Do not send this lock\..*swap-cli intent FILE --cancel.*--accept-producer-concentration.*new swap file\. Once a `tick --apply` has run, removing the marker does not clear it\./s;
+      const stderrOf = async (fn) => {
+        const written = [];
+        const orig = process.stderr.write;
+        process.stderr.write = (c, ...r) => (written.push(String(c)), true);
+        try {
+          return { result: await fn(), written: written.join("") };
+        } finally {
+          process.stderr.write = orig;
+        }
+      };
+      const logsOf = async () => (await provider.getLogs({ address: htlcAddr, fromBlock: 0 })).length;
+
+      /** Nothing was sent: Bob's nonce and balance and the contract's logs are as before. */
+      async function assertNothingSent(run) {
+        const n = await nonce(bobAddr), b = await bal(bobAddr), l = await logsOf();
+        await run();
+        expect(await nonce(bobAddr)).to.equal(n);
+        expect(await bal(bobAddr)).to.equal(b);
+        expect(await logsOf()).to.equal(l);
+      }
+
+      it("(a) intent recorded, then the marker appears, then lock: refused with the full text, nothing sent", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal) }); // the earlier tick passed
+        fs.writeFileSync(swap + MARKER, "{}"); // the later tick detected
+        await assertNothingSent(async () => {
+          const e = await live.lock(provider, bob, { swap }).then(() => null, (x) => x);
+          expect(e, "lock must refuse").to.be.instanceOf(Error);
+          expect(e.message).to.match(REFUSAL);
+          expect(e.message).to.include(swap + MARKER);
+          expect(e.message).to.not.match(/0x[0-9a-fA-F]{40}/);
+        });
+      });
+
+      it("(b) the history entry alone (no marker) refuses too", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: SEEN });
+        expect(fs.existsSync(swap + MARKER)).to.equal(false);
+        await assertNothingSent(async () => {
+          const e = await live.lock(provider, bob, { swap }).then(() => null, (x) => x);
+          expect(e.message).to.match(REFUSAL);
+          expect(e.message).to.include("the swap file's history holds \"producer_differs_seen\"");
+          expect(e.message).to.not.include("marker file");
+        });
+      });
+
+      it("(c) a marker that is a directory, an empty file or garbage refuses (presence is enough, nothing is parsed)", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        for (const make of [
+          (m) => fs.mkdirSync(m),
+          (m) => fs.writeFileSync(m, ""),
+          (m) => fs.writeFileSync(m, "\u0000 not json at all {{{"),
+          (m) => fs.writeFileSync(m, JSON.stringify({ version: 1, height: 1, at: 1 })),
+        ]) {
+          const swap = swapFile({ intent: lockIntent(tReveal) });
+          make(swap + MARKER);
+          await assertNothingSent(async () => {
+            await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(REFUSAL);
+          });
+        }
+      });
+
+      it("(c) a marker that is a symlink (even a dangling one) refuses", async function () {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal) });
+        try {
+          fs.symlinkSync(path.join(dir, "no-such-target"), swap + MARKER);
+        } catch (e) {
+          if (e.code === "EPERM" || e.code === "EACCES") return this.skip(); // Windows without the symlink privilege
+          throw e;
+        }
+        await assertNothingSent(async () => {
+          await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(REFUSAL);
+        });
+      });
+
+      it("(c) a marker that cannot be examined (lstat fails with EACCES, ENOTDIR or EIO) refuses and says so", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal) });
+        for (const code of ["EACCES", "ENOTDIR", "EIO"]) {
+          const orig = fs.lstatSync;
+          fs.lstatSync = (f, ...r) => {
+            if (String(f).endsWith(MARKER)) throw Object.assign(new Error(code), { code });
+            return orig.call(fs, f, ...r);
+          };
+          try {
+            await assertNothingSent(async () => {
+              const e = await live.lock(provider, bob, { swap }).then(() => null, (x) => x);
+              expect(e, code).to.be.instanceOf(Error);
+              expect(e.message).to.match(REFUSAL);
+              expect(e.message).to.include(`cannot be examined (${code}), which counts as present`);
+            });
+          } finally {
+            fs.lstatSync = orig;
+          }
+        }
+        // The stub is gone: no marker, so the dry run goes through.
+        expect((await live.lock(provider, bob, { swap, dryRun: true })).dryRun).to.equal(true);
+      });
+
+      it("(d) under sepolia and rehearsal the same evidence only warns on stderr, and the lock goes through", async () => {
+        for (const profile of ["sepolia", "rehearsal"]) {
+          const tReveal = (await latestTs()) + 2 * HOUR;
+          const swap = swapFile({ intent: lockIntent(tReveal), profile, history: SEEN });
+          fs.writeFileSync(swap + MARKER, "{}");
+          const n = await nonce(bobAddr);
+          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+          expect(await nonce(bobAddr)).to.equal(n + 1);
+          expect(written).to.match(new RegExp(`^WARNING: the producer screen of swap-cli remembers .*under the ${profile} profile this only warns\\. A screen, not a defence\\.\\n`, "m"));
+          expect(written).to.include("the marker file").and.to.include("producer_differs_seen");
+          hashlock = sha256Raw(rand32()); // the next profile locks under a fresh hashlock (one own lock per hashlock)
+        }
+      });
+
+      it("(e) production with the operator's override in the history: a warning, and the lock goes through", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: [...SEEN, ...OVERRIDDEN] });
+        fs.writeFileSync(swap + MARKER, "{}");
+        const n = await nonce(bobAddr);
+        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+        expect(await nonce(bobAddr)).to.equal(n + 1);
+        expect(written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden \(tick --accept-producer-concentration\)\. A screen, not a defence\.\n/m);
+      });
+
+      // The override counts only when its entry comes AFTER the last detection entry (an outside read, 2026-11-10): an older override, written for
+      // a concentration, must not waive a later disagreement of the two nodes.
+      const REFUSES = /refusing: the producer screen of swap-cli remembers .*under the production profile that screen refuses the lock/s;
+
+      it("(e2) the override entry comes BEFORE the detection: the lock is refused under production, in a dry run too, nothing sent, the file untouched", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: [...OVERRIDDEN, ...SEEN] });
+        const before = fs.readFileSync(swap, "utf8");
+        await assertNothingSent(async () => {
+          // "Several ticks": the same refusal each time, and the history is as it was.
+          for (let i = 0; i < 3; i++) {
+            const e = await live.lock(provider, bob, { swap }).then(() => null, (x) => x);
+            expect(e, `attempt ${i}`).to.be.instanceOf(Error);
+            expect(e.message).to.match(REFUSES);
+            expect(e.message).to.include("the swap file's history holds \"producer_differs_seen\"");
+            await expect(live.lock(provider, bob, { swap, dryRun: true }), `dry run ${i}`).to.be.rejectedWith(REFUSES);
+          }
+        });
+        expect(fs.readFileSync(swap, "utf8"), "live.js never writes the swap file").to.equal(before);
+        // With a marker file as well: the same.
+        fs.writeFileSync(swap + MARKER, "{}");
+        await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(REFUSES);
+      });
+
+      it("(e3) the override entry comes AFTER the last detection: a warning, and the lock goes through; a later detection takes the waiver away again", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        // detection, override: waived.
+        const swap = swapFile({ intent: lockIntent(tReveal), history: [...SEEN, ...OVERRIDDEN] });
+        const n = await nonce(bobAddr);
+        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+        expect(await nonce(bobAddr)).to.equal(n + 1);
+        expect(written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden/m);
+        // override, detection, override, detection: the newest detection has no override after it.
+        const late = swapFile({ intent: lockIntent(tReveal), history: [...OVERRIDDEN, ...SEEN, ...OVERRIDDEN, ...SEEN] });
+        await assertNothingSent(async () => {
+          await expect(live.lock(provider, bob, { swap: late })).to.be.rejectedWith(REFUSES);
+        });
+        // override, detection, override: waived (the latest override is newer than the latest detection).
+        hashlock = sha256Raw(rand32()); // one own lock per hashlock
+        const waived = swapFile({ intent: lockIntent((await latestTs()) + 2 * HOUR), history: [...OVERRIDDEN, ...SEEN, ...OVERRIDDEN] });
+        const m = await nonce(bobAddr);
+        const out = await stderrOf(() => live.lock(provider, bob, { swap: waived }));
+        expect(out.result.lockId).to.be.a("string");
+        expect(await nonce(bobAddr)).to.equal(m + 1);
+      });
+
+      it("(f) no marker and no entry: no warning, behaviour unchanged (an override alone changes nothing either)", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: OVERRIDDEN });
+        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        expect(result.lockId).to.be.a("string");
+        expect(written).to.not.include("producer screen");
+      });
+
+      it("(g) a dry run under production with a marker (or the entry) refuses too", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const withMarker = swapFile({ intent: lockIntent(tReveal) });
+        fs.writeFileSync(withMarker + MARKER, "");
+        await expect(live.lock(provider, bob, { swap: withMarker, dryRun: true })).to.be.rejectedWith(REFUSAL);
+        await expect(live.lock(provider, bob, { swap: swapFile({ intent: lockIntent(tReveal), history: SEEN }), dryRun: true })).to.be.rejectedWith(REFUSAL);
+      });
+
+      it("the refusal comes before any network read (the provider is never touched); refund does not look at the marker", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: SEEN });
+        const noNet = new Proxy({}, { get: () => { throw new Error("the provider must not be touched"); } });
+        await expect(live.lock(noNet, bob, { swap })).to.be.rejectedWith(REFUSAL);
+        const l = await makeLock();
+        const refundSwap = swapFile({ intent: refundIntent(l.lockId), history: SEEN });
+        fs.writeFileSync(refundSwap + MARKER, "{}");
+        const e = await live.refund(provider, bob, { swap: refundSwap, dryRun: true }).then(() => null, (x) => x);
+        if (e) expect(e.message).to.not.include("producer screen"); // it may refuse for its own reasons (the timelock), never for this one
+      });
     });
   });
 
@@ -3805,9 +4014,11 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
     /**
      * A local HTTP JSON-RPC bridge to the in-process node. bridge.seen lists the methods of every request that arrived (a request is a batch).
      * bridge.throttle(methods) -> true makes it answer HTTP 429 with retry-after 1 (the request is then NOT forwarded).
+     * bridge.redirect(methods) -> { status, location } makes it answer that redirect instead (the request is then NOT forwarded).
+     * bridge.gate(methods) -> a promise holds the answer back until it settles (the request is forwarded after that).
      */
     async function startBridge() {
-      const bridge = { seen: [], throttle: () => false, throttled: 0, url: null, close: null };
+      const bridge = { seen: [], throttle: () => false, redirect: () => null, gate: () => null, throttled: 0, url: null, close: null };
       const handle = async (rq) => {
         try {
           return { jsonrpc: "2.0", id: rq.id, result: await hre.network.provider.send(rq.method, rq.params || []) };
@@ -3828,6 +4039,14 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
             res.end("slow down");
             return;
           }
+          const moved = bridge.redirect(methods);
+          if (moved) {
+            res.writeHead(moved.status, { location: moved.location });
+            res.end();
+            return;
+          }
+          const held = bridge.gate(methods);
+          if (held) await held;
           const out = Array.isArray(body) ? await Promise.all(body.map(handle)) : await handle(body);
           res.writeHead(200, { "content-type": "application/json" });
           res.end(JSON.stringify(out));
@@ -3908,6 +4127,465 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
         await bridge.close();
       }
       expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    // ---- no redirect for a request made through makeProvider (an outside read, 2026-11-10)
+    const REDIRECT_RE = /the endpoint answered with a redirect \(HTTP 307, to an http:\/\/ address\); this tool never follows redirects: put the endpoint's final URL in ETH_RPC_URL\./;
+
+    it("HTTP 307 to the request that carries the claim is not followed: the other endpoint sees nothing at all, the claim fails, the sidecar stays, nothing is repeated", async () => {
+      for (const [what, arm] of [
+        ["the other endpoint would accept", () => {}],
+        ["the other endpoint would answer 429 with retry-after and then 200 (the original bug)", (other) => (other.throttle = () => other.throttled === 0)],
+      ]) {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const other = await startBridge();
+        const bridge = await startBridge();
+        arm(other);
+        bridge.redirect = (methods) => (methods.includes("eth_sendRawTransaction") ? { status: 307, location: `${other.url}/final/path?apikey=LOCATIONKEY` } : null);
+        const p = live.makeProvider(`${bridge.url}/v2/CONFIGKEY`);
+        let err;
+        try {
+          err = await live.claim(p, wallet.connect(p), { swap, secret: preimage }).then(
+            () => null,
+            (e) => e
+          );
+          await pause(2500); // well past the retry-after: a library retry on the second endpoint would have landed by now
+          expect(bridge.count("eth_sendRawTransaction"), `${what}: the first endpoint saw the send exactly once`).to.equal(1);
+          expect(other.seen, `${what}: the second endpoint saw no request of any kind`).to.deep.equal([]);
+          expect(other.throttled, what).to.equal(0);
+        } finally {
+          p.destroy();
+          await bridge.close();
+          await other.close();
+        }
+        expect(err, what).to.be.an.instanceOf(Error);
+        expect(err.message, what).to.match(REDIRECT_RE);
+        expect(err.message, what).to.match(
+          /The endpoint answered the send with a redirect \(HTTP 307\), which this tool never follows, so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself\. To send it again as a first reveal, put the endpoint's final URL in ETH_RPC_URL and run the claim again now with --margin-s 1800 \(the strict cutoff, whatever the sidecar says\)/
+        );
+        expect(err.message, what).to.match(/reveal sidecar .* was written before the send and stays: the claim may have reached the network/);
+        expect(err.message, what).to.match(/run tick --apply before the claim only if you think it did reach the network\)$/);
+        for (const secretPart of ["CONFIGKEY", "LOCATIONKEY", "final/path", "127.0.0.1"]) expect(err.message, `${what}: ${secretPart} is not printed`).to.not.include(secretPart);
+        expect(live.sendGuard.noRetry, what).to.equal(false);
+        expect(fs.existsSync(swap + live.CLAIM_LOCK_SUFFIX), `${what}: the claim lock is gone`).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+        expect(live.readRevealSidecar(swap, l.lockId).state, what).to.equal("matching");
+      }
+    });
+
+    it("a read through makeProvider still works against an endpoint that redirects nothing", async () => {
+      const bridge = await startBridge();
+      const p = live.makeProvider(bridge.url);
+      try {
+        expect(await p.getBlockNumber()).to.be.a("number");
+        expect(await p.send("eth_chainId", [])).to.equal("0x7a69");
+        expect(bridge.seen.length).to.be.greaterThan(0);
+      } finally {
+        p.destroy();
+        await bridge.close();
+      }
+    });
+
+    it("a read answered with a redirect (301, 302, 303, 307, 308) fails with the same clear error, promptly, and the target sees nothing; so does the network detection", async () => {
+      const other = await startBridge();
+      const bridge = await startBridge();
+      const p = live.makeProvider(`${bridge.url}/v2/CONFIGKEY`);
+      const realLog = console.log;
+      console.log = () => {}; // the library's start-up loop says "failed to detect network" once a second
+      try {
+        for (const status of [301, 302, 303, 307, 308]) {
+          bridge.redirect = () => ({ status, location: `${other.url}/x?apikey=LOCATIONKEY` });
+          const e = await p.send("eth_blockNumber", []).then(
+            () => null,
+            (x) => x
+          );
+          expect(e, String(status)).to.be.an.instanceOf(Error);
+          expect(e.code, String(status)).to.equal("REDIRECT_REFUSED");
+          expect(e.statusCode, String(status)).to.equal(status);
+          expect(e.message, String(status)).to.include(`(HTTP ${status}, to an http:// address); this tool never follows redirects`);
+          for (const secretPart of ["CONFIGKEY", "LOCATIONKEY", "127.0.0.1"]) expect(e.message).to.not.include(secretPart);
+          expect(live.explain(e)).to.equal(e.message);
+        }
+        // a provider method that starts with the network detection does not hang either
+        const started = Date.now();
+        const e2 = await p.getBlockNumber().then(
+          () => null,
+          (x) => x
+        );
+        expect(e2 && e2.code).to.equal("REDIRECT_REFUSED");
+        expect(Date.now() - started, "fails promptly").to.be.below(3000);
+        // an answer with no Location header: same refusal, nothing said about a target
+        bridge.redirect = () => ({ status: 302, location: "" });
+        const e3 = await p.send("eth_blockNumber", []).then(
+          () => null,
+          (x) => x
+        );
+        expect(e3.message).to.match(/^the endpoint answered with a redirect \(HTTP 302\); this tool never follows redirects/);
+        await pause(300);
+        expect(other.seen, "the address the answers named was never asked").to.deep.equal([]);
+      } finally {
+        console.log = realLog;
+        p.destroy();
+        await bridge.close();
+        await other.close();
+      }
+    });
+
+    // ---- the claim lock (FILE.claim-lock)
+    const lockOf = (swap) => swap + live.CLAIM_LOCK_SUFFIX;
+    /** Every file beside the swap file that begins with its name and a dot (the sidecar, its temporary and stale files, the lock), with its bytes in hex. */
+    const snapshotOf = (swap) => {
+      const base = path.basename(swap) + ".";
+      const out = {};
+      for (const n of fs.readdirSync(path.dirname(swap)).filter((x) => x.startsWith(base))) {
+        const f = path.join(path.dirname(swap), n);
+        out[n] = fs.statSync(f).isFile() ? fs.readFileSync(f).toString("hex") : "(not a file)";
+      }
+      return out;
+    };
+    /** A claim whose clock jumps past the cutoff after the second local signature (the last check refuses). Resolves to the error. */
+    async function claimWithClockJump(wallet, l, swap, sentFlag) {
+      const realNow = Date.now;
+      const jump = l.tReveal - 1800 - Math.floor(realNow() / 1000) + 60;
+      let offset = 0;
+      try {
+        Date.now = () => realNow() + offset;
+        const spy = spying(wallet, () => (sentFlag.sent = true), { afterSign: (n) => (n === 2 ? (offset = jump * 1000) : 0) });
+        return await live.claim(provider, spy, { swap, secret: preimage }).then(
+          () => null,
+          (e) => e
+        );
+      } finally {
+        Date.now = realNow;
+      }
+    }
+
+    it("the claim lock: one small line (pid, time), there while the claim is signed and sent, gone before the receipt wait and after the claim", async () => {
+      const { wallet, swap } = await freshClaim();
+      expect(fs.existsSync(lockOf(swap))).to.equal(false);
+      let atSend = null;
+      let atSent = "not called";
+      const t0 = Math.floor(Date.now() / 1000);
+      const r = await live.claim(provider, spying(wallet, () => (atSend = fs.readFileSync(lockOf(swap), "utf8"))), {
+        swap,
+        secret: preimage,
+        onSent: () => (atSent = fs.existsSync(lockOf(swap))),
+      });
+      expect(atSend, "the lock was there when the broadcast was attempted").to.be.a("string");
+      const j = JSON.parse(atSend);
+      expect(Object.keys(j).sort()).to.deep.equal(["at", "pid", "version"]);
+      expect(j.version).to.equal(1);
+      expect(j.pid).to.equal(process.pid);
+      expect(j.at).to.be.within(t0 - 2, t0 + 600);
+      expect(atSend.toLowerCase()).to.not.include(preimage.slice(2).toLowerCase());
+      expect(atSent, "the lock is released as soon as the broadcast has settled, before the wait for the receipt (a --replace-tx from another terminal is possible then)").to.equal(false);
+      expect(fs.existsSync(lockOf(swap))).to.equal(false);
+      expect(r.revealSidecar).to.equal("written");
+      expect(leftovers(swap)).to.deep.equal([]);
+    });
+
+    it("a lock file that is already there (a dead claim, or one running) refuses the claim before anything beside the swap file is touched: no request, no sidecar, no .tmp, no .stale-*; the lock stays byte for byte", async () => {
+      for (const [what, content, expected] of [
+        ["a readable lock", JSON.stringify({ version: 1, pid: 4242, at: 1700000000 }) + "\n", /pid 4242, taken at Unix second 1700000000/],
+        ["garbage", "not json at all", /its content could not be read/],
+        ["empty", "", /its content could not be read/],
+      ]) {
+        for (const withSidecar of [false, true]) {
+          const { wallet, l, swap, n0 } = await freshClaim();
+          fs.writeFileSync(lockOf(swap), content);
+          if (withSidecar) fs.writeFileSync(sideOf(swap), sidecarBody(l.lockId, "ab".repeat(32), 1700000000));
+          const before = snapshotOf(swap);
+          const bridge = await startBridge();
+          const p = live.makeProvider(bridge.url);
+          let err;
+          try {
+            err = await live.claim(p, wallet.connect(p), { swap, secret: preimage }).then(
+              () => null,
+              (e) => e
+            );
+            expect(bridge.seen, `${what}: no request of any kind`).to.deep.equal([]);
+          } finally {
+            p.destroy();
+            await bridge.close();
+          }
+          const tag = `${what}, sidecar ${withSidecar}`;
+          expect(err, tag).to.be.an.instanceOf(Error);
+          expect(err.message, tag).to.match(/refusing: another claim for this swap file is running, or an earlier one died/);
+          expect(err.message, tag).to.include(lockOf(swap));
+          expect(err.message, tag).to.match(expected);
+          expect(err.message, tag).to.match(/Nothing was read or written beside the swap file and nothing was sent\. If you are sure that no other claim for this swap file is running, delete .* by hand/);
+          expect(snapshotOf(swap), `${tag}: every file beside the swap file is byte for byte as before`).to.deep.equal(before);
+          await expectUnsent(wallet, l, n0);
+        }
+      }
+      // something that is not a file at the name (a directory) is also "exists": fail closed, left alone
+      const { wallet, l, swap, n0 } = await freshClaim();
+      fs.mkdirSync(lockOf(swap));
+      await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/another claim for this swap file is running, or an earlier one died/);
+      expect(fs.statSync(lockOf(swap)).isDirectory()).to.equal(true);
+      expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      fs.rmdirSync(lockOf(swap));
+    });
+
+    it("a lock that cannot be created for another reason also refuses (fail closed): nothing is read, written or sent", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const realOpen = fs.openSync;
+      fs.openSync = (p, ...rest) => {
+        if (String(p).endsWith(live.CLAIM_LOCK_SUFFIX)) throw Object.assign(new Error("simulated"), { code: "EACCES" });
+        return realOpen(p, ...rest);
+      };
+      try {
+        await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(
+          /the lock file .* could not be created \(EACCES\), so it is not known whether another claim for this swap file is running.*Nothing was read or written beside the swap file and nothing was sent/
+        );
+      } finally {
+        fs.openSync = realOpen;
+      }
+      expect(snapshotOf(swap)).to.deep.equal({});
+      await expectUnsent(wallet, l, n0);
+      expect((await live.claim(provider, wallet, { swap, secret: preimage })).revealSidecar).to.equal("written");
+    });
+
+    it("a second claim while the first is between its lock and the answer to its send is refused and changes nothing; the first goes through and the lock is gone", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const bridge = await startBridge();
+      const p = live.makeProvider(bridge.url);
+      let open;
+      const hold = new Promise((r) => (open = r));
+      bridge.gate = (methods) => (methods.includes("eth_sendRawTransaction") ? hold : null);
+      const wp = wallet.connect(p);
+      const first = live.claim(p, wp, { swap, secret: preimage });
+      let r;
+      try {
+        for (let i = 0; i < 400 && bridge.count("eth_sendRawTransaction") === 0; i++) await pause(25);
+        expect(bridge.count("eth_sendRawTransaction"), "the first claim's send is at the endpoint").to.equal(1);
+        expect(fs.existsSync(lockOf(swap)), "the first claim holds the lock").to.equal(true);
+        const before = snapshotOf(swap);
+        expect(before[path.basename(sideOf(swap))], "the first claim's sidecar is there").to.be.a("string");
+        const requests = bridge.seen.length;
+        const err = await live.claim(p, wp, { swap, secret: preimage }).then(
+          () => null,
+          (e) => e
+        );
+        expect(err).to.be.an.instanceOf(Error);
+        expect(err.message).to.match(/another claim for this swap file is running, or an earlier one died/);
+        expect(err.message).to.include(lockOf(swap));
+        expect(err.message).to.include(`pid ${process.pid}`);
+        expect(snapshotOf(swap), "the first claim's lock and sidecar are untouched").to.deep.equal(before);
+        expect(bridge.seen.length, "the second claim sent no request").to.equal(requests);
+      } finally {
+        open();
+        r = await first;
+        p.destroy();
+        await bridge.close();
+      }
+      expect(r.revealSidecar).to.equal("written");
+      expect(fs.existsSync(lockOf(swap))).to.equal(false);
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+    });
+
+    it("the lock is gone after every way a claim can end: sent, refused at the last check, refused before the send, the sidecar cannot be written, the send throttled", async () => {
+      // (1) sent
+      {
+        const { wallet, swap } = await freshClaim();
+        await live.claim(provider, wallet, { swap, secret: preimage });
+        expect(fs.existsSync(lockOf(swap)), "sent").to.equal(false);
+      }
+      // (2) refused at the last check, after the sidecar was written
+      {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const flag = { sent: false };
+        const err = await claimWithClockJump(wallet, l, swap, flag);
+        expect(err.message).to.match(/past the reveal cutoff.*after the reveal sidecar was written.*was removed again.*nothing was sent/);
+        expect(flag.sent).to.equal(false);
+        expect(fs.existsSync(lockOf(swap)), "last check").to.equal(false);
+        expect(fs.existsSync(sideOf(swap))).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+      }
+      // (3) refused before the send: the frozen cutoff has passed
+      {
+        preimage = rand32(); // a new secret: a hashlock can be locked once per sender
+        hashlock = sha256Raw(preimage);
+        const l = await makeLock();
+        const past = (await latestTs()) - 5;
+        const swap = swapFile({ intent: revealIntent(l.lockId, l.tReveal, past) });
+        await expect(live.claim(provider, alice, { swap, secret: preimage })).to.be.rejectedWith(/past the reveal cutoff/);
+        expect(fs.existsSync(lockOf(swap)), "refused before the send").to.equal(false);
+      }
+      // (4) the sidecar cannot be written
+      {
+        const { wallet, swap } = await freshClaim();
+        const real = fs.fsyncSync;
+        fs.fsyncSync = () => {
+          throw EIO();
+        };
+        try {
+          await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/reveal sidecar .* could not be written \(EIO\); nothing was sent/);
+        } finally {
+          fs.fsyncSync = real;
+        }
+        expect(fs.existsSync(lockOf(swap)), "sidecar cannot be written").to.equal(false);
+        expect(fs.existsSync(sideOf(swap))).to.equal(false);
+      }
+      // (5) the send is answered with HTTP 429
+      {
+        const { wallet, l, swap } = await freshClaim();
+        const bridge = await startBridge();
+        const p = live.makeProvider(bridge.url);
+        try {
+          bridge.throttle = (methods) => methods.includes("eth_sendRawTransaction") && bridge.throttled === 0;
+          await expect(live.claim(p, wallet.connect(p), { swap, secret: preimage })).to.be.rejectedWith(/throttled \(HTTP 429\)/);
+        } finally {
+          p.destroy();
+          await bridge.close();
+        }
+        expect(fs.existsSync(lockOf(swap)), "throttled send").to.equal(false);
+        expect(live.readRevealSidecar(swap, l.lockId).state, "the sidecar of the throttled send stays").to.equal("matching");
+      }
+    });
+
+    it("a dry run takes no lock, does not look at one, and leaves one that is there byte for byte", async () => {
+      const { wallet, swap } = await freshClaim();
+      const dry = await live.claim(provider, wallet, { swap, secret: preimage, dryRun: true });
+      expect(dry.dryRun).to.equal(true);
+      expect(fs.existsSync(lockOf(swap))).to.equal(false);
+      const held = JSON.stringify({ version: 1, pid: 4242, at: 1700000000 }) + "\n";
+      fs.writeFileSync(lockOf(swap), held);
+      const planOnly = await live.claim(provider, wallet, { swap, dryRun: true });
+      expect(planOnly.dryRun).to.equal(true);
+      const dry2 = await live.claim(provider, wallet, { swap, secret: preimage, dryRun: true });
+      expect(dry2.dryRun).to.equal(true);
+      expect(fs.readFileSync(lockOf(swap), "utf8")).to.equal(held);
+      expect(snapshotOf(swap)).to.deep.equal({ [path.basename(lockOf(swap))]: Buffer.from(held).toString("hex") });
+    });
+
+    it("a claim without --swap needs no lock and makes none", async () => {
+      const l = await makeLock();
+      const before = fs.readdirSync(dir).filter((n) => n.includes(".claim-lock"));
+      const r = await live.claim(provider, alice, { ...tgt, contract: htlcAddr, lockId: l.lockId, secret: preimage });
+      expect(r.txHash).to.match(/^0x[0-9a-f]{64}$/);
+      expect(fs.readdirSync(dir).filter((n) => n.includes(".claim-lock"))).to.deep.equal(before);
+    });
+
+    it("a lock that cannot be removed is reported on stderr and changes nothing else: the claim still succeeds, the lock stays for the operator", async () => {
+      const { wallet, l, swap } = await freshClaim();
+      const realUnlink = fs.unlinkSync;
+      const realWrite = process.stderr.write;
+      const said = [];
+      fs.unlinkSync = (p, ...rest) => {
+        if (String(p).endsWith(live.CLAIM_LOCK_SUFFIX)) throw Object.assign(new Error("simulated"), { code: "EPERM" });
+        return realUnlink(p, ...rest);
+      };
+      process.stderr.write = (chunk) => {
+        said.push(String(chunk));
+        return true;
+      };
+      let r;
+      try {
+        r = await live.claim(provider, wallet, { swap, secret: preimage });
+      } finally {
+        fs.unlinkSync = realUnlink;
+        process.stderr.write = realWrite;
+      }
+      expect(r.revealSidecar).to.equal("written");
+      expect((await live.status(provider, null, { contract: htlcAddr, lockId: l.lockId })).state).to.equal("claimed");
+      expect(said.join("")).to.match(/warning: the claim lock .* could not be removed \(EPERM\); delete it by hand before the next claim for this swap file/);
+      expect(fs.existsSync(lockOf(swap))).to.equal(true);
+      fs.unlinkSync(lockOf(swap));
+    });
+
+    // ---- a link that was made but reported an error
+    it("a hard link that was really made but reported an error is this call's file: written, created, not raced; a later refusal takes it back", async () => {
+      // directly: both ways of recognising the file (same inode; and, where the file system reports inode 0, the exact bytes)
+      for (const [what, zeroInodes] of [
+        ["same inode", false],
+        ["inode 0 on this file system: the bytes decide", true],
+      ]) {
+        const { l, swap } = await freshClaim();
+        const t = patchFs();
+        t.onLink = (a, b) => {
+          t.real.linkSync(a, b);
+          throw EIO();
+        };
+        const realStat = fs.statSync;
+        if (zeroInodes) {
+          fs.statSync = (p, o) => {
+            const st = realStat(p, o);
+            return String(p).includes(".reveal-sent") && st && typeof st.ino === "bigint" ? Object.assign(Object.create(Object.getPrototypeOf(st)), st, { ino: 0n }) : st;
+          };
+        }
+        let res;
+        try {
+          res = live.writeRevealSidecar(swap, l.lockId, "0x" + "ab".repeat(32));
+        } finally {
+          fs.statSync = realStat;
+          t.restore();
+        }
+        expect(res.state, what).to.equal("written");
+        expect(res.created, what).to.equal(true);
+        expect(fs.readFileSync(sideOf(swap)).equals(res.bytes), what).to.equal(true);
+        expect(leftovers(swap), what).to.deep.equal([]);
+      }
+      // through the claim: the last check refuses after that, and the file is removed (it was never evidence of a send)
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const t = patchFs();
+      t.onLink = (a, b) => {
+        t.real.linkSync(a, b);
+        throw EIO();
+      };
+      const flag = { sent: false };
+      let err;
+      try {
+        err = await claimWithClockJump(wallet, l, swap, flag);
+      } finally {
+        t.restore();
+      }
+      expect(err.message).to.match(/past the reveal cutoff.*after the reveal sidecar was written.*was removed again.*nothing was sent/);
+      expect(err.message).to.not.match(/evidence of an earlier attempt/);
+      expect(flag.sent).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+      expect(fs.existsSync(sideOf(swap)), "no sidecar stays for a send that was never made").to.equal(false);
+      expect(leftovers(swap)).to.deep.equal([]);
+      expect(fs.existsSync(lockOf(swap))).to.equal(false);
+    });
+
+    it("a matching sidecar of another writer that appears at the moment of the link (a different record, EEXIST) is still kept and never removed", async () => {
+      const { l, swap } = await freshClaim();
+      const other = sidecarBody(l.lockId, "ef".repeat(32), 1700000001);
+      const t = patchFs();
+      t.onLink = (_a, b) => {
+        fs.writeFileSync(b, other);
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      };
+      let res;
+      try {
+        res = live.writeRevealSidecar(swap, l.lockId, "0x" + "ab".repeat(32));
+      } finally {
+        t.restore();
+      }
+      expect(res.state).to.equal("kept");
+      expect(res.created).to.equal(false);
+      expect(fs.readFileSync(sideOf(swap), "utf8"), "the other record, byte for byte").to.equal(other);
+      expect(leftovers(swap)).to.deep.equal([]);
+      // through the claim: the last check refuses and the other writer's record stays
+      const again = await freshClaim();
+      const otherAgain = sidecarBody(again.l.lockId, "ef".repeat(32), 1700000001);
+      const t2 = patchFs();
+      t2.onLink = (_a, b) => {
+        fs.writeFileSync(b, otherAgain);
+        throw Object.assign(new Error("exists"), { code: "EEXIST" });
+      };
+      const flag = { sent: false };
+      let err;
+      try {
+        err = await claimWithClockJump(again.wallet, again.l, again.swap, flag);
+      } finally {
+        t2.restore();
+      }
+      expect(err.message).to.match(/past the reveal cutoff.*that was there before is kept \(it is evidence of an earlier attempt\).*nothing was sent/);
+      expect(flag.sent).to.equal(false);
+      expect(fs.readFileSync(sideOf(again.swap), "utf8")).to.equal(otherAgain);
     });
 
     it("a crash after the write but before the send leaves the sidecar; the next claim keeps it (the earliest time) and sends", async () => {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # usage: lock.sh [--dry-run]       Bob's Ethereum lock, from the intent his last `tick --apply` recorded in his swap file.
 # live.js lock --swap FILE fills and checks every term (amount, hashlock, receiver, T_reveal, contract, chain, code hash)
-# against the file and refuses a duplicate hashlock. Without --dry-run REAL ETH is locked: owner's go-ahead first.
+# against the file and refuses a duplicate hashlock, and (also with --dry-run) a file whose producer screen remembers a detection under
+# production (marker FILE.producer-differs or history entry producer_differs_seen; T21), unless the file records the override. Without --dry-run REAL ETH is locked: owner's go-ahead first.
 # Fee flags as in reveal.sh (REVIEW-5 R5-8): MAX_FEE_GWEI (mainnet: --mainnet --max-fee-gwei) or GAS_PRICE_GWEI in env.local.sh; a chain-1 file
 # needs MAX_FEE_GWEI. live.js refuses a cap below 1 x the latest base fee for a lock (R4-1).
 # Key file: BOB_KEY (default keys/bob.key, relative to eth/); for mainnet set BOB_KEY in env.local.sh to the mainnet key file.

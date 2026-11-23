@@ -47,6 +47,10 @@
  *                        under the same hashlock do not block, for either lock kind (REVIEW-6 R6-2);
  *                        they are reported (and noted on stderr).
  *   refund               the lock is present, unclaimed, unrefunded, and its timelock passed.
+ *   lock --swap FILE     the producer screen of swap-cli must not remember a detection (T21): the marker file FILE.producer-differs (present, or
+ *                        not examinable, counts) or the history entry producer_differs_seen. Under the production profile `lock` refuses (also in
+ *                        --dry-run) unless the history holds the operator's producer_concentration_overridden (tick --accept-producer-concentration),
+ *                        then it only warns; under any other profile it warns. Local reads only, before any network call. A screen, not a defence.
  *
  * Mainnet (chain id 1) is refused unless the signing command (deploy, send, lock, claim, refund) is given --mainnet.
  * With --mainnet: only chain 1 is accepted (a test network is refused, no mixing; --allow-chain-id is refused),
@@ -100,6 +104,14 @@
  * mode 600, fsynced with its directory) as the last step before the broadcast and sends nothing if that fails. A sidecar of THIS lock beside the file is read
  * as evidence that the secret may be public, like the history events below (same late cutoff); one of another lock is ignored and reported. swap-cli's
  * `tick` reads the same file (history name reveal_sidecar_seen).
+ *
+ * Claim lock: a real `claim --swap FILE` first creates FILE.claim-lock exclusively (pid and time, nothing secret) and holds it until the send has settled
+ * (not through the wait for the receipt, so `claim --replace-tx` from another terminal still works then). If that file exists, or cannot be created, the
+ * claim refuses before it touches the sidecar: a claim that died leaves its lock, and the operator deletes it by hand once sure that no other claim for
+ * this swap file is running. The tool never removes a lock it did not make. A dry run takes no lock.
+ *
+ * No redirect, no library retry for the send: a provider from makeProvider (the command line's) turns every HTTP 3xx answer into an error
+ * (REDIRECT_REFUSED; put the endpoint's final URL in ETH_RPC_URL), and the claim's send is not retried on HTTP 429 (see sendGuard).
  *
  * Keys (REVIEW-4 R4-5): with --swap, claim needs the key of the file's alice_receiver, refund and lock that of bob_sender.
  * Late re-send (REVIEW-4 R4-3): with --swap, when the file's history shows the secret may already be public (reveal_submitted,
@@ -592,6 +604,8 @@ function redact(text) {
 /** Decode a revert into something readable, without ever including tx secrets. */
 const SECRET_MAY_BE_OUT = new Set(["BadCalldataLength", "InsufficientGas", "TimelockExpired", "InvalidPreimage", "TransferFailed"]);
 function explain(e) {
+  // A redirect answer refused by makeProvider: its message is complete and carries no part of the configured URL.
+  if (isRedirectAnswer(e)) return e.message;
   // HTLCPoseidonV2's errors are those of HTLC.sol plus two, so its interface reads both; HTLC.sol's is the fallback.
   const ifaces = [];
   for (const kind of ["poseidon", "sha256"]) {
@@ -720,18 +734,51 @@ async function requireFundsFor(provider, from, req, gasLimit) {
 // that one send; the provider built by `makeProvider` has a `retryFunc` that reads it (`_getConnection()` hands out clones of the request, and
 // `clone()` copies the retry function, so the closure over this shared object reaches every clone). Every other request keeps the retry.
 // A provider not built by `makeProvider` (an in-process node in a test) has no such function: the switch is simply unused.
+// Redirects: when an endpoint answers 301, 302, 307 or 308 the library builds a NEW request for the address the answer names (`redirect()`), and that
+// new request has neither this retry function nor the wrapper below. If the second endpoint then answered 429, the library would repeat the signed
+// claim by itself, late, unseen. So a provider from `makeProvider` never reaches that branch: its `getUrlFunc` turns every 3xx answer into an error
+// (REDIRECT_REFUSED) before the library looks at the status. `clone()` copies `getUrlFunc` as well, so the wrapper reaches every clone. This tool
+// follows no redirect, for a read or for the send; the operator puts the endpoint's final address into ETH_RPC_URL.
 const sendGuard = { noRetry: false };
 
-/** The provider the command line uses: a JSON-RPC provider over HTTP whose automatic retry on HTTP 429 is switched off while `sendGuard.noRetry` is set. */
+/** The error a provider from `makeProvider` throws for an HTTP 3xx answer. It carries no part of the configured URL or of the address the answer names. */
+class RedirectRefused extends Error {
+  constructor(statusCode, locationScheme) {
+    super(
+      `the endpoint answered with a redirect (HTTP ${statusCode}${locationScheme ? `, to an ${locationScheme}:// address` : ""}); this tool never follows redirects: ` +
+        `put the endpoint's final URL in ETH_RPC_URL.`
+    );
+    this.name = "RedirectRefused";
+    this.code = "REDIRECT_REFUSED";
+    this.statusCode = statusCode;
+  }
+}
+
+/** The provider the command line uses: a JSON-RPC provider over HTTP whose automatic retry on HTTP 429 is switched off while `sendGuard.noRetry` is set, and that follows no redirect. */
 function makeProvider(url) {
   const request = new ethers.FetchRequest(url);
   request.retryFunc = async () => !sendGuard.noRetry;
+  const inner = request.getUrlFunc; // the getter returns the library's default when none is set
+  request.getUrlFunc = async (req, signal) => {
+    const resp = await inner(req, signal);
+    if (resp && resp.statusCode >= 300 && resp.statusCode <= 399) {
+      // Only the scheme of the address named is kept: the rest (host, path, query) can hold an API key.
+      const m = /^(https?):\/\//i.exec(String((resp.headers && resp.headers.location) || ""));
+      throw new RedirectRefused(resp.statusCode, m ? m[1].toLowerCase() : null);
+    }
+    return resp;
+  };
   return new ethers.JsonRpcProvider(request, undefined, { cacheTimeout: -1 });
 }
 
 /** True when the error is the endpoint's HTTP 429 answer (a server error of the library with that status). */
 function isThrottledAnswer(e) {
   return !!e && e.code === "SERVER_ERROR" && !!e.response && e.response.statusCode === 429;
+}
+
+/** True when the error is the refusal of a redirect answer by a provider from `makeProvider`. */
+function isRedirectAnswer(e) {
+  return !!e && e.code === "REDIRECT_REFUSED";
 }
 
 /**
@@ -746,6 +793,8 @@ function isThrottledAnswer(e) {
  * the transaction is signed locally after preSend, lastCheck runs, and the very next call hands the signed bytes to `provider.broadcastTransaction`:
  * nothing but the local signature and this synchronous check sits between the sidecar and the bytes going to the node. With any other signer it runs
  * just before `signer.sendTransaction`, which does its own network reads before it broadcasts, so the check is weaker there.
+ * opts.afterSend: optional callback (it must not throw), run as soon as the broadcast call has returned or thrown, before the wait for the
+ * receipt (only together with opts.preSend). The claim uses it to release its lock file (see takeClaimLock).
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
@@ -826,14 +875,15 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
       // the send fails and the claim says so. What remains, and is NOT fixed here (TASKS.md T21-17): the request's own duration. The node has the
       // bytes as soon as the request is delivered, but a stalled connection can delay the delivery, and that delay has no firm bound: the
       // library's 300 s is an inactivity timer on the socket (any traffic resets it), the name lookup and the connect have no library timeout,
-      // and on a timeout the library rejects without aborting the request. A redirect answer (301, 302, 307, 308) is also followed by the
-      // library at once, to the address the endpoint names.
+      // and on a timeout the library rejects without aborting the request. A redirect answer (301, 302, 307, 308, or any 3xx) is NOT followed by
+      // a provider from `makeProvider`: it becomes an error (REDIRECT_REFUSED), so the signed bytes are offered to the one endpoint only.
       if (typeof opts.lastCheck === "function") opts.lastCheck();
       sendGuard.noRetry = true;
       try {
         resp = await sendVia.broadcastTransaction(raw);
       } finally {
         sendGuard.noRetry = false; // the receipt polling after the send keeps the library's normal retry behaviour
+        if (typeof opts.afterSend === "function") opts.afterSend(); // the send has settled (answered or failed): the claim lock is let go here, not after the receipt wait
       }
     } else {
       // Any other signer (a node-held account, a hardware or remote signer) does its own network reads inside `sendTransaction` before it
@@ -845,6 +895,7 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
         resp = await signer.sendTransaction(toSend);
       } finally {
         sendGuard.noRetry = false;
+        if (typeof opts.afterSend === "function") opts.afterSend();
       }
     }
   } else {
@@ -869,6 +920,54 @@ function profileOf(v) {
   if (v === undefined) return "production";
   if (typeof v !== "string" || v === "") throw new UserError("swap file profile must be a non-empty string");
   return v;
+}
+
+// ------------------------------------------------ the producer screen's memory (T21)
+// Bob's tool (`swap-cli tick`) keeps a screen on who produces the Parano1d blocks. A tick that sees two honest nodes disagree on a block's
+// producer remembers it: the marker file `<swap file>.producer-differs` and, from `tick --apply`, the history entry `producer_differs_seen`.
+// Under `production` the tool then refuses to offer the lock. But an intent recorded by an EARLIER tick stays pending, and this script used to
+// check only the intent, so the lock still went out. `lock` therefore reads the same memory itself: pure local file reads, before any network
+// call, signing or send. It refuses in a dry run too, so that the dry run shows the operator the truth.
+// It is a screen, not a defence. The marker is presence only, as in the Rust reader (`producer_marker::read`): a clean "not found" is absent,
+// anything else (a file, a directory, a link, an empty or garbage file, a failed lstat) counts as present. Nothing is parsed here.
+const PRODUCER_MARKER_SUFFIX = ".producer-differs";
+const PRODUCER_DIFFERS_EVENT = "producer_differs_seen";
+const PRODUCER_OVERRIDE_PREFIX = "producer_concentration_overridden";
+
+/** Where the remembered detection is on record for this swap file: { marker: string|null, history: boolean }. Reads nothing but local metadata. */
+function producerDetection(sw) {
+  const markerPath = sw.file + PRODUCER_MARKER_SUFFIX;
+  let marker = null;
+  try {
+    fs.lstatSync(markerPath);
+    marker = `${markerPath} exists`;
+  } catch (e) {
+    if (!(e && e.code === "ENOENT")) marker = `${markerPath} cannot be examined (${e && e.code ? e.code : "error"}), which counts as present`;
+  }
+  return { marker, history: sw.producerDiffersSeen === true };
+}
+
+/** `lock` only: refuse (production, no override) or warn (override recorded, or any other profile) when the producer screen remembers a detection. */
+function checkProducerMemory(sw) {
+  const found = producerDetection(sw);
+  if (found.marker === null && !found.history) return;
+  const evidence = [found.marker === null ? null : `the marker file ${found.marker}`, found.history ? `the swap file's history holds "${PRODUCER_DIFFERS_EVENT}"` : null].filter(Boolean).join(" and ");
+  const what = `the producer screen of swap-cli remembers that two Parano1d nodes named different producers for the same block (${evidence})`;
+  if (sw.profile !== "production") {
+    process.stderr.write(`WARNING: ${what}; under the ${sw.profile} profile this only warns. A screen, not a defence.\n`);
+    return;
+  }
+  if (sw.producerOverridden) {
+    process.stderr.write(
+      `WARNING: ${what}; this lock goes ahead only because the swap file records the operator's ${PRODUCER_OVERRIDE_PREFIX} (tick --accept-producer-concentration). A screen, not a defence.\n`
+    );
+    return;
+  }
+  throw new UserError(
+    `refusing: ${what}, and under the production profile that screen refuses the lock. ` +
+      "This is a screen, not a defence. Do not send this lock. If nothing was sent, cancel the intent with `swap-cli intent FILE --cancel` (with the same chain flags as tick). " +
+      "The way on is `--accept-producer-concentration` on the next `tick --apply` (it is recorded in the swap file and printed on every tick), or ending this swap and starting a new one with a new swap file. Once a `tick --apply` has run, removing the marker does not clear it."
+  );
 }
 
 /** Parse the parts of the swap file this script needs. Read-only; `secret` is never looked at. */
@@ -900,6 +999,15 @@ function readSwapFile(file) {
       intent: j.pending_intent || null,
       // REVIEW-4 R4-3: swap-cli's own predicate (`secret_may_be_public`): the file shows Alice's claim reached the network.
       secretMayBePublic: Array.isArray(j.history) && j.history.some((h) => h && SECRET_PUBLIC_EVENTS.has(h.event)),
+      // The producer screen of swap-cli (T21): its remembered detection is the history entry `producer_differs_seen`; the operator's waiver is an
+      // entry whose event starts with `producer_concentration_overridden` (`tick --accept-producer-concentration`). Only `lock` reads them.
+      producerDiffersSeen: Array.isArray(j.history) && j.history.some((h) => h && h.event === PRODUCER_DIFFERS_EVENT),
+      // The override counts only when its entry comes AFTER the last detection entry (an older override, e.g. for a concentration, must not waive a later disagreement).
+      producerOverridden: Array.isArray(j.history) && (() => {
+        const ev = j.history.map((h) => (h && typeof h.event === "string" ? h.event : ""));
+        const lastDetection = ev.lastIndexOf(PRODUCER_DIFFERS_EVENT);
+        return ev.some((e, i) => e.startsWith(PRODUCER_OVERRIDE_PREFIX) && i > lastDetection);
+      })(),
       ethFromBlock: j.eth_from_block === undefined || j.eth_from_block === null ? null : uint("swap file eth_from_block", j.eth_from_block),
     };
   } catch (e) {
@@ -921,7 +1029,8 @@ function readSwapFile(file) {
 // final file is read back and compared byte for byte. The final name is never opened for writing, so a half-written file cannot appear there. If any
 // step fails, what this call created is removed (it is not evidence: nothing was sent) and the claim is refused; it is removed only if it still
 // holds what this call wrote (or debris), never another process's record. A file at the name that cannot be examined or read (an I/O error) is
-// never moved aside: it may be a good sidecar, so the claim is refused. Two claims for one swap file at the same time are not supported.
+// never moved aside: it may be a good sidecar, so the claim is refused. Two claims for one swap file at the same time are excluded by the claim
+// lock (`FILE.claim-lock`, see takeClaimLock): a real claim with --swap holds it from before the sidecar is read until the send has settled.
 // A sidecar of this lock that ALREADY exists is evidence of an earlier attempt and is never deleted or truncated by this code, whatever fails: its
 // own bytes are written again through a new temporary file (fsynced, checked) and renamed over it, so that the data and the entry are made
 // durable now, whatever happened to the earlier attempt's own flush. If that fails, the claim is refused and the old file stays.
@@ -933,6 +1042,80 @@ const REVEAL_SIDECAR_SUFFIX = ".reveal-sent";
 const REVEAL_SIDECAR_MAX_BYTES = 4096;
 const revealSidecarPath = (swapFile) => String(swapFile) + REVEAL_SIDECAR_SUFFIX;
 const codeOf = (e) => (e && e.code ? e.code : "error");
+
+// ------------------------------------------------ the claim lock
+// A real `claim --swap FILE` holds `FILE.claim-lock` while it can touch the sidecar and send: from before the sidecar is first read until the send has
+// settled (the broadcast call returned or threw, or something before it threw). Without it two claims for one swap file could lose each other's
+// sidecar: one publishes it and sends, the other's rename overwrites it, and that one's later refusal removes it again. The lock is created
+// exclusively (an existing name is never replaced); it holds one small JSON line (version, pid, Unix seconds): nothing secret.
+// It fails CLOSED. If the file exists, or cannot be created for any other reason, the claim refuses before it reads or writes anything beside the swap
+// file. A lock is never taken over, deleted or judged stale here, not by the pid and not by the age: a claim that died leaves its lock, and the
+// operator removes it by hand once sure that no other claim for this swap is running. It is not held while the receipt is awaited, so a
+// `claim --replace-tx` from another terminal is possible then. A dry run takes no lock (it writes nothing).
+const CLAIM_LOCK_SUFFIX = ".claim-lock";
+const claimLockPath = (swapFile) => String(swapFile) + CLAIM_LOCK_SUFFIX;
+
+/** What the lock file at `file` says about its holder, for the refusal message (never throws). */
+function describeClaimLock(file) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (j && Number.isSafeInteger(j.pid) && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}`;
+  } catch {
+    /* unreadable or not our line: say so below */
+  }
+  return "its content could not be read";
+}
+
+/**
+ * Take the claim lock of a swap file. Throws a UserError (nothing touched beside the swap file) if it is held or cannot be created. Returns
+ * { file, release() }: release() is idempotent, never throws, and removes the file only if it still holds the bytes this call wrote (a failed write
+ * of those bytes counts: a prefix of them, even none, is still ours). A release that fails is reported on stderr and changes nothing else.
+ */
+function takeClaimLock(swapFile) {
+  const file = claimLockPath(swapFile);
+  const body = Buffer.from(JSON.stringify({ version: 1, pid: process.pid, at: Math.floor(Date.now() / 1000) }) + "\n", "utf8");
+  let fd;
+  try {
+    fd = fs.openSync(file, "wx", 0o600);
+  } catch (e) {
+    const how =
+      e && e.code === "EEXIST"
+        ? `another claim for this swap file is running, or an earlier one died: the lock file ${file} exists (${describeClaimLock(file)})`
+        : `the lock file ${file} could not be created (${codeOf(e)}), so it is not known whether another claim for this swap file is running`;
+    throw new UserError(
+      `refusing: ${how}. Nothing was read or written beside the swap file and nothing was sent. If you are sure that no other claim for this swap file is running, ` +
+        `delete ${file} by hand and run the claim again; this tool never removes a lock it did not make`
+    );
+  }
+  try {
+    writeAllSync(fd, body);
+    fs.fsyncSync(fd);
+  } catch {
+    /* best effort: the file's existence is the lock, its content only helps the operator */
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {
+      /* nothing to do */
+    }
+  }
+  let released = false;
+  return {
+    file,
+    release() {
+      if (released) return;
+      released = true;
+      try {
+        const got = fs.readFileSync(file);
+        if (got.length <= body.length && body.subarray(0, got.length).equals(got)) fs.unlinkSync(file);
+        else process.stderr.write(`warning: the claim lock ${file} now holds another record and was left in place\n`);
+      } catch (e) {
+        if (e && e.code === "ENOENT") return; // already gone
+        process.stderr.write(`warning: the claim lock ${file} could not be removed (${codeOf(e)}); delete it by hand before the next claim for this swap file\n`);
+      }
+    },
+  };
+}
 
 /**
  * Judge the text of a sidecar for this lock (the one rule used by the reader and by the re-publish). state: "matching" (this lock: evidence),
@@ -1129,6 +1312,28 @@ function republishRevealSidecar(target, lockHex) {
 }
 
 /**
+ * After `fs.linkSync(tmp, target)` threw: is the file at `target` this call's own link? True when it is the same file as `tmp` (same device and
+ * inode, where the file system gives a real inode: not 0) or, where it does not, when its bytes are exactly `body`. The bytes rule is sound because
+ * the claim lock excludes every other claim for this swap file, so no other process wrote these bytes (they hold this call's own time and hash); where
+ * the lock is not held (a direct call) it is the best that can be said. The caller has just attempted the link, which is what makes the file ours.
+ */
+function linkIsOurs(tmp, target, body) {
+  try {
+    const a = fs.statSync(tmp, { bigint: true });
+    const b = fs.statSync(target, { bigint: true });
+    if (a.ino !== 0n && b.ino !== 0n) return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    /* no identity to compare: use the bytes */
+  }
+  try {
+    const got = fs.readFileSync(target);
+    return Buffer.isBuffer(got) && got.equals(body);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Record, before the broadcast, that the reveal of `lockId` is about to be sent. Synchronous. Throws a UserError (and the caller then sends
  * nothing) if the sidecar cannot be written and made durable. Returns { state: "written" | "kept", file, created, bytes? }: "written" = this call
  * made the file (bytes = what it wrote); "kept" = a sidecar of this lock was there before (its bytes, so its time and hash, are kept and were
@@ -1136,7 +1341,8 @@ function republishRevealSidecar(target, lockHex) {
  * this lock (another lock, bad JSON, wrong fields, not a regular file, too large) is moved aside under `.stale-*`, never deleted; a file that
  * cannot even be examined or read (an I/O error) is neither moved nor deleted: the claim is refused. If a step fails after this call created the
  * file, the file is removed again (only if it still holds what this call wrote or debris, see removeCreatedRevealSidecar): it would otherwise
- * count as evidence of a send that was not made. Two claims for one swap file must never run at the same time (not supported, see the rename below).
+ * count as evidence of a send that was not made. Two claims for one swap file are excluded by the claim lock the caller holds (see takeClaimLock); the
+ * code below still does not rely on that for what it removes (only what holds this call's own bytes).
  */
 function writeRevealSidecar(swapFile, lockId, txHash) {
   const target = revealSidecarPath(swapFile);
@@ -1162,12 +1368,16 @@ function writeRevealSidecar(swapFile, lockId, txHash) {
       fs.renameSync(target, `${target}.stale-${at}-${crypto.randomBytes(3).toString("hex")}`);
     }
     try {
-      // Atomic and exclusive: an existing name is never replaced. (Edge: a link that succeeded on a server but reported an error is treated below
-      // as another process's file: it is kept, never removed by this call.)
+      // Atomic and exclusive: an existing name is never replaced.
       fs.linkSync(tmp, target);
       created = true;
     } catch (e) {
-      if (readRevealSidecar(swapFile, lockHex).state === "matching") {
+      if (linkIsOurs(tmp, target, body)) {
+        // A link that was made but reported an error (possible on a network file system): the final name IS this call's file. It counts as created by
+        // this call, so a later refusal takes it back like any other file of this call. (If it were treated as another process's file, a refusal
+        // would keep it as "evidence of an earlier attempt" although nothing was ever sent.)
+        created = true;
+      } else if (readRevealSidecar(swapFile, lockHex).state === "matching") {
         raced = true; // another process wrote this lock's sidecar a moment ago: it is the evidence, ours is dropped
       } else if (e && e.code === "EEXIST") {
         throw e; // something else sits at the name: never touched
@@ -1175,8 +1385,9 @@ function writeRevealSidecar(swapFile, lockId, txHash) {
         // A file system that refuses hard links (the usual case for a Windows process writing to a `\wsl.localhost` share; also FAT and some
         // mounts; the error code varies): rename the finished temporary file onto the final name. The final name is never opened for writing. A
         // rename is atomic but not exclusive. A foreign sidecar was already moved aside above, and a record of this same lock replaced by a record
-        // of this same lock loses nothing but a later `at`. Concurrent claims for one swap file are NOT supported: two of them could each replace
-        // the other's record, and the one whose read-back then fails leaves the other's record in place (see below) while the other goes on to send.
+        // of this same lock loses nothing but a later `at`. Concurrent claims for one swap file are excluded by the claim lock (takeClaimLock);
+        // without it two of them could each replace the other's record, and the one whose read-back then fails would leave the other's record in
+        // place (see below) while the other goes on to send.
         fs.renameSync(tmp, target);
         created = true;
       }
@@ -1252,6 +1463,8 @@ const sameUint = (a, b) => {
 function bindSwap(args, want) {
   if (args.swap === undefined) return { args, sw: null }; // the CLI wrapper has already warned (main)
   const sw = readSwapFile(need(args, "swap"));
+  // T21: a remembered producer-screen detection beats an intent recorded before it. First thing, local reads only; `lock` only (claim and refund are untouched).
+  if (want === "lock_eth") checkProducerMemory(sw);
   const merged = { ...args };
   // The lock kind is the file's; a --lock-kind that says otherwise is refused (the artifact, ABI and checks all follow it).
   if (!LOCK_KINDS.includes(sw.lockKind)) throw new UserError(`--swap ${sw.file}: unknown lock_kind "${sw.lockKind}"; refusing`);
@@ -1675,11 +1888,17 @@ async function claim(provider, signer, args0) {
         "run the dry run WITHOUT --secret-stdin (every gate is checked without it)"
     );
   }
+  let claimLock = null;
   try {
-    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw });
+    // A real claim with a swap file holds the claim lock from here (before the sidecar is first read, in claimChecked) until the send has settled
+    // (execute's afterSend) or anything before it fails (the finally below). A dry run writes nothing and takes none.
+    if (sw && secret !== null && !args.dryRun) claimLock = takeClaimLock(sw.file);
+    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock });
   } catch (e) {
     if (e instanceof UserError) throw new UserError(redact(e.message));
     throw new UserError(explain(e)); // ethers errors can carry the calldata, which holds the secret
+  } finally {
+    if (claimLock !== null) claimLock.release(); // idempotent; a release that fails is reported on stderr and changes nothing else
   }
 }
 
@@ -1707,7 +1926,7 @@ function assertPoseidonClaimCalldata(iface, data, lockId, secret) {
   if (data.toLowerCase() !== expected) throw new UserError("refusing to sign: the claim calldata is not selector + lock id + secret");
 }
 
-async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw }) {
+async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock = null }) {
   const kind = kindOf(args);
   const target = await verifyTarget(provider, args, contractAddr);
   const l = await fetchLock(provider, contractAddr, lockId, kind);
@@ -1925,7 +2144,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
         `refusing: past the reveal cutoff. now ${wallLast} > cutoff ${cutoff} or >= timelock ${l.timelock} (${cutoffRule}; re-checked against the wall clock immediately before the broadcast${afterSidecar}, which took too long); ${fate}; nothing was sent`
       );
     };
-    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend, lastCheck });
+    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend, lastCheck, afterSend: claimLock === null ? undefined : () => claimLock.release() });
   } catch (e) {
     // REVIEW-6 R6-3: a claim that was mined and REVERTED (it came too late, or lost a race with the refund) paid nobody and still published the
     // secret in its calldata. Say so in the result, with the hash, instead of a bare failure: the caller must treat the secret as public.
@@ -1956,8 +2175,14 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       const throttled = throttledAnswer
         ? ` The endpoint refused the send as throttled (HTTP 429), so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself. To send it again as a first reveal, run the claim again now with --margin-s ${DEFAULT_MARGIN_S} (the strict cutoff, whatever the sidecar says).`
         : "";
-      const next = throttledAnswer ? "run tick --apply before the claim only if you think it did reach the network" : "run tick --apply";
-      throw new UserError(`${base}${throttled} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; ${next})`);
+      // A redirect answer (HTTP 3xx) is the same case: the endpoint did not take the send, and this tool follows no redirect. The advice is the same,
+      // with the endpoint's final address put into ETH_RPC_URL first.
+      const redirectAnswer = isRedirectAnswer(e);
+      const redirected = redirectAnswer
+        ? ` The endpoint answered the send with a redirect (HTTP ${e.statusCode}), which this tool never follows, so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself. To send it again as a first reveal, put the endpoint's final URL in ETH_RPC_URL and run the claim again now with --margin-s ${DEFAULT_MARGIN_S} (the strict cutoff, whatever the sidecar says).`
+        : "";
+      const next = throttledAnswer || redirectAnswer ? "run tick --apply before the claim only if you think it did reach the network" : "run tick --apply";
+      throw new UserError(`${base}${throttled}${redirected} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; ${next})`);
     }
     throw e;
   }
@@ -2196,7 +2421,7 @@ module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
-  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, execute, makeProvider, sendGuard,
+  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

@@ -597,6 +597,14 @@ struct FakeNode {
 enum Repeat {
     OtherHash,
     Error,
+    /// From the second ask on the height is answered without the `relabel` entry: a node that takes its own producer back.
+    Unlabelled,
+    /// From the second ask on, a third producer label.
+    OtherMiner,
+    /// Only the second ask has another producer label; the third and later are as usual.
+    OtherMinerOnce,
+    /// From the second ask on, no header at this height (a `null`).
+    Null,
 }
 
 /// The made-up hash of a height: a different one from every honest hash.
@@ -682,11 +690,16 @@ impl FakeNode {
         let asked_before = self.asked.borrow().iter().filter(|x| **x == h).count();
         self.asked.borrow_mut().push(h);
         let repeat = match *self.on_repeat.borrow() {
+            Some((at, Repeat::OtherMinerOnce)) if at == h && asked_before == 1 => Some(Repeat::OtherMiner),
+            Some((at, Repeat::OtherMinerOnce)) if at == h => None,
             Some((at, how)) if at == h && asked_before >= 1 => Some(how),
             _ => None,
         };
         if matches!(repeat, Some(Repeat::Error)) {
             return Err(RpcError::Transport("connection reset".into()));
+        }
+        if matches!(repeat, Some(Repeat::Null)) {
+            return Ok(Value::Null);
         }
         if self.fail_at.get() == Some(h) {
             return Err(RpcError::Transport("connection refused".into()));
@@ -699,7 +712,12 @@ impl FakeNode {
         let hash = if matches!(repeat, Some(Repeat::OtherHash)) { hash_of(h, 55) } else { self.reported_hash(h) };
         let mut v = header_value(h, hash, prev);
         if let Some(label) = self.relabel.borrow().get(&h) {
-            v["miner"] = json!(label);
+            if !matches!(repeat, Some(Repeat::Unlabelled)) {
+                v["miner"] = json!(label);
+            }
+        }
+        if matches!(repeat, Some(Repeat::OtherMiner)) {
+            v["miner"] = json!("synthetic-miner-Y");
         }
         Ok(v)
     }
@@ -1101,12 +1119,142 @@ fn one_sampled_height_with_another_producer_and_the_same_hash_is_producer_differ
     no_address(&json);
     assert!(json.contains(r#""state":"producer_differs""#) && json.contains(r#""height":7500"#), "{json}");
     assert!(!json.contains("synthetic"), "{json}");
-    // At the anchor itself the producer is compared too, and the sample is not even fetched.
+    // At the anchor itself the producer is compared too, and the sample is not even fetched: the second node is asked for the anchor, and once more
+    // to confirm the producer difference.
     let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
     second.relabel.borrow_mut().insert(9_997, "synthetic-miner-Z".into());
     let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
     assert_eq!(sum.second, SecondCheck::ProducerDiffers { height: 9_997 }, "{sum:?}");
-    assert_eq!(*second.asked.borrow(), vec![9_997]);
+    assert_eq!(*second.asked.borrow(), vec![9_997, 9_997]);
+}
+
+/// The reading of a producer difference at 8,010 (a sampled height) with the second node scripted by `script`, for the confirmation tests below.
+fn confirm_read(script: impl FnOnce(&FakeNode)) -> (SecondCheck, FakeNode, FakeNode) {
+    let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    second.relabel.borrow_mut().insert(8_010, "synthetic-miner-Z".into());
+    script(&second);
+    let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
+    (sum.second, first, second)
+}
+
+#[test]
+fn a_producer_difference_is_asked_for_once_more_from_the_second_node_only_and_for_that_height_only_before_it_stands() {
+    let chosen = with_height(7_500);
+    let (check, first, second) = confirm_read(|_| {});
+    assert_eq!(check, SecondCheck::ProducerDiffers { height: 8_010 });
+    // The anchor, the union of the two draws in one batch, then exactly one more request: 8,010 again, as a single call.
+    let mut want = vec![9_997];
+    want.extend(union(&chosen, &short_with(SHORT_LO)));
+    want.push(8_010);
+    assert_eq!(*second.asked.borrow(), want);
+    assert_eq!((second.singles.get(), second.batches.get()), (2, 1), "the anchor and the confirmation singly, the sample in one batch");
+    // The first node is not asked again: its calls are the same as in a reading where the nodes agree.
+    let (agreeing_first, agreeing_second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    let sum = read_with(&agreeing_first, &agreeing_second, fixed_sampler(with_height(7_500)));
+    assert!(matches!(sum.second, SecondCheck::Agrees { .. }), "{sum:?}");
+    assert_eq!(*first.asked.borrow(), *agreeing_first.asked.borrow(), "the first node answers the same calls, none more");
+    assert_eq!((first.singles.get(), first.batches.get()), (agreeing_first.singles.get(), agreeing_first.batches.get()));
+    assert_eq!(agreeing_second.asked.borrow().len() + 1, want.len(), "exactly one request more than an agreeing reading");
+    // A hash difference with no producer difference asks nothing more of 8,010 (the anchor's second ask is the other kind of follow-up).
+    let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    second.tags.borrow_mut()[8_010] = 1;
+    read_with(&first, &second, fixed_sampler(chosen));
+    assert_eq!(second.asked.borrow().iter().filter(|h| **h == 8_010).count(), 1);
+}
+
+#[test]
+fn a_second_node_that_takes_its_producer_back_is_not_remembered_and_the_tick_is_unreadable() {
+    // The second node named another producer at first and, asked again, names the first node's: two answers for one block, not a detection.
+    let (check, ..) = confirm_read(|n| *n.on_repeat.borrow_mut() = Some((8_010, Repeat::Unlabelled)));
+    assert!(
+        matches!(&check, SecondCheck::Unreadable { reason } if reason.contains("two different answers for the producer of the block at height 8010")),
+        "{check:?}"
+    );
+    assert_eq!(swap_cli::producer_marker::remembered(&check), None);
+    no_address(&serde_json::to_string(&check).unwrap());
+    // At the anchor itself: the first ask differs, the confirmation does not.
+    let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    second.relabel.borrow_mut().insert(9_997, "synthetic-miner-Z".into());
+    *second.on_repeat.borrow_mut() = Some((9_997, Repeat::Unlabelled));
+    let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
+    assert!(matches!(&sum.second, SecondCheck::Unreadable { reason } if reason.contains("height 9997")), "{sum:?}");
+    assert_eq!(*second.asked.borrow(), vec![9_997, 9_997], "no sample is fetched after an unconfirmed anchor difference");
+    // Through the anchor's second ask after a hash difference in the sample: that ask shows another producer, the confirmation does not.
+    let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    second.tags.borrow_mut()[8_010] = 1;
+    *second.on_repeat.borrow_mut() = Some((9_997, Repeat::OtherMinerOnce));
+    let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
+    assert!(matches!(&sum.second, SecondCheck::Unreadable { reason } if reason.contains("two different answers")), "{sum:?}");
+    assert_eq!(second.asked.borrow().iter().filter(|h| **h == 9_997).count(), 3, "the anchor, its second ask, the confirmation");
+    // ... and when the second ask AND the confirmation both show another producer, it stands.
+    let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+    second.tags.borrow_mut()[8_010] = 1;
+    *second.on_repeat.borrow_mut() = Some((9_997, Repeat::OtherMiner));
+    let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
+    assert_eq!(sum.second, SecondCheck::ProducerDiffers { height: 9_997 }, "{sum:?}");
+}
+
+#[test]
+fn a_confirmation_that_fails_answers_another_hash_or_has_no_header_is_unreadable_and_never_remembered() {
+    for (name, how, word) in [
+        ("an error", Repeat::Error, "could not be confirmed"),
+        ("another hash", Repeat::OtherHash, "a different block for height 8010"),
+        ("no header", Repeat::Null, "could not be confirmed"),
+    ] {
+        let (check, ..) = confirm_read(|n| *n.on_repeat.borrow_mut() = Some((8_010, how)));
+        assert!(matches!(&check, SecondCheck::Unreadable { reason } if reason.contains(word)), "{name}: {check:?}");
+        assert_eq!(swap_cli::producer_marker::remembered(&check), None, "{name}");
+    }
+    // A third producer on the confirmation is still another producer than the first node's: it stands.
+    let (check, ..) = confirm_read(|n| *n.on_repeat.borrow_mut() = Some((8_010, Repeat::OtherMiner)));
+    assert_eq!(check, SecondCheck::ProducerDiffers { height: 8_010 });
+}
+
+#[test]
+fn a_failed_producer_confirmation_does_not_throw_away_a_hash_difference_seen_in_the_same_sample() {
+    use swap_cli::producer_marker::remembered;
+    for (name, how) in [("an error", Repeat::Error), ("no header", Repeat::Null)] {
+        // Both kinds in one sample: another producer (same hash) at 8,010 and another hash at 7,500, below the anchor; both are sampled heights.
+        // The confirmation of 8,010 fails, so the hash difference goes through its own anchor re-ask and is remembered.
+        let (first, second) = (FakeNode::new(10_000), FakeNode::new(10_000));
+        second.relabel.borrow_mut().insert(8_010, "synthetic-miner-Z".into());
+        second.tags.borrow_mut()[7_500] = 1;
+        *second.on_repeat.borrow_mut() = Some((8_010, how));
+        let sum = read_with(&first, &second, fixed_sampler(with_height(7_500)));
+        assert_eq!(sum.second, SecondCheck::SampledDiffers { height: 7_500 }, "{name}: {sum:?}");
+        assert_eq!(remembered(&sum.second), Some((7_500, MarkerKind::Hash)), "{name}");
+        let asked = second.asked.borrow().clone();
+        assert_eq!(asked.iter().filter(|h| **h == 8_010).count(), 2, "{name}: asked in the sample and once more to confirm: {asked:?}");
+        assert_eq!((asked[0], *asked.last().unwrap()), (9_997, 9_997), "{name}: the anchor is asked again after the sample: {asked:?}");
+        assert_eq!(asked.iter().filter(|h| **h == 9_997).count(), 2, "{name}");
+        no_address(&serde_json::to_string(&sum).unwrap());
+
+        // Only a producer difference in the sample and its confirmation fails: still unreadable, nothing remembered.
+        let (check, ..) = confirm_read(|n| *n.on_repeat.borrow_mut() = Some((8_010, how)));
+        assert!(matches!(&check, SecondCheck::Unreadable { .. }), "{name}: {check:?}");
+        assert_eq!(remembered(&check), None, "{name}");
+    }
+}
+
+#[test]
+fn the_confirmation_has_its_own_time_when_the_shared_deadline_is_already_spent() {
+    // As the anchor's second ask: the first node relabels one block (a producer lie, true hash); its slow cache-top header spends the reading's
+    // shared budget (2 s) right after the sample batch returns (cache-top header 1,200 ms; anchor ask, second node 500 ms, ends at 1,700; sample
+    // batch 500 ms ends at 2,200). The confirmation starts there, past the shared deadline, and still gets its own time.
+    let first = FakeNode::new(10_000);
+    first.relabel.borrow_mut().insert(8_010, "synthetic-miner-Z".into());
+    let second = FakeNode::new(10_000);
+    let dir = tempfile::tempdir().unwrap();
+    assert!(read_producers(&first, None, &cache_in(&dir), 10_000, &cfg()).complete, "a warm cache that holds the relabelled block");
+    first.delay_one.set(Some((10_000, 1_200)));
+    second.delay_ms.set(500);
+    let mut c = cfg();
+    c.budget = Duration::from_millis(2_000);
+    c.sampler = fixed_sampler(with_height(7_500));
+    let sum = read_producers(&first, sec(&second, Some(10_000)), &cache_in(&dir), 10_000, &c);
+    assert!(sum.complete, "{sum:?}");
+    assert_eq!(sum.second, SecondCheck::ProducerDiffers { height: 8_010 }, "{sum:?}");
+    assert_eq!(second.asked.borrow().iter().filter(|h| **h == 8_010).count(), 2, "asked in the sample and once more to confirm");
 }
 
 #[test]
@@ -1884,6 +2032,13 @@ fn a_remembered_producer_difference_refuses_under_production_on_a_later_tick_who
         "{why}"
     );
     assert!(why.contains("compare the two nodes by hand") && why.contains(".producer-differs") && why.contains("the tool never removes it"), "{why}");
+    // Nothing tells the operator to remove the marker to reopen the screen: it cannot be cleared, and the ways on are named.
+    assert!(!why.contains("remove it yourself") && !why.contains("removed by hand"), "{why}");
+    assert!(
+        why.contains("It cannot be cleared for this swap file") && why.contains(OVERRIDE_FLAG) && why.contains("end this swap") && why.contains("new swap file"),
+        "{why}"
+    );
+    assert!(why.contains("with tick --apply the swap file's history records it too"), "{why}");
     assert!(r.notes.contains(&why), "{:?}", r.notes);
     no_address(&why);
     assert_eq!(s.bob.executor.count("lock_eth"), 0);
@@ -1948,6 +2103,8 @@ fn an_unreadable_or_malformed_marker_counts_as_present_under_production_and_warn
         why.starts_with(&format!("ALARM: {MARKER_UNREADABLE_HEADLINE}, not locking (T21): b.swap.json.producer-differs is not in the producer-differs record's format;")),
         "{why}"
     );
+    assert!(why.contains("the swap file's history records it too") && why.contains("It cannot be cleared for this swap file"), "{why}");
+    assert!(!why.contains("removed or repaired it yourself"), "{why}");
     assert_eq!(s.bob.executor.count("lock_eth"), 0);
     for profile in [ProfileName::Sepolia, ProfileName::Rehearsal] {
         let mut s = scenario(profile);
@@ -1955,6 +2112,59 @@ fn an_unreadable_or_malformed_marker_counts_as_present_under_production_and_warn
         assert_eq!(r.action.kind(), "lock_eth", "{profile:?}: {:?}", r.notes);
         assert!(note_starting(&r, "WARNING: ").iter().any(|t| t.contains(MARKER_UNREADABLE_HEADLINE)), "{:?}", r.notes);
     }
+}
+
+const REMEMBERED_HEADLINE: &str = "the swap file's history records a producer disagreement between the two Parano1d nodes";
+
+#[test]
+fn a_detection_that_only_the_swap_files_history_remembers_refuses_under_production_warns_elsewhere_and_the_override_waives_it() {
+    let remembered = MarkerState::Remembered { at: 1_700_000_123 };
+    // Production: no marker file, only the history entry. The simulator's second node agrees, and the lock is still held back.
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+    let why = wait_reason(&r);
+    assert!(
+        why.starts_with(&format!("ALARM: {REMEMBERED_HEADLINE}, not locking (T21): the swap file's history records, at Unix time 1700000123, that an earlier tick saw evidence that cannot come from two honest nodes")),
+        "{why}"
+    );
+    assert!(why.contains("is missing (it was removed, or the swap file was moved)") && why.contains(".producer-differs"), "{why}");
+    assert!(
+        why.contains("It cannot be cleared for this swap file") && why.contains(OVERRIDE_FLAG) && why.contains("end this swap") && why.contains("new swap file"),
+        "{why}"
+    );
+    assert!(r.notes.contains(&why), "{:?}", r.notes);
+    no_address(&why);
+    assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    assert_eq!(s.bob_phase(), "funding_final", "the file waits, it does not abort");
+    // sepolia and rehearsal: warned on every tick, the lock is offered.
+    for profile in [ProfileName::Sepolia, ProfileName::Rehearsal] {
+        let mut s = scenario(profile);
+        let r = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+        assert_eq!(r.action.kind(), "lock_eth", "{profile:?}: {:?} {:?}", r.action, r.notes);
+        assert!(
+            note_starting(&r, "WARNING: ").iter().any(|t| t.contains(REMEMBERED_HEADLINE) && t.contains("only warns and the lock is still offered")),
+            "{profile:?}: {:?}",
+            r.notes
+        );
+    }
+    // The override waives it exactly as it waives the marker: printed, and recorded once in the history.
+    let mut s = scenario(ProfileName::Production);
+    let r = s.tick_bob_with(|n, _| {
+        n.producer_marker = remembered.clone();
+        n.accept_producer_concentration = true;
+    });
+    assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
+    let overridden = note_starting(&r, "WARNING: producer concentration gate OVERRIDDEN");
+    assert_eq!(overridden.len(), 1, "{:?}", r.notes);
+    assert!(overridden[0].contains(REMEMBERED_HEADLINE), "{}", overridden[0]);
+    let entry = format!("{OVERRIDE_HISTORY}: {REMEMBERED_HEADLINE}");
+    assert_eq!(s.bob.file.history.iter().filter(|h| h.event == entry).count(), 1, "{:?}", s.bob.file.history);
+    // Through the waiting phases the same finding is information only.
+    let mut s = Scenario::with_profile(Variant::Raw, ProfileName::Production);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    let r = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+    assert!(note_starting(&r, "producer concentration, not yet blocking").iter().any(|t| t.contains(REMEMBERED_HEADLINE)), "{:?}", r.notes);
 }
 
 #[test]
@@ -1971,6 +2181,99 @@ fn the_override_waives_a_remembered_producer_difference_prints_it_and_records_it
     assert!(overridden[0].contains(MARKER_HEADLINE), "{}", overridden[0]);
     let entry = format!("{OVERRIDE_HISTORY}: {MARKER_HEADLINE}");
     assert_eq!(s.bob.file.history.iter().filter(|h| h.event == entry).count(), 1, "{:?}", s.bob.file.history);
+}
+
+/// An override entry is written again when the only existing one precedes the last `producer_differs_seen` entry (an outside read,
+/// 2026-11-10: the Ethereum-side lock script accepts an override only when its entry comes AFTER the last detection entry).
+#[test]
+fn the_override_entry_is_written_again_only_when_the_last_detection_is_newer_than_every_override() {
+    use swap_cli::producer_marker::HISTORY as DETECTION;
+    use swap_cli::swapfile::HistoryEntry;
+    let entry = |at: u64, event: &str| HistoryEntry { at, event: event.to_string(), from: "x".into(), to: "y".into() };
+    let override_entry = |at: u64| entry(at, &format!("{OVERRIDE_HISTORY}: largest 60 % of 720"));
+    let detection = |at: u64| entry(at, DETECTION);
+    let remembered = MarkerState::Remembered { at: 1_700_000_123 };
+
+    // (history before the decision, a detection is remembered by the tick, a new override entry is expected)
+    let cases: Vec<(&str, Vec<HistoryEntry>, bool, bool)> = vec![
+        ("override, then detection: written again", vec![override_entry(5), detection(6)], true, true),
+        ("detection, then override: nothing new", vec![detection(5), override_entry(6)], true, false),
+        ("override only, no detection: nothing new", vec![override_entry(5)], false, false),
+        ("override, detection, override: nothing new", vec![override_entry(4), detection(5), override_entry(6)], true, false),
+        ("override, detection, override, detection: written again", vec![override_entry(3), detection(4), override_entry(5), detection(6)], true, true),
+        ("detection only: written (the first one)", vec![detection(5)], true, true),
+    ];
+    for (name, history, remembers, expect_new) in cases {
+        let mut s = scenario(ProfileName::Production);
+        s.world.borrow_mut().accept_producer_concentration = true;
+        let (noid, eth, now) = {
+            let w = s.world.borrow();
+            let mut n = w.noid_obs(None);
+            if remembers {
+                n.producer_marker = remembered.clone();
+            } else {
+                // No detection: the screen has something to waive through the concentration instead.
+                shape(&mut n, 1_500, 400, 1_800, 500);
+            }
+            (n, w.eth_obs(), w.eth_time)
+        };
+        let mut file = s.bob.file.clone();
+        file.history.extend(history);
+        let d = decide(&file, &noid, &eth, now);
+        assert_eq!(d.action.kind(), "lock_eth", "{name}: {:?} {:?}", d.action, d.notes);
+        let new: Vec<&String> = d.log.iter().filter(|l| l.starts_with(OVERRIDE_HISTORY)).collect();
+        assert_eq!(new.len(), usize::from(expect_new), "{name}: {:?}", d.log);
+    }
+}
+
+/// Without `--accept-producer-concentration` no override entry is ever written, however many ticks run and whatever the history holds;
+/// with the flag exactly one is written for a detection newer than the last override; afterwards, without the flag, none again.
+#[test]
+fn without_the_flag_no_override_entry_is_ever_written_with_the_flag_exactly_one() {
+    use swap_cli::producer_marker::HISTORY as DETECTION;
+    use swap_cli::swapfile::HistoryEntry;
+    let entry = |at: u64, event: &str| HistoryEntry { at, event: event.to_string(), from: "x".into(), to: "y".into() };
+    let overrides = |s: &Scenario| s.bob.file.history.iter().filter(|h| h.event.starts_with(OVERRIDE_HISTORY)).count();
+    let remembered = MarkerState::Remembered { at: 1_700_000_123 };
+
+    let mut s = scenario(ProfileName::Production);
+    s.bob.file.history.push(entry(5, &format!("{OVERRIDE_HISTORY}: largest 60 % of 720")));
+    s.bob.file.history.push(entry(6, DETECTION));
+    assert_eq!(overrides(&s), 1);
+    let detections = |s: &Scenario| s.bob.file.history.iter().filter(|h| h.event == DETECTION).count();
+
+    // Several ticks without the flag: held back, no entry in the log, none in the history.
+    for i in 0..4 {
+        assert!(!s.world.borrow().accept_producer_concentration);
+        let r = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+        assert_eq!(r.action.kind(), "wait", "tick {i}: {:?} {:?}", r.action, r.notes);
+        assert!(wait_reason(&r).contains("not locking (T21)"), "tick {i}: {:?}", r.notes);
+        assert_eq!(overrides(&s), 1, "tick {i}: {:?}", s.bob.file.history);
+        assert_eq!(detections(&s), 1, "tick {i}: {:?}", s.bob.file.history);
+        assert_eq!(s.bob.executor.count("lock_eth"), 0);
+    }
+    // And the pure decision with no flag proposes nothing to log.
+    {
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        n.producer_marker = remembered.clone();
+        let d = decide(&s.bob.file, &n, &w.eth_obs(), w.eth_time);
+        assert!(d.log.iter().all(|l| !l.starts_with(OVERRIDE_HISTORY)), "{:?}", d.log);
+    }
+
+    // One tick with the flag: the lock goes out and exactly one new entry is written.
+    s.world.borrow_mut().accept_producer_concentration = true;
+    let r = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+    assert_eq!(r.action.kind(), "lock_eth", "{:?} {:?}", r.action, r.notes);
+    assert_eq!(overrides(&s), 2, "{:?}", s.bob.file.history);
+    assert_eq!(s.bob.executor.count("lock_eth"), 1);
+
+    // Further ticks without the flag: nothing more is written.
+    s.world.borrow_mut().accept_producer_concentration = false;
+    for i in 0..3 {
+        let _ = s.tick_bob_with(|n, _| n.producer_marker = remembered.clone());
+        assert_eq!(overrides(&s), 2, "later tick {i}: {:?}", s.bob.file.history);
+    }
 }
 
 // ---------------------------------------------------------------- through the binary: the marker file itself
@@ -2076,9 +2379,58 @@ fn an_unreadable_marker_file_reaches_the_screen_and_a_missing_one_changes_nothin
     let v = tick_nodes(&b, &n1, &n2, &[]);
     assert_eq!(v["noid"]["producer_marker"]["state"], "unreadable", "{}", v["noid"]);
     assert!(has_note(&v, MARKER_UNREADABLE_HEADLINE), "{}", v["notes"]);
-    tick_nodes(&b, &n1, &n2, &["--apply"]);
-    assert_eq!(history_count(&b, "producer_differs_seen"), 0, "only a readable marker is recorded");
+    // An unreadable marker counts as a detection and `--apply` records it in the history once, like a readable one.
+    for _ in 0..2 {
+        tick_nodes(&b, &n1, &n2, &["--apply"]);
+        assert_eq!(history_count(&b, "producer_differs_seen"), 1);
+    }
     assert_eq!(std::fs::read(&marker).unwrap(), b"garbage", "the tool never rewrites it");
+    // Removing it afterwards reopens nothing: the history remembers.
+    std::fs::remove_file(&marker).unwrap();
+    let v = tick_nodes(&b, &n1, &n2, &[]);
+    assert_eq!(v["noid"]["producer_marker"]["state"], "remembered", "{}", v["noid"]);
+    assert!(has_note(&v, REMEMBERED_HEADLINE), "{}", v["notes"]);
+    assert!(!marker.exists(), "the tool does not write the marker again for a detection it only remembers");
+}
+
+#[test]
+fn after_an_apply_tick_removing_the_marker_or_copying_the_swap_file_elsewhere_does_not_reopen_the_screen() {
+    let dir = tempfile::tempdir().unwrap();
+    let b = bob_file_in(dir.path());
+    let marker = swap_cli::producer_marker::path_for(&b);
+    let (honest, honest2, liar) = (spawn_chain_node(false), spawn_chain_node(false), spawn_chain_node(true));
+    // A read-only tick that sees the lie keeps the swap file out of it; the --apply tick that sees the marker records the history.
+    tick_nodes(&b, &honest, &liar, &[]);
+    assert!(marker.exists());
+    assert_eq!(history_count(&b, "producer_differs_seen"), 0);
+    tick_nodes(&b, &honest, &honest2, &["--apply"]);
+    assert_eq!(history_count(&b, "producer_differs_seen"), 1);
+    // 1. The marker and the header cache are removed; two honest nodes agree: the screen is still closed, on the history alone.
+    std::fs::remove_file(&marker).unwrap();
+    std::fs::remove_file(swap_cli::watch::producers::cache_path_for(&b)).unwrap();
+    for extra in [&[][..], &["--apply"][..]] {
+        let v = tick_nodes(&b, &honest, &honest2, extra);
+        assert_eq!(v["noid"]["producers"]["second"]["state"], "agrees", "{}", v["noid"]["producers"]);
+        assert_eq!(v["noid"]["producer_marker"]["state"], "remembered", "{}", v["noid"]);
+        assert!(v["noid"]["producer_marker"]["at"].as_u64().unwrap() > 0);
+        assert!(has_note(&v, REMEMBERED_HEADLINE) && has_note(&v, "It cannot be cleared for this swap file"), "{}", v["notes"]);
+        assert!(!marker.exists(), "the tool writes no new marker for a detection it only remembers");
+        assert_eq!(history_count(&b, "producer_differs_seen"), 1, "still one entry");
+    }
+    // 2. The swap file is copied to another folder (no marker, no cache there): the history travels with the file.
+    let other = tempfile::tempdir().unwrap();
+    let copy = other.path().join("b.swap.json");
+    std::fs::copy(&b, &copy).unwrap();
+    let v = tick_nodes(&copy, &honest, &honest2, &[]);
+    assert_eq!(v["noid"]["producer_marker"]["state"], "remembered", "{}", v["noid"]);
+    assert!(has_note(&v, REMEMBERED_HEADLINE), "{}", v["notes"]);
+    assert!(!swap_cli::producer_marker::path_for(&copy).exists());
+    // 3. A new swap file (the way on) starts clean: another file's history does not reach it.
+    let third = tempfile::tempdir().unwrap();
+    let fresh = bob_file_in(third.path());
+    let v = tick_nodes(&fresh, &honest, &honest2, &["--apply"]);
+    assert!(v["noid"].get("producer_marker").is_none() && !has_note(&v, REMEMBERED_HEADLINE), "{}", v["notes"]);
+    assert_eq!(history_count(&fresh, "producer_differs_seen"), 0);
 }
 
 #[cfg(unix)]
@@ -2098,10 +2450,14 @@ fn a_marker_that_cannot_be_written_relaxes_nothing_and_the_note_says_so() {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(v["noid"]["producers"]["second"]["state"], "producer_differs", "{}", v["noid"]["producers"]);
         assert!(has_note(&v, "was not created") && has_note(&v, "permission denied"), "{}", v["notes"]);
-        assert!(has_note(&v, "later ticks will not remember it"), "{}", v["notes"]);
-        // This tick still refuses, on the summary itself.
-        assert!(has_note(&v, "name different producers for the block at height 280514 although the block hashes are equal"), "{}", v["notes"]);
+        // A read-only tick saves nothing, and the note says so plainly and says what to do.
+        assert!(has_note(&v, "read-only tick and nothing was saved to the swap file") && has_note(&v, "run `tick --apply`"), "{}", v["notes"]);
+        assert!(!has_note(&v, "later ticks will not remember it"), "{}", v["notes"]);
+        // This tick still refuses, on the detection of this very tick (carried in memory: no file exists, so the history is what `--apply` writes).
+        assert!(has_note(&v, "named different producers for the block at height 280514"), "{}", v["notes"]);
+        assert_eq!(v["noid"]["producer_marker"]["state"], "present", "{}", v["noid"]);
         assert!(!swap_cli::producer_marker::path_for(&b).exists());
+        assert_eq!(history_count(&b, "producer_differs_seen"), 0, "a read-only tick saved nothing");
     } else {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         // Written straight to the stderr handle, not with `eprintln!`: the test harness captures `eprintln!` of a passing test, and a skip must be visible.
@@ -2236,4 +2592,192 @@ fn a_difference_at_the_anchor_or_a_missing_sampled_height_writes_no_marker() {
     let v = tick_nodes(&b, &honest, &spawn_gappy_node(277_638, 280_514), &[]);
     assert_eq!(v["noid"]["producers"]["second"]["state"], "unreadable", "{}", v["noid"]["producers"]);
     assert!(!marker.exists());
+}
+
+// ================================================================== a lock_eth intent that is still pending while the screen refuses (T21)
+
+use swap_cli::engine::{cancel_intent, tick_apply, Executor, IntentStatus, TickOutcome, MIN_CANCEL_AGE_S};
+use swap_cli::swapfile::SwapFile;
+use swap_cli::watch::EthObservation;
+
+fn obs_of(s: &Scenario) -> (NoidObservation, EthObservation, u64) {
+    let w = s.world.borrow();
+    (w.noid_obs(None), w.eth_obs(), w.eth_time)
+}
+
+fn out_notes<'a>(o: &'a TickOutcome, start: &str) -> Vec<&'a String> {
+    o.decision.notes.iter().filter(|n| n.starts_with(start)).collect()
+}
+
+fn out_wait(o: &TickOutcome) -> String {
+    match &o.decision.action {
+        Action::Wait { reason } => reason.clone(),
+        other => panic!("expected wait, got {other:?}: {:?}", o.decision.notes),
+    }
+}
+
+/// Bob at the point where his lock is next, and one `tick --apply` on a healthy screen that records the `lock_eth` intent (nothing is sent).
+fn with_recorded_lock(profile: ProfileName) -> (Scenario, SwapFile, NoidObservation, EthObservation, u64) {
+    let s = scenario(profile);
+    let mut bob = s.bob.file.clone();
+    let (n, e, now) = obs_of(&s);
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(out.decision.action.kind(), "lock_eth", "{:?}", out.decision.notes);
+    assert!(matches!(out.intent, IntentStatus::Recorded(_)), "{:?}", out.intent);
+    assert!(out_notes(&out, "ALERT:").is_empty() && out_notes(&out, "WARNING: the producer screen holds").is_empty(), "{:?}", out.decision.notes);
+    (s, bob, n, e, now)
+}
+
+fn detection() -> MarkerState {
+    MarkerState::Present { height: 300_017, at: 1_700_000_123, kind: MarkerKind::Producer }
+}
+
+#[test]
+fn a_detection_after_a_lock_eth_intent_was_recorded_raises_one_alert_that_names_the_cancel_and_the_intent_stays_held() {
+    let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
+    let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
+    // The next tick finds the marker (the CLI notes it into the history first, then calls `tick_apply`).
+    let mut n2 = n.clone();
+    n2.producer_marker = detection();
+    // A read-only tick shows the alert too and saves nothing.
+    let mut ro = bob.clone();
+    let out = tick_apply(&mut ro, &n2, &e, now, false).unwrap();
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1, "{:?}", out.decision.notes);
+    assert_eq!(ro.history.len(), bob.history.len(), "a read-only tick writes no latch");
+    // The tick that saves.
+    swap_cli::producer_marker::note_marker(&mut bob, &n2.producer_marker, now);
+    let out = tick_apply(&mut bob, &n2, &e, now, true).unwrap();
+    let alerts = out_notes(&out, "ALERT:");
+    assert_eq!(alerts.len(), 1, "{:?}", out.decision.notes);
+    let alert = alerts[0];
+    assert!(
+        alert.contains("the producer screen refuses to lock now") && alert.contains(MARKER_HEADLINE) && alert.contains(&format!("decided at {decided_at}")),
+        "{alert}"
+    );
+    assert!(
+        alert.contains("Do NOT send that lock") && alert.contains("lock.sh") && alert.contains("live.js lock") && alert.contains("`swap-cli intent FILE --cancel`"),
+        "{alert}"
+    );
+    assert!(alert.contains("same chain flags as tick") && alert.contains("look at the contract"), "{alert}");
+    no_address(alert);
+    assert!(!alert.contains('\n'));
+    // The decision: wait; the intent is still pending and held; the history holds the detection.
+    let why = out_wait(&out);
+    assert!(why.contains("intent lock_eth pending since") && why.contains("do NOT send it") && why.contains("--cancel"), "{why}");
+    assert!(!why.contains("reuse the printed parameters"), "the usual advice would send the refused lock: {why}");
+    assert!(matches!(&out.intent, IntentStatus::Held(h) if h.action == "lock_eth"), "{:?}", out.intent);
+    assert!(bob.pending_intent.is_some());
+    assert_eq!(bob.history.iter().filter(|h| h.event == swap_cli::producer_marker::HISTORY).count(), 1);
+    // The fresh decision's own refusal note is there once; the alert did not duplicate it.
+    assert_eq!(out_notes(&out, "ALARM: ").len(), 1, "{:?}", out.decision.notes);
+    assert!(out.decision.notes.iter().any(|n| n.starts_with("frozen parameters of the pending lock_eth")), "{:?}", out.decision.notes);
+    // Later ticks print the alert no more (the alert hook sends one message per line); the wait reason and the ALARM stay.
+    for _ in 0..2 {
+        let out = tick_apply(&mut bob, &n2, &e, now, true).unwrap();
+        assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+        assert!(out_wait(&out).contains("do NOT send it"));
+        assert_eq!(out_notes(&out, "ALARM: ").len(), 1);
+    }
+    // The detection is remembered by the history alone as well (no marker file): the alert, once per intent.
+    let (_s2, mut bob2, n, e, now) = with_recorded_lock(ProfileName::Production);
+    bob2.log(swap_cli::producer_marker::HISTORY, now);
+    let mut n3 = n.clone();
+    n3.producer_marker = MarkerState::Remembered { at: now };
+    let out = tick_apply(&mut bob2, &n3, &e, now, true).unwrap();
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1, "{:?}", out.decision.notes);
+    assert!(out_notes(&out, "ALERT:")[0].contains(REMEMBERED_HEADLINE));
+}
+
+#[test]
+fn the_override_waives_the_alert_and_a_concentration_refusal_raises_it_too() {
+    // The override: the screen does not refuse, so the pending lock is not held back and no alert is raised; the OVERRIDDEN note says the rest.
+    let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
+    let mut n2 = n.clone();
+    n2.producer_marker = detection();
+    n2.accept_producer_concentration = true;
+    let out = tick_apply(&mut bob, &n2, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    assert_eq!(out_notes(&out, "WARNING: producer concentration gate OVERRIDDEN").len(), 1, "{:?}", out.decision.notes);
+    assert!(out_wait(&out).contains("reuse the printed parameters"), "the ordinary hold of the ledger");
+    assert!(matches!(out.intent, IntentStatus::Held(_)));
+    // A concentration refusal (one address above 35 %), no detection at all: the alert, with its own reason, and no history entry for a detection.
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    shape(&mut n, 1_009, 252, 1_500, 380);
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    let alerts = out_notes(&out, "ALERT:");
+    assert_eq!(alerts.len(), 1, "{:?}", out.decision.notes);
+    assert!(alerts[0].contains("producer concentration too high") && alerts[0].contains("`swap-cli intent FILE --cancel`"), "{}", alerts[0]);
+    assert!(bob.history.iter().all(|h| h.event != swap_cli::producer_marker::HISTORY));
+    assert!(out_wait(&out).contains("do NOT send it") && out_wait(&out).contains("producer concentration too high"));
+    assert!(bob.pending_intent.is_some());
+    // The same with the override: nothing.
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    shape(&mut n, 1_009, 252, 1_500, 380);
+    n.accept_producer_concentration = true;
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+}
+
+#[test]
+fn under_sepolia_a_remembered_detection_is_a_warning_beside_the_pending_intent_and_nothing_else_is() {
+    let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Sepolia);
+    // A detection: the profile only warns (the fresh decision is still `lock_eth`, held by the ledger), the pending lock gets a WARNING, no ALERT.
+    for marker in [detection(), MarkerState::Remembered { at: 5 }] {
+        let mut n2 = n.clone();
+        n2.producer_marker = marker;
+        let out = tick_apply(&mut bob, &n2, &e, now, true).unwrap();
+        assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+        let warnings = out_notes(&out, "WARNING: the producer screen holds a remembered detection");
+        assert_eq!(warnings.len(), 1, "{:?}", out.decision.notes);
+        assert!(warnings[0].contains("Do NOT send that lock") && warnings[0].contains("`swap-cli intent FILE --cancel`"), "{}", warnings[0]);
+        assert!(out_wait(&out).contains("reuse the printed parameters"), "the ledger's own hold: {}", out_wait(&out));
+        assert!(matches!(out.intent, IntentStatus::Held(_)) && bob.pending_intent.is_some());
+    }
+    // A concentration above the sepolia limit (28 %) with no detection: the ordinary warning of the screen only, nothing of the pending-lock kind.
+    let mut n3 = n.clone();
+    shape(&mut n3, 900, 220, 1_000, 260);
+    let out = tick_apply(&mut bob, &n3, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty() && out_notes(&out, "WARNING: the producer screen holds").is_empty(), "{:?}", out.decision.notes);
+    assert!(!out_notes(&out, "WARNING: producer concentration too high").is_empty(), "{:?}", out.decision.notes);
+}
+
+#[test]
+fn no_alert_once_the_lock_is_seen_the_intent_is_cancelled_or_nothing_was_read() {
+    // The lock is sent and seen: the intent resolves, the phase moves, no alert.
+    let (mut s, mut bob, _n, _e, now) = with_recorded_lock(ProfileName::Production);
+    let action = Action::LockEth {
+        hashlock: bob.public.hashlock,
+        t_reveal: bob.pending_intent.as_ref().unwrap().params["t_reveal"].as_u64().unwrap(),
+        receiver: bob.public.params.eth.alice_receiver,
+        amount_wei: bob.public.params.eth.amount_wei,
+    };
+    s.bob.executor.execute(&bob, &action, now).unwrap();
+    s.world.borrow_mut().advance_eth(1);
+    let (mut n2, e2, now2) = obs_of(&s);
+    n2.producer_marker = detection();
+    let out = tick_apply(&mut bob, &n2, &e2, now2, true).unwrap();
+    assert!(matches!(&out.intent, IntentStatus::Resolved(h) if h.action == "lock_eth"), "{:?}", out.intent);
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    assert_eq!(bob.phase.name(), "locked");
+    // A cancelled intent: nothing is pending, so nothing to alert about.
+    let (s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
+    cancel_intent(&mut bob, &n, &e, now + MIN_CANCEL_AGE_S).unwrap();
+    assert!(bob.pending_intent.is_none());
+    let mut n3 = n.clone();
+    n3.producer_marker = detection();
+    let (_, e3, now3) = obs_of(&s);
+    let out = tick_apply(&mut bob, &n3, &e3, now3, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    // A tick that read neither a summary nor a marker (a fixture replay) judges nothing here.
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    n.producers = None;
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    // Alice's file never has a lock_eth intent, so never this alert.
+    let s = scenario(ProfileName::Production);
+    let mut alice = s.alice.file.clone();
+    let (mut n, e, now) = obs_of(&s);
+    n.producer_marker = detection();
+    let out = tick_apply(&mut alice, &n, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
 }

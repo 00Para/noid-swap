@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-265 passing, 0 failing, about 3 minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
+330 passing, 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -283,6 +283,7 @@ typed by hand or repeated.
 |---------|----------------|----------------|
 | `lock`, `claim`, `refund` | `--chain-id N` (mandatory); `--code-hash 0x…` (optional) | `eth_chainId` equals `--chain-id`, the chain is an allowed test chain (chainId 1 is refused unless `--mainnet` is given, see "Mainnet"), and `keccak256(eth_getCode(CONTRACT))` equals `keccak256(deployedBytecode)` of this repo's compiled artifact (REVIEW-3 F1; run `npx hardhat compile` first). `--code-hash` defaults to that value and, when given, must equal it. With `--swap FILE` the file's `code_hash` must equal it too. A contract address with no code is refused too. |
 | `lock` | | no `Locked` event with the same hashlock from your own sender address (the key file's) exists in the contract's logs, and the exact lockId is unused. There is no override flag: a second lock of yours under one hashlock means you pay twice. A lock by another sender under the same hashlock does not block you (a third party who knows the public hashlock could otherwise grief the swap); it is listed in the JSON as `foreignLocksSameHashlock: [{sender, lockId, blockNumber}]` and noted on stderr, because whoever reveals the secret can claim those too. |
+| `lock --swap FILE` | | the producer screen of `swap-cli` (T21) remembers no detection: neither the marker file `FILE.producer-differs` (present, or not examinable, counts as present; nothing in it is parsed) nor the history entry `producer_differs_seen`. Under the `production` profile `lock` refuses, also with `--dry-run`, before any network read; the way on is `--accept-producer-concentration` on the next `swap-cli tick --apply` (recorded in the swap file as `producer_concentration_overridden…`), after which `lock` only prints a `WARNING:` line on stderr. Under `sepolia` and `rehearsal` it only warns. Why here: an intent recorded by an earlier tick stays pending after a later tick finds the detection. A screen, not a defence. `claim` and `refund` do not look at it. |
 | `claim` | `--secret-stdin` or `--secret-file PATH` (not needed for `--dry-run`) | `now <= timelock - --margin-s` (default 1800 s = `M_A`, design §4.3; `now` is the later of your clock and the latest block's timestamp), the lock exists, is unclaimed and unrefunded, `sha256(secret)` equals its hashlock, and the `Locked` event's block is at or below the node's `finalized` block (a node that does not answer the `finalized` tag is refused; on a local Hardhat node it equals `latest`). `--confirmations` still decides how long to wait after sending. With `--swap FILE` the key must be the file's `alice_receiver` (REVIEW-4 R4-5). |
 | `refund` | | the lock exists, this key is its sender (with `--swap FILE`: the file's `bob_sender`, checked first, R4-5), it is unclaimed and unrefunded, and the latest block's timestamp is at or past the timelock. |
 | `lock`, `claim`, `refund` | | the fee cap is not outrun by the base fee (REVIEW-4 R4-1, next section). |
@@ -368,12 +369,21 @@ bytes). With a local key the claim is then signed locally and the signed bytes a
 network read sits between the last check and the send. That send is one HTTP request which the library never repeats: its automatic retry on
 an HTTP 429 answer is switched off for this one request (a throttled first attempt was not accepted, and a repeat minutes later would be the
 real publication, after the last check). A throttled send fails with the sidecar in place; the endpoint most likely did not accept the claim,
-so run the claim again with `--margin-s 1800`, which keeps the strict cutoff whatever the sidecar says. Not bounded: how long a stalled
+so run the claim again with `--margin-s 1800`, which keeps the strict cutoff whatever the sidecar says. The provider the command line builds
+follows no redirect either (for a read or for the send): any HTTP 3xx answer becomes the error `REDIRECT_REFUSED` (the library would have sent
+the request to the new address as a fresh request, without the 429 switch above). The message names the status, never the configured URL or the
+address the answer names; put the endpoint's final URL in `ETH_RPC_URL`. A send answered that way is treated like the throttled one: the
+sidecar stays, the endpoint most likely did not accept the claim, and the advice is the same plus the new URL. Not bounded: how long a stalled
 connection takes to deliver that one request (`TASKS.md` T21-17). A sidecar of this lock that
 exists already is never deleted: its own bytes are written again through a new fsynced temporary file and renamed over it (the first attempt's time
 stays), and if that fails nothing is sent. A file there whose content is not a sidecar of this lock is moved aside to
-`FILE.reveal-sent.stale-*`, never deleted; one that cannot be examined or read (an I/O error) is left alone and the claim is refused. Never run
-two `claim` commands for one swap file at the same time. The
+`FILE.reveal-sent.stale-*`, never deleted; one that cannot be examined or read (an I/O error) is left alone and the claim is refused.
+Two `claim` commands for one swap file cannot send at the same time (a second one started after the first send has settled, without `--replace`, is not blocked: it signs a new claim at the next nonce, which reverts once the first lands and costs gas only): a real `claim --swap FILE` first creates `FILE.claim-lock` exclusively (one
+small JSON line: version, pid, Unix seconds) and holds it from before the sidecar is read until the send has settled (the broadcast call returned
+or failed, or anything before it failed); it is not held through the wait for the receipt, so `claim --replace --replace-tx HASH` from another
+terminal works then. If that file exists, or cannot be created, the claim refuses before it touches anything beside the swap file, and says which
+pid and time the lock records. The tool never removes, takes over or judges a lock by itself (no pid check, no age): a claim that died leaves its
+lock, and you delete the file by hand once you are sure that no other claim for this swap file is running. A dry run takes no lock. The
 file is written only for a real send, not for a dry run, a refused claim or a claim without `--swap`. `claim` reads it too: a sidecar of THIS lock
 is evidence that the secret may be public, exactly like the history events above (the intent's `late_cutoff` rules; an intent without one keeps its
 frozen cutoff; `--margin-s` still tightens). A sidecar of another lock or one not in the format is ignored and reported (`revealSidecar`,

@@ -53,8 +53,10 @@ pub const DEFAULT_BUDGET: Duration = Duration::from_secs(40);
 /// The longest a single call may take (the transport timeout of the reader). A call that starts just before the budget ends can overrun it by this much.
 pub const PER_CALL_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time kept back from the budget for the second node's headers (the anchor block, then one batch of sampled blocks) when a second node is
-/// configured. The total budget is unchanged by the sample, except for the one second ask of the anchor after a sample that showed a hash
-/// difference below the anchor, which has its own [`PER_CALL_TIMEOUT`] and can extend that tick by at most that much.
+/// configured. The total budget is unchanged by the sample, except for the asks that follow a difference: the second ask of the anchor after a
+/// sample that showed a hash difference below the anchor, and the confirmation of a producer difference (the same height asked of the second
+/// node again). Each has its own [`PER_CALL_TIMEOUT`], so a tick that saw a difference can be extended by at most two of them (a producer
+/// difference at the anchor's second ask is confirmed after it).
 pub const SECOND_RESERVE: Duration = Duration::from_secs(5);
 /// The second node is asked for the header this many blocks below the lower of the two tips (so that a block still being settled does not
 /// make two honest nodes disagree).
@@ -166,8 +168,9 @@ pub enum SecondCheck {
     },
     /// The two nodes name different blocks at `height` (8-hex hashes), at the anchor or at a sampled height.
     Differs { height: u64, first: String, second: String },
-    /// The two nodes hold the same block (equal hashes) at `height` but name different producers for it: one of them is misreporting. Holds no
-    /// address, only the height, so that the operator can look at both nodes.
+    /// The two nodes hold the same block (equal hashes) at `height` but name different producers for it: one of them is misreporting. The second
+    /// node was asked once more for that one height and gave the same hash and again a producer other than the first node's (a second node that
+    /// takes its answer back is `Unreadable`, not this). Holds no address, only the height, so that the operator can look at both nodes.
     ProducerDiffers { height: u64 },
     /// The two nodes hold different blocks (different hashes) at the SAMPLED height `height`, which lies below the anchor block, and the second node
     /// named the same anchor block (hash and producer) before the sample and again after its answers arrived. Two honest nodes that agree on a
@@ -498,16 +501,62 @@ impl Fetcher<'_> {
     }
 }
 
+/// The second node named another producer than the first node's entry for the block at `height`, under an equal hash. Before that is
+/// remembered for good (a marker, a history entry, a screen that stays closed), the SECOND node is asked once more for that one height, with its
+/// own fresh time (`now + PER_CALL_TIMEOUT`), for the reason given at the anchor's second ask in [`sample_check`]: the first node, whose calls
+/// spend the reading's shared deadline, must not be able to make this ask unreadable. The answer decides:
+///
+/// - the same hash and a producer that is still not the first node's: [`SecondCheck::ProducerDiffers`] (remembered);
+/// - the same hash and now the SAME producer as the first node's (the second node gave two different producers for one block): not remembered,
+///   [`SecondCheck::Unreadable`] saying so (the screen fails closed for this tick only);
+/// - another hash, an error, no answer in time or not exactly one header: `Unreadable` with its reason, never remembered.
+///
+/// Why the second node and not the first, and what that leaves. The first node's entry is deliberately not read again: a lying first node
+/// would answer that one call truthfully and be forgotten. The node that matters for the latch is the first one (its headers are what the
+/// screen counts), and an honest second node gives the same answer twice, so a lying first node is still remembered. A second node that takes
+/// back its own answer is refused for the tick and not remembered. That lets a lying SECOND node avoid the latch, but a lying second node
+/// beside an honest first node cannot hide anything (the counts come from the first node), and two lying nodes defeat the screen anyway. The
+/// producers are compared byte for byte, as everywhere in the reader.
+///
+/// Cost: at most one more per-call timeout on a tick that saw a producer difference.
+fn confirm_producer_differs(rpc2: &dyn JsonRpc, entries: &[Header], height: u64) -> SecondCheck {
+    let unreadable = |reason: String| SecondCheck::Unreadable { reason };
+    let Some(mine) = entries.iter().find(|e| e.height == height) else {
+        return unreadable(format!("the height {height} is not in the first node's headers"));
+    };
+    let mut again = Fetcher { rpc: rpc2, deadline: Instant::now() + PER_CALL_TIMEOUT, fetched: 0 };
+    match again.fetch(&[height]) {
+        (g, None) if g.len() == 1 => {
+            if g[0].hash != mine.hash {
+                unreadable(format!(
+                    "the second node gave a different block for height {height} when it was asked again to confirm a producer difference, so the difference is not confirmed"
+                ))
+            } else if g[0].miner == mine.miner {
+                unreadable(format!(
+                    "the second node gave two different answers for the producer of the block at height {height}, so the producer difference is not confirmed"
+                ))
+            } else {
+                SecondCheck::ProducerDiffers { height }
+            }
+        }
+        (_, None) => unreadable(format!("the second node did not return exactly one header when asked again about height {height}")),
+        (_, Some(Stop::Error(e))) => unreadable(format!("the producer difference at height {height} could not be confirmed: {e}")),
+        (_, Some(Stop::Budget)) => unreadable(format!("the second node did not answer in time when asked again about height {height}")),
+    }
+}
+
 /// The second half of the cross-check, run only after the anchor block agreed in hash and producer: two samples are drawn by `cfg.sampler`,
 /// afresh on every tick, each of up to [`SECOND_SAMPLE_COUNT`] distinct heights: one from the SHORT window's range up to the anchor
 /// (`short_lo..=anchor`) and one from the LONG window's range (`lo..=anchor`). Never above the anchor, where the two tips may differ; never
 /// below the window. The union (a height drawn in both is asked once) goes to the second node in one batch (the fetcher falls back to single
 /// calls) under the reading's own deadline, and the hash and the producer of each height are compared with the first node's entry. A
-/// different hash AT the anchor is `Differs` (never remembered); the same hash with another producer is `ProducerDiffers` (remembered); a different
+/// different hash AT the anchor is `Differs` (never remembered); the same hash with another producer is `ProducerDiffers` (remembered) once the
+/// second node, asked for that one height again, still names another producer ([`confirm_producer_differs`]; if it takes its answer back, or the
+/// ask fails, the result is `Unreadable` and nothing is remembered); a different
 /// hash at a sampled height BELOW the anchor is `SampledDiffers` (remembered) when the second node names the same anchor block again after the
 /// sampled answers, otherwise `Differs` at the anchor or `Unreadable` (ordinary); a second node that does not return every height in time,
 /// or answers with an error, is `Unreadable`. If one sample shows both a producer difference and a hash difference the outcome is the remembered
-/// `ProducerDiffers`. A range of fewer heights than the count is sampled completely.
+/// `ProducerDiffers`, when it is confirmed; when the confirmation cannot be completed the hash difference goes on through its own anchor re-ask (`SampledDiffers` or an ordinary result), and a producer difference alone is `Unreadable`. A range of fewer heights than the count is sampled completely.
 fn sample_check(f2: &mut Fetcher<'_>, entries: &[Header], lo: u64, short_lo: u64, anchor: u64, cfg: &ReaderConfig) -> SecondCheck {
     let unreadable = |reason: String| SecondCheck::Unreadable { reason };
     if anchor < short_lo {
@@ -565,9 +614,15 @@ fn sample_check(f2: &mut Fetcher<'_>, entries: &[Header], lo: u64, short_lo: u64
             producer_differs = Some(*h);
         }
     }
-    // A remembered kind never loses to an ordinary result: a producer difference under an equal hash stands whatever else was seen.
+    // A remembered kind never loses to an ordinary result: a producer difference under an equal hash stands whatever else was seen, once the
+    // second node has been asked for that one height again and still names another producer (`confirm_producer_differs`).
     if let Some(height) = producer_differs {
-        return SecondCheck::ProducerDiffers { height };
+        match confirm_producer_differs(f2.rpc, entries, height) {
+            // A confirmation that could not be completed must not throw away a hash difference seen in the same sample: that one still goes
+            // through its own anchor re-ask below (an outside read, 2026-11-10).
+            SecondCheck::Unreadable { .. } if below_differs.is_some() && anchor_moved.is_none() => {}
+            confirmed => return confirmed,
+        }
     }
     if let Some(moved) = anchor_moved {
         return moved;
@@ -586,7 +641,7 @@ fn sample_check(f2: &mut Fetcher<'_>, entries: &[Header], lo: u64, short_lo: u64
     // above it). For an honest first node, equal hashes at the top mean the same chain below it. What the cache cannot do is forget a lie: a lower
     // entry written by a source that lied earlier survives while the top hash matches. That can only make a difference show (a refusal, never a
     // wrongly allowed lock), and the entry is deliberately NOT re-read from the first node before remembering: a lying node would simply answer
-    // that one call truthfully and never be remembered. The operator who clears a marker deletes the header cache beside it too (the docs say so).
+    // that one call truthfully and never be remembered. (A swap that is started again after a detection has a new swap file, hence a new cache.)
     let Some(anchor_entry) = entries.iter().find(|e| e.height == anchor) else {
         return unreadable(format!("the anchor height {anchor} is not in the first node's headers"));
     };
@@ -605,7 +660,7 @@ fn sample_check(f2: &mut Fetcher<'_>, entries: &[Header], lo: u64, short_lo: u64
             if g[0].hash != anchor_entry.hash {
                 SecondCheck::Differs { height: anchor, first: short_hash(&anchor_entry.hash), second: short_hash(&g[0].hash) }
             } else if g[0].miner != anchor_entry.miner {
-                SecondCheck::ProducerDiffers { height: anchor }
+                confirm_producer_differs(f2.rpc, entries, anchor)
             } else {
                 SecondCheck::SampledDiffers { height }
             }
@@ -790,7 +845,7 @@ pub fn read_producers(
                             if g[0].hash != mine.hash {
                                 SecondCheck::Differs { height: anchor, first: short_hash(&mine.hash), second: short_hash(&g[0].hash) }
                             } else if g[0].miner != mine.miner {
-                                SecondCheck::ProducerDiffers { height: anchor }
+                                confirm_producer_differs(rpc2, &entries, anchor)
                             } else {
                                 sample_check(&mut f2, &entries, lo, tip + 1 - cfg.window_short, anchor, cfg)
                             }

@@ -71,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 625 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 640 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -577,7 +577,7 @@ a swap against a producer that is visibly large, and nothing else.
   produced more than 35 % of either window (a share exactly at the limit passes; the comparison is on integers), or when the headers cannot be read in
   full, are stale (more than 2 blocks below the tip, or read more than 120 s ago), the chain of `prev_hash` does not link, no summary was read, or the
   second Parano1d node names another block or another producer at the anchor height (three below the lower tip) or at a sampled height, or could
-  not be read for the cross-check, or an earlier such finding is on record beside the swap file (below). Under `sepolia`
+  not be read for the cross-check, or an earlier such finding is on record beside the swap file or in its history (below). Under `sepolia`
   and `rehearsal` (limit 28 %) the same evaluation runs and only prints a `WARNING:` note; the lock is offered as before. The two largest addresses
   together above 50 % always only warn. In `received` and `funded` the finding is said as information (the lock is decided at `funding_final`).
 - **What reads the headers.** Only `tick`, only Bob's file, only in `received`, `funded` or `funding_final`, only against a live node (`--noid-rpc`;
@@ -595,17 +595,40 @@ a swap against a producer that is visibly large, and nothing else.
   node for their union in one batch and compares hash and producer with the first node's entries. The ok note says how many heights were compared
   (64 when the two draws do not overlap). A missing height, an error or a timeout is "could not be read" (fail closed under `production`, as
   before). Two findings cannot come from two honest nodes: another producer under an equal hash, and another hash at a sampled height below an
-  anchor that the second node names again, unchanged, after the sample. Either refuses that tick and is **remembered** in
-  `<swap file>.producer-differs` (a version, the height, the time and the kind; no address, no hash; created exclusively, also on a read-only
-  tick; never changed or deleted by the tool), with one history entry `producer_differs_seen` on the next `--apply`. While that file exists
-  `production` does not offer the lock for the rest of the swap, `sepolia` and `rehearsal` warn on every tick, and
-  `--accept-producer-concentration` waives it like the rest of the screen; a marker that cannot be read counts as present. A difference at the
-  anchor itself is never remembered (a reorg near the tip can cause it between honest nodes). To clear a marker after finding the cause, delete
-  it and `<swap file>.producers` together, by hand; move or copy the swap file only together with both. Producers are compared byte for byte,
-  so check once, on a copy of the swap file, that the two real nodes agree before a two-node run (`docs/runbook-two-party.md`). It stays a
+  anchor that the second node names again, unchanged, after the sample. A producer difference is first **confirmed**: the second node is asked
+  once more for that one height (with its own per-call timeout, so a slow first node cannot spend it), and only if it gives the same hash and
+  again a producer other than the first node's does the finding stand. A second node that takes its answer back (two different producers for
+  one block), answers with another hash, fails or does not answer makes that tick "could not be read" (fail closed under `production`) and
+  remembers nothing; a tick that saw a producer difference can therefore take up to one more per-call timeout (10 s). The first node's entry is
+  deliberately not read again (a lying first node would answer that one call truthfully). A lying SECOND node can avoid the latch this way, but
+  it cannot hide anything the first node reports, and two lying nodes defeat the screen anyway. Either finding refuses that tick and is
+  **remembered** in `<swap file>.producer-differs` (a version, the height, the time and the kind; no address, no hash; created exclusively, also
+  on a read-only tick; never changed or deleted by the tool) and, on `--apply`, in one history entry `producer_differs_seen` of the swap file
+  itself (also when the marker could not be written, and also for a marker that cannot be read). While either exists `production` does not offer
+  the lock for the rest of the swap, `sepolia` and `rehearsal` warn on every tick, and `--accept-producer-concentration` waives it like the rest
+  of the screen. **A remembered detection cannot be cleared for that swap file**: removing the marker, or moving the swap file without it, no
+  longer reopens the screen once the history entry is written (the text then says "the swap file's history records ..."). The two ways on are
+  `--accept-producer-concentration` (printed as OVERRIDDEN on every tick and recorded in the history) and ending this swap (if no lock was sent
+  there is nothing to refund) and starting a new one with a new swap file. A read-only `tick` writes no history entry, so run `tick --apply`
+  (the helpers' loop does) for the memory to be in the file. If the marker file cannot be written, the tick says so (a read-only tick adds that
+  nothing was saved) and the detection is still written into the history on `--apply`. A difference at the anchor itself is never remembered (a
+  reorg near the tip can cause it between honest nodes). Producers are compared byte for byte, so check once, on a copy of the swap file, that
+  the two real nodes agree before a two-node run (`docs/runbook-two-party.md`). It stays a
   screen, not a defence: one party on several addresses, two lying nodes or one shared upstream are not covered, and a node that hides a
   producer only a few points over the limit is missed often (`docs/bob-concentration-gate.md`, section 4, gives the chance per swap by share).
-  The remembered refusal is a new rule of Bob's lock gate (decision 2026-11-09).
+  The remembered refusal is a new rule of Bob's lock gate (decision 2026-11-09; the confirmation, the history memory and the no-clear rule are
+  decision 2026-11-10, after an outside read (2026-11-10)).
+- **A `lock_eth` intent that is pending while the screen refuses (decision 2026-11-10).** `tick --apply` records the intent when the screen
+  passes; a later tick can find a detection (or a share over the limit). The helper that sends the lock sends the frozen parameters, so
+  `tick_apply` now says so: when a `lock_eth` intent is held (Bob's file, the lock not seen) and the screen refuses now, the tick adds one note
+  that starts with `ALERT:` (printed on the first tick that sees the refusal only, as `scripts/live` expects of an alert, so `watch.sh`
+  sends one message): the producer screen refuses to lock now, a `lock_eth` intent decided at that time is still pending, do NOT send it (not
+  with `lock.sh`, not with `live.js lock`), cancel it with `swap-cli intent FILE --cancel` (the same chain flags as `tick`) if nothing was sent,
+  and look at the contract if it may have been sent. The `wait` reason changes the same way (the usual "reuse the printed parameters" would
+  send the refused lock). With `--accept-producer-concentration` the screen does not refuse, so there is no alert. Under `sepolia` and
+  `rehearsal` the screen only warns, so the same text comes as a `WARNING:` and only for a remembered detection. The tool does not cancel
+  the intent by itself and the intent is not marked in any other way: the detection is in the swap file's history (`producer_differs_seen`),
+  which a lock helper can read; a concentration refusal leaves no such entry.
 - **The flag.** `--accept-producer-concentration` (no value) waives the `production` refusals above, the fail-closed ones included; it is printed as an
   `OVERRIDDEN` warning on every tick that uses it and written once to the swap file's history (`producer_concentration_overridden: ...`, no phase
   change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is
