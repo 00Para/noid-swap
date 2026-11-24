@@ -225,6 +225,17 @@ node scripts/live.js lock ...same flags, without --dry-run        # note lockId,
 `--t-reveal` must be the tick's value, not a fresh one: the lock id is derived from it, and Alice only accepts the
 lock if `T_reveal` minus the lock block's time is at least 5,400 s.
 
+**What the operator sees when the lock helper refuses (`scripts/live/lock.sh`).** A send first asks the engine again, with a fresh
+read-only `tick`, whether Bob's lock is still wanted. If the producer screen now refuses (a share over the limit, data that cannot be
+verified, a second node missing or differing, a remembered detection), or the tick fails or cannot be read, the helper prints
+`lock REFUSED, nothing sent`, the tick's own reason, and exits 3; `live.js` is not run. `live.js lock` itself also refuses, before any
+network read, when the swap file's history holds the alert latch `producer_alert_lock_pending:...` of this intent with no
+`producer_concentration_overridden` entry after it, or a remembered detection (the marker file, or `producer_differs_seen`); with the
+marker file but no detection entry yet it tells you to run `tick --apply` first. What to do: do not send; if nothing was sent, cancel the
+intent (`swap-cli intent FILE --cancel`, same chain flags as `tick`); the ways on are `--accept-producer-concentration` on a `tick --apply`
+(printed and recorded, trial amounts only) or a new swap file. Even after the screen passes again, a latch on record keeps `live.js lock`
+refusing for that intent until you cancel the intent (the flag writes no override on a pass); while the screen still refuses, the flag does work. `live.js lock` without `--swap` makes no producer check and says so.
+
 **Step 5, Alice reveals** (only when `tick` says `reveal_eth`; the dry run needs no secret):
 ```sh
 cd eth && node scripts/live.js claim --key-file keys/alice.key --contract 0xC --lock-id 0xLOCKID \

@@ -1013,6 +1013,107 @@ check "setup.sh: Alice's swap file blocks the guess too" "0|none|none" "$SRC|$(s
 SD=$(mkl setup-swapexplicit2); printf '{}\n' > "$SD/alice.swap.json"
 SOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$SD" LIVE_PLATFORM=native CURL="$RPCSTUB" RPC_MAP="$SD/none" RPC_LOG="$SD/rpc.log" RUN=7 DEPLOY_BLOCK=777 "$BASH" "$HERE/setup.sh" 2>&1); SRC=$?
 check "setup.sh: an explicit DEPLOY_BLOCK is honoured even with a swap file present (the operator's word)" "0|777" "$SRC|$(sb)"
+
+# ---- (15) lock.sh asks a fresh read-only tick right before it sends (T21 design B): lock_precheck on fixture ticks, then lock.sh against STUBS
+# (a stub swap-cli that prints a tick file and records its argv, a stub node that records its argv; nothing is read from a chain, nothing is sent)
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import json' >/dev/null 2>&1; then
+  PC="$TMP/precheck"; mkdir -p "$PC"
+  TICK_GO='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix): the chain does not show it yet; reuse the printed parameters"},"notes":["producer concentration ok","held: fresh decision was lock_eth","frozen parameters of the pending lock_eth: {}"],"intent":{"status":"held","intent":{"action":"lock_eth","params":{}}}}'
+  TICK_ALERT='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix) but the producer screen refuses to lock now (x): do NOT send it"},"notes":["ALARM: producer concentration too high, not locking (T21)","ALERT: the producer screen refuses to lock now (T21: producer concentration too high), but a lock_eth intent decided at 1 (Unix time) is still pending.","held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  pc() { printf '%s' "$2" > "$PC/$1.json"; lock_pre_out=$(env -i HOME="$TMP/home" PATH="$PATH" HERE="$HERE" L="$PC" "$BASH" -c 'set -u; . "$HERE/env.sh" 2>/dev/null; lock_precheck "$1"' _ "$PC/$1.json" 2>&1); lock_pre_rc=$?; }
+  pc go "$TICK_GO"
+  check "lock_precheck: a held lock_eth intent whose fresh decision is still the lock goes" "0|go" "$lock_pre_rc|$lock_pre_out"
+  pc alert "$TICK_ALERT"
+  check "lock_precheck: an ALERT: note refuses" "1" "$lock_pre_rc"
+  check_has "lock_precheck: ... and says what the tick said" "ALERT: the producer screen refuses" "$lock_pre_out"
+  # no ALERT, but the fresh decision is not the lock (the engine holds it back for another reason)
+  pc other '{"action":{"action":"wait","reason":"not lock_eth: a second node is required"},"notes":["held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: a fresh decision that is not the lock refuses" "1" "$lock_pre_rc"
+  pc donotsend '{"action":{"action":"wait","reason":"do NOT send it"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: a wait that says do NOT send it refuses even beside the lock note" "1" "$lock_pre_rc"
+  pc nonote '{"action":{"action":"wait","reason":"r"},"notes":["frozen parameters of the pending lock_eth: {}"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: no 'held: fresh decision' note refuses" "1" "$lock_pre_rc"
+  pc twonotes '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth","held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: two decision notes refuse" "1" "$lock_pre_rc"
+  pc nointent '{"action":{"action":"lock_eth"},"notes":[],"intent":{"status":"none","intent":null}}'
+  check "lock_precheck: no pending intent refuses (a read-only tick never offers the lock itself)" "1" "$lock_pre_rc"
+  pc recorded '{"action":{"action":"lock_eth"},"notes":[],"intent":{"status":"recorded","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: an intent only just recorded (status recorded) refuses" "1" "$lock_pre_rc"
+  pc resolved '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"resolved","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: an intent the chain resolved (the lock is on chain) refuses" "1" "$lock_pre_rc"
+  pc refund '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"refund_eth"}}}'
+  check "lock_precheck: another action's intent refuses" "1" "$lock_pre_rc"
+  pc garbage 'not json at all'
+  check "lock_precheck: a tick output that is not JSON refuses" "1" "$lock_pre_rc"
+  pc empty ''
+  check "lock_precheck: an empty tick output refuses" "1" "$lock_pre_rc"
+  pc array '[]'
+  check "lock_precheck: JSON that is not an object refuses" "1" "$lock_pre_rc"
+  pc badnotes '{"action":{"action":"wait","reason":"r"},"notes":[1,2],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check "lock_precheck: notes that are not text refuse" "1" "$lock_pre_rc"
+  lock_pre_out=$(env -i HOME="$TMP/home" PATH="$PATH" HERE="$HERE" L="$PC" "$BASH" -c 'set -u; . "$HERE/env.sh" 2>/dev/null; lock_precheck "$1"' _ "$PC/nonexistent.json" 2>&1); lock_pre_rc=$?
+  check "lock_precheck: a missing file refuses" "1" "$lock_pre_rc"
+
+  # lock.sh against stubs
+  LB="$TMP/lockbin"; mkdir -p "$LB" "$TMP/ethdir/scripts"
+  cp "$HERE/env.sh" "$HERE/lock.sh" "$LB/"
+  cat > "$TMP/lockbinstub" <<'STUB'
+#!/bin/sh
+# a stub swap-cli: records its argv (one per line, appended) and prints the tick file STUB_TICK (or garbage), exits with STUB_TICK_EXIT
+printf '%s\n' "$@" >> "$STUB_BIN_ARGV"
+if [ -n "${STUB_TICK:-}" ] && [ -f "$STUB_TICK" ]; then cat "$STUB_TICK"; fi
+exit "${STUB_TICK_EXIT:-0}"
+STUB
+  cat > "$TMP/locknodestub" <<'STUB'
+#!/bin/sh
+# a stub node: records its argv (one per line, appended) and prints an empty object
+printf '%s\n' "$@" >> "$STUB_NODE_ARGV"
+echo "{}"
+STUB
+  chmod +x "$TMP/lockbinstub" "$TMP/locknodestub"
+  # lock_run NAME TICKFILE TICKEXIT [lock.sh args]: sets LOUT, LRC, LBIN (the swap-cli argv), LNODE (the node argv)
+  lock_run() {
+    local name=$1 tick=$2 tex=$3; shift 3
+    local d; d=$(mkl "lock-$name"); mkdir -p "$d/bob" "$d/rec"; echo "selftest-passphrase" > "$d/passphrase.txt"
+    : > "$d/bin.argv"; : > "$d/node.argv"
+    LOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$d" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" \
+      STUB_BIN_ARGV="$d/bin.argv" STUB_NODE_ARGV="$d/node.argv" STUB_TICK="$tick" STUB_TICK_EXIT="$tex" "$BASH" "$LB/lock.sh" ${1+"$@"} 2>/dev/null)
+    LRC=$?
+    LBIN=$(cat "$d/bin.argv"); LNODE=$(cat "$d/node.argv")
+  }
+  printf '%s' "$TICK_GO" > "$PC/stub-go.json"; printf '%s' "$TICK_ALERT" > "$PC/stub-alert.json"; printf 'garbage' > "$PC/stub-garbage.json"
+  lock_run go "$PC/stub-go.json" 0
+  check "lock.sh (send): the fresh tick shows the lock: live.js lock runs once, exit 0" "0|1" "$LRC|$(printf '%s\n' "$LNODE" | grep -cx lock)"
+  check_has "lock.sh (send): ... and it says the engine still offers the lock" "fresh read-only tick: the engine still offers Bob's lock" "$LOUT"
+  check "lock.sh (send): the tick it asked for is a plain read-only tick (no --apply), of Bob's file" "1|0|1" "$(printf '%s\n' "$LBIN" | grep -cx tick)|$(printf '%s\n' "$LBIN" | grep -cx -- --apply)|$(printf '%s\n' "$LBIN" | grep -c '/bob/bob.swap.json$')"
+  lock_run alert "$PC/stub-alert.json" 0
+  check "lock.sh (send): the fresh tick shows the screen refusing: exit 3, live.js is never run" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
+  check_has "lock.sh (send): ... and the operator reads why" "lock REFUSED, nothing sent" "$LOUT"
+  check_has "lock.sh (send): ... with the tick's own words" "ALERT: the producer screen refuses" "$LOUT"
+  lock_run failed "$PC/stub-go.json" 1
+  check "lock.sh (send): a tick that fails (even one that printed a good tick) refuses: exit 3, live.js is never run" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
+  check_has "lock.sh (send): ... and says the tick failed" "the fresh read-only tick right before the send failed" "$LOUT"
+  lock_run garbage "$PC/stub-garbage.json" 0
+  check "lock.sh (send): a tick whose output cannot be read refuses: exit 3, live.js is never run" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
+  lock_run nothing "$PC/none.json" 0
+  check "lock.sh (send): a tick that prints nothing refuses" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
+  lock_run dry "$PC/stub-alert.json" 0 --dry-run
+  check "lock.sh --dry-run: no tick at all (the dry run stays offline-style and shows live.js's own checks), live.js runs with --dry-run" "0|0|1" "$LRC|$(printf '%s' "$LBIN" | grep -c .)|$(printf '%s\n' "$LNODE" | grep -cx -- --dry-run)"
+  lock_run flags "$PC/stub-go.json" 0
+  check "lock.sh (send): the tick gets the same node flags as tick.sh" "1" "$(printf '%s\n' "$LBIN" | grep -cx -- --noid-rpc)"
+  # the passphrase is for the tick only: the node that sends the lock does not inherit it
+  cat > "$TMP/locknodeenv" <<'STUB'
+#!/bin/sh
+if [ -n "${SWAP_PASSPHRASE:-}" ]; then echo "passphrase-inherited" >> "$STUB_NODE_ARGV"; else echo "passphrase-not-inherited" >> "$STUB_NODE_ARGV"; fi
+echo "{}"
+STUB
+  chmod +x "$TMP/locknodeenv"
+  PD=$(mkl lock-pass); mkdir -p "$PD/bob"; echo "selftest-passphrase" > "$PD/passphrase.txt"; : > "$PD/node.argv"
+  env -i HOME="$TMP/home" PATH="$PATH" L="$PD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodeenv" ETH_DIR="$TMP/ethdir" STUB_BIN_ARGV="$PD/bin.argv" STUB_NODE_ARGV="$PD/node.argv" STUB_TICK="$PC/stub-go.json" "$BASH" "$LB/lock.sh" >/dev/null 2>&1
+  check "lock.sh (send): the node that sends the lock does not inherit SWAP_PASSPHRASE" "passphrase-not-inherited" "$(cat "$PD/node.argv")"
+else
+  echo "skip lock_precheck and lock.sh against stubs (no python3 on this machine)"
+fi
 echo
 echo "$PASS ok, $FAILS failed (bash $BASH_VERSION)"
 [ "$FAILS" -eq 0 ]

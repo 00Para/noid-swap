@@ -2768,11 +2768,19 @@ fn no_alert_once_the_lock_is_seen_the_intent_is_cancelled_or_nothing_was_read() 
     let (_, e3, now3) = obs_of(&s);
     let out = tick_apply(&mut bob, &n3, &e3, now3, true).unwrap();
     assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
-    // A tick that read neither a summary nor a marker (a fixture replay) judges nothing here.
+    // A tick that read neither a summary nor a marker: under production the screen refuses (it cannot be checked), so the pending lock is alerted and
+    // latched like any other refusal (review, 2026-11-10); the warning-only profiles stay quiet.
     let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
+    n.producers = None;
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1, "{:?}", out.decision.notes);
+    assert_eq!(latches(&bob), vec![format!("producer_alert_lock_pending:{decided_at}:cannot-be-checked")]);
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Sepolia);
     n.producers = None;
     let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
     assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+    assert!(latches(&bob).is_empty());
     // Alice's file never has a lock_eth intent, so never this alert.
     let s = scenario(ProfileName::Production);
     let mut alice = s.alice.file.clone();
@@ -2780,4 +2788,206 @@ fn no_alert_once_the_lock_is_seen_the_intent_is_cancelled_or_nothing_was_read() 
     n.producer_marker = detection();
     let out = tick_apply(&mut alice, &n, &e, now, true).unwrap();
     assert!(out_notes(&out, "ALERT:").is_empty(), "{:?}", out.decision.notes);
+}
+
+// ================================================================== the latch, per intent and kind of finding; its ordering against the override (an outside read, 2026-11-10)
+
+fn latches(bob: &SwapFile) -> Vec<String> {
+    bob.history.iter().filter(|h| h.event.starts_with(swap_cli::producer_gate::LOCK_LATCH_PREFIX)).map(|h| h.event.clone()).collect()
+}
+
+#[test]
+fn the_latch_is_written_for_every_kind_of_refusal_with_the_intent_and_the_kind_and_each_kind_alerts_once() {
+    type Mutator = fn(&mut NoidObservation);
+    let cases: Vec<(&str, Mutator, &str)> = vec![
+        ("concentration over the limit", |n| shape(n, 1_009, 252, 1_500, 380), "concentration"),
+        (
+            "headers incomplete",
+            |n| {
+                let at = n.observed_at.unwrap();
+                let mut p = ProducerSummary::synthetic(n.tip, 2_880, 720, at, 300, 450);
+                p.complete = false;
+                p.long = None;
+                p.short = None;
+                p.have = 1_420;
+                n.producers = Some(p);
+            },
+            "cannot-be-checked",
+        ),
+        (
+            "a header failed",
+            |n| {
+                tweak(n, |p| {
+                    p.complete = false;
+                    p.long = None;
+                    p.short = None;
+                    p.error = Some("a header failed".into());
+                })
+            },
+            "cannot-be-checked",
+        ),
+        (
+            "stale headers",
+            |n| {
+                let tip = n.tip;
+                tweak(n, |p| p.header_tip = tip - 3)
+            },
+            "stale",
+        ),
+        (
+            "read 121 s ago",
+            |n| {
+                let at = n.observed_at.unwrap();
+                tweak(n, |p| p.read_at = Some(at - 121))
+            },
+            "stale",
+        ),
+        ("second node names another block", |n| tweak(n, |p| p.second = SecondCheck::Differs { height: 300_017, first: "3c1d85aa".into(), second: "9a02e4f1".into() }), "disagree"),
+        ("second node names another producer", |n| tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 300_017 }), "disagree"),
+        ("second node holds other blocks below an anchor", |n| tweak(n, |p| p.second = SecondCheck::SampledDiffers { height: 300_017 }), "disagree"),
+        ("second node unreadable", |n| tweak(n, |p| p.second = SecondCheck::Unreadable { reason: "timed out".into() }), "cannot-be-checked"),
+        ("second node configured but the check did not run", |n| tweak(n, |p| p.second = SecondCheck::NotConfigured), "cannot-be-checked"),
+        (
+            "second node missing with --single-node-ok",
+            |n| {
+                n.second = None;
+                n.single_node_ok = true;
+                tweak(n, |p| p.second = SecondCheck::NotConfigured);
+            },
+            "one-node",
+        ),
+        ("a remembered detection (marker)", |n| n.producer_marker = detection(), "remembered"),
+        ("a remembered detection (history only)", |n| n.producer_marker = MarkerState::Remembered { at: 5 }, "remembered"),
+        ("an unreadable marker", |n| n.producer_marker = MarkerState::Unreadable { reason: "cannot be read".into() }, "remembered"),
+    ];
+    for (name, mutate, kind) in cases {
+        let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+        let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
+        mutate(&mut n);
+        // A read-only tick alerts and writes no latch.
+        let mut ro = bob.clone();
+        assert_eq!(out_notes(&tick_apply(&mut ro, &n, &e, now, false).unwrap(), "ALERT:").len(), 1, "{name}");
+        assert!(latches(&ro).is_empty(), "{name}: a read-only tick writes no latch");
+        // The tick that saves: one ALERT, one latch entry with the intent and the kind.
+        let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+        assert_eq!(out_notes(&out, "ALERT:").len(), 1, "{name}: {:?}", out.decision.notes);
+        assert_eq!(latches(&bob), vec![format!("producer_alert_lock_pending:{decided_at}:{kind}")], "{name}");
+        // The same finding again: no second alert, no second entry.
+        let again = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+        assert!(out_notes(&again, "ALERT:").is_empty(), "{name}");
+        assert_eq!(latches(&bob).len(), 1, "{name}");
+        assert!(bob.pending_intent.is_some(), "{name}: the intent stays pending");
+    }
+}
+
+#[test]
+fn a_later_finding_of_another_kind_alerts_again_and_a_transient_one_does_not_use_up_the_real_one() {
+    let (_s, mut bob, n, e, now) = with_recorded_lock(ProfileName::Production);
+    let decided_at = bob.pending_intent.as_ref().unwrap().decided_at;
+    // A transient timeout of the second node: the first alert.
+    let mut transient = n.clone();
+    tweak(&mut transient, |p| p.second = SecondCheck::Unreadable { reason: "timed out".into() });
+    assert_eq!(out_notes(&tick_apply(&mut bob, &transient, &e, now, true).unwrap(), "ALERT:").len(), 1);
+    // The next tick is clean again: nothing.
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty() && latches(&bob).len() == 1, "{:?}", out.decision.notes);
+    // Then a real detection (the marker): its own alert, its own entry.
+    let mut found = n.clone();
+    found.producer_marker = detection();
+    let out = tick_apply(&mut bob, &found, &e, now, true).unwrap();
+    let alerts = out_notes(&out, "ALERT:");
+    assert_eq!(alerts.len(), 1, "{:?}", out.decision.notes);
+    assert!(alerts[0].contains(MARKER_HEADLINE), "{}", alerts[0]);
+    assert_eq!(
+        latches(&bob),
+        vec![format!("producer_alert_lock_pending:{decided_at}:cannot-be-checked"), format!("producer_alert_lock_pending:{decided_at}:remembered")]
+    );
+    // And once more: nothing.
+    assert!(out_notes(&tick_apply(&mut bob, &found, &e, now, true).unwrap(), "ALERT:").is_empty());
+}
+
+#[test]
+fn an_override_written_before_a_latch_does_not_count_so_the_flag_writes_a_new_override_entry_after_it() {
+    let overrides = |bob: &SwapFile| -> Vec<usize> { bob.history.iter().enumerate().filter(|(_, h)| h.event.starts_with(OVERRIDE_HISTORY)).map(|(i, _)| i).collect() };
+    let last_latch = |bob: &SwapFile| bob.history.iter().rposition(|h| h.event.starts_with(swap_cli::producer_gate::LOCK_LATCH_PREFIX));
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    shape(&mut n, 1_009, 252, 1_500, 380);
+    // The flag is on: the override is written, no latch.
+    n.accept_producer_concentration = true;
+    tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(overrides(&bob).len(), 1);
+    assert!(last_latch(&bob).is_none());
+    // The flag is off: the screen refuses the pending lock; the latch comes AFTER the override.
+    n.accept_producer_concentration = false;
+    tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    let latch = last_latch(&bob).expect("a latch");
+    assert!(overrides(&bob).iter().all(|i| *i < latch));
+    // The flag again: a NEW override entry after the latch (live.js lock accepts it only from there).
+    n.accept_producer_concentration = true;
+    tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(overrides(&bob).len(), 2);
+    assert!(*overrides(&bob).last().unwrap() > latch);
+    // And a tick with the flag again adds no third.
+    tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(overrides(&bob).len(), 2);
+}
+
+#[test]
+fn a_read_only_tick_with_a_pending_lock_shows_the_current_decision_in_one_note_the_lock_helper_reads() {
+    // Healthy screen: the pending intent is held, the fresh decision is still the lock (the note lock.sh needs), no ALERT, the usual wait.
+    let (_s, bob, n, e, now) = with_recorded_lock(ProfileName::Production);
+    let mut ro = bob.clone();
+    let out = tick_apply(&mut ro, &n, &e, now, false).unwrap();
+    assert!(matches!(&out.intent, IntentStatus::Held(h) if h.action == "lock_eth"), "{:?}", out.intent);
+    assert_eq!(
+        out.decision.notes.iter().filter(|x| x.starts_with("held: fresh decision was ")).collect::<Vec<_>>(),
+        vec!["held: fresh decision was lock_eth"],
+        "{:?}",
+        out.decision.notes
+    );
+    assert!(out_notes(&out, "ALERT:").is_empty());
+    assert!(out_wait(&out).contains("reuse the printed parameters"));
+    assert_eq!(ro.history.len(), bob.history.len(), "read-only");
+    // A refusing screen: the fresh decision is a wait (not the lock), an ALERT, and the wait says not to send it.
+    let mut bad = n.clone();
+    shape(&mut bad, 1_009, 252, 1_500, 380);
+    let mut ro = bob.clone();
+    let out = tick_apply(&mut ro, &bad, &e, now, false).unwrap();
+    assert_eq!(
+        out.decision.notes.iter().filter(|x| x.starts_with("held: fresh decision was ")).collect::<Vec<_>>(),
+        vec!["held: fresh decision was wait"],
+        "{:?}",
+        out.decision.notes
+    );
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1);
+    assert!(out_wait(&out).contains("do NOT send it"));
+}
+
+#[test]
+fn a_latch_is_written_again_when_an_override_came_after_the_last_one_of_its_kind() {
+    // The review's sequence: refusal (latch), the flag once (override), the flag dropped, the same refusal again. live.js waives a latch that an
+    // override follows, so the refusal that is true now needs a latch of its own AFTER the override, and it alerts again.
+    let overrides = |bob: &SwapFile| -> Vec<usize> { bob.history.iter().enumerate().filter(|(_, h)| h.event.starts_with(OVERRIDE_HISTORY)).map(|(i, _)| i).collect() };
+    let latch_at = |bob: &SwapFile| -> Vec<usize> {
+        bob.history.iter().enumerate().filter(|(_, h)| h.event.starts_with(swap_cli::producer_gate::LOCK_LATCH_PREFIX)).map(|(i, _)| i).collect()
+    };
+    let (_s, mut bob, mut n, e, now) = with_recorded_lock(ProfileName::Production);
+    shape(&mut n, 1_009, 252, 1_500, 380);
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1);
+    assert_eq!(latch_at(&bob).len(), 1);
+    n.accept_producer_concentration = true;
+    tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(overrides(&bob).len(), 1);
+    assert!(overrides(&bob)[0] > latch_at(&bob)[0], "the override came after the latch");
+    assert_eq!(latch_at(&bob).len(), 1, "with the flag the screen does not refuse: no latch");
+    n.accept_producer_concentration = false;
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert_eq!(out_notes(&out, "ALERT:").len(), 1, "the refusal is true again: it alerts again");
+    let (latches_now, last_override) = (latch_at(&bob), *overrides(&bob).last().unwrap());
+    assert_eq!(latches_now.len(), 2);
+    assert!(*latches_now.last().unwrap() > last_override, "the new latch comes after the override, so live.js refuses");
+    let out = tick_apply(&mut bob, &n, &e, now, true).unwrap();
+    assert!(out_notes(&out, "ALERT:").is_empty());
+    assert_eq!(latch_at(&bob).len(), 2, "and only once");
 }

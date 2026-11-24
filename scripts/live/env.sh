@@ -349,3 +349,40 @@ single_node_warning() {
     echo "NOTE: no second node for $([ -z "$NOID_RPC2" ] && echo "Parano1d (NOID_RPC2)")$([ -z "$NOID_RPC2" ] && [ -z "$ETH_RPC2" ] && echo " and ")$([ -z "$ETH_RPC2" ] && echo "Ethereum (ETH_RPC2)"), and SINGLE_NODE_OK is not 1: --single-node-ok is NOT passed, so the engine will WAIT before Bob's lock and before Alice's reveal (F5) until the second nodes are in $L/env.local.sh (or, for a run against a counterparty you control, SINGLE_NODE_OK=1 there; under the production profile Bob's lock then still needs NOID_RPC2 for the producer-concentration check, or ACCEPT_PRODUCER_CONCENTRATION=1)" >&2
   fi
 }
+# lock_precheck TICK_JSON: the gate of lock.sh (a send), T21 design B. The file is the output of a FRESH read-only `swap-cli tick` of Bob's swap file (asked
+# right before the send). Prints "go" and returns 0 only when that tick shows exactly what a lock needs: a lock_eth intent is pending and HELD (the tick
+# kept it), the fresh decision, asked again by the engine with the producer screen and every other gate, is still the lock (the engine's own note
+# "held: fresh decision was lock_eth"), no note starts with ALERT:, and the held wait does not say "do NOT send it". Anything else, a file that is
+# missing, empty or not JSON, a tick that failed, a missing field, a second note, returns 1 and prints the reason: the lock is NOT sent. Local reads only;
+# python3 missing returns non-zero too. The JavaScript checks of live.js lock stay as the second barrier.
+lock_precheck() {
+  python3 - "$1" <<'PY'
+import sys, json
+def no(why):
+    print(why); sys.exit(1)
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: v = json.load(f)
+except Exception as e:
+    no("the fresh tick printed nothing I can read (%s)" % type(e).__name__)
+if not isinstance(v, dict): no("the fresh tick's output is not an object")
+intent = v.get("intent")
+if not isinstance(intent, dict) or intent.get("status") != "held":
+    st = intent.get("status") if isinstance(intent, dict) else None
+    no("Bob's file holds no pending lock_eth intent that the fresh tick kept (intent status: %s); run tick --apply first and use the intent it records" % st)
+inner = intent.get("intent")
+if not isinstance(inner, dict) or inner.get("action") != "lock_eth":
+    no("the pending intent is not a lock_eth (it is: %s)" % (inner.get("action") if isinstance(inner, dict) else None))
+notes = v.get("notes")
+if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes): no("the fresh tick has no readable notes")
+alerts = [n for n in notes if n.startswith("ALERT:")]
+if alerts: no("the fresh tick raised an ALERT: " + alerts[0][:400])
+action = v.get("action")
+reason = action.get("reason") if isinstance(action, dict) and isinstance(action.get("reason"), str) else ""
+if not isinstance(action, dict) or action.get("action") != "wait": no("the fresh tick's decision is not the wait that holds a pending intent")
+if "do NOT send it" in reason: no("the fresh tick says not to send the pending lock: " + reason[:400])
+fresh = [n for n in notes if n.startswith("held: fresh decision was ")]
+if fresh != ["held: fresh decision was lock_eth"]:
+    no("the fresh decision is no longer the lock (%s); the engine holds Bob's lock back now: %s" % (fresh if fresh else "no 'held: fresh decision' note", reason[:400]))
+print("go")
+PY
+}

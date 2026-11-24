@@ -397,28 +397,49 @@ pub struct PendingLockFinding {
     pub hard: bool,
     /// The short reason, the headline of the finding. Never an address.
     pub headline: &'static str,
+    /// A short fixed slug of the kind of finding (`concentration`, `cannot-be-checked`, `stale`, `disagree`, `one-node`, `remembered`). It keys the
+    /// history latch together with the intent, so that a later finding of ANOTHER kind (a remembered detection after a transient timeout) alerts again.
+    pub kind: &'static str,
+}
+
+/// The history entry that latches the `ALERT:` of a pending `lock_eth` intent decided at `decided_at`, for one kind of finding. `live.js lock` refuses
+/// while the history holds `producer_alert_lock_pending:<decided_at>` or `producer_alert_lock_pending:<decided_at>:<kind>` for the intent it is about to
+/// send, with no override entry after it, so the prefix and the decided-at must stay as they are.
+pub fn pending_lock_latch(decided_at: u64, kind: &str) -> String {
+    format!("{LOCK_LATCH_PREFIX}{decided_at}:{kind}")
+}
+
+/// The start of every latch entry (read by `eth/scripts/live.js`).
+pub const LOCK_LATCH_PREFIX: &str = "producer_alert_lock_pending:";
+
+fn kind_of(headline: &'static str) -> &'static str {
+    match headline {
+        HEADLINE_CANNOT => "cannot-be-checked",
+        HEADLINE_STALE => "stale",
+        HEADLINE_DISAGREE => "disagree",
+        HEADLINE_ONE_NODE => "one-node",
+        HEADLINE_MARKER | HEADLINE_MARKER_HASH | HEADLINE_MARKER_UNREADABLE | HEADLINE_MARKER_REMEMBERED => "remembered",
+        _ => "other",
+    }
 }
 
 /// Does the screen, asked now, refuse (or, under a profile that only warns, hold a remembered detection against) the `lock_eth` that an
 /// earlier tick recorded as an intent? The decision is the one [`lock_gate`] makes (`wait.is_some()`), asked with a scratch note list so that
 /// the notes it pushes are not printed twice. `None` when the screen passes, when the override waives a refusal, when a warning-only profile
-/// has no remembered detection (its ordinary warning is already in the notes), and when no summary and no marker were read at all (a fixture
-/// replay: the screen was not asked, as for [`waiting_notes`]).
+/// has no remembered detection (its ordinary warning is already in the notes). A tick that read no summary and no marker still counts: under an
+/// enforced profile the screen refuses it ("cannot be checked"), so the pending lock gets its alert and its latch too (review, 2026-11-10).
 pub fn pending_lock_finding(g: &Gates, noid: &NoidObservation, now: u64) -> Option<PendingLockFinding> {
-    if noid.producers.is_none() && noid.producer_marker.is_absent() {
-        return None;
-    }
     let mut scratch: Vec<String> = Vec::new();
     let hard = lock_gate(g, noid, now, &mut scratch).wait.is_some();
     if !hard && (g.producer_gate_enforced || noid.producer_marker.is_absent()) {
         return None;
     }
-    let headline = match evaluate(g, noid, now).finding {
+    let (headline, kind) = match evaluate(g, noid, now).finding {
         Finding::Pass => return None,
-        Finding::Concentrated { .. } => "producer concentration too high",
-        Finding::Unverifiable { headline, .. } => headline,
+        Finding::Concentrated { .. } => ("producer concentration too high", "concentration"),
+        Finding::Unverifiable { headline, .. } => (headline, kind_of(headline)),
     };
-    Some(PendingLockFinding { hard, headline })
+    Some(PendingLockFinding { hard, headline, kind })
 }
 
 const PENDING_LOCK_WHAT_TO_DO: &str = "Do NOT send that lock (do not run lock.sh or live.js lock). If nothing was sent, cancel the intent with `swap-cli intent FILE --cancel` (with the same chain flags as tick). If it may already have been sent, look at the contract";

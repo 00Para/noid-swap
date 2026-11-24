@@ -50,7 +50,11 @@
  *   lock --swap FILE     the producer screen of swap-cli must not remember a detection (T21): the marker file FILE.producer-differs (present, or
  *                        not examinable, counts) or the history entry producer_differs_seen. Under the production profile `lock` refuses (also in
  *                        --dry-run) unless the history holds the operator's producer_concentration_overridden (tick --accept-producer-concentration),
- *                        then it only warns; under any other profile it warns. Local reads only, before any network call. A screen, not a defence.
+ *                        then it only warns; under any other profile it warns. The same for a pending lock the screen refused: the history entry
+ *                        producer_alert_lock_pending:<decided_at>[:kind] of THIS intent (written by `tick --apply` for every kind of refusal) refuses
+ *                        the lock unless an override entry comes after it. An override counts only AFTER the entry it waives (by position); with the
+ *                        marker file and no detection entry in the history no override counts (run `tick --apply` first). Without --swap no
+ *                        producer check is made and a warning says so. Local reads only, before any network call. A screen, not a defence.
  *
  * Mainnet (chain id 1) is refused unless the signing command (deploy, send, lock, claim, refund) is given --mainnet.
  * With --mainnet: only chain 1 is accepted (a test network is refused, no mixing; --allow-chain-id is refused),
@@ -183,6 +187,10 @@ class RevertedTx extends UserError {
 }
 
 const NO_SWAP_WARNING = "warning: no --swap FILE, the swap file's intent is not checked (REVIEW-3 F3)\n";
+// `lock` without --swap reads no swap file, so none of the producer-screen checks (T21) run: not the marker, not the history, not the pending-lock
+// latch. On a local test chain there is no swap file and this is the normal way; with a swap-cli swap file it removes a barrier.
+const NO_SWAP_LOCK_WARNING =
+  "WARNING: lock without --swap FILE: NO producer check was made (the marker file, the history and the pending-lock alert of swap-cli's producer screen, T21, all live in the swap file). Fine for a local test chain; for a real swap pass --swap FILE (lock.sh does)\n";
 const PRIORITY_FEE_WARNING =
   "warning: --priority-fee-gwei is in effect: a tip below what block builders take can leave the transaction pending; --replace then re-sends it with a higher cap and pays up to the whole cap (the small tip is not used for a replacement)\n";
 
@@ -933,47 +941,124 @@ function profileOf(v) {
 const PRODUCER_MARKER_SUFFIX = ".producer-differs";
 const PRODUCER_DIFFERS_EVENT = "producer_differs_seen";
 const PRODUCER_OVERRIDE_PREFIX = "producer_concentration_overridden";
+// The latch `swap-cli tick --apply` writes when the screen refuses a `lock_eth` intent that is still pending (engine.rs): the entry is
+// `producer_alert_lock_pending:<the intent's decided_at>` and, since the 2026-11-10 batch, `...:<decided_at>:<kind of the finding>`. It is
+// written for EVERY kind of refusal (concentration over the limit, data that cannot be verified, second node missing or differing, a remembered
+// detection), so this script can refuse a pending lock on the latch alone.
+const PRODUCER_LOCK_LATCH_PREFIX = "producer_alert_lock_pending:";
 
 /** Where the remembered detection is on record for this swap file: { marker: string|null, history: boolean }. Reads nothing but local metadata. */
 function producerDetection(sw) {
-  const markerPath = sw.file + PRODUCER_MARKER_SUFFIX;
-  let marker = null;
-  try {
-    fs.lstatSync(markerPath);
-    marker = `${markerPath} exists`;
-  } catch (e) {
-    if (!(e && e.code === "ENOENT")) marker = `${markerPath} cannot be examined (${e && e.code ? e.code : "error"}), which counts as present`;
+  // The marker is looked for beside the path as given (resolved) and, when that is another name, beside the real path too (a link to the swap
+  // file): swap-cli writes it beside the path it was given. Either one counts; a name that cannot be examined counts as present.
+  const names = [sw.file + PRODUCER_MARKER_SUFFIX];
+  if (sw.realFile && sw.realFile !== sw.file) names.push(sw.realFile + PRODUCER_MARKER_SUFFIX);
+  const notes = [];
+  for (const markerPath of names) {
+    try {
+      fs.lstatSync(markerPath);
+      notes.push(`${markerPath} exists`);
+    } catch (e) {
+      if (!(e && e.code === "ENOENT")) notes.push(`${markerPath} cannot be examined (${e && e.code ? e.code : "error"}), which counts as present`);
+    }
   }
-  return { marker, history: sw.producerDiffersSeen === true };
+  return { marker: notes.length === 0 ? null : notes.join(" and "), history: sw.producerDiffersSeen === true };
 }
 
-/** `lock` only: refuse (production, no override) or warn (override recorded, or any other profile) when the producer screen remembers a detection. */
+/**
+ * Where the entries that matter sit in the swap file's history, by position (the history is append-only, so position is order):
+ * the last detection entry, the last pending-lock latch entry of THIS intent, and the last override entry. -1 = none. A latch entry of an
+ * earlier, cancelled intent has another decided_at and is not looked at. If the intent's decided_at cannot be read, any latch entry counts.
+ */
+function producerHistoryPositions(sw) {
+  const ev = Array.isArray(sw.historyEvents) ? sw.historyEvents : [];
+  // decided_at is the engine's Unix time (a u64). Anything else (a hand edit: an object, a float, a negative or huge number) is not matched against a
+  // latch's name, so any latch counts (fail closed).
+  const rawAt = sw.intent ? sw.intent.decided_at : undefined;
+  const decidedAt = Number.isSafeInteger(rawAt) && rawAt >= 0 ? String(rawAt) : null;
+  const latchBase = decidedAt === null ? PRODUCER_LOCK_LATCH_PREFIX : `${PRODUCER_LOCK_LATCH_PREFIX}${decidedAt}`;
+  let lastLatch = -1;
+  let lastOverride = -1;
+  ev.forEach((e, i) => {
+    if (decidedAt === null ? e.startsWith(latchBase) : e === latchBase || e.startsWith(`${latchBase}:`)) lastLatch = i;
+    if (e.startsWith(PRODUCER_OVERRIDE_PREFIX)) lastOverride = i;
+  });
+  return { lastDetection: ev.lastIndexOf(PRODUCER_DIFFERS_EVENT), lastLatch, lastOverride };
+}
+
+/**
+ * `lock` only: refuse (production, no waiver) or warn (waiver recorded, or any other profile) when the producer screen of swap-cli has refused
+ * this lock: a remembered detection (the marker file or the history entry), or a latch entry for THIS pending intent (a tick found the screen
+ * refusing it, whatever the kind of refusal). A waiver is an override entry that comes AFTER the entry it waives, by position in the history.
+ * Local reads only.
+ */
 function checkProducerMemory(sw) {
   const found = producerDetection(sw);
-  if (found.marker === null && !found.history) return;
-  const evidence = [found.marker === null ? null : `the marker file ${found.marker}`, found.history ? `the swap file's history holds "${PRODUCER_DIFFERS_EVENT}"` : null].filter(Boolean).join(" and ");
-  const what = `the producer screen of swap-cli remembers that two Parano1d nodes named different producers for the same block (${evidence})`;
-  if (sw.profile !== "production") {
-    process.stderr.write(`WARNING: ${what}; under the ${sw.profile} profile this only warns. A screen, not a defence.\n`);
-    return;
+  const pos = producerHistoryPositions(sw);
+  const latched = pos.lastLatch >= 0;
+  const detected = found.marker !== null || found.history;
+  if (!detected && !latched) return;
+  const production = sw.profile === "production";
+  const refusals = []; // texts of the memories that stand (production, no waiver after them)
+  let needsApply = false; // the marker is there but the history holds no detection entry yet
+  let latchStands = false; // the latch of this intent stands (nothing waives it)
+  const waived = []; // texts of the memories an override entry waives
+  if (detected) {
+    const evidence = [found.marker === null ? null : `the marker file ${found.marker}`, found.history ? `the swap file's history holds "${PRODUCER_DIFFERS_EVENT}"` : null].filter(Boolean).join(" and ");
+    const what = `the producer screen of swap-cli remembers that two Parano1d nodes named different producers for the same block (${evidence})`;
+    // A marker with no detection entry in the history: there is no entry for an override to come after, so no override entry can be told from an
+    // older one (e.g. one for a concentration). Nothing counts until a `tick --apply` has written the detection into the history (an outside read, 2026-11-10).
+    const markerOnly = found.marker !== null && !found.history;
+    if (!production) waived.push(what);
+    else if (markerOnly) {
+      needsApply = true;
+      refusals.push(`${what}, and under the production profile that screen refuses the lock`);
+    } else if (pos.lastOverride > pos.lastDetection) waived.push(what);
+    else refusals.push(`${what}, and under the production profile that screen refuses the lock`);
   }
-  if (sw.producerOverridden) {
-    process.stderr.write(
-      `WARNING: ${what}; this lock goes ahead only because the swap file records the operator's ${PRODUCER_OVERRIDE_PREFIX} (tick --accept-producer-concentration). A screen, not a defence.\n`
+  if (latched) {
+    const what = `the swap file's history holds a "${PRODUCER_LOCK_LATCH_PREFIX}..." entry for this pending lock_eth intent: a tick found the producer screen refusing it (a share over the limit, data that could not be verified, a second node missing or differing, or a remembered detection)`;
+    if (!production) waived.push(what);
+    else if (pos.lastOverride > pos.lastLatch) waived.push(what);
+    else {
+      refusals.push(`${what}, and no ${PRODUCER_OVERRIDE_PREFIX} entry comes after it`);
+      latchStands = true;
+    }
+  }
+  if (refusals.length > 0) {
+    throw new UserError(
+      `refusing: ${refusals.join("; and ")}. ` +
+        "This is a screen, not a defence. Do not send this lock. If nothing was sent, cancel the intent with `swap-cli intent FILE --cancel` (with the same chain flags as tick). " +
+        "The way on is `--accept-producer-concentration` on the next `tick --apply` (it is recorded in the swap file and printed on every tick), or ending this swap and starting a new one with a new swap file. Once a `tick --apply` has run, removing the marker does not clear it." +
+        (needsApply
+          ? ` The swap file's history holds no "${PRODUCER_DIFFERS_EVENT}" entry yet, so no override can count: run \`swap-cli tick --apply\` (it writes the detection into the history), pass \`--accept-producer-concentration\` on that tick if you accept the risk, and then run this lock again.`
+          : "") +
+        (latchStands
+          ? " A latch stays on record even if the screen passes again: the flag writes no override entry on a pass, so then the way on is to cancel the intent (`swap-cli intent FILE --cancel`, same chain flags as tick) and let a `tick --apply` record a new one."
+          : "")
     );
-    return;
   }
-  throw new UserError(
-    `refusing: ${what}, and under the production profile that screen refuses the lock. ` +
-      "This is a screen, not a defence. Do not send this lock. If nothing was sent, cancel the intent with `swap-cli intent FILE --cancel` (with the same chain flags as tick). " +
-      "The way on is `--accept-producer-concentration` on the next `tick --apply` (it is recorded in the swap file and printed on every tick), or ending this swap and starting a new one with a new swap file. Once a `tick --apply` has run, removing the marker does not clear it."
-  );
+  for (const what of waived) {
+    process.stderr.write(
+      production
+        ? `WARNING: ${what}; this lock goes ahead only because the swap file records the operator's ${PRODUCER_OVERRIDE_PREFIX} (tick --accept-producer-concentration). A screen, not a defence.\n`
+        : `WARNING: ${what}; under the ${sw.profile} profile this only warns. A screen, not a defence.\n`
+    );
+  }
 }
 
 /** Parse the parts of the swap file this script needs. Read-only; `secret` is never looked at. */
 function readSwapFile(file) {
   const abs = path.resolve(String(file));
   if (!fs.existsSync(abs)) throw new UserError(`--swap: swap file not found: ${abs}`);
+  // The claim lock and the reveal sidecar are named from the REAL path of the swap file, so that the same file reached through a link gets the same
+  // lock and the same sidecar (an outside read, 2026-11-10). If the real path cannot be found out, nothing that is keyed to it can be trusted: refuse.
+  let real;
+  try {
+    real = fs.realpathSync(abs);
+  } catch (e) {
+    throw new UserError(`--swap: the real path of ${abs} cannot be determined (${codeOf(e)}); the claim lock and the reveal sidecar are named from it, so refusing`);
+  }
   let j;
   try {
     j = JSON.parse(fs.readFileSync(abs, "utf8"));
@@ -985,6 +1070,8 @@ function readSwapFile(file) {
   try {
     return {
       file: abs,
+      // Where the claim lock and the reveal sidecar live (their names are this plus a suffix). Equal to `file` unless the file is reached through a link.
+      realFile: real,
       chainId: uint("swap file chain_id", eth.chain_id),
       // As swap-cli stores it: `public.params.profile`, absent for `production` (the default is not written).
       profile: profileOf(j.public.params.profile),
@@ -1002,12 +1089,10 @@ function readSwapFile(file) {
       // The producer screen of swap-cli (T21): its remembered detection is the history entry `producer_differs_seen`; the operator's waiver is an
       // entry whose event starts with `producer_concentration_overridden` (`tick --accept-producer-concentration`). Only `lock` reads them.
       producerDiffersSeen: Array.isArray(j.history) && j.history.some((h) => h && h.event === PRODUCER_DIFFERS_EVENT),
-      // The override counts only when its entry comes AFTER the last detection entry (an older override, e.g. for a concentration, must not waive a later disagreement).
-      producerOverridden: Array.isArray(j.history) && (() => {
-        const ev = j.history.map((h) => (h && typeof h.event === "string" ? h.event : ""));
-        const lastDetection = ev.lastIndexOf(PRODUCER_DIFFERS_EVENT);
-        return ev.some((e, i) => e.startsWith(PRODUCER_OVERRIDE_PREFIX) && i > lastDetection);
-      })(),
+      // The event names in order (a non-string event is ""): `checkProducerMemory` judges the detection, the pending-lock latch and the override by
+      // position. An override counts only when its entry comes AFTER the entry it waives (an older override, e.g. for a concentration, must not waive a
+      // later disagreement or a later refusal).
+      historyEvents: Array.isArray(j.history) ? j.history.map((h) => (h && typeof h.event === "string" ? h.event : "")) : [],
       ethFromBlock: j.eth_from_block === undefined || j.eth_from_block === null ? null : uint("swap file eth_from_block", j.eth_from_block),
     };
   } catch (e) {
@@ -1055,10 +1140,32 @@ const codeOf = (e) => (e && e.code ? e.code : "error");
 const CLAIM_LOCK_SUFFIX = ".claim-lock";
 const claimLockPath = (swapFile) => String(swapFile) + CLAIM_LOCK_SUFFIX;
 
+/**
+ * Is a process with this pid alive on THIS machine? Words for the refusal message only; the answer never lets the lock be taken over.
+ * Signal 0 sends nothing: "no such process" = not alive, "not permitted" = alive (another user's). A pid can be reused by an unrelated process, and
+ * a lock made on another machine or by another kind of process (e.g. a different shell's pid space) records a pid that means nothing here, so the
+ * sentence always says that the operator decides.
+ */
+function pidLiveness(pid, kill = process.kill) {
+  let alive;
+  try {
+    kill(pid, 0);
+    alive = true;
+  } catch (e) {
+    if (e && e.code === "ESRCH") alive = false;
+    else if (e && e.code === "EPERM") alive = true;
+    else return "whether that process is still alive could not be determined";
+  }
+  return alive
+    ? "a process with that pid is alive on this machine, so another claim may well be running (the pid may also have been reused by an unrelated process)"
+    : "no process with that pid is alive on this machine, so the claim that took it probably died (a lock made on another machine would show the same: check before deleting)";
+}
+
 /** What the lock file at `file` says about its holder, for the refusal message (never throws). */
 function describeClaimLock(file) {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (j && Number.isSafeInteger(j.pid) && j.pid > 0 && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}; ${pidLiveness(j.pid)}`;
     if (j && Number.isSafeInteger(j.pid) && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}`;
   } catch {
     /* unreadable or not our line: say so below */
@@ -1892,7 +1999,7 @@ async function claim(provider, signer, args0) {
   try {
     // A real claim with a swap file holds the claim lock from here (before the sidecar is first read, in claimChecked) until the send has settled
     // (execute's afterSend) or anything before it fails (the finally below). A dry run writes nothing and takes none.
-    if (sw && secret !== null && !args.dryRun) claimLock = takeClaimLock(sw.file);
+    if (sw && secret !== null && !args.dryRun) claimLock = takeClaimLock(sw.realFile);
     return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock });
   } catch (e) {
     if (e instanceof UserError) throw new UserError(redact(e.message));
@@ -1993,7 +2100,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   // publishes nothing new and the cutoff the intent froze (T_reveal - DE) is the authority, not the stricter default margin.
   // An explicit --margin-s still tightens it. Without that evidence the earlier of the two stays the rule.
   // T21-11: a reveal sidecar of THIS lock beside the file (written just before an earlier claim was broadcast) is the same kind of evidence.
-  const sidecar = sw ? readRevealSidecar(sw.file, lockId) : null;
+  const sidecar = sw ? readRevealSidecar(sw.realFile, lockId) : null;
   const sidecarEvidence = sidecar !== null && sidecar.state === "matching";
   const lateResend = intentCutoff !== null && (sw.secretMayBePublic || replaced !== null || sidecarEvidence) && !marginGiven;
   if (lateResend) {
@@ -2064,7 +2171,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     timelock: l.timelock.toString(),
     timelockIso: new Date(Number(l.timelock) * 1000).toISOString(),
     marginS: margin.toString(),
-    swapFile: sw ? sw.file : null,
+    swapFile: sw ? sw.realFile : null,
     revealCutoff: cutoff.toString(),
     revealCutoffRule: cutoffRule,
     secondsToCutoff: (cutoff - now).toString(),
@@ -2124,7 +2231,7 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       }
       // T21-11: the sidecar is the last thing preSend does. If it cannot be written and made durable this throws and nothing is sent. With a local
       // key, only the local signature and the synchronous `lastCheck` below sit between this point and the bytes going to the node.
-      if (sw) sidecarWritten = writeRevealSidecar(sw.file, lockId, await presignedHash(signer, populated));
+      if (sw) sidecarWritten = writeRevealSidecar(sw.realFile, lockId, await presignedHash(signer, populated));
     };
     // The fsyncs and the signature can take time (on a network share above all): the cutoff is checked once more against the WALL CLOCK only, in a
     // synchronous guard that runs immediately before the broadcast (for every claim, with or without --swap). No network read can happen after it.
@@ -2391,6 +2498,7 @@ async function main(argv) {
   if (args.priorityFeeGwei !== undefined) process.stderr.write(PRIORITY_FEE_WARNING);
   // Under --mainnet a missing --swap is a refusal (requireSwapOnMainnet), not a warning.
   if (["lock", "claim", "refund"].includes(command) && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_WARNING);
+  if (command === "lock" && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_LOCK_WARNING);
   const provider = command === "keygen" ? null : makeProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545");
   try {
     const signer = SPECS[command].signer ? loadSigner(provider, args.keyFile) : null;
@@ -2422,6 +2530,7 @@ module.exports = {
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
+  pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

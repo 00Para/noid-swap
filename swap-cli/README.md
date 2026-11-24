@@ -71,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 640 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 648 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -624,11 +624,14 @@ a swap against a producer that is visibly large, and nothing else.
   that starts with `ALERT:` (printed on the first tick that sees the refusal only, as `scripts/live` expects of an alert, so `watch.sh`
   sends one message): the producer screen refuses to lock now, a `lock_eth` intent decided at that time is still pending, do NOT send it (not
   with `lock.sh`, not with `live.js lock`), cancel it with `swap-cli intent FILE --cancel` (the same chain flags as `tick`) if nothing was sent,
-  and look at the contract if it may have been sent. The `wait` reason changes the same way (the usual "reuse the printed parameters" would
+  and look at the contract if it may have been sent. The `alert` is latched once per intent and per kind of finding
+  (`producer_alert_lock_pending:<decided_at>:<kind>`, written by `--apply`, for every kind of refusal, and again after an override entry that follows the last one of its kind), so a later finding of another kind alerts
+  again. The `wait` reason changes the same way (the usual "reuse the printed parameters" would
   send the refused lock). With `--accept-producer-concentration` the screen does not refuse, so there is no alert. Under `sepolia` and
   `rehearsal` the screen only warns, so the same text comes as a `WARNING:` and only for a remembered detection. The tool does not cancel
-  the intent by itself and the intent is not marked in any other way: the detection is in the swap file's history (`producer_differs_seen`),
-  which a lock helper can read; a concentration refusal leaves no such entry.
+  the intent by itself and the latch entry above is the mark that the intent is not to be sent, and `live.js lock` and `scripts/live/lock.sh` read it
+  (`docs/bob-concentration-gate.md`, section 4; `lock.sh` asks a fresh read-only `tick` right before a send and relies on its note
+  `held: fresh decision was lock_eth`).
 - **The flag.** `--accept-producer-concentration` (no value) waives the `production` refusals above, the fail-closed ones included; it is printed as an
   `OVERRIDDEN` warning on every tick that uses it and written once to the swap file's history (`producer_concentration_overridden: ...`, no phase
   change). It does **not** waive the F5 rules (`--single-node-ok` is a separate flag; a second node that cannot be read still holds the lock), it is

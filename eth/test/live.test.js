@@ -1489,6 +1489,137 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         await expect(live.lock(provider, bob, { swap: swapFile({ intent: lockIntent(tReveal), history: SEEN }), dryRun: true })).to.be.rejectedWith(REFUSAL);
       });
 
+      // An outside read, 2026-11-10 (finding 1): with the marker file and NO detection entry in the history there is no entry for an override to come
+      // after, so an override entry (e.g. one for a concentration, written earlier) must not waive anything: `tick --apply` has to write the detection first.
+      it("(h) the marker alone with an override in the history and no detection entry: refused, in a dry run too, nothing sent, and the text says to run tick --apply", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal), history: OVERRIDDEN });
+        fs.writeFileSync(swap + MARKER, "{}");
+        await assertNothingSent(async () => {
+          for (const dryRun of [false, true]) {
+            const e = await live.lock(provider, bob, { swap, dryRun }).then(() => null, (x) => x);
+            expect(e, `dry run ${dryRun}`).to.be.instanceOf(Error);
+            expect(e.message).to.match(REFUSAL);
+            expect(e.message).to.include("history holds no \"producer_differs_seen\" entry yet, so no override can count");
+            expect(e.message).to.include("swap-cli tick --apply").and.to.include("--accept-producer-concentration");
+          }
+        });
+        // The marker as a link target of the real path counts too (the same file reached by two names): see the realpath tests below.
+        // Once a tick --apply has written the detection and then the override, the same file goes through with the waiver warning.
+        const waived = swapFile({ intent: lockIntent(tReveal), history: [...OVERRIDDEN, ...SEEN, ...OVERRIDDEN] });
+        fs.writeFileSync(waived + MARKER, "{}");
+        const out = await stderrOf(() => live.lock(provider, bob, { swap: waived }));
+        expect(out.result.lockId).to.be.a("string");
+        expect(out.written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden/m);
+      });
+
+      // Finding 2: the engine writes `producer_alert_lock_pending:<decided_at>[:kind]` when a tick finds its screen refusing a PENDING lock (every kind of
+      // refusal); the lock must not go out on the strength of an intent that is older than that refusal. The test intents have decided_at 1.
+      const LATCH = (suffix = "1:concentration", at = 7) => [{ at, event: `producer_alert_lock_pending:${suffix}`, from: "x", to: "y" }];
+      const LATCH_REFUSAL = /refusing: the swap file's history holds a "producer_alert_lock_pending:\.\.\." entry for this pending lock_eth intent.*no producer_concentration_overridden entry comes after it\. This is a screen, not a defence\. Do not send this lock\./s;
+
+      it("(i) the latch of this intent in the history, no override after it: refused (every form of the entry), in a dry run too, nothing sent, the file untouched", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        for (const suffix of ["1", "1:concentration", "1:remembered", "1:cannot-be-checked"]) {
+          const swap = swapFile({ intent: lockIntent(tReveal), history: LATCH(suffix) });
+          const before = fs.readFileSync(swap, "utf8");
+          expect(fs.existsSync(swap + MARKER)).to.equal(false);
+          await assertNothingSent(async () => {
+            for (const dryRun of [false, true]) {
+              const e = await live.lock(provider, bob, { swap, dryRun }).then(() => null, (x) => x);
+              expect(e, `${suffix} dry run ${dryRun}`).to.be.instanceOf(Error);
+              expect(e.message, suffix).to.match(LATCH_REFUSAL);
+              expect(e.message, suffix).to.include("A latch stays on record even if the screen passes again").and.to.include("cancel the intent");
+            }
+          });
+          expect(fs.readFileSync(swap, "utf8")).to.equal(before);
+        }
+        // The scenario of the finding: the tick recorded the intent, then a plain concentration refusal wrote the latch (no marker, no detection entry).
+        const swap = swapFile({ intent: lockIntent(tReveal), history: [{ at: 1, event: "intent_decided:lock_eth" }, ...LATCH("1:concentration", 9)] });
+        await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(LATCH_REFUSAL);
+        // The refusal comes before any network read.
+        const noNet = new Proxy({}, { get: () => { throw new Error("the provider must not be touched"); } });
+        await expect(live.lock(noNet, bob, { swap })).to.be.rejectedWith(LATCH_REFUSAL);
+      });
+
+      it("(i2) a latch of ANOTHER intent (another decided_at, a longer number that starts with this one) or a different event name is not this intent's latch", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        for (const suffix of ["2:concentration", "12:concentration", "10", "11:x"]) {
+          hashlock = sha256Raw(rand32());
+          const swap = swapFile({ intent: lockIntent((await latestTs()) + 2 * HOUR), history: LATCH(suffix) });
+          const n = await nonce(bobAddr);
+          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          expect(result.lockId, suffix).to.be.a("string");
+          expect(await nonce(bobAddr)).to.equal(n + 1);
+          expect(written, suffix).to.not.include("producer screen");
+        }
+        void tReveal;
+      });
+
+      it("(i3) the override entry AFTER the latch waives it: a warning that says so, and the lock goes through; an override BEFORE the latch does not", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const before = swapFile({ intent: lockIntent(tReveal), history: [...OVERRIDDEN, ...LATCH("1:concentration", 9)] });
+        await assertNothingSent(async () => {
+          await expect(live.lock(provider, bob, { swap: before })).to.be.rejectedWith(LATCH_REFUSAL);
+        });
+        const after = swapFile({ intent: lockIntent(tReveal), history: [...LATCH("1:concentration", 7), ...OVERRIDDEN] });
+        const n = await nonce(bobAddr);
+        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap: after }));
+        expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+        expect(await nonce(bobAddr)).to.equal(n + 1);
+        expect(written).to.match(/^WARNING: the swap file's history holds a "producer_alert_lock_pending:\.\.\." entry for this pending lock_eth intent.*only because the swap file records the operator's producer_concentration_overridden \(tick --accept-producer-concentration\)\. A screen, not a defence\.\n/m);
+        // A later latch takes the waiver away again: latch, override, latch.
+        hashlock = sha256Raw(rand32());
+        const later = swapFile({ intent: lockIntent((await latestTs()) + 2 * HOUR), history: [...LATCH("1:concentration", 7), ...OVERRIDDEN, ...LATCH("1:remembered", 9)] });
+        await assertNothingSent(async () => {
+          await expect(live.lock(provider, bob, { swap: later })).to.be.rejectedWith(LATCH_REFUSAL);
+        });
+      });
+
+      it("(i4) a detection waived and a latch not (or the other way round): the lock is refused for the one that stands, and both texts are given when both stand", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        // detection, override, latch: the detection is waived, the latch stands.
+        const a = swapFile({ intent: lockIntent(tReveal), history: [...SEEN, ...OVERRIDDEN, ...LATCH("1:remembered", 9)] });
+        const ea = await live.lock(provider, bob, { swap: a }).then(() => null, (x) => x);
+        expect(ea.message).to.match(LATCH_REFUSAL);
+        expect(ea.message).to.not.include("remembers that two Parano1d nodes");
+        // latch, override, detection: the latch is waived, the detection stands.
+        const b = swapFile({ intent: lockIntent(tReveal), history: [...LATCH("1:remembered", 5), ...OVERRIDDEN, ...SEEN] });
+        const eb = await live.lock(provider, bob, { swap: b }).then(() => null, (x) => x);
+        expect(eb.message).to.match(REFUSES);
+        expect(eb.message).to.not.include("producer_alert_lock_pending");
+        // latch and detection with no override at all: both are named.
+        const c = swapFile({ intent: lockIntent(tReveal), history: [...LATCH("1:remembered", 5), ...SEEN] });
+        const ec = await live.lock(provider, bob, { swap: c }).then(() => null, (x) => x);
+        expect(ec.message).to.include("remembers that two Parano1d nodes").and.to.include("producer_alert_lock_pending");
+      });
+
+      it("(i5) under sepolia and rehearsal the latch only warns, and the lock goes through", async () => {
+        for (const profile of ["sepolia", "rehearsal"]) {
+          hashlock = sha256Raw(rand32());
+          const tReveal = (await latestTs()) + 2 * HOUR;
+          const swap = swapFile({ intent: lockIntent(tReveal), profile, history: LATCH("1:concentration") });
+          const n = await nonce(bobAddr);
+          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          expect(result.lockId).to.be.a("string");
+          expect(await nonce(bobAddr)).to.equal(n + 1);
+          expect(written).to.match(new RegExp(`^WARNING: the swap file's history holds a "producer_alert_lock_pending:\\.\\.\\." entry.*under the ${profile} profile this only warns\\. A screen, not a defence\\.\\n`, "m"));
+        }
+      });
+
+      it("(i6) a latch for an intent whose decided_at cannot be read counts for any intent (fail closed)", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        for (const bad of [undefined, null, {}, 1.5, "1", -1, 2 ** 60, [1]]) {
+          const intent = lockIntent(tReveal);
+          if (bad === undefined) delete intent.decided_at;
+          else intent.decided_at = bad;
+          const swap = swapFile({ intent, history: LATCH("77:concentration") });
+          await assertNothingSent(async () => {
+            await expect(live.lock(provider, bob, { swap }), JSON.stringify(bad)).to.be.rejectedWith(LATCH_REFUSAL);
+          });
+        }
+      });
+
       it("the refusal comes before any network read (the provider is never touched); refund does not look at the marker", async () => {
         const tReveal = (await latestTs()) + 2 * HOUR;
         const swap = swapFile({ intent: lockIntent(tReveal), history: SEEN });
@@ -1752,6 +1883,17 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       const kg = await run(["keygen", "--out", path.join(dir, "k2.key")]);
       expect(kg.code, kg.err).to.equal(0);
       expect(kg.err).to.not.include("warning: no --swap");
+    });
+
+    it("lock without --swap says plainly that NO producer check was made; claim and refund do not say it, and --swap silences it", async () => {
+      const keyFile = path.join(dir, "k3.key");
+      await live.keygen(null, null, { out: keyFile });
+      const without = await run(["lock", "--key-file", keyFile]);
+      expect(without.err).to.include(live.NO_SWAP_LOCK_WARNING.trim());
+      expect(without.err.split("NO producer check was made").length - 1).to.equal(1);
+      for (const cmd of ["claim", "refund"]) expect((await run([cmd, "--key-file", keyFile])).err, cmd).to.not.include("NO producer check was made");
+      const withSwap = await run(["lock", "--key-file", keyFile, "--swap", swapFile({})]);
+      expect(withSwap.err).to.not.include("NO producer check was made");
     });
 
     it("--swap is a flag of exactly lock, claim and refund", () => {
@@ -4328,6 +4470,105 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       fs.rmdirSync(lockOf(swap));
     });
 
+    it("the stale-lock refusal says whether the recorded pid is alive on this machine, and never takes the lock over", async () => {
+      // pidLiveness on its own: signal 0 with a stub, every outcome.
+      const kill = (code) => () => { throw Object.assign(new Error(code), { code }); };
+      expect(live.pidLiveness(4242, () => true)).to.match(/a process with that pid is alive on this machine, so another claim may well be running/);
+      expect(live.pidLiveness(4242, kill("EPERM"))).to.match(/is alive on this machine/);
+      expect(live.pidLiveness(4242, kill("ESRCH"))).to.match(/no process with that pid is alive on this machine, so the claim that took it probably died/);
+      expect(live.pidLiveness(4242, kill("EIO"))).to.match(/could not be determined/);
+      // In the refusal: the lock of THIS process (alive) and a pid that cannot exist (not alive); the lock stays byte for byte, nothing is sent.
+      for (const [pid, re] of [[process.pid, /a process with that pid is alive on this machine/], [2147483646, /no process with that pid is alive on this machine/]]) {
+        const { wallet, l, swap, n0 } = await freshClaim();
+        const body = JSON.stringify({ version: 1, pid, at: 1700000000 }) + "\n";
+        fs.writeFileSync(lockOf(swap), body);
+        const e = await live.claim(provider, wallet, { swap, secret: preimage }).then(() => null, (x) => x);
+        expect(e, String(pid)).to.be.an.instanceOf(Error);
+        expect(e.message).to.match(new RegExp(`pid ${pid}, taken at Unix second 1700000000; `));
+        expect(e.message).to.match(re);
+        expect(e.message).to.include("delete");
+        expect(fs.readFileSync(lockOf(swap), "utf8"), "never taken over or removed").to.equal(body);
+        expect(fs.existsSync(sideOf(swap))).to.equal(false);
+        await expectUnsent(wallet, l, n0);
+      }
+    });
+
+    it("the claim lock and the sidecar are named from the REAL path: the same swap file through a link meets the same lock; a real path that cannot be determined refuses", async function () {
+      const { wallet, l, swap: first, n0 } = await freshClaim();
+      // The same file by two names: the folder is reached through a link (a junction on Windows, which needs no privilege; a plain symlink elsewhere).
+      const sub = path.join(dir, "real-sub");
+      fs.mkdirSync(sub);
+      const swap = path.join(sub, "swap.json");
+      fs.copyFileSync(first, swap);
+      const via = path.join(dir, "via");
+      try {
+        fs.symlinkSync(sub, via, "junction");
+      } catch (e) {
+        if (e.code === "EPERM" || e.code === "EACCES") return this.skip();
+        throw e;
+      }
+      const link = path.join(via, "swap.json");
+      const real = fs.realpathSync(link);
+      expect(real).to.equal(fs.realpathSync(swap));
+      expect(real).to.not.equal(path.resolve(link));
+      // The lock sits beside the real file (another claim, started through the real name): a claim through the link meets it and refuses.
+      fs.writeFileSync(lockOf(real), JSON.stringify({ version: 1, pid: 2147483646, at: 1700000000 }) + "\n");
+      const e = await live.claim(provider, wallet, { swap: link, secret: preimage }).then(() => null, (x) => x);
+      expect(e).to.be.an.instanceOf(Error);
+      expect(e.message).to.match(/another claim for this swap file is running, or an earlier one died/);
+      expect(e.message).to.include(lockOf(real));
+      await expectUnsent(wallet, l, n0);
+      fs.unlinkSync(lockOf(real));
+      // Without a lock: the claim through the link writes its sidecar beside the REAL file, and the plan names the real path.
+      const plan = await live.claim(provider, wallet, { swap: link, secret: preimage, dryRun: true });
+      expect(plan.swapFile).to.equal(real);
+      const done = await live.claim(provider, wallet, { swap: link, secret: preimage });
+      expect(done.revealSidecar).to.equal("written");
+      expect(fs.existsSync(sideOf(real))).to.equal(true);
+      expect(fs.existsSync(lockOf(real)), "released").to.equal(false);
+    });
+
+    it("a swap FILE that is a symlink: the lock and the sidecar sit beside the real file, never beside the link's own name (skipped where symlinks are not allowed)", async function () {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const real = fs.realpathSync(swap);
+      const link = path.join(dir, "link-to-swap.json");
+      try {
+        fs.symlinkSync(real, link);
+      } catch (e) {
+        if (e.code === "EPERM" || e.code === "EACCES") return this.skip(); // Windows without the symlink privilege
+        throw e;
+      }
+      fs.writeFileSync(lockOf(real), JSON.stringify({ version: 1, pid: 2147483646, at: 1700000000 }) + "\n");
+      await expect(live.claim(provider, wallet, { swap: link, secret: preimage })).to.be.rejectedWith(/another claim for this swap file is running/);
+      expect(fs.existsSync(lockOf(link))).to.equal(false);
+      fs.unlinkSync(lockOf(real));
+      const done = await live.claim(provider, wallet, { swap: link, secret: preimage });
+      expect(done.revealSidecar).to.equal("written");
+      expect(fs.existsSync(sideOf(real)) && !fs.existsSync(sideOf(link))).to.equal(true);
+      void l; void n0;
+    });
+
+    it("a swap file whose real path cannot be determined is refused before anything is read or sent (claim and lock)", async () => {
+      const { wallet, l, swap, n0 } = await freshClaim();
+      const realRP = fs.realpathSync;
+      fs.realpathSync = Object.assign(
+        (p, ...r) => {
+          if (path.resolve(String(p)) === path.resolve(swap)) throw Object.assign(new Error("simulated"), { code: "EIO" });
+          return realRP(p, ...r);
+        },
+        realRP
+      );
+      try {
+        await expect(live.claim(provider, wallet, { swap, secret: preimage })).to.be.rejectedWith(/the real path of .* cannot be determined \(EIO\); the claim lock and the reveal sidecar are named from it, so refusing/);
+        await expect(live.claim(provider, wallet, { swap, secret: preimage, dryRun: true })).to.be.rejectedWith(/cannot be determined \(EIO\)/);
+        await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(/cannot be determined \(EIO\)/);
+      } finally {
+        fs.realpathSync = realRP;
+      }
+      expect(fs.existsSync(lockOf(swap)) || fs.existsSync(sideOf(swap))).to.equal(false);
+      await expectUnsent(wallet, l, n0);
+    });
+
     it("a lock that cannot be created for another reason also refuses (fail closed): nothing is read, written or sent", async () => {
       const { wallet, l, swap, n0 } = await freshClaim();
       const realOpen = fs.openSync;
@@ -4779,6 +5020,37 @@ describe("rpc-proxy.js", function () {
     const r = await post(proxy.address().port, '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}');
     expect(r.status).to.equal(429);
     expect(await r.text()).to.equal('{"error":"rate limited"}');
+  });
+
+  it("never follows a redirect: every 3xx of the upstream is answered with 502 and the redirect target is never asked", async () => {
+    for (const status of [301, 302, 303, 307, 308, 304, 399]) {
+      let targetAsked = 0;
+      const target = await listen((req, res) => {
+        req.resume();
+        targetAsked++;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end('{"jsonrpc":"2.0","id":1,"result":"elsewhere"}');
+      });
+      const upstream = await listen((req, res) => {
+        req.resume();
+        req.on("end", () => {
+          res.writeHead(status, { location: `http://127.0.0.1:${target.address().port}/other`, "content-type": "application/json" });
+          res.end("{}");
+        });
+      });
+      const logs = [];
+      const proxy = await startProxy({ listen: "127.0.0.1:0", upstream: `http://127.0.0.1:${upstream.address().port}/v2/SECRETKEY`, log: (l) => logs.push(l) });
+      servers.push(proxy);
+      const r = await post(proxy.address().port, '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}');
+      expect(r.status, String(status)).to.equal(502);
+      const j = await r.json();
+      expect(j.error.code).to.equal(-32603);
+      expect(j.error.message).to.match(/upstream answered a redirect \(status \d+\); redirects are never followed/);
+      expect(JSON.stringify(j)).to.not.include("elsewhere").and.to.not.include("SECRETKEY");
+      expect(targetAsked, `${status}: the target was never asked`).to.equal(0);
+      expect(logs).to.have.length(1);
+      expect(logs[0]).to.match(/^eth_chainId 502 \d+ms$/);
+    }
   });
 
   it("answers 502 with a JSON-RPC error when the upstream is down, and 405 for GET", async () => {

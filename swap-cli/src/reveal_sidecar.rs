@@ -69,7 +69,33 @@ fn is_hex64(s: &str) -> bool {
 
 /// Read the sidecar of `swap_file` against `lock_id` (the lock of the file's own phase; `None` when the phase has none yet).
 pub fn read(swap_file: &Path, lock_id: Option<[u8; 32]>) -> Reading {
-    let path = path_for(swap_file);
+    // `live.js` names the sidecar from the REAL path of the swap file (an outside read, 2026-11-10: the same file through a link must share one
+    // sidecar). So the sidecar beside the real path is looked at first; when the swap file was given by another name (a link), the sidecar beside
+    // that name is looked at too (an older `live.js` wrote it there). Either one counts as evidence (a matching one wins).
+    if let Ok(real) = std::fs::canonicalize(swap_file) {
+        let real = strip_verbatim(real);
+        if real != swap_file {
+            let first = read_at(&path_for(&real), lock_id);
+            if matches!(first, Reading::Matching { .. }) {
+                return first;
+            }
+            let second = read_at(&path_for(swap_file), lock_id);
+            return if matches!(second, Reading::Matching { .. }) || matches!(first, Reading::Absent) { second } else { first };
+        }
+    }
+    read_at(&path_for(swap_file), lock_id)
+}
+
+/// Windows `canonicalize` returns a verbatim path (`\\?\C:\...`); a plain path is what the rest of the tool prints and compares.
+pub(crate) fn strip_verbatim(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => p,
+    }
+}
+
+fn read_at(path: &Path, lock_id: Option<[u8; 32]>) -> Reading {
+    let path = path.to_path_buf();
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reading::Absent,
@@ -159,6 +185,36 @@ mod tests {
         assert!(matches!(read(&swap, Some(id)), Reading::Unreadable { .. }), "the format is lower-case hex");
         write(dir.path(), &" ".repeat(5000));
         assert!(matches!(read(&swap, Some(id)), Reading::Unreadable { .. }), "too large");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_swap_file_given_by_a_link_finds_the_sidecar_beside_the_real_file_and_beside_the_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = [0xabu8; 32];
+        let good = format!(r#"{{"version":1,"lock_id":"{}","tx_hash":null,"at":7}}"#, hex::encode(id));
+        let real = dir.path().join("real.swap.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("link.swap.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert_eq!(read(&link, Some(id)), Reading::Absent, "no sidecar anywhere");
+        // live.js wrote it beside the real path: a tick given the link name still sees it.
+        std::fs::write(path_for(&std::fs::canonicalize(&real).unwrap()), &good).unwrap();
+        assert_eq!(read(&link, Some(id)), Reading::Matching { tx_hash: None, at: 7 });
+        std::fs::remove_file(path_for(&std::fs::canonicalize(&real).unwrap())).unwrap();
+        // an older live.js wrote it beside the link name: still seen.
+        std::fs::write(path_for(&link), &good).unwrap();
+        assert_eq!(read(&link, Some(id)), Reading::Matching { tx_hash: None, at: 7 });
+        // a good one beside the link beats an unreadable one beside the real path.
+        std::fs::write(path_for(&std::fs::canonicalize(&real).unwrap()), "not json").unwrap();
+        assert_eq!(read(&link, Some(id)), Reading::Matching { tx_hash: None, at: 7 });
+    }
+
+    #[test]
+    fn the_verbatim_prefix_of_a_windows_path_is_removed_and_a_unc_path_is_left_alone() {
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\C:\Users\x\a.json")), PathBuf::from(r"C:\Users\x\a.json"));
+        assert_eq!(strip_verbatim(PathBuf::from(r"\\?\UNC\host\share\a.json")), PathBuf::from(r"\\?\UNC\host\share\a.json"));
+        assert_eq!(strip_verbatim(PathBuf::from("/x/y/a.json")), PathBuf::from("/x/y/a.json"));
     }
 
     #[test]

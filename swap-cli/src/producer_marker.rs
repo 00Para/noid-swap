@@ -109,9 +109,22 @@ struct Record {
     kind: MarkerKind,
 }
 
-/// Read the marker beside `swap_file`.
+/// Read the marker beside `swap_file`, and, when the swap file was given by a link (its real path is another name), beside the real path too:
+/// `live.js` looks under both names, so a marker under either must reach the screen and the history (review, 2026-11-10). The marker beside the
+/// given name wins when it is there; the tool still WRITES only beside the given name.
 pub fn read(swap_file: &Path) -> MarkerState {
-    let path = path_for(swap_file);
+    let first = read_at(&path_for(swap_file));
+    if !first.is_absent() {
+        return first;
+    }
+    match std::fs::canonicalize(swap_file) {
+        Ok(real) if real != swap_file => read_at(&path_for(&crate::reveal_sidecar::strip_verbatim(real))),
+        _ => first,
+    }
+}
+
+fn read_at(path: &Path) -> MarkerState {
+    let path = path.to_path_buf();
     let unreadable = |why: String| MarkerState::Unreadable { reason: format!("{} {why}", path.display()) };
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(m) => m,
@@ -229,6 +242,21 @@ pub fn note_marker(file: &mut SwapFile, state: &MarkerState, now: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_marker_beside_the_real_file_reaches_a_tick_that_was_given_the_link_and_the_given_name_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.swap.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = dir.path().join("link.swap.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(read(&link).is_absent());
+        record(&std::fs::canonicalize(&real).unwrap(), 7, 8, MarkerKind::Producer).unwrap();
+        assert_eq!(read(&link), MarkerState::Present { height: 7, at: 8, kind: MarkerKind::Producer });
+        std::fs::write(path_for(&link), "garbage").unwrap();
+        assert!(matches!(read(&link), MarkerState::Unreadable { .. }), "the marker beside the given name wins");
+    }
 
     #[test]
     fn the_name_is_the_swap_file_name_plus_suffix() {

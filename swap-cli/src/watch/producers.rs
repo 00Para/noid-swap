@@ -350,8 +350,10 @@ pub fn load_cache(path: &Path) -> Result<Vec<Header>, String> {
 /// Write the cache atomically (a temp file beside it, then a rename), readable by the owner only.
 pub fn save_cache(path: &Path, entries: &[Header]) -> Result<(), String> {
     use std::io::Write;
+    // A temporary name of this process: the watch loop's `tick --apply` and a read-only tick (the lock helper's check right before a send) can write
+    // the cache at the same time, and one fixed name would let them interleave their bytes (review, 2026-11-10).
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
+    tmp.push(format!(".tmp.{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create(true).truncate(true);

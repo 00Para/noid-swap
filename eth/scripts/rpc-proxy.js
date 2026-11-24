@@ -7,7 +7,8 @@
  * Purpose: let a plain-HTTP JSON-RPC client (the Rust swap-cli has no TLS) talk
  * to an HTTPS endpoint. Each POST body is forwarded unchanged to the upstream;
  * the upstream's status and body come back unchanged. No auth, no caching, no
- * rewriting. Binds to 127.0.0.1 only.
+ * rewriting. Binds to 127.0.0.1 only. A redirect from the upstream is never
+ * followed: it is answered with 502.
  *
  * Logs one line per request to stderr: method, status, ms. The upstream URL
  * path/query (which may carry an API key) is never logged.
@@ -77,7 +78,19 @@ function startProxy({ listen, upstream, log = (line) => process.stderr.write(lin
           method: "POST",
           headers: { "content-type": req.headers["content-type"] || "application/json", accept: "application/json" },
           body,
+          // A redirect is never followed (the node's own transports refuse every 3xx; a proxy that followed one would let an endpoint send the
+          // request, and the answer, somewhere the operator never named). It is answered with 502.
+          redirect: "manual",
         });
+        if (up.type === "opaqueredirect" || (up.status >= 300 && up.status < 400)) {
+          if (up.body) await up.body.cancel().catch(() => {});
+          return finish(
+            method,
+            502,
+            { "content-type": "application/json" },
+            JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32603, message: `proxy: upstream answered a redirect (status ${up.status}); redirects are never followed` } })
+          );
+        }
         const out = Buffer.from(await up.arrayBuffer());
         finish(method, up.status, { "content-type": up.headers.get("content-type") || "application/json" }, out);
       } catch (e) {

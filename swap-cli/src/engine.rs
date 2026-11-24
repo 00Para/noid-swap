@@ -677,8 +677,13 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     if matches!(&action, Action::LockEth { .. }) && matches!(&phase, Phase::Bob(BobPhase::FundingFinal { .. })) {
         // Once per swap, and again after each recorded detection: the live.js lock accepts the override only when its entry comes AFTER the
         // detection entry (an outside read, 2026-11-10: an older override for a concentration must not waive a later disagreement).
-        let last_detection = file.history.iter().rposition(|h| h.event == crate::producer_marker::HISTORY);
-        let already = file.history.iter().enumerate().any(|(i, h)| h.event.starts_with(producer_gate::OVERRIDE_HISTORY) && last_detection.is_none_or(|d| i > d));
+        // The same for the pending-lock latch (a tick found the screen refusing a pending `lock_eth`): `live.js lock` refuses on a latch entry with no override
+        // entry after it, so an override older than the newest latch entry does not count as "already written" either.
+        let last_barrier = file
+            .history
+            .iter()
+            .rposition(|h| h.event == crate::producer_marker::HISTORY || h.event.starts_with(producer_gate::LOCK_LATCH_PREFIX));
+        let already = file.history.iter().enumerate().any(|(i, h)| h.event.starts_with(producer_gate::OVERRIDE_HISTORY) && last_barrier.is_none_or(|d| i > d));
         if !already {
             log.extend(producer_gate::override_history_entry(file.public.params.profile.gates(), noid, now));
         }
@@ -3220,8 +3225,13 @@ pub fn tick_apply(
                 if intent.action == "lock_eth" && producer_scan_wanted(file) {
                     if let Some(f) = producer_gate::pending_lock_finding(file.public.params.profile.gates(), noid, now) {
                         if f.hard {
-                            let latch = format!("producer_alert_lock_pending:{}", intent.decided_at);
-                            if !file.history.iter().any(|h| h.event == latch) {
+                            let latch = producer_gate::pending_lock_latch(intent.decided_at, f.kind);
+                            // Written again when an override entry came after the last latch of this kind (the operator passed the flag once, then
+                            // dropped it): `live.js lock` waives a latch that an override follows, so the refusal that is true now needs its own
+                            // newer entry (review, 2026-11-10).
+                            let last_same = file.history.iter().rposition(|h| h.event == latch);
+                            let last_override = file.history.iter().rposition(|h| h.event.starts_with(producer_gate::OVERRIDE_HISTORY));
+                            if last_same.is_none_or(|l| last_override.is_some_and(|o| o > l)) {
                                 decision.notes.push(producer_gate::pending_lock_note(&f, intent.decided_at));
                                 if record {
                                     file.log(latch, now);
