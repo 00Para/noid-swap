@@ -149,6 +149,8 @@ new folder and endpoints, written beside the old one and moved into place (run 3
    `lock_eth` with `t_reveal` (`min(now + 7,200 s, T_max)`): run `live.js lock --mainnet --max-fee-gwei N --swap bob.swap.json
    --chain-id 1 --from-block <deploy block>` (dry run first, with exactly the intent's values; the dry run prints the
    worst-case cost, the balance and `foreignLocksSameHashlock`). Note `lockId`, `blockNumber`, `blockTimestamp`.
+   Since 2026-11-10 the real send goes through `scripts/live/lock.sh` only (a fresh read-only tick right before it; `live.js lock --swap` refuses a real send without
+   `--approved-intent`, `--approved-terms`, `--approved-at`, the approval of that tick); the dry run may still be `live.js` or `lock.sh --dry-run`.
    *Go-ahead needed: the mainnet lock.*
 6. Alice's `tick` says `reveal_eth` once Bob's lock is at or below the mainnet `finalized` block and (I2) holds: `swap-cli
    secret alice.swap.json | node scripts/live.js claim --mainnet --max-fee-gwei N --key-file keys/alice-mainnet.key --swap

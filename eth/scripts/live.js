@@ -56,6 +56,19 @@
  *                        marker file and no detection entry in the history no override counts (run `tick --apply` first). Without --swap no
  *                        producer check is made and a warning says so. Local reads only, before any network call. A screen, not a defence.
  *
+ * lock --swap FILE   a REAL send (not a dry run) must be handed the APPROVAL of a fresh read-only `swap-cli tick`: --approved-intent (the `decided_at` of the
+ *                      lock_eth intent the tick held), --approved-terms (the SHA-256 of the lock's terms in the fixed encoding of `approvalText`, which this script
+ *                      recomputes from what it is about to send) and --approved-at (the tick's own Unix time; refused when older than 120 s, the engine's
+ *                      observation age limit, or more than 5 s ahead of this machine's clock). Any one missing, malformed or different refuses, nothing sent; no
+ *                      flag or environment variable skips it. The only supported way to send a lock is scripts/live/lock.sh, which runs that tick right before and
+ *                      hands the three values over from the tick's own output. It is a binding, not a proof (whoever reads the swap file can compute the values).
+ *                      The approval is NOT single-use; for this swap file a second send of the same lock is made impossible by four checks of this script: the duplicate-hashlock rule
+ *                      (mined Locked events), the lock lock FILE.lock-lock (exclusive, held from before the checks until the send has settled), the pending-nonce check
+ *                      (an extra: nodes drop pending transactions) and the lock record FILE.lock-sent (written and synced before the broadcast, never removed by
+ *                      this tool once the bytes may have left; the operator removes it by hand on one of two proofs, see scripts/live/README.md).
+ * lock, claim --swap FILE  the file must have ONE name: a swap file with more than one hard link is refused (the claim lock and the marker files are named from
+ *                      the path, so a second name gets its own claim lock and misses a marker beside the first). Only where the file system reports a link count.
+ *
  * Mainnet (chain id 1) is refused unless the signing command (deploy, send, lock, claim, refund) is given --mainnet.
  * With --mainnet: only chain 1 is accepted (a test network is refused, no mixing; --allow-chain-id is refused),
  * --max-fee-gwei N is required (it is the maxFeePerGas of the transaction; --gas-price-gwei is refused), the dry run
@@ -730,7 +743,7 @@ async function requireFundsFor(provider, from, req, gasLimit) {
   if (bal < need) {
     throw new UserError(
       `refusing: the sender ${from} holds ${ethers.formatEther(bal)} ETH but gas limit ${gasLimit} x fee cap ${ethers.formatUnits(cap, "gwei")} gwei (+ value ${ethers.formatEther(req.value || 0n)} ETH) = ${ethers.formatEther(need)} ETH must be available, ` +
-        `or the claim would not be sent at all (unused gas is not charged)`
+        `or the transaction would not be sent at all (unused gas is not charged)`
     );
   }
 }
@@ -1048,7 +1061,7 @@ function checkProducerMemory(sw) {
 }
 
 /** Parse the parts of the swap file this script needs. Read-only; `secret` is never looked at. */
-function readSwapFile(file) {
+function readSwapFile(file, want = null) {
   const abs = path.resolve(String(file));
   if (!fs.existsSync(abs)) throw new UserError(`--swap: swap file not found: ${abs}`);
   // The claim lock and the reveal sidecar are named from the REAL path of the swap file, so that the same file reached through a link gets the same
@@ -1058,6 +1071,23 @@ function readSwapFile(file) {
     real = fs.realpathSync(abs);
   } catch (e) {
     throw new UserError(`--swap: the real path of ${abs} cannot be determined (${codeOf(e)}); the claim lock and the reveal sidecar are named from it, so refusing`);
+  }
+  // One name per swap file for a lock and a claim (an outside read, 2026-11-10): realpath resolves links of the symbolic kind, not hard links, so the same
+  // file under two names would get two claim locks and a marker file beside the other name would be missed. A link count above 1 is refused, with the fix.
+  // Only where the file system reports a count: a share or file system that reports 0, 1 or nothing (some network shares do) gets no refusal here.
+  if (want === "lock_eth" || want === "reveal_eth") {
+    let nlink;
+    try {
+      nlink = fs.statSync(real).nlink;
+    } catch (e) {
+      throw new UserError(`--swap: the link count of ${real} cannot be read (${codeOf(e)}); refusing`);
+    }
+    if (typeof nlink === "number" && nlink > 1) {
+      throw new UserError(
+        `--swap: ${abs} has ${nlink} hard links (names for the same file). The claim lock and the marker files are named from the path, so a second name would get its own claim lock and miss a marker beside the first: ` +
+          `keep one name (remove the other links, or copy the file to a new one and delete the old names), then run again; refusing`
+      );
+    }
   }
   let j;
   try {
@@ -1146,7 +1176,7 @@ const claimLockPath = (swapFile) => String(swapFile) + CLAIM_LOCK_SUFFIX;
  * a lock made on another machine or by another kind of process (e.g. a different shell's pid space) records a pid that means nothing here, so the
  * sentence always says that the operator decides.
  */
-function pidLiveness(pid, kill = process.kill) {
+function pidLiveness(pid, kill = process.kill, noun = "claim") {
   let alive;
   try {
     kill(pid, 0);
@@ -1157,15 +1187,15 @@ function pidLiveness(pid, kill = process.kill) {
     else return "whether that process is still alive could not be determined";
   }
   return alive
-    ? "a process with that pid is alive on this machine, so another claim may well be running (the pid may also have been reused by an unrelated process)"
-    : "no process with that pid is alive on this machine, so the claim that took it probably died (a lock made on another machine would show the same: check before deleting)";
+    ? `a process with that pid is alive on this machine, so another ${noun} may well be running (the pid may also have been reused by an unrelated process)`
+    : `no process with that pid is alive on this machine, so the ${noun} that took it probably died (a lock made on another machine would show the same: check before deleting)`;
 }
 
 /** What the lock file at `file` says about its holder, for the refusal message (never throws). */
-function describeClaimLock(file) {
+function describeClaimLock(file, noun = "claim") {
   try {
     const j = JSON.parse(fs.readFileSync(file, "utf8"));
-    if (j && Number.isSafeInteger(j.pid) && j.pid > 0 && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}; ${pidLiveness(j.pid)}`;
+    if (j && Number.isSafeInteger(j.pid) && j.pid > 0 && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}; ${pidLiveness(j.pid, process.kill, noun)}`;
     if (j && Number.isSafeInteger(j.pid) && Number.isSafeInteger(j.at)) return `it records pid ${j.pid}, taken at Unix second ${j.at}`;
   } catch {
     /* unreadable or not our line: say so below */
@@ -1179,7 +1209,11 @@ function describeClaimLock(file) {
  * of those bytes counts: a prefix of them, even none, is still ours). A release that fails is reported on stderr and changes nothing else.
  */
 function takeClaimLock(swapFile) {
-  const file = claimLockPath(swapFile);
+  return takeSwapLock(claimLockPath(swapFile), "claim");
+}
+
+/** The exclusive lock file behind takeClaimLock (a claim) and the lock lock (a lock): `file` is the full name, `noun` the word the messages use. */
+function takeSwapLock(file, noun) {
   const body = Buffer.from(JSON.stringify({ version: 1, pid: process.pid, at: Math.floor(Date.now() / 1000) }) + "\n", "utf8");
   let fd;
   try {
@@ -1187,11 +1221,11 @@ function takeClaimLock(swapFile) {
   } catch (e) {
     const how =
       e && e.code === "EEXIST"
-        ? `another claim for this swap file is running, or an earlier one died: the lock file ${file} exists (${describeClaimLock(file)})`
-        : `the lock file ${file} could not be created (${codeOf(e)}), so it is not known whether another claim for this swap file is running`;
+        ? `another ${noun} for this swap file is running, or an earlier one died: the lock file ${file} exists (${describeClaimLock(file, noun)})`
+        : `the lock file ${file} could not be created (${codeOf(e)}), so it is not known whether another ${noun} for this swap file is running`;
     throw new UserError(
-      `refusing: ${how}. Nothing was read or written beside the swap file and nothing was sent. If you are sure that no other claim for this swap file is running, ` +
-        `delete ${file} by hand and run the claim again; this tool never removes a lock it did not make`
+      `refusing: ${how}. Nothing was read or written beside the swap file and nothing was sent. If you are sure that no other ${noun} for this swap file is running, ` +
+        `delete ${file} by hand and run the ${noun} again; this tool never removes a lock it did not make`
     );
   }
   try {
@@ -1215,13 +1249,148 @@ function takeClaimLock(swapFile) {
       try {
         const got = fs.readFileSync(file);
         if (got.length <= body.length && body.subarray(0, got.length).equals(got)) fs.unlinkSync(file);
-        else process.stderr.write(`warning: the claim lock ${file} now holds another record and was left in place\n`);
+        else process.stderr.write(`warning: the ${noun} lock ${file} now holds another record and was left in place\n`);
       } catch (e) {
         if (e && e.code === "ENOENT") return; // already gone
-        process.stderr.write(`warning: the claim lock ${file} could not be removed (${codeOf(e)}); delete it by hand before the next claim for this swap file\n`);
+        process.stderr.write(`warning: the ${noun} lock ${file} could not be removed (${codeOf(e)}); delete it by hand before the next ${noun} for this swap file\n`);
       }
     },
   };
+}
+
+// ------------------------------------------------ the lock lock and the lock record (2026-11-10)
+// The duplicate rule of `lock` reads MINED Locked events only, so a second real lock could pass while the first send is still in flight or timed out
+// unconfirmed (Bob would lock twice). Three layers close that window on the lock side; refusing a lock is always the safe direction (no lock, no ETH at risk):
+//  (a) the lock lock `FILE.lock-lock`: a real `lock --swap FILE` takes it exclusively (the claim lock's code and its fail-closed handling, a file of its own
+//      so a claim and a lock never meet) before any check and holds it until the send has settled;
+//  (b) the pending-nonce check: the sender has no transaction pending on the node (pending nonce above latest nonce). An extra only: nodes drop pending
+//      transactions, so (c) is the check that counts;
+//  (c) the lock record `FILE.lock-sent`: written and synced BEFORE the broadcast (lock word, lock id, sender, nonce, signed hash when the key is local, time;
+//      nothing secret), created exclusively. A later real lock refuses while it exists. The tool NEVER removes it once the bytes may have left (only a
+//      call that was refused before the broadcast takes back the record it made itself). The operator removes it by hand, only on one of two proofs (see
+//      `lockSentRefusal`; scripts/live/README.md, "Clearing a FILE.lock-sent record"). A record that cannot be examined counts as present.
+const LOCK_LOCK_SUFFIX = ".lock-lock";
+const LOCK_SENT_SUFFIX = ".lock-sent";
+const lockLockPath = (swapFile) => String(swapFile) + LOCK_LOCK_SUFFIX;
+const lockSentPath = (swapFile) => String(swapFile) + LOCK_SENT_SUFFIX;
+const LOCK_SENT_MAX_BYTES = 4096;
+const CLEARING_NAME = "Clearing a FILE.lock-sent record"; // the section of scripts/live/README.md and docs/runbook-two-party.md the refusals point at
+
+/** What the record at `file` says (for the refusal message; never throws). */
+function describeLockSent(file) {
+  try {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || st.size > LOCK_SENT_MAX_BYTES) return "it is not a record this tool wrote (not a regular file, or too large)";
+    const j = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (j && j.version === 1 && typeof j.sender === "string" && Number.isSafeInteger(j.nonce) && Number.isSafeInteger(j.at)) {
+      return `it records sender ${j.sender}, nonce ${j.nonce}, transaction hash ${j.tx_hash === null ? "unknown (no local key)" : j.tx_hash}, lock id ${j.lock_id}, written at Unix second ${j.at}`;
+    }
+  } catch {
+    /* say so below */
+  }
+  return "its content could not be read";
+}
+
+/** Names the record can be under: beside the real path and beside the path as given. { file, why } of the first one that is there (or cannot be examined), else null. */
+function findLockSent(sw) {
+  const names = [lockSentPath(sw.realFile)];
+  if (sw.file && sw.file !== sw.realFile) names.push(lockSentPath(sw.file));
+  for (const file of names) {
+    try {
+      fs.lstatSync(file);
+    } catch (e) {
+      if (e && e.code === "ENOENT") continue;
+      return { file, why: `it cannot be examined (${codeOf(e)}), which counts as present` };
+    }
+    return { file, why: describeLockSent(file) };
+  }
+  return null;
+}
+
+/**
+ * The refusal when a lock record exists: it says what the record is, what the two proofs are that make removing it by hand safe, and that the tool
+ * never removes it. (The duplicate rule refuses first when the lock is mined: this message is for a lock that is not known to be mined.)
+ */
+function lockSentRefusal(found) {
+  return new UserError(
+    `refusing: the lock record ${found.file} exists (${found.why}). An earlier real lock for this swap file was signed and may have reached the network, and no Locked event of ours for this hashlock is mined, ` +
+      "so it is not known whether that lock is pending, dropped or will still be mined; a second lock now could lock ETH twice. Nothing was sent. " +
+      "Look the recorded hash up (receipt) and the sender's nonce at a FINALIZED block. Remove the record by hand ONLY if (1) the recorded transaction has a receipt in a finalized block " +
+      "(status 0x1: the lock is mined and the duplicate rule refuses a second one anyway; status 0x0: it reverted and locked nothing), or (2) the sender's nonce at a FINALIZED block is above the recorded nonce " +
+      "while the recorded hash has no receipt (it can never be mined). If neither holds, wait, or let the swap abort: no lock means no ETH at risk. " +
+      `This tool never removes the record itself. The exact read-only commands are in the section "${CLEARING_NAME}" of scripts/live/README.md and docs/runbook-two-party.md`
+  );
+}
+
+/**
+ * Write the lock record exclusively (`wx`), fsync it, sync the directory, read it back. Synchronous. Throws a UserError (nothing was sent) when it cannot be made
+ * durable; a file that THIS call created and cannot trust is taken back (only if it holds this call's bytes, or a prefix of them: debris of a short
+ * write), and an existing record is never touched. Returns { file, bytes }.
+ */
+function writeLockSent(swapFile, rec) {
+  const target = lockSentPath(swapFile);
+  const body = Buffer.from(
+    JSON.stringify({ version: 1, lock_word: rec.lockWord, lock_id: rec.lockId, sender: rec.sender, nonce: rec.nonce, tx_hash: rec.txHash, at: Math.floor(Date.now() / 1000) }) + "\n",
+    "utf8"
+  );
+  let fd;
+  try {
+    fd = fs.openSync(target, "wx", 0o600);
+  } catch (e) {
+    if (e && e.code === "EEXIST") throw lockSentRefusal({ file: target, why: describeLockSent(target) });
+    throw new UserError(`refusing: the lock record ${target} could not be created (${codeOf(e)}); it is written before the lock is broadcast so that a lock that may be in flight stays on record; nothing was sent. Fix the directory and retry`);
+  }
+  try {
+    writeAllSync(fd, body);
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fsyncDir(path.dirname(path.resolve(target)));
+    requireBytes(target, body, "the lock record");
+  } catch (e) {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* nothing to do */
+      }
+    }
+    const res = removeLockSentIfOurs(target, body);
+    throw new UserError(
+      `refusing: the lock record ${target} could not be written durably (${codeOf(e)}); nothing was sent. ${lockSentFate(res, target)}`
+    );
+  }
+  return { file: target, bytes: body };
+}
+
+/** Remove `file` only if it still holds exactly `body` or a prefix of it (including nothing: the debris of our own short write). { outcome: "removed" | "other" | "failed", code? }. */
+function removeLockSentIfOurs(file, body) {
+  let res = { outcome: "removed" };
+  try {
+    let holds;
+    try {
+      holds = fs.readFileSync(file);
+    } catch (e) {
+      if (e && e.code === "ENOENT") return res;
+      throw e;
+    }
+    if (holds.length <= body.length && body.subarray(0, holds.length).equals(holds)) fs.unlinkSync(file);
+    else res = { outcome: "other" };
+  } catch (e) {
+    res = { outcome: "failed", code: codeOf(e) };
+  }
+  try {
+    fsyncDir(path.dirname(path.resolve(file)));
+  } catch {
+    /* best effort */
+  }
+  return res;
+}
+
+function lockSentFate(res, file) {
+  if (res.outcome === "removed") return "The lock record this call had written was removed again (nothing was sent, so it is not a trace of a send).";
+  if (res.outcome === "other") return `The file ${file} now holds another record and was left in place.`;
+  return `The lock record ${file} this call had written could NOT be removed (${res.code}) and stays: it makes every later lock refuse until you have looked at it (see the section "${CLEARING_NAME}" of scripts/live/README.md).`;
 }
 
 /**
@@ -1562,6 +1731,125 @@ const sameUint = (a, b) => {
   }
 };
 
+// ------------------------------------------------ the approval of a fresh check (an outside read, 2026-11-10)
+// A real lock sent with --swap must be handed the approval of a fresh read-only `swap-cli tick` (scripts/live/lock.sh runs the tick and hands it over).
+// The approval carries three things, all taken from that tick's own output by lock.sh, none of them from the swap file:
+//   --approved-intent  the `decided_at` (Unix seconds) of the lock_eth intent the tick held;
+//   --approved-terms   the SHA-256 (64 hex digits) of the lock's terms in the fixed encoding below (`approvalText`), computed by lock.sh from the
+//                      tick's `intent.intent.params`, `intent.intent.decided_at` and `swap_terms`;
+//   --approved-at      the tick's own Unix time (its `now`).
+// This script recomputes the hash from the values it is about to SEND (and from the intent in the swap file it just read) and compares. It refuses
+// when any of the three is missing, malformed or different, when the tick is older than the engine's observation age limit (MAX_OBSERVATION_AGE_S, the
+// value of the constant of that name in swap-cli's engine.rs; a test compares the two) or dated more than APPROVAL_FUTURE_SKEW_S seconds ahead
+// of this machine's clock. No flag and no environment variable skips it; a dry run needs none (it sends nothing). It is a binding, not a proof:
+// whoever can read the swap file can compute the three values by hand. The approval is not single-use: a second send of the same lock is made
+// impossible by the duplicate-hashlock rule, the lock lock, the pending-nonce check and the lock record (see `lock`).
+const MAX_OBSERVATION_AGE_S = 120;
+const APPROVAL_FUTURE_SKEW_S = 5;
+const APPROVAL_FIRST_LINE = "noid-swap lock approval v1";
+const CLOCK_HINT =
+  " (the helpers run in WSL and live.js on Windows, with two clocks: a WSL clock that has drifted, for instance after the PC slept, refuses every lock; compare `date +%s` in WSL with the Windows clock, resync, for example with `wsl --shutdown`, and run lock.sh again)";
+
+const lowerHex = (name, v, bytes) => {
+  const s = String(v).toLowerCase();
+  if (!new RegExp(`^0x[0-9a-f]{${bytes * 2}}$`).test(s)) throw new UserError(`approval: ${name} is not 0x and ${bytes * 2} hex digits`);
+  return s;
+};
+const decimalOf = (name, v) => {
+  try {
+    return uint(name, v).toString();
+  } catch {
+    throw new UserError(`approval: ${name} is not a non-negative whole number`);
+  }
+};
+
+/**
+ * The fixed, documented encoding the approval's hash is taken over: UTF-8 text, one `name=value` line each in this order, every line ended by "\n",
+ * after a first line that names the version. Hex is lower case with 0x, numbers are decimal with no sign, no leading zero, no spaces.
+ *   noid-swap lock approval v1
+ *   chain_id=<decimal>          contract=<0x, 20 bytes>       lock_kind=<sha256|poseidon>   code_hash=<0x, 32 bytes>
+ *   bob_sender=<0x, 20 bytes>   receiver=<0x, 20 bytes>       amount_wei=<decimal>
+ *   lock_word=<0x, 32 bytes>    t_reveal=<decimal>            decided_at=<decimal>
+ * (one field per line in the text itself). `lock_word` is the hashlock (sha256 kind) or the lock address Addr(s) (poseidon). scripts/live/env.sh
+ * (lock_precheck) builds the same text from the tick's output; a shared test vector in eth/test and scripts/live/selftest.sh keeps the two in step.
+ */
+function approvalText(t) {
+  const kind = String(t.lockKind);
+  if (!LOCK_KINDS.includes(kind)) throw new UserError(`approval: lock_kind ${kind} is not one of ${LOCK_KINDS.join(", ")}`);
+  return (
+    [
+      APPROVAL_FIRST_LINE,
+      `chain_id=${decimalOf("chain_id", t.chainId)}`,
+      `contract=${lowerHex("contract", t.contract, 20)}`,
+      `lock_kind=${kind}`,
+      `code_hash=${lowerHex("code_hash", t.codeHash, 32)}`,
+      `bob_sender=${lowerHex("bob_sender", t.bobSender, 20)}`,
+      `receiver=${lowerHex("receiver", t.receiver, 20)}`,
+      `amount_wei=${decimalOf("amount_wei", t.amountWei)}`,
+      `lock_word=${lowerHex("lock_word", t.lockWord, 32)}`,
+      `t_reveal=${decimalOf("t_reveal", t.tReveal)}`,
+      `decided_at=${decimalOf("decided_at", t.decidedAt)}`,
+    ].join("\n") + "\n"
+  );
+}
+const approvalTermsHash = (t) => crypto.createHash("sha256").update(approvalText(t), "utf8").digest("hex");
+
+/**
+ * `t`: the terms this call is about to send, `decidedAt`: the pending intent's `decided_at` from the swap file, `args`: the three flags. Throws a UserError
+ * (nothing was sent) unless all three are present and well formed, the intent and the terms are the ones the fresh check approved, and the check is
+ * recent. `nowS` is the clock (Unix seconds), a parameter only so a test can place it.
+ */
+function checkApproval(t, decidedAt, args, nowS = Math.floor(Date.now() / 1000)) {
+  const given = { intent: args.approvedIntent, terms: args.approvedTerms, at: args.approvedAt };
+  const missing = Object.entries({ "--approved-intent": given.intent, "--approved-terms": given.terms, "--approved-at": given.at })
+    .filter(([, v]) => v === undefined || v === null || v === "")
+    .map(([k]) => k);
+  if (missing.length > 0) {
+    throw new UserError(
+      `a real lock sent with --swap needs the approval of a fresh read-only \`swap-cli tick\` of this swap file: ${missing.join(", ")} ${missing.length > 1 ? "are" : "is"} missing. Send the lock through scripts/live/lock.sh ` +
+        "(it runs that fresh check right before the send and hands over the three values: --approved-intent, --approved-terms, --approved-at); " +
+        "do not call live.js lock directly. Nothing was sent; refusing"
+    );
+  }
+  const whole = (flag, v, digits) => {
+    const text = typeof v === "number" && Number.isSafeInteger(v) && v >= 0 ? String(v) : v;
+    if (typeof text !== "string" || !new RegExp(`^(0|[1-9][0-9]{0,${digits - 1}})$`).test(text)) {
+      throw new UserError(`${flag} must be a whole number of seconds (Unix time) without sign, spaces or leading zeros; refusing`);
+    }
+    return BigInt(text);
+  };
+  const intentAt = whole("--approved-intent", given.intent, 20);
+  if (!Number.isSafeInteger(decidedAt) || decidedAt < 0) {
+    throw new UserError("the pending intent in the swap file has no decided_at that can be read as a Unix time, so no approval can be matched to it; refusing");
+  }
+  if (intentAt !== BigInt(decidedAt)) {
+    throw new UserError(
+      `--approved-intent ${intentAt} is not the decided_at of the lock_eth intent in the swap file (not shown here: it is the number the fresh check hands over, and a number that stays valid must not be copied from an error message): the fresh check approved another intent than the one this file holds (replaced or cancelled and re-recorded since, or a different file); nothing was sent; run the fresh check again (scripts/live/lock.sh); refusing`
+    );
+  }
+  if (typeof given.terms !== "string" || !/^[0-9a-fA-F]{64}$/.test(given.terms)) throw new UserError("--approved-terms must be the 64 hex digits of a SHA-256; refusing");
+  const mine = approvalTermsHash({ ...t, decidedAt });
+  if (given.terms.toLowerCase() !== mine) {
+    throw new UserError(
+      `--approved-terms ${given.terms.toLowerCase()} is not the hash ${mine} of the terms this lock would be sent with (chain, contract, lock kind, code hash, sender, receiver, amount, lock word, T_reveal, decided_at): ` +
+        "the fresh check approved other terms than the swap file and the flags give now; nothing was sent; run the fresh check again (scripts/live/lock.sh); refusing"
+    );
+  }
+  const at = whole("--approved-at", given.at, 16);
+  const now = BigInt(nowS);
+  if (at > now + BigInt(APPROVAL_FUTURE_SKEW_S)) {
+    throw new UserError(
+      `--approved-at ${at} is ${at - now} s in the future of this machine's clock (${now}; allowed: ${APPROVAL_FUTURE_SKEW_S} s): the fresh check and this script disagree about the time${CLOCK_HINT}; nothing was sent; refusing`
+    );
+  }
+  if (now - at > BigInt(MAX_OBSERVATION_AGE_S)) {
+    throw new UserError(
+      `the fresh check is ${now - at} s old (taken at ${at}, now ${now}); the limit is ${MAX_OBSERVATION_AGE_S} s, the engine's own observation age limit (MAX_OBSERVATION_AGE_S in swap-cli's engine.rs); ` +
+        `${CLOCK_HINT}; nothing was sent; run the fresh check again (scripts/live/lock.sh); refusing`
+    );
+  }
+}
+
 /**
  * Bind a lock / claim / refund call to the swap file. Returns { args, sw }: `args` with the file's terms filled in
  * (every given flag was checked against the file), `sw` the parsed file; `sw` is null when there is no --swap (the
@@ -1569,7 +1857,7 @@ const sameUint = (a, b) => {
  */
 function bindSwap(args, want) {
   if (args.swap === undefined) return { args, sw: null }; // the CLI wrapper has already warned (main)
-  const sw = readSwapFile(need(args, "swap"));
+  const sw = readSwapFile(need(args, "swap"), want);
   // T21: a remembered producer-screen detection beats an intent recorded before it. First thing, local reads only; `lock` only (claim and refund are untouched).
   if (want === "lock_eth") checkProducerMemory(sw);
   const merged = { ...args };
@@ -1835,6 +2123,18 @@ async function lock(provider, signer, args0) {
   mainnetFlags(args0);
   requireSwapOnMainnet(args0);
   const { args, sw } = bindSwap(args0, "lock_eth");
+  // A real lock with a swap file holds `FILE.lock-lock` from before its checks until the send has settled (execute's afterSend), or until anything
+  // before the send throws (the finally below). A dry run writes nothing and takes none. See "the lock lock and the lock record".
+  let lockLock = null;
+  try {
+    if (sw && !args.dryRun) lockLock = takeSwapLock(lockLockPath(sw.realFile), "lock");
+    return await lockChecked(provider, signer, args, sw, lockLock);
+  } finally {
+    if (lockLock !== null) lockLock.release(); // idempotent
+  }
+}
+
+async function lockChecked(provider, signer, args, sw, lockLock) {
   const kind = kindOf(args);
   const contractAddr = address("--contract", need(args, "contract"));
   // The lock word: --hashlock (SHA-256 of the secret) for sha256, --lock-addr (A = Addr(s), the NOID claim authority) for poseidon.
@@ -1913,9 +2213,62 @@ async function lock(provider, signer, args0) {
   const tx = { to: contractAddr, data: iface.encodeFunctionData("newLock", [hashlock, tReveal, receiver]), value: amount };
   // REVIEW-4 R4-1: the fee cap must clear the latest base fee (also in --dry-run); --replace does not exist for lock.
   const fp = await feePlan(provider, signer, args, { name: "newLock", contractAddr, lockId: expectedLockId });
-  if (args.dryRun) return (await execute(provider, signer, args, tx, { expectedLockId, ...checks, ...fp.report }, { fees: fp.fees })).out;
-
-  const r = await execute(provider, signer, args, tx, {}, { fees: fp.fees });
+  if (args.dryRun) {
+    // Local read, stderr only: the dry run otherwise looks clean while the real send would refuse on the lock record of an earlier send.
+    const earlier = sw ? findLockSent(sw) : null;
+    if (earlier !== null) process.stderr.write(`WARNING: the lock record ${earlier.file} exists (${earlier.why}); a real lock for this swap file would refuse (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
+    return (await execute(provider, signer, args, tx, { expectedLockId, ...checks, ...fp.report }, { fees: fp.fees })).out;
+  }
+  let r;
+  let written = null; // the lock record this call made (a real lock with a swap file)
+  if (sw === null) {
+    r = await execute(provider, signer, args, tx, {}, { fees: fp.fees });
+  } else {
+    // The last refusals before the send (every check above stays as it was). First the approval of a fresh read-only tick, of the terms about to be sent.
+    const approvedTerms = { chainId: target.chainId, contract: contractAddr, lockKind: kind, codeHash: target.codeHash, bobSender: sender, receiver, amountWei: amount, lockWord: hashlock, tReveal };
+    checkApproval(approvedTerms, sw.intent.decided_at, args);
+    // (c) a lock record of an earlier send that is not known to be mined: refuse. A record that cannot be examined counts as present.
+    const stuck = findLockSent(sw);
+    if (stuck !== null) throw lockSentRefusal(stuck);
+    // (b) a transaction of this sender still pending on the node: refuse (an extra; nodes drop pending transactions, the record is what counts).
+    const [nonceLatest, noncePending] = await Promise.all([provider.getTransactionCount(sender, "latest"), provider.getTransactionCount(sender, "pending")]);
+    if (noncePending > nonceLatest) {
+      throw new UserError(
+        `refusing: the sender ${sender} has a transaction pending on this node (pending nonce ${noncePending}, latest nonce ${nonceLatest}); an earlier send of this swap's lock may still be mined, and a second lock could lock ETH twice. Nothing was sent. ` +
+          `Wait until it is mined or dropped, then look at the contract and at the lock record (the section "${CLEARING_NAME}" of scripts/live/README.md); a node also drops pending transactions, so the record is the check that counts`
+      );
+    }
+    // The gas is estimated here (the same estimate execute would make), so that execute can write the record as the very last step before the broadcast.
+    const gasLimit = await signer.estimateGas({ ...tx, ...fp.fees });
+    let reachedBroadcast = false;
+    const preSend = async (populated) => {
+      // The slow steps since the first check (the nonce reads, the gas estimate, populating the transaction) can take long on a stalled endpoint: the approval is
+      // judged again, locally, at the last step before the record is written and the bytes are signed.
+      checkApproval(approvedTerms, sw.intent.decided_at, args);
+      // A local key (the command line's) is populated with its nonce; a node-held account is not (the node picks it at the send), so the nonce it will get is read.
+      const nonce = populated.nonce !== undefined && populated.nonce !== null ? populated.nonce : await provider.getTransactionCount(sender, "pending");
+      if (!Number.isSafeInteger(nonce) || nonce < 0) throw new UserError("refusing: the transaction has no nonce to put in the lock record; nothing was sent");
+      written = writeLockSent(sw.realFile, { lockWord: hashlock, lockId: expectedLockId, sender, nonce, txHash: await presignedHash(signer, populated) });
+    };
+    // Runs after the local signature, immediately before the bytes go to the node: from here on the lock may have left this process.
+    const lastCheck = () => {
+      reachedBroadcast = true;
+    };
+    try {
+      r = await execute(provider, signer, args, tx, {}, { fees: fp.fees, fixedGas: gasLimit, preSend, lastCheck, afterSend: () => lockLock.release() });
+    } catch (e) {
+      if (written === null) throw e;
+      const base = e instanceof UserError ? redact(e.message) : explain(e);
+      if (!reachedBroadcast) {
+        throw new UserError(`${base}; ${lockSentFate(removeLockSentIfOurs(written.file, written.bytes), written.file)}`);
+      }
+      // The record stays whatever happens now (a timeout, an error, a revert): the bytes may have left. This tool never clears it.
+      throw new UserError(
+        `${base} (the lock record ${written.file} was written before the send and STAYS: the lock may have reached the network, so every later lock for this swap file refuses until you have looked at it; ` +
+          `see the section "${CLEARING_NAME}" of scripts/live/README.md)`
+      );
+    }
+  }
   let eventLockId = null;
   for (const log of r.receipt.logs) {
     if (log.address.toLowerCase() !== contractAddr.toLowerCase()) continue;
@@ -1940,6 +2293,7 @@ async function lock(provider, signer, args0) {
     ...(bt.note ? { blockTimestampNote: bt.note } : {}),
     sender,
     chainId: target.chainId.toString(),
+    ...(written !== null ? { lockRecord: written.file } : {}),
     ...checks,
     ...fp.report,
   };
@@ -2434,7 +2788,7 @@ const SPECS = {
   balance: { flags: {}, positional: "address", signer: false },
   deploy: { flags: { ...COMMON, ...KIND, "key-file": "v" }, signer: true },
   lock: {
-    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", hashlock: "v", "lock-addr": "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v" },
+    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", hashlock: "v", "lock-addr": "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v", "approved-intent": "v", "approved-terms": "v", "approved-at": "v" },
     signer: true,
   },
   claim: {
@@ -2531,6 +2885,7 @@ module.exports = {
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
+  approvalText, approvalTermsHash, checkApproval, MAX_OBSERVATION_AGE_S, APPROVAL_FUTURE_SKEW_S, lockLockPath, LOCK_LOCK_SUFFIX, lockSentPath, LOCK_SENT_SUFFIX,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

@@ -26,6 +26,34 @@ const POSEIDON_HASH = "0xf510d2a368c730339fa7cf5e023bcf2429d5732793f043e03025780
 const PUBLISHED_SECRET = "0x" + Buffer.from([...Array(32).keys()]).toString("hex");
 const PUBLISHED_ADDR = "0xf8183db204ffb765c7015d851c1754e4974c675b975c6738d9f6d138eb7212cf";
 
+/**
+ * The approval that a fresh read-only tick would hand over for the lock of swap file `file` (the real one is built by lock_precheck in scripts/live/env.sh from
+ * the tick's output; this stands in for it in the tests, from the file). `over` changes one of the terms, to test a refusal.
+ */
+function approvalOf(file, over = {}, at = Math.floor(Date.now() / 1000)) {
+  const j = JSON.parse(fs.readFileSync(file, "utf8"));
+  const eth = j.public.params.eth;
+  const it = j.pending_intent;
+  const p = it.params;
+  const terms = {
+    chainId: eth.chain_id, contract: eth.contract, lockKind: eth.lock_kind === undefined ? "sha256" : eth.lock_kind, codeHash: eth.code_hash,
+    bobSender: eth.bob_sender, receiver: p.receiver, amountWei: p.amount_wei, lockWord: p.hashlock, tReveal: p.t_reveal, decidedAt: it.decided_at, ...over,
+  };
+  return { approvedIntent: String(it.decided_at), approvedTerms: live.approvalTermsHash(terms), approvedAt: String(at) };
+}
+/** args with the approval of their swap file added for a real send (a dry run and a lock without a swap file need none); explicit approval flags win. */
+function withApproval(args) {
+  if (args.dryRun || !args.swap) return args;
+  let ap = {};
+  try {
+    ap = approvalOf(args.swap);
+  } catch {
+    /* a file the helper cannot read gets no approval, and the lock refuses */
+  }
+  return { ...ap, ...args };
+}
+const lockApproved = (provider, signer, args) => live.lock(provider, signer, withApproval(args));
+
 describe("live.js with the poseidon lock kind (HTLCPoseidonV2)", function () {
   this.timeout(600000);
   const amount = ethers.parseEther("0.2");
@@ -381,7 +409,7 @@ describe("live.js with the poseidon lock kind (HTLCPoseidonV2)", function () {
       const lockFile = swapFile({ intent: lockIntent(tReveal) });
       const dry = await live.lock(provider, bob, { swap: lockFile, dryRun: true });
       expect(dry.lockKind).to.equal("poseidon");
-      const l = await live.lock(provider, bob, { swap: lockFile });
+      const l = await lockApproved(provider, bob, { swap: lockFile });
       expect(l.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, lockAddr, BigInt(tReveal)));
       // Alice's reveal from the file: the secret is only the secret; every term comes from the file's intent.
       const revealFile = swapFile({ intent: revealIntent(l.lockId, tReveal) });
@@ -397,7 +425,7 @@ describe("live.js with the poseidon lock kind (HTLCPoseidonV2)", function () {
       const secret2 = rand32();
       lockAddr = live.localAddr(secret2);
       const t2 = (await latestTs()) + HOUR;
-      const l2 = await live.lock(provider, bob, { swap: swapFile({ intent: lockIntent(t2) }) });
+      const l2 = await lockApproved(provider, bob, { swap: swapFile({ intent: lockIntent(t2) }) });
       await provider.send("evm_increaseTime", [HOUR + 10]);
       await provider.send("evm_mine", []);
       const nb = await nonce(bobAddr);

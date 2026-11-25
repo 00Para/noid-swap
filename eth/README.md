@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-342 passing and 2 pending on Windows (the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 344 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
+360 passing and 2 pending on Windows (the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 362 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -442,6 +442,18 @@ own, so this limit is a rule of the operator, not a gate.
 # dry run first, always; the cap is an upper bound, not a price (the network charges base fee + tip)
 node scripts/live.js lock --mainnet --max-fee-gwei 20 --swap ../path/bob.swap.json --chain-id 1 --dry-run
 ```
+
+A REAL lock with `--swap FILE` (on any chain) is sent through `scripts/live/lock.sh` only. It runs a fresh read-only `swap-cli tick` of the swap file right before the
+send and passes `live.js lock` the approval of that tick, three values from the tick's own output: `--approved-intent` (the `decided_at` of the `lock_eth` intent it held),
+`--approved-terms` (the SHA-256 of the lock's terms in the fixed encoding documented at `approvalText` in `scripts/live.js`) and `--approved-at` (the tick's Unix time). `live.js lock`
+recomputes the hash from what it is about to send and refuses a real send with a swap file when any of the three is missing, malformed or different, or when the tick is older than
+120 s (`MAX_OBSERVATION_AGE_S`, the engine's own limit) or more than 5 s ahead of its clock; no flag or environment variable skips it, a dry run needs none. The approval is not
+single-use: the duplicate-hashlock rule, the lock lock `FILE.lock-lock`, the pending-nonce check (an extra: nodes drop pending transactions) and the lock record `FILE.lock-sent`
+(written and synced before the broadcast, never removed by the tool, cleared by hand on one of two proofs: "Clearing a FILE.lock-sent record" in `scripts/live/README.md`) make a
+second send from this swap file impossible while the first is unresolved (a copy of the file shares only the duplicate rule and the node-local pending-nonce check; a lock without `--swap` has the duplicate rule alone). The
+engine's producer screen lives in `swap-cli`, so `live.js` cannot make that decision itself: do not call `live.js lock --swap` for a real send by hand. `lock` and `claim`
+also refuse a swap file with more than one hard link (the claim lock and the marker files are named from the path): keep one name. A lock without `--swap` (below) is not
+covered: it makes no producer check and says so.
 
 ### Roles on the ETH side
 

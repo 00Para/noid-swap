@@ -15,6 +15,34 @@ const HOUR = 3600;
 const rand32 = () => "0x" + crypto.randomBytes(32).toString("hex");
 const sha256Raw = (hex32) => "0x" + crypto.createHash("sha256").update(Buffer.from(hex32.slice(2), "hex")).digest("hex");
 
+/**
+ * The approval that a fresh read-only tick would hand over for the lock of swap file `file` (the real one is built by lock_precheck in scripts/live/env.sh from
+ * the tick's output; this stands in for it in the tests, from the file). `over` changes one of the terms, to test a refusal.
+ */
+function approvalOf(file, over = {}, at = Math.floor(Date.now() / 1000)) {
+  const j = JSON.parse(fs.readFileSync(file, "utf8"));
+  const eth = j.public.params.eth;
+  const it = j.pending_intent;
+  const p = it.params;
+  const terms = {
+    chainId: eth.chain_id, contract: eth.contract, lockKind: eth.lock_kind === undefined ? "sha256" : eth.lock_kind, codeHash: eth.code_hash,
+    bobSender: eth.bob_sender, receiver: p.receiver, amountWei: p.amount_wei, lockWord: p.hashlock, tReveal: p.t_reveal, decidedAt: it.decided_at, ...over,
+  };
+  return { approvedIntent: String(it.decided_at), approvedTerms: live.approvalTermsHash(terms), approvedAt: String(at) };
+}
+/** args with the approval of their swap file added for a real send (a dry run and a lock without a swap file need none); explicit approval flags win. */
+function withApproval(args) {
+  if (args.dryRun || !args.swap) return args;
+  let ap = {};
+  try {
+    ap = approvalOf(args.swap);
+  } catch {
+    /* a file the helper cannot read gets no approval, and the lock refuses */
+  }
+  return { ...ap, ...args };
+}
+const lockApproved = (provider, signer, args) => live.lock(provider, signer, withApproval(args));
+
 describe("live.js (over Hardhat's in-process network)", function () {
   let provider, alice, bob, carol, htlcAddr, tgt;
   const amount = ethers.parseEther("0.5");
@@ -1198,13 +1226,365 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       expect(dry.expectedLockId).to.equal(want);
       expect(dry.valueWei).to.equal(amount.toString());
       const n = await nonce(bobAddr);
-      const real = await live.lock(provider, bob, { swap });
+      const real = await lockApproved(provider, bob, { swap });
       expect(real.lockId).to.equal(want);
       expect(await nonce(bobAddr)).to.equal(n + 1);
       const s = await live.status(provider, null, { contract: htlcAddr, lockId: want });
       expect(s.lock.receiver).to.equal(aliceAddr);
       expect(s.lock.timelock).to.equal(String(tReveal));
     });
+
+    describe("the approval of a fresh check (an outside read, 2026-11-10)", () => {
+      const NO_APPROVAL = /needs the approval of a fresh read-only `swap-cli tick`.*(?:is|are) missing.*scripts\/live\/lock\.sh.*do not call live\.js lock directly.*Nothing was sent/s;
+      const lockFileOf = (swap) => swap + live.LOCK_LOCK_SUFFIX;
+      const recordOf = (swap) => swap + live.LOCK_SENT_SUFFIX;
+      async function fresh(decidedAt = undefined) {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const intent = lockIntent(tReveal);
+        if (decidedAt !== undefined) intent.decided_at = decidedAt;
+        return { tReveal, swap: swapFile({ intent }) };
+      }
+      const nothingSent = async (swap, n) => {
+        expect(await nonce(bobAddr)).to.equal(n);
+        expect(fs.existsSync(recordOf(swap)), "no lock record").to.equal(false);
+        expect(fs.existsSync(lockFileOf(swap)), "the lock lock is let go").to.equal(false);
+      };
+
+      it("a real lock needs all three values: with any missing it refuses and sends nothing; the message says to use lock.sh", async () => {
+        const { swap } = await fresh();
+        const n = await nonce(bobAddr);
+        const ap = approvalOf(swap);
+        await expect(live.lock(provider, bob, { swap })).to.be.rejectedWith(NO_APPROVAL);
+        for (const drop of ["approvedIntent", "approvedTerms", "approvedAt"]) {
+          const part = { ...ap };
+          delete part[drop];
+          await expect(live.lock(provider, bob, { swap, ...part }), drop).to.be.rejectedWith(NO_APPROVAL);
+          await expect(live.lock(provider, bob, { swap, ...part, [drop]: "" }), drop).to.be.rejectedWith(NO_APPROVAL);
+        }
+        await nothingSent(swap, n);
+      });
+
+      it("another intent's decided_at refuses, and the message does not print the file's own value", async () => {
+        const { swap } = await fresh(1762000000);
+        const n = await nonce(bobAddr);
+        const ap = approvalOf(swap);
+        let err = null;
+        await live.lock(provider, bob, { swap, ...ap, approvedIntent: "1762000001" }).catch((e) => (err = e));
+        expect(err && err.message).to.match(/--approved-intent 1762000001 is not the decided_at of the lock_eth intent in the swap file/);
+        expect(err.message, "a number that stays valid must not be copied from an error").to.not.include("1762000000");
+        await expect(live.lock(provider, bob, { swap, ...ap, approvedIntent: "18446744073709551617" })).to.be.rejectedWith(/is not the decided_at/);
+        for (const bad of ["abc", "-1", "+1", "01", " 1", "1 ", "1.0", "0x1", "1e0", "٣"]) {
+          await expect(live.lock(provider, bob, { swap, ...ap, approvedIntent: bad }), bad).to.be.rejectedWith(/--approved-intent must be a whole number/);
+        }
+        await expect(live.lock(provider, bob, { swap, ...ap, approvedIntent: 1762000001 })).to.be.rejectedWith(/is not the decided_at/);
+        await expect(live.lock(provider, bob, { swap, ...ap, approvedIntent: 1.5 })).to.be.rejectedWith(/whole number/);
+        await nothingSent(swap, n);
+      });
+
+      it("a hash of other terms refuses: each one of the nine terms changed after the check, a malformed hash, an uppercase hash of the right terms is accepted", async () => {
+        const { swap } = await fresh();
+        const n = await nonce(bobAddr);
+        const other = {
+          chainId: "1", contract: "0x" + "ab".repeat(20), lockKind: "poseidon", codeHash: "0x" + "cd".repeat(32), bobSender: "0x" + "ef".repeat(20),
+          receiver: "0x" + "12".repeat(20), amountWei: "1", lockWord: "0x" + "34".repeat(32), tReveal: "5", decidedAt: "2",
+        };
+        for (const [term, value] of Object.entries(other)) {
+          if (term === "decidedAt") continue; // that one is the --approved-intent check, above
+          const ap = approvalOf(swap, { [term]: value });
+          await expect(live.lock(provider, bob, { swap, ...ap }), term).to.be.rejectedWith(/is not the hash [0-9a-f]{64} of the terms this lock would be sent with/);
+        }
+        const ap = approvalOf(swap);
+        for (const bad of ["abc", "0x" + "1".repeat(64), "1".repeat(63), "g".repeat(64)]) {
+          await expect(live.lock(provider, bob, { swap, ...ap, approvedTerms: bad }), bad).to.be.rejectedWith(/--approved-terms must be the 64 hex digits/);
+        }
+        await nothingSent(swap, n);
+        const real = await live.lock(provider, bob, { swap, ...ap, approvedTerms: ap.approvedTerms.toUpperCase() });
+        expect(real.lockId).to.match(/^0x[0-9a-f]{64}$/);
+      });
+
+      it("a stale or future tick time refuses; the limit is the engine's observation age limit (read from engine.rs)", async () => {
+        const { swap } = await fresh();
+        const n = await nonce(bobAddr);
+        const now = Math.floor(Date.now() / 1000);
+        await expect(live.lock(provider, bob, { swap, ...approvalOf(swap, {}, now - 121) })).to.be.rejectedWith(/the fresh check is 12[1-9] s old .*limit is 120 s, the engine's own observation age limit \(MAX_OBSERVATION_AGE_S/s);
+        await expect(live.lock(provider, bob, { swap, ...approvalOf(swap, {}, now - 3600) })).to.be.rejectedWith(/is 3[56]\d\d s old/);
+        await expect(live.lock(provider, bob, { swap, ...approvalOf(swap, {}, now + 60) })).to.be.rejectedWith(/in the future of this machine's clock .*allowed: 5 s/);
+        for (const bad of ["x", "-5", "05", "1.5", " 1"]) {
+          await expect(live.lock(provider, bob, { swap, ...approvalOf(swap), approvedAt: bad }), bad).to.be.rejectedWith(/--approved-at must be a whole number/);
+        }
+        await nothingSent(swap, n);
+        // in step: the constant here is the Rust one
+        const src = path.join(__dirname, "..", "..", "swap-cli", "src", "engine.rs");
+        if (fs.existsSync(src)) {
+          const m = /pub const MAX_OBSERVATION_AGE_S: u64 = (\d+);/.exec(fs.readFileSync(src, "utf8"));
+          expect(m, "the constant is in engine.rs").to.not.equal(null);
+          expect(Number(m[1])).to.equal(live.MAX_OBSERVATION_AGE_S);
+        }
+        // a tick of 100 s ago still sends
+        const ok = await live.lock(provider, bob, { swap, ...approvalOf(swap, {}, now - 100) });
+        expect(ok.lockId).to.match(/^0x[0-9a-f]{64}$/);
+      });
+
+      it("the encoding is fixed: a shared vector (the same terms and the same hash are in scripts/live/selftest.sh), and the right approval sends as before", async () => {
+        const t = {
+          chainId: "11155111", contract: "0x" + "11".repeat(20), lockKind: "sha256", codeHash: "0x" + "22".repeat(32), bobSender: "0x" + "33".repeat(20),
+          receiver: "0x" + "44".repeat(20), amountWei: "1000000000000000", lockWord: "0x" + "55".repeat(32), tReveal: "1762007200", decidedAt: "1762000000",
+        };
+        expect(live.approvalText(t)).to.equal(
+          "noid-swap lock approval v1\nchain_id=11155111\ncontract=0x" + "11".repeat(20) + "\nlock_kind=sha256\ncode_hash=0x" + "22".repeat(32) + "\nbob_sender=0x" + "33".repeat(20) +
+            "\nreceiver=0x" + "44".repeat(20) + "\namount_wei=1000000000000000\nlock_word=0x" + "55".repeat(32) + "\nt_reveal=1762007200\ndecided_at=1762000000\n"
+        );
+        expect(live.approvalTermsHash(t)).to.equal("c49c5c1f57ed1e347403ffa1e4ea25167b0132aa7b6f705d5996acaf8cb09761");
+        expect(live.approvalTermsHash({ ...t, contract: t.contract.toUpperCase().replace("0X", "0x") }), "case of the hex does not matter").to.equal(live.approvalTermsHash(t));
+        expect(() => live.approvalTermsHash({ ...t, lockKind: "keccak" })).to.throw(/lock_kind/);
+        expect(() => live.approvalTermsHash({ ...t, amountWei: "-1" })).to.throw(/whole number/);
+        expect(() => live.approvalTermsHash({ ...t, lockWord: "0x12" })).to.throw(/hex digits/);
+      });
+
+      it("an intent whose decided_at cannot be read in the file refuses even with a value; the right approval sends; the lock lock is gone after", async () => {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        for (const bad of [undefined, "1", -1, 1.5, null]) {
+          const intent = lockIntent(tReveal);
+          if (bad === undefined) delete intent.decided_at;
+          else intent.decided_at = bad;
+          const swap = swapFile({ intent });
+          await expect(live.lock(provider, bob, { swap, approvedIntent: "1", approvedTerms: "0".repeat(64), approvedAt: String(Math.floor(Date.now() / 1000)) }), String(bad)).to.be.rejectedWith(/no decided_at that can be read as a Unix time/);
+        }
+        const { swap, tReveal: tReveal2 } = await fresh();
+        const real = await live.lock(provider, bob, { swap, ...approvalOf(swap) });
+        expect(real.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal2)));
+        expect(fs.existsSync(lockFileOf(swap)), "the lock lock is gone after the send").to.equal(false);
+        expect(fs.existsSync(recordOf(swap)), "the record of the send stays").to.equal(true);
+        expect(path.resolve(real.lockRecord)).to.equal(path.resolve(recordOf(swap)));
+      });
+
+      it("a dry run needs no approval (and a wrong one changes nothing); a lock without a swap file is not covered, and takes no lock file", async () => {
+        const { tReveal, swap } = await fresh();
+        expect((await live.lock(provider, bob, { swap, dryRun: true })).dryRun).to.equal(true);
+        expect((await live.lock(provider, bob, { swap, dryRun: true, approvedIntent: "999", approvedTerms: "x", approvedAt: "y" })).dryRun).to.equal(true);
+        expect(fs.existsSync(lockFileOf(swap)) || fs.existsSync(recordOf(swap))).to.equal(false);
+        expect((await live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock: sha256Raw(rand32()), tReveal: String(tReveal), receiver: aliceAddr, amountWei: "1" })).lockId).to.match(/^0x[0-9a-f]{64}$/);
+      });
+
+      it("the three flags are command-line flags of lock only", async () => {
+        const a = live.parseArgs(["lock", "--approved-intent", "1762000000", "--approved-terms", "ab", "--approved-at", "1762000010"]).args;
+        expect([a.approvedIntent, a.approvedTerms, a.approvedAt]).to.deep.equal(["1762000000", "ab", "1762000010"]);
+        for (const f of ["--approved-intent", "--approved-terms", "--approved-at"]) expect(() => live.parseArgs(["lock", f])).to.throw(/needs a value/);
+        for (const cmd of ["claim", "refund", "deploy", "send"]) expect(() => live.parseArgs([cmd, "--approved-intent", "1"]), cmd).to.throw(/unknown flag/);
+      });
+
+      it("a swap file with more than one hard link is refused for lock and claim (also in a dry run), with the fix; one name again is accepted", async function () {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        const swap = swapFile({ intent: lockIntent(tReveal) });
+        const revealSwap = swapFile({ intent: revealIntent(rand32(), tReveal, tReveal - 1800) });
+        const alias = path.join(dir, "second-name.json");
+        const aliasReveal = path.join(dir, "second-name-reveal.json");
+        try {
+          fs.linkSync(swap, alias);
+          fs.linkSync(revealSwap, aliasReveal);
+        } catch (e) {
+          if (e.code === "ENOTSUP" || e.code === "EPERM" || e.code === "EACCES" || e.code === "EXDEV") return this.skip(); // a file system without hard links
+          throw e;
+        }
+        if (fs.statSync(swap).nlink < 2) return this.skip(); // a file system that does not report a link count
+        const LINKS = /has 2 hard links.*keep one name/s;
+        const n = await nonce(bobAddr);
+        await expect(live.lock(provider, bob, { swap, dryRun: true })).to.be.rejectedWith(LINKS);
+        await expect(live.lock(provider, bob, { swap: alias, dryRun: true })).to.be.rejectedWith(LINKS);
+        await expect(lockApproved(provider, bob, { swap })).to.be.rejectedWith(LINKS);
+        await expect(live.claim(provider, alice, { swap: revealSwap, dryRun: true })).to.be.rejectedWith(LINKS);
+        await expect(live.claim(provider, alice, { swap: aliasReveal, secret: rand32() })).to.be.rejectedWith(LINKS);
+        expect(await nonce(bobAddr)).to.equal(n);
+        expect(fs.existsSync(`${swap}.claim-lock`) || fs.existsSync(`${revealSwap}.claim-lock`), "no claim lock is taken for a refused file").to.equal(false);
+        expect(fs.existsSync(lockFileOf(swap)), "no lock lock is taken for a refused file").to.equal(false);
+        fs.unlinkSync(alias);
+        fs.unlinkSync(aliasReveal);
+        expect((await live.lock(provider, bob, { swap, dryRun: true })).dryRun).to.equal(true); // one name again: accepted
+        const ec = await live.claim(provider, alice, { swap: revealSwap, dryRun: true }).then(() => null, (x) => x);
+        expect(ec === null || !LINKS.test(ec.message), "the link check no longer fires").to.equal(true);
+      });
+    });
+
+    // Bob's key is Hardhat's account 1: a local key (an ethers.Wallet), so the signed hash is known before the broadcast
+    describe("the lock lock and the lock record: a second send is impossible while the first is unresolved (2026-11-10)", () => {
+      const BOB_KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+      let wallet;
+      beforeEach(() => {
+        wallet = new ethers.Wallet(BOB_KEY, provider);
+      });
+      afterEach(async () => {
+        await provider.send("evm_setAutomine", [true]);
+      });
+      const lockFileOf = (swap) => swap + live.LOCK_LOCK_SUFFIX;
+      const recordOf = (swap) => swap + live.LOCK_SENT_SUFFIX;
+      async function fileWith(hash = hashlock) {
+        const tReveal = (await latestTs()) + 2 * HOUR;
+        return { tReveal, swap: swapFile({ hash, intent: lockIntent(tReveal, { hashlock: hash }) }) };
+      }
+      const until = async (cond, what) => {
+        for (let i = 0; i < 200; i++) {
+          if (await cond()) return;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        throw new Error(`timed out waiting for ${what}`);
+      };
+
+      it("the key is Hardhat's account 1 (the premise of these tests)", async () => {
+        expect(wallet.address).to.equal(bobAddr);
+      });
+
+      it("(a) an existing lock lock refuses a real lock before anything else, names the file, is never removed; a dry run takes no lock", async () => {
+        const { swap } = await fileWith();
+        fs.writeFileSync(lockFileOf(swap), '{"version":1,"pid":1,"at":1}\n');
+        const n = await nonce(bobAddr);
+        const e = await lockApproved(provider, bob, { swap }).then(() => null, (x) => x);
+        expect(e && e.message).to.match(/another lock for this swap file is running, or an earlier one died: the lock file .*\.lock-lock exists/);
+        expect(e.message).to.match(/this tool never removes a lock it did not make/);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(true);
+        expect(await nonce(bobAddr)).to.equal(n);
+        expect((await live.lock(provider, bob, { swap, dryRun: true })).dryRun).to.equal(true);
+        fs.unlinkSync(lockFileOf(swap));
+        expect((await lockApproved(provider, bob, { swap })).lockId).to.match(/^0x[0-9a-f]{64}$/);
+      });
+
+      it("(a) the lock lock is let go after a refusal too (an approval that does not match), so the retry is not blocked", async () => {
+        const { swap } = await fileWith();
+        await expect(live.lock(provider, bob, { swap, ...approvalOf(swap), approvedIntent: "7" })).to.be.rejectedWith(/is not the decided_at/);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+        expect((await lockApproved(provider, bob, { swap })).lockId).to.match(/^0x[0-9a-f]{64}$/);
+      });
+
+      it("(c) the record is written before the broadcast: it holds the lock word, the lock id, the sender, the nonce and the signed hash of the transaction that was mined", async () => {
+        const { swap, tReveal } = await fileWith();
+        const nonceBefore = await nonce(bobAddr);
+        const r = await lockApproved(provider, wallet, { swap });
+        const rec = JSON.parse(fs.readFileSync(recordOf(swap), "utf8"));
+        expect(rec).to.include({ version: 1, lock_word: hashlock, lock_id: r.lockId, sender: bobAddr, nonce: nonceBefore, tx_hash: r.txHash });
+        expect(rec.at).to.be.a("number");
+        expect(rec.lock_id).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
+        expect(fs.statSync(recordOf(swap)).size).to.be.lessThan(4096);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+      });
+
+      it("a first send that never mines, then a second attempt: the record refuses it (and another swap file of the same sender meets the pending-nonce check)", async () => {
+        const { swap } = await fileWith();
+        await provider.send("evm_setAutomine", [false]);
+        const first = lockApproved(provider, wallet, { swap }); // broadcast, then waits for a receipt that does not come
+        await until(() => fs.existsSync(recordOf(swap)) && !fs.existsSync(lockFileOf(swap)), "the record, and the lock lock let go after the broadcast");
+        expect(await provider.getTransactionCount(bobAddr, "pending")).to.equal((await provider.getTransactionCount(bobAddr, "latest")) + 1);
+        // the same swap file, a fresh approval: refused by the record (nothing mined, so the duplicate rule sees nothing)
+        const e = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+        expect(e && e.message).to.match(/refusing: the lock record .*\.lock-sent exists \(it records sender 0x[0-9a-fA-F]{40}, nonce \d+, transaction hash 0x[0-9a-f]{64}, lock id 0x[0-9a-f]{64}, written at Unix second \d+\)/);
+        expect(e.message).to.match(/Remove the record by hand ONLY if \(1\).*finalized block.*\(2\) the sender's nonce at a FINALIZED block is above the recorded nonce while the recorded hash has no receipt/s);
+        expect(e.message).to.match(/This tool never removes the record itself.*section "Clearing a FILE\.lock-sent record" of scripts\/live\/README\.md and docs\/runbook-two-party\.md/s);
+        expect(fs.existsSync(recordOf(swap))).to.equal(true);
+        // another swap file (no record), the same sender: the pending-nonce check
+        const other = await fileWith(sha256Raw(rand32()));
+        const e2 = await lockApproved(provider, wallet, { swap: other.swap }).then(() => null, (x) => x);
+        expect(e2 && e2.message).to.match(/the sender 0x[0-9a-fA-F]{40} has a transaction pending on this node \(pending nonce \d+, latest nonce \d+\).*the record is the check that counts/s);
+        expect(fs.existsSync(recordOf(other.swap)), "no record for a lock that was refused before the send").to.equal(false);
+        expect(fs.existsSync(lockFileOf(other.swap))).to.equal(false);
+        // the first one is mined: it succeeds, the record stays, and a third attempt is refused by the duplicate rule (the lock is mined)
+        await provider.send("evm_setAutomine", [true]);
+        await provider.send("evm_mine", []);
+        const r1 = await first;
+        expect(r1.txHash).to.match(/^0x[0-9a-f]{64}$/);
+        expect(fs.existsSync(recordOf(swap))).to.equal(true);
+        await expect(lockApproved(provider, wallet, { swap })).to.be.rejectedWith(/a Locked event for hashlock .* from this sender .* already exists/);
+      });
+
+      it("the approval is judged again at the last step before the record is written: a stall in the slow steps that pushes it past 120 s refuses, with no record", async () => {
+        const { swap } = await fileWith();
+        const slow = new ethers.Wallet(BOB_KEY, provider);
+        const realEstimate = slow.estimateGas.bind(slow);
+        slow.estimateGas = async (tx) => {
+          await new Promise((r) => setTimeout(r, 4000)); // a stalled endpoint, for four seconds
+          return realEstimate(tx);
+        };
+        const n = await nonce(bobAddr);
+        const now = Math.floor(Date.now() / 1000);
+        // 117 s old at the first check (it passes), 121 s old after the stall
+        const e = await live.lock(provider, slow, { swap, ...approvalOf(swap, {}, now - 117) }).then(() => null, (x) => x);
+        expect(e && e.message).to.match(/the fresh check is 12[0-9] s old .*limit is 120 s/s);
+        expect(fs.existsSync(recordOf(swap)), "no record: nothing was signed").to.equal(false);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+        expect(await nonce(bobAddr)).to.equal(n);
+      }).timeout(30000);
+
+      it("a dry run says on stderr that a real lock would refuse on an existing lock record, and still returns its result", async () => {
+        const { swap } = await fileWith();
+        fs.writeFileSync(recordOf(swap), "not json");
+        const written = [];
+        const realWrite = process.stderr.write.bind(process.stderr);
+        process.stderr.write = (chunk, ...rest) => {
+          written.push(String(chunk));
+          return true;
+        };
+        let dry;
+        try {
+          dry = await live.lock(provider, bob, { swap, dryRun: true });
+        } finally {
+          process.stderr.write = realWrite;
+        }
+        expect(dry.dryRun).to.equal(true);
+        expect(written.join("")).to.match(/WARNING: the lock record .*\.lock-sent exists .*a real lock for this swap file would refuse.*Clearing a FILE\.lock-sent record/s);
+      });
+
+      it("a record that cannot be examined or read counts as present; a record of any content refuses; the tool never removes it", async () => {
+        const { swap } = await fileWith();
+        const n = await nonce(bobAddr);
+        for (const content of ["", "not json", '{"version":2}', "x".repeat(5000)]) {
+          fs.writeFileSync(recordOf(swap), content);
+          const e = await lockApproved(provider, bob, { swap }).then(() => null, (x) => x);
+          expect(e && e.message, JSON.stringify(content.slice(0, 20))).to.match(/refusing: the lock record .*\.lock-sent exists \((its content could not be read|it is not a record this tool wrote)/);
+          expect(fs.readFileSync(recordOf(swap), "utf8")).to.equal(content);
+        }
+        fs.rmSync(recordOf(swap));
+        fs.mkdirSync(recordOf(swap)); // a directory at the name: examined, not a regular file
+        const e2 = await lockApproved(provider, bob, { swap }).then(() => null, (x) => x);
+        expect(e2 && e2.message).to.match(/lock record .* exists \(it is not a record this tool wrote/);
+        expect(fs.statSync(recordOf(swap)).isDirectory()).to.equal(true);
+        expect(await nonce(bobAddr)).to.equal(n);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+      });
+
+      it("a send refused before the broadcast takes back the record this call made; an error after the bytes may have left keeps it", async () => {
+        // before the broadcast: the signer refuses to sign (after the record was written by preSend)
+        const { swap } = await fileWith();
+        const failing = new ethers.Wallet(BOB_KEY, provider);
+        const realSign = failing.signTransaction.bind(failing);
+        let calls = 0;
+        failing.signTransaction = async (tx) => {
+          calls++;
+          if (calls >= 2) throw new Error("signing refused by the test"); // the 1st call is the pre-signature for the hash, the 2nd the real one
+          return realSign(tx);
+        };
+        const n = await nonce(bobAddr);
+        const e = await lockApproved(provider, failing, { swap }).then(() => null, (x) => x);
+        expect(e && e.message).to.match(/signing refused by the test.*The lock record this call had written was removed again \(nothing was sent/s);
+        expect(fs.existsSync(recordOf(swap)), "taken back").to.equal(false);
+        expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+        expect(await nonce(bobAddr)).to.equal(n);
+        // after the broadcast was attempted: the node refuses the transaction, the record STAYS
+        const { swap: swap2 } = await fileWith(sha256Raw(rand32()));
+        const refusing = new ethers.Wallet(BOB_KEY, provider);
+        const realBroadcast = provider.broadcastTransaction.bind(provider);
+        provider.broadcastTransaction = async () => {
+          throw new Error("the node did not answer (test)");
+        };
+        try {
+          const e2 = await lockApproved(provider, refusing, { swap: swap2 }).then(() => null, (x) => x);
+          expect(e2 && e2.message).to.match(/the node did not answer \(test\).*the lock record .*\.lock-sent was written before the send and STAYS.*Clearing a FILE\.lock-sent record/s);
+        } finally {
+          provider.broadcastTransaction = realBroadcast;
+        }
+        expect(fs.existsSync(recordOf(swap2)), "the record stays after the broadcast was attempted").to.equal(true);
+        expect(fs.existsSync(lockFileOf(swap2)), "the lock lock is let go").to.equal(false);
+        // and the next attempt refuses on the record, whatever the node says
+        await expect(lockApproved(provider, bob, { swap: swap2 })).to.be.rejectedWith(/refusing: the lock record .*\.lock-sent exists/);
+      });
+    });
+
 
     it("scans the logs from the file's eth_from_block when --from-block is omitted, and a given --from-block wins (REVIEW-3 F7)", async () => {
       const tReveal = (await latestTs()) + 2 * HOUR;
@@ -1243,7 +1623,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       ];
       const n = await nonce(bobAddr);
       for (const [over, re] of cases) {
-        await expect(live.lock(provider, bob, { swap, ...over }), JSON.stringify(over)).to.be.rejectedWith(re);
+        await expect(lockApproved(provider, bob, { swap, ...over }), JSON.stringify(over)).to.be.rejectedWith(re);
         await expect(live.lock(provider, bob, { swap, dryRun: true, ...over }), JSON.stringify(over)).to.be.rejectedWith(re);
       }
       expect(await nonce(bobAddr)).to.equal(n);
@@ -1406,7 +1786,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
           const swap = swapFile({ intent: lockIntent(tReveal), profile, history: SEEN });
           fs.writeFileSync(swap + MARKER, "{}");
           const n = await nonce(bobAddr);
-          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
           expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
           expect(await nonce(bobAddr)).to.equal(n + 1);
           expect(written).to.match(new RegExp(`^WARNING: the producer screen of swap-cli remembers .*under the ${profile} profile this only warns\\. A screen, not a defence\\.\\n`, "m"));
@@ -1420,7 +1800,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         const swap = swapFile({ intent: lockIntent(tReveal), history: [...SEEN, ...OVERRIDDEN] });
         fs.writeFileSync(swap + MARKER, "{}");
         const n = await nonce(bobAddr);
-        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
         expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
         expect(await nonce(bobAddr)).to.equal(n + 1);
         expect(written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden \(tick --accept-producer-concentration\)\. A screen, not a defence\.\n/m);
@@ -1455,7 +1835,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         // detection, override: waived.
         const swap = swapFile({ intent: lockIntent(tReveal), history: [...SEEN, ...OVERRIDDEN] });
         const n = await nonce(bobAddr);
-        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
         expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
         expect(await nonce(bobAddr)).to.equal(n + 1);
         expect(written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden/m);
@@ -1468,7 +1848,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         hashlock = sha256Raw(rand32()); // one own lock per hashlock
         const waived = swapFile({ intent: lockIntent((await latestTs()) + 2 * HOUR), history: [...OVERRIDDEN, ...SEEN, ...OVERRIDDEN] });
         const m = await nonce(bobAddr);
-        const out = await stderrOf(() => live.lock(provider, bob, { swap: waived }));
+        const out = await stderrOf(() => lockApproved(provider, bob, { swap: waived }));
         expect(out.result.lockId).to.be.a("string");
         expect(await nonce(bobAddr)).to.equal(m + 1);
       });
@@ -1476,7 +1856,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
       it("(f) no marker and no entry: no warning, behaviour unchanged (an override alone changes nothing either)", async () => {
         const tReveal = (await latestTs()) + 2 * HOUR;
         const swap = swapFile({ intent: lockIntent(tReveal), history: OVERRIDDEN });
-        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+        const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
         expect(result.lockId).to.be.a("string");
         expect(written).to.not.include("producer screen");
       });
@@ -1508,7 +1888,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         // Once a tick --apply has written the detection and then the override, the same file goes through with the waiver warning.
         const waived = swapFile({ intent: lockIntent(tReveal), history: [...OVERRIDDEN, ...SEEN, ...OVERRIDDEN] });
         fs.writeFileSync(waived + MARKER, "{}");
-        const out = await stderrOf(() => live.lock(provider, bob, { swap: waived }));
+        const out = await stderrOf(() => lockApproved(provider, bob, { swap: waived }));
         expect(out.result.lockId).to.be.a("string");
         expect(out.written).to.match(/^WARNING: the producer screen of swap-cli remembers .*only because the swap file records the operator's producer_concentration_overridden/m);
       });
@@ -1548,7 +1928,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
           hashlock = sha256Raw(rand32());
           const swap = swapFile({ intent: lockIntent((await latestTs()) + 2 * HOUR), history: LATCH(suffix) });
           const n = await nonce(bobAddr);
-          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
           expect(result.lockId, suffix).to.be.a("string");
           expect(await nonce(bobAddr)).to.equal(n + 1);
           expect(written, suffix).to.not.include("producer screen");
@@ -1564,7 +1944,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         });
         const after = swapFile({ intent: lockIntent(tReveal), history: [...LATCH("1:concentration", 7), ...OVERRIDDEN] });
         const n = await nonce(bobAddr);
-        const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap: after }));
+        const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap: after }));
         expect(result.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
         expect(await nonce(bobAddr)).to.equal(n + 1);
         expect(written).to.match(/^WARNING: the swap file's history holds a "producer_alert_lock_pending:\.\.\." entry for this pending lock_eth intent.*only because the swap file records the operator's producer_concentration_overridden \(tick --accept-producer-concentration\)\. A screen, not a defence\.\n/m);
@@ -1600,7 +1980,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
           const tReveal = (await latestTs()) + 2 * HOUR;
           const swap = swapFile({ intent: lockIntent(tReveal), profile, history: LATCH("1:concentration") });
           const n = await nonce(bobAddr);
-          const { result, written } = await stderrOf(() => live.lock(provider, bob, { swap }));
+          const { result, written } = await stderrOf(() => lockApproved(provider, bob, { swap }));
           expect(result.lockId).to.be.a("string");
           expect(await nonce(bobAddr)).to.equal(n + 1);
           expect(written).to.match(new RegExp(`^WARNING: the swap file's history holds a "producer_alert_lock_pending:\\.\\.\\." entry.*under the ${profile} profile this only warns\\. A screen, not a defence\\.\\n`, "m"));
@@ -1758,7 +2138,7 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         expect(dry.maxFeeGwei).to.equal("50.0");
         expect(dry.expectedLockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
       }
-      const real = await live.lock(net, bob, { swap: lockSwap(tReveal, { eth: { chain_id: 1 } }), ...FEE });
+      const real = await lockApproved(net, bob, { swap: lockSwap(tReveal, { eth: { chain_id: 1 } }), ...FEE });
       expect(real.chainId).to.equal("1");
       expect(real.lockId).to.equal(live.computeLockIdLocal(bobAddr, aliceAddr, amount, hashlock, BigInt(tReveal)));
 
@@ -1983,7 +2363,7 @@ describe("live.js --mainnet (chain id 1)", function () {
       case "send": return live.send(node, alice, { to: carolAddr, amountWei: "1000", ...extra });
       case "lock": {
         const sw = needSwap ? { swap: swapFile({ action: "lock_eth", hashlock: t.hashlock, tReveal: Number(t.tReveal), receiver: t.receiver, amountWei: t.amountWei, sender: aliceAddr }) } : {};
-        return live.lock(node, alice, { ...tgtMain, ...t, ...sw, ...extra });
+        return lockApproved(node, alice, { ...tgtMain, ...t, ...sw, ...extra });
       }
       case "claim": {
         const sw = needSwap ? { swap: swapFile({ action: "reveal_eth", lockId, tReveal: Number(t.tReveal), sender: aliceAddr }) } : {};
@@ -2234,7 +2614,7 @@ describe("live.js --mainnet (chain id 1)", function () {
       const n = await nonce(w.address);
       for (const dryRun of [true, false]) {
         const swap = swapFile({ action: "lock_eth", hashlock: t.hashlock, tReveal: Number(t.tReveal), receiver: t.receiver, amountWei: t.amountWei, sender: w.address });
-        await expect(live.lock(net, w, { ...tgtMain, ...t, swap, dryRun, ...m({ maxFeeGwei: "10" }) }), `dryRun ${dryRun}`).to.be.rejectedWith(/refusing: the sender 0x[0-9a-fA-F]{40} holds 1\.0 ETH but amount 0\.9999 ETH \+ worst-case fee/);
+        await expect(lockApproved(net, w, { ...tgtMain, ...t, swap, dryRun, ...m({ maxFeeGwei: "10" }) }), `dryRun ${dryRun}`).to.be.rejectedWith(/refusing: the sender 0x[0-9a-fA-F]{40} holds 1\.0 ETH but amount 0\.9999 ETH \+ worst-case fee/);
       }
       expect(await nonce(w.address)).to.equal(n);
     });
@@ -2266,7 +2646,7 @@ describe("live.js --mainnet (chain id 1)", function () {
       const tReveal = (await latestTs()) + 2 * HOUR;
       const lockFile = (hl, tr) =>
         swapFile({ action: "lock_eth", hashlock: hl, contract: d.contract, tReveal: tr, receiver: aliceAddr, sender: bobAddr, amountWei: amount.toString() });
-      const l = await live.lock(net, bob, { swap: lockFile(hashlock, tReveal), ...tgtMain, contract: d.contract, hashlock, tReveal: String(tReveal), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
+      const l = await lockApproved(net, bob, { swap: lockFile(hashlock, tReveal), ...tgtMain, contract: d.contract, hashlock, tReveal: String(tReveal), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
       expect(l.chainId).to.equal("1");
       const ofLock = (action, lockId, hl, tr) =>
         swapFile({ action, hashlock: hl, contract: d.contract, tReveal: tr, receiver: aliceAddr, sender: bobAddr, amountWei: amount.toString(), lockId });
@@ -2279,7 +2659,7 @@ describe("live.js --mainnet (chain id 1)", function () {
 
       const t2 = (await latestTs()) + HOUR;
       const h2 = sha256Raw(rand32());
-      const l2 = await live.lock(net, bob, { swap: lockFile(h2, t2), ...tgtMain, contract: d.contract, hashlock: h2, tReveal: String(t2), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
+      const l2 = await lockApproved(net, bob, { swap: lockFile(h2, t2), ...tgtMain, contract: d.contract, hashlock: h2, tReveal: String(t2), receiver: aliceAddr, amountWei: amount.toString(), ...flags });
       await passAge(HOUR + 5);
       const r = await live.refund(net, bob, { swap: ofLock("refund_eth", l2.lockId, h2, t2), ...tgtMain, contract: d.contract, lockId: l2.lockId, ...flags });
       await feeOf(r.txHash);
@@ -2648,7 +3028,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       // lock
       const t1 = (await latestTs()) + 2 * HOUR;
       const h2 = sha256Raw(rand32());
-      const lk = await live.lock(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...flags });
+      const lk = await lockApproved(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...flags });
       expect(await feesOf(lk.txHash)).to.deep.equal([cap, tipWei]);
       expect(lk.feeCheck).to.include({ priorityFeeGwei: TIP, maxFeeGwei: "0.2" });
       // claim
@@ -2748,7 +3128,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       // lock and claim go through feePlan: the same tip, and the report names it
       const t1 = (await latestTs()) + 2 * HOUR;
       const h2 = sha256Raw(rand32());
-      const lk = await live.lock(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...MAIN, maxFeeGwei: "5" });
+      const lk = await lockApproved(net, bob, { swap: swapFile({ chain: 1, hash: h2, intent: lockIntent(t1, h2) }), ...MAIN, maxFeeGwei: "5" });
       expect(await feesOf(lk.txHash)).to.deep.equal([gwei("5"), gwei("1")]);
       expect(lk.feeCheck.priorityFeeGwei).to.equal("1.0");
       const l = await makeLock();
@@ -2773,7 +3153,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
       expect(cl.priorityFeeGwei).to.equal("0.01");
       expect(cl.maxFeeGwei).to.equal("0.2");
       expect(cl.worstCaseFeeWei).to.equal((BigInt(cl.gasLimit) * gwei("0.2")).toString());
-      const lk = await live.lock(net, bob, { swap: lockSwap, ...flags });
+      const lk = await lockApproved(net, bob, { swap: lockSwap, ...flags });
       expect(lk.feeCheck).to.include({ priorityFeeGwei: "0.01", expectedGasPriceGwei: "0.07" });
       expect(lk.priorityFeeGwei).to.equal("0.01");
       expect(lk.worstCaseFeeWei).to.equal((BigInt(lk.gasEstimate) * gwei("0.2")).toString());
@@ -2983,7 +3363,7 @@ describe("live.js REVIEW-4 and REVIEW-5 (R4-1, R4-3, R4-5, R5-1, R5-2)", functio
         expect(r.feeCheck, cmd).to.include({ baseFeeGwei: "0.06", priorityFeeGwei: "0.006", minPriorityFeeGwei: "0.006", expectedGasPriceGwei: "0.066" });
       }
       // real ones, read back from the chain (the lock first, the base fee set again before each)
-      const lk = await live.lock(net, bob, { swap: lockSwap, ...at });
+      const lk = await lockApproved(net, bob, { swap: lockSwap, ...at });
       expect(await feesOf(lk.txHash)).to.deep.equal([gwei("0.2"), gwei("0.006")]);
       expect(lk.feeCheck.minPriorityFeeGwei).to.equal("0.006");
       await setBaseWei(BASE);

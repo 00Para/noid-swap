@@ -711,6 +711,20 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
         "action": action_json,
         "notes": decision.notes,
         "intent": intent_json(&outcome.intent),
+        // The terms of the swap that the lock is bound to, as THIS tick read them from the file (copies, nothing computed or decided): scripts/live/lock.sh
+        // hashes them with the intent's parameters into the approval it hands to `live.js lock`, which recomputes the hash from what it is about to send
+        // (the 2026-11-10 batch). Read-only: no decision reads this field. The amount and the receiver are NOT here: a read-only tick withholds a spend's
+        // parameters (REVIEW-3 F3), and the held intent block already carries them where the tick may show them.
+        "swap_terms": {
+            "eth": {
+                "chain_id": file.public.params.eth.chain_id,
+                "contract": format!("0x{}", hex::encode(file.public.params.eth.contract)),
+                "code_hash": file.public.params.eth.code_hash.map(|h| format!("0x{}", hex::encode(h))),
+                "lock_kind": file.public.params.eth.lock_kind,
+                "bob_sender": format!("0x{}", hex::encode(file.public.params.eth.bob_sender)),
+            },
+            "hashlock": format!("0x{}", hex::encode(file.public.hashlock)),
+        },
         "events_applied_to_file": apply,
         "action_executed": false,
         "phase_after": if apply { work.phase.name() } else { file.phase.name() },

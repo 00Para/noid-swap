@@ -166,6 +166,17 @@ fn tick_runs_the_watchers_over_fixtures_and_records_the_facts() {
     assert_eq!(v["action_executed"], false);
     assert_eq!(v["phase_after"], "funded");
     assert_eq!(SwapFile::load(&b).unwrap().phase.name(), "funded");
+    // `swap_terms` is the public section's chain, contract, code hash, lock kind, sender and lock word as the tick read them (lock.sh hashes them into the approval of a lock).
+    let file_now = SwapFile::load(&b).unwrap();
+    let eth = &file_now.public.params.eth;
+    assert_eq!(v["swap_terms"]["eth"]["chain_id"], eth.chain_id, "{out}");
+    assert_eq!(v["swap_terms"]["eth"]["contract"], format!("0x{}", hex::encode(eth.contract)), "{out}");
+    assert!(v["swap_terms"]["eth"].get("amount_wei").is_none() && v["swap_terms"]["eth"].get("alice_receiver").is_none(), "a read-only tick withholds a spend's amount and receiver: {out}");
+    assert_eq!(v["swap_terms"]["eth"]["bob_sender"], format!("0x{}", hex::encode(eth.bob_sender)), "{out}");
+    assert_eq!(v["swap_terms"]["eth"]["code_hash"], format!("0x{}", hex::encode(eth.code_hash.unwrap())), "{out}");
+    assert_eq!(v["swap_terms"]["hashlock"], format!("0x{}", hex::encode(file_now.public.hashlock)), "{out}");
+    assert_eq!(v["swap_terms"]["eth"]["lock_kind"], "sha256", "{out}");
+    assert_eq!(v["now"], 1794312000);
     // The recorded Ethereum lock belongs to another swap: the watcher ignores it.
     assert!(v["eth"]["lock"].is_null());
     // A fixture of another swap is refused by its pinned params, not silently reused.

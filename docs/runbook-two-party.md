@@ -198,7 +198,7 @@ anything; it prints the one step due. Node URLs are shown only as `scheme://host
 |---|---|---|---|
 | 1 | Checks the object, then funds (below). | `tick`. | Bob: `waiting for Alice's funding` |
 | 2 | `tick` until funding is final (18 blocks, 8.5 min in run 1). | `tick`. | `funding not yet visible`, `waiting for funding finality` |
-| 3 | `tick`. | At final: `lock_eth` with `t_reveal`, hashlock, receiver, `amount_wei`. He runs `live.js lock` with exactly those. | Bob: `lock_eth`, then `lock not yet visible`, `waiting for the secret (or T_reveal)` |
+| 3 | `tick`. | At final: `lock_eth` with `t_reveal`, hashlock, receiver, `amount_wei`. He runs `scripts/live/lock.sh` (it takes them from his file). | Bob: `lock_eth`, then `lock not yet visible`, `waiting for the secret (or T_reveal)` |
 | 4 | Sees Bob's lock; waits until Ethereum calls it `finalized`; then `reveal_eth` with the `lock_id`. | `tick`. | Alice: `reveal_eth`, only before `T_reveal - 1800 s` |
 | 5 | Reveals (below). | `tick`. | Alice: `ETH claim pending`, `waiting for ETH claim finality`, `done: ETH received` |
 | 6 | Idle. | Engine reads `s` from the `Claimed` log (`eth_preimage_seen`) and says `claim_noid`: dry run, then `--submit`. | Bob: `claim_noid`, `NOID claim pending`, `waiting for NOID claim finality`, `done: NOID received` |
@@ -216,7 +216,12 @@ parano1d-cli contract status swap.object.json <S>                        # "Open
 Keep `swap.object.json` and `alice.swap.json`: the opening cannot be recovered from the chain. Fund once; if the
 answer was lost, run `contract instances` before funding again. Tell Bob the funding went out.
 
-**Step 3, Bob locks ETH** (from `eth/`; copy `--hashlock`, `--t-reveal`, `--receiver`, `--amount-wei` from the tick):
+**Step 3, Bob locks ETH.** Send the lock through `scripts/live/lock.sh` (`lock.sh --dry-run`, then `lock.sh`): it runs a fresh read-only tick right before the
+send and hands `live.js lock` the approval of that tick: three values from the tick's own output (`--approved-intent`, the `decided_at` of the intent it held; `--approved-terms`, the
+SHA-256 of the lock's terms; `--approved-at`, the tick's own time). `live.js lock --swap FILE` refuses a real send when any is missing or different, or when the tick is older than 120 s, so
+do not call `live.js lock` by hand against a swap file. The approval is not single-use: the duplicate rule, the lock lock `FILE.lock-lock`, the pending-nonce check and the lock record
+`FILE.lock-sent` make a second send FROM THIS SWAP FILE impossible while the first is unresolved (a copy of the file or another machine shares only the duplicate rule, which reads mined locks only, and the node-local pending-nonce check; a lock without `--swap` has the duplicate rule alone; see "Clearing a FILE.lock-sent record" below). A `FILE.lock-lock` that a killed process left behind is never taken over: when you are sure no lock is running, delete it by hand. The commands below are the form without a swap file (a hostile-counterparty test, a rehearsal
+by hand), which makes no producer check and no fresh check; copy `--hashlock`, `--t-reveal`, `--receiver`, `--amount-wei` from the tick (from `eth/`):
 ```sh
 node scripts/live.js lock --key-file keys/bob.key --contract 0xC --chain-id 11155111 \
    --hashlock 0xH --t-reveal T_REVEAL --receiver 0xALICEETH --amount-wei 1000000000000000 --dry-run
@@ -235,6 +240,32 @@ marker file but no detection entry yet it tells you to run `tick --apply` first.
 intent (`swap-cli intent FILE --cancel`, same chain flags as `tick`); the ways on are `--accept-producer-concentration` on a `tick --apply`
 (printed and recorded, trial amounts only) or a new swap file. Even after the screen passes again, a latch on record keeps `live.js lock`
 refusing for that intent until you cancel the intent (the flag writes no override on a pass); while the screen still refuses, the flag does work. `live.js lock` without `--swap` makes no producer check and says so.
+
+The fresh tick has a time limit (`LOCK_PRECHECK_TIMEOUT`, default 3 x `RPC_TIMEOUT`); one that does not finish is stopped and refuses the same way (exit 3, nothing sent). A swap file with more than one hard link is refused by `live.js` for `lock` and `claim` (keep one name).
+
+**`ACCEPT_PRODUCER_CONCENTRATION=1` is a standing waiver.** It waives the refusal for the concentration you looked at and also a LATER finding that a node is misreporting the producers. Set it for one command only, on the command line, never as a line in `env.local.sh` (every call prints a warning while it is on).
+
+**Clearing a FILE.lock-sent record.**
+
+A real `lock --swap FILE` writes `FILE.lock-sent` (lock word, lock id, sender, nonce, the signed hash when the key is local, time; nothing secret) and syncs it BEFORE the lock is broadcast. While it exists, every later real lock for that swap file refuses, because the lock may be in flight and the duplicate rule reads mined locks only. A record that cannot be examined or read counts as present. The tool never removes it: only a call that was refused before the broadcast takes back the record it made itself. Refusing a lock is always the safe direction (no lock means no ETH at risk), so when in doubt wait, or let the swap abort.
+
+Remove the record by hand ONLY if one of two proofs holds (both read-only; `$ETH_RPC` is the endpoint of `env.local.sh`, ask `$ETH_RPC2` too when you have it; `SENDER`, `HASH` and `NONCE` are in the record: `cat bob.swap.json.lock-sent`):
+
+1. Look up the recorded hash for a receipt, and the finalized block:
+   ```bash
+   curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["HASH"]}'
+   curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["finalized",false]}'
+   ```
+   **Proof 1:** the receipt exists and its `blockNumber` is at or below the finalized block's `number` (both are hex). `"status":"0x1"`: the lock is mined (the duplicate rule then refuses a second lock anyway); `"status":"0x0"`: it reverted and locked nothing. `"result":null` is no receipt: not mined, or not seen by this node.
+2. Read the sender's nonce at the finalized block and compare it with the record:
+   ```bash
+   curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":["SENDER","finalized"]}'
+   ```
+   **Proof 2:** the result (hex) is ABOVE the record's `nonce` (decimal), and step 1 shows no receipt for HASH on any endpoint you have: that nonce was used by another transaction, so the recorded one can never be mined. A record with no hash (`tx_hash` null: the key was not local) can only be cleared by this proof.
+3. Remove the record (`rm bob.swap.json.lock-sent`) only if proof 1 or proof 2 holds. If neither holds, do not remove it: wait (a pending transaction is mined, replaced or dropped), or let the swap abort.
+4. A send that no node ever accepted (HTTP 429, a refused redirect or connection, "fee too low") leaves a record too, and the sender's nonce never moves, so proof 2 cannot come by waiting. The way out is to spend the recorded nonce yourself: send a 0-ETH transfer from the sender to itself at exactly that nonce (from the wallet that holds the key, with a fee above the base fee). Once that transaction is in a finalized block, proof 2 holds.
+
+A node that is behind, or a load-balanced endpoint, can answer `null` for a mined hash or an old nonce: ask more than once and from two endpoints. The pending-nonce check of `live.js` is only an extra, because nodes drop pending transactions; this record is what counts.
 
 **Step 5, Alice reveals** (only when `tick` says `reveal_eth`; the dry run needs no secret):
 ```sh

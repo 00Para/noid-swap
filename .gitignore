@@ -20,6 +20,8 @@ Thumbs.db
 *.swap.json.lock
 *.swap.json.reveal-sent*
 *.swap.json.claim-lock
+*.lock-lock
+*.lock-sent
 *.producers
 *.producers.tmp
 *.producer-differs*

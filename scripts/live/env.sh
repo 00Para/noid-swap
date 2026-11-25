@@ -84,7 +84,7 @@ ETH_RPC2=${ETH_RPC2:-}                               # a second, distinct Ethere
 NOID_RPC2_REMOTE=${NOID_RPC2_REMOTE:-0}              # 1 = the second Parano1d node runs on another machine and is reached through a local port (an SSH tunnel): passes --noid-rpc2-is-remote, text only (the tool cannot verify it); only with NOID_RPC2
 ETH_RPC2_REMOTE=${ETH_RPC2_REMOTE:-0}                # the same for the second Ethereum node (--eth-rpc2-is-remote), only with ETH_RPC2
 SINGLE_NODE_OK=${SINGLE_NODE_OK:-0}                  # 1 = pass --single-node-ok (waive the F5 second-node rule); opt-in, set it in env.local.sh
-ACCEPT_PRODUCER_CONCENTRATION=${ACCEPT_PRODUCER_CONCENTRATION:-0}  # 1 = pass --accept-producer-concentration (waive the production profile's refusal to lock while one address produced too many recent blocks, threat T21); opt-in, set it in env.local.sh, said on every call
+ACCEPT_PRODUCER_CONCENTRATION=${ACCEPT_PRODUCER_CONCENTRATION:-0}  # 1 = pass --accept-producer-concentration (waive the production profile's refusal to lock while one address produced too many recent blocks, threat T21); opt-in, for ONE command only (set it in front of that command, never in env.local.sh: it is a standing waiver that also covers a later finding that a node is misreporting), said on every call
 ALERT_URL=""                                         # optional: a full URL that watch.sh POSTs a short message to when Bob's mined NOID claim was removed by a reorg. Set ONLY in $L/env.local.sh (the environment is ignored); never printed, never in a tracked file
 PROFILE=${PROFILE:-sepolia}
 CHAIN=${CHAIN:-11155111}
@@ -266,10 +266,10 @@ enter_eth_dir() {
 # Native mode: the "Windows-side copies" are plain local copies in $PUB; make the folder before a script copies into it. Under wsl nothing is made here.
 ensure_pub() { if [ "$LIVE_PLATFORM" = native ]; then mkdir -p "$PUB" 2>/dev/null; fi; return 0; }
 require_parties() { for v in ALICE_NOID BOB_NOID ALICE_ETH BOB_ETH CONTRACT; do [ -n "${!v}" ] || { echo "$v is not set: put the four party addresses and CONTRACT in $L/env.local.sh" >&2; return 2; }; done; }
-# Opt-in only (ACCEPT_PRODUCER_CONCENTRATION=1 in $L/env.local.sh), said on EVERY call that builds the node flags. Nothing when the setting is off.
+# Opt-in only (ACCEPT_PRODUCER_CONCENTRATION=1 in front of ONE command; a standing waiver, so not as a line in $L/env.local.sh), said on EVERY call that builds the node flags. Nothing when the setting is off.
 producer_concentration_warning() {
   [ "$ACCEPT_PRODUCER_CONCENTRATION" = 1 ] || return 0
-  echo "WARNING: ACCEPT_PRODUCER_CONCENTRATION=1 (--accept-producer-concentration): the production profile will offer Bob's lock even while one address produced more than 35 % of the recent blocks, or the producer check cannot be completed (threat T21). Amounts must stay trial-sized. The F5 second-node rules are not waived by it" >&2
+  echo "WARNING: ACCEPT_PRODUCER_CONCENTRATION=1 (--accept-producer-concentration): the production profile will offer Bob's lock even while one address produced more than 35 % of the recent blocks, or the producer check cannot be completed (threat T21). Amounts must stay trial-sized. The F5 second-node rules are not waived by it. This is a STANDING waiver: it also covers a LATER finding that a node is misreporting the producers, not only the concentration you looked at. Set it for ONE command only (ACCEPT_PRODUCER_CONCENTRATION=1 in front of that command), never in env.local.sh" >&2
 }
 # alert_send MESSAGE: one POST to $ALERT_URL. The URL reaches curl on its standard input (one config line), never in its argument list, so it is not
 # in the process list; -f turns an HTTP error into a failure. Returns curl's status.
@@ -352,9 +352,13 @@ single_node_warning() {
 # lock_precheck TICK_JSON: the gate of lock.sh (a send), T21 design B. The file is the output of a FRESH read-only `swap-cli tick` of Bob's swap file (asked
 # right before the send). Prints "go" and returns 0 only when that tick shows exactly what a lock needs: a lock_eth intent is pending and HELD (the tick
 # kept it), the fresh decision, asked again by the engine with the producer screen and every other gate, is still the lock (the engine's own note
-# "held: fresh decision was lock_eth"), no note starts with ALERT:, and the held wait does not say "do NOT send it". Anything else, a file that is
-# missing, empty or not JSON, a tick that failed, a missing field, a second note, returns 1 and prints the reason: the lock is NOT sent. Local reads only;
-# python3 missing returns non-zero too. The JavaScript checks of live.js lock stay as the second barrier.
+# "held: fresh decision was lock_eth"), no note starts with ALERT:, and the held wait does not say "do NOT send it". On success it prints
+# "go DECIDED_AT TERMS_SHA256 TICK_NOW": the three values of the APPROVAL that lock.sh hands to live.js lock (--approved-intent, --approved-terms, --approved-at),
+# all taken from THIS tick's output: the `decided_at` of the intent it held (a whole number, Unix time); the SHA-256 of the lock's terms (the tick's
+# `swap_terms` and the intent's parameters) in the fixed encoding documented at `approvalText` in eth/scripts/live.js, which live.js recomputes from what
+# it is about to send; and the tick's own `now`. live.js refuses a value that does not match, so the lock sent is the intent and the terms the tick approved. Anything else, a file that is
+# missing, empty or not JSON, a tick that failed, a missing field (also an intent with no readable decided_at), a second note, returns 1 and prints the
+# reason: the lock is NOT sent. Local reads only; python3 missing returns non-zero too. The JavaScript checks of live.js lock stay as the second barrier.
 lock_precheck() {
   python3 - "$1" <<'PY'
 import sys, json
@@ -372,6 +376,10 @@ if not isinstance(intent, dict) or intent.get("status") != "held":
 inner = intent.get("intent")
 if not isinstance(inner, dict) or inner.get("action") != "lock_eth":
     no("the pending intent is not a lock_eth (it is: %s)" % (inner.get("action") if isinstance(inner, dict) else None))
+decided = inner.get("decided_at")
+# a whole number of seconds that a JavaScript number holds exactly (live.js compares it as such); a bool is an int in Python and is not a time
+if isinstance(decided, bool) or not isinstance(decided, int) or decided < 0 or decided > 9007199254740991:
+    no("the pending intent in the fresh tick carries no decided_at that can be read as a Unix time, so the approval cannot be handed to live.js")
 notes = v.get("notes")
 if not isinstance(notes, list) or not all(isinstance(n, str) for n in notes): no("the fresh tick has no readable notes")
 alerts = [n for n in notes if n.startswith("ALERT:")]
@@ -383,6 +391,63 @@ if "do NOT send it" in reason: no("the fresh tick says not to send the pending l
 fresh = [n for n in notes if n.startswith("held: fresh decision was ")]
 if fresh != ["held: fresh decision was lock_eth"]:
     no("the fresh decision is no longer the lock (%s); the engine holds Bob's lock back now: %s" % (fresh if fresh else "no 'held: fresh decision' note", reason[:400]))
-print("go")
+now = v.get("now")
+if isinstance(now, bool) or not isinstance(now, int) or now < 0 or now > 9007199254740991:
+    no("the fresh tick carries no 'now' (its own Unix time) that can be read, so the approval cannot be handed to live.js")
+# the terms, in the encoding of approvalText (eth/scripts/live.js): the tick's own report of the swap's terms and of the intent's parameters
+import hashlib, re
+def hx(name, val, nbytes):
+    if not isinstance(val, str) or not re.fullmatch(r"0x[0-9a-fA-F]{%d}" % (nbytes * 2), val): no("the fresh tick's %s is not 0x and %d hex digits" % (name, nbytes * 2))
+    return val.lower()
+def dec(name, val):
+    if isinstance(val, bool): no("the fresh tick's %s is not a whole number" % name)
+    if isinstance(val, int) and val >= 0: return str(val)
+    if isinstance(val, str) and re.fullmatch(r"[0-9]+", val): return str(int(val))
+    no("the fresh tick's %s is not a whole number" % name)
+params = inner.get("params"); terms = v.get("swap_terms")
+if not isinstance(params, dict) or not isinstance(terms, dict) or not isinstance(terms.get("eth"), dict):
+    no("the fresh tick carries no intent parameters or no swap_terms, so the terms of the lock cannot be approved")
+eth = terms["eth"]
+kind = eth.get("lock_kind", "sha256")
+if kind not in ("sha256", "poseidon"): no("the fresh tick's lock_kind is not sha256 or poseidon")
+receiver = hx("receiver", params.get("receiver"), 20)
+amount = dec("amount_wei", params.get("amount_wei"))
+word = hx("hashlock", params.get("hashlock"), 32)
+if word != hx("swap hashlock", terms.get("hashlock"), 32): no("the intent's hashlock is not the swap's hashlock")
+text = "\n".join([
+    "noid-swap lock approval v1",
+    "chain_id=" + dec("chain_id", eth.get("chain_id")),
+    "contract=" + hx("contract", eth.get("contract"), 20),
+    "lock_kind=" + kind,
+    "code_hash=" + hx("code_hash", eth.get("code_hash"), 32),
+    "bob_sender=" + hx("bob_sender", eth.get("bob_sender"), 20),
+    "receiver=" + receiver,
+    "amount_wei=" + amount,
+    "lock_word=" + word,
+    "t_reveal=" + dec("t_reveal", params.get("t_reveal")),
+    "decided_at=" + str(decided),
+]) + "\n"
+digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+print("go %d %s %d" % (decided, digest, now))
 PY
+}
+# run_with_limit SECONDS OUTFILE ERRFILE CMD [ARGS...]: runs CMD with stdout and stderr to the two files and stops it after SECONDS (whole seconds, polled once a
+# second; plain bash, no `timeout` binary, which macOS does not have). Returns CMD's exit status, or 124 when the limit was hit (CMD is then killed);
+# RUN_LIMIT_HIT is set to 1 only when the limit was hit (a command that exits 124 by itself does not set it), so callers can tell the two apart.
+RUN_LIMIT_HIT=0
+run_with_limit() {
+  local secs=$1 out=$2 err=$3; shift 3
+  RUN_LIMIT_HIT=0
+  "$@" > "$out" 2> "$err" &
+  local pid=$! waited=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      RUN_LIMIT_HIT=1
+      kill "$pid" 2>/dev/null; sleep 1; kill -9 "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 124
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  wait "$pid"
 }

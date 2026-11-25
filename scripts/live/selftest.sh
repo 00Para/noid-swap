@@ -1018,39 +1018,92 @@ check "setup.sh: an explicit DEPLOY_BLOCK is honoured even with a swap file pres
 # (a stub swap-cli that prints a tick file and records its argv, a stub node that records its argv; nothing is read from a chain, nothing is sent)
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import json' >/dev/null 2>&1; then
   PC="$TMP/precheck"; mkdir -p "$PC"
-  TICK_GO='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix): the chain does not show it yet; reuse the printed parameters"},"notes":["producer concentration ok","held: fresh decision was lock_eth","frozen parameters of the pending lock_eth: {}"],"intent":{"status":"held","intent":{"action":"lock_eth","params":{}}}}'
-  TICK_ALERT='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix) but the producer screen refuses to lock now (x): do NOT send it"},"notes":["ALARM: producer concentration too high, not locking (T21)","ALERT: the producer screen refuses to lock now (T21: producer concentration too high), but a lock_eth intent decided at 1 (Unix time) is still pending.","held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  # The shared test vector of the lock approval (eth/test/live.test.js has the same terms and the same hash): chain 11155111, contract 0x11.., sha256, code hash 0x22..,
+  # sender 0x33.., receiver 0x44.., 1000000000000000 wei, lock word 0x55.., T_reveal 1762007200, decided_at 1762000000.
+  hexn() { local n=$1 d=$2 i; printf '0x'; for i in $(seq 1 "$n"); do printf '%s%s' "$d" "$d"; done; }
+  V_CONTRACT=$(hexn 20 1); V_CODE=$(hexn 32 2); V_SENDER=$(hexn 20 3); V_RECV=$(hexn 20 4); V_WORD=$(hexn 32 5)
+  V_ETH='"chain_id":11155111,"contract":"'$V_CONTRACT'","code_hash":"'$V_CODE'","lock_kind":"sha256","bob_sender":"'$V_SENDER'"'
+  V_TERMS='"swap_terms":{"eth":{'$V_ETH'},"hashlock":"'$V_WORD'"}'
+  V_PARAMS='"params":{"action":"lock_eth","hashlock":"'$V_WORD'","t_reveal":1762007200,"receiver":"'$V_RECV'","amount_wei":"1000000000000000"}'
+  V_HASH=c49c5c1f57ed1e347403ffa1e4ea25167b0132aa7b6f705d5996acaf8cb09761
+  V_GO="go 1762000000 $V_HASH 1762000010"
+  # changed_go OUT: 1 when OUT is a "go" line for the same intent and tick time but another hash, else 0
+  changed_go() { case "$1" in "go 1762000000 "*" 1762000010") if [ "$1" != "$V_GO" ]; then echo 1; else echo 0; fi ;; *) echo 0 ;; esac; }
+  # mk_tick NOW_FRAGMENT TERMS_FRAGMENT PARAMS_FRAGMENT: a held lock_eth tick whose fresh decision is the lock, with the given pieces ("" = leave the piece out)
+  mk_tick() {
+    printf '%s' '{"action":{"action":"wait","reason":"r"},'"$1"'"notes":["held: fresh decision was lock_eth"],'"$2"'"intent":{"status":"held","intent":{"action":"lock_eth",'"$3"'"decided_at":1762000000}}}'
+  }
+  TICK_GO='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix): the chain does not show it yet; reuse the printed parameters"},"now":1762000010,"notes":["producer concentration ok","held: fresh decision was lock_eth","frozen parameters of the pending lock_eth: {}"],'"$V_TERMS"',"intent":{"status":"held","intent":{"action":"lock_eth",'"$V_PARAMS"',"decided_at":1762000000}}}'
+  TICK_ALERT='{"action":{"action":"wait","reason":"intent lock_eth pending since 1 (unix) but the producer screen refuses to lock now (x): do NOT send it"},"notes":["ALARM: producer concentration too high, not locking (T21)","ALERT: the producer screen refuses to lock now (T21: producer concentration too high), but a lock_eth intent decided at 1 (Unix time) is still pending.","held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth","decided_at":1762000000}}}'
   pc() { printf '%s' "$2" > "$PC/$1.json"; lock_pre_out=$(env -i HOME="$TMP/home" PATH="$PATH" HERE="$HERE" L="$PC" "$BASH" -c 'set -u; . "$HERE/env.sh" 2>/dev/null; lock_precheck "$1"' _ "$PC/$1.json" 2>&1); lock_pre_rc=$?; }
   pc go "$TICK_GO"
-  check "lock_precheck: a held lock_eth intent whose fresh decision is still the lock goes" "0|go" "$lock_pre_rc|$lock_pre_out"
-  pc alert "$TICK_ALERT"
+  check "lock_precheck: a held lock_eth intent whose fresh decision is still the lock goes, and names the decided_at of the intent it held" "0|$V_GO" "$lock_pre_rc|$lock_pre_out"
+  # the terms are the tick's own report: a changed parameter changes the hash; a missing or inconsistent part refuses
+  pc tchg "$(mk_tick '"now":1762000010,' "$V_TERMS," "$(printf '%s' "$V_PARAMS" | sed 's/1762007200/1762007201/'),")"
+  check "lock_precheck: one changed parameter (T_reveal) gives another hash, and the same tick time" "0|1" "$lock_pre_rc|$(changed_go "$lock_pre_out")"
+  pc pchg "$(mk_tick '"now":1762000010,' '"swap_terms":{"eth":{'"$(printf '%s' "$V_ETH" | sed 's/"sha256"/"poseidon"/')"'},"hashlock":"'$V_WORD'"},' "$V_PARAMS,")"
+  check "lock_precheck: the lock kind is part of the terms (poseidon gives another hash)" "0|1" "$lock_pre_rc|$(changed_go "$lock_pre_out")"
+  pc noterms "$(mk_tick '"now":1762000010,' "" "$V_PARAMS,")"
+  check "lock_precheck: a tick with no swap_terms refuses (no terms to approve)" "1" "$lock_pre_rc"
+  pc nonow "$(mk_tick "" "$V_TERMS," "$V_PARAMS,")"
+  check "lock_precheck: a tick with no 'now' refuses (no time to hand over)" "1" "$lock_pre_rc"
+  pc badword "$(mk_tick '"now":1762000010,' "$V_TERMS," "$(printf '%s' "$V_PARAMS" | sed "s/$V_WORD/$(hexn 32 6)/"),")"
+  check "lock_precheck: an intent whose hashlock is not the swap's hashlock refuses" "1" "$lock_pre_rc"
+  pc noparams "$(mk_tick '"now":1762000010,' "$V_TERMS," "")"
+  check "lock_precheck: an intent with no parameters refuses" "1" "$lock_pre_rc"
+  GOBASE='{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"lock_eth"'
+  pc noat "$GOBASE"'}}}'
+  check "lock_precheck: a held intent with no decided_at refuses (no approval to hand to live.js)" "1" "$lock_pre_rc"
+  pc strat "$GOBASE"',"decided_at":"1762000000"}}}'
+  check "lock_precheck: a decided_at that is text refuses" "1" "$lock_pre_rc"
+  pc negat "$GOBASE"',"decided_at":-5}}}'
+  check "lock_precheck: a negative decided_at refuses" "1" "$lock_pre_rc"
+  pc fltat "$GOBASE"',"decided_at":1762000000.5}}}'
+  check "lock_precheck: a decided_at that is not a whole number refuses" "1" "$lock_pre_rc"
+  pc boolat "$GOBASE"',"decided_at":true}}}'
+  check "lock_precheck: a decided_at that is a boolean refuses" "1" "$lock_pre_rc"
+  pc bigat "$GOBASE"',"decided_at":18446744073709551615}}}'
+  check "lock_precheck: a decided_at a JavaScript number cannot hold exactly refuses" "1" "$lock_pre_rc"
+  # Every refusal below is TICK_GO (which goes) with exactly ONE thing changed, so that deleting the rule a case names would let the case through (they are
+  # not refused for a missing part instead); each also checks the reason it gives.
+  chg() { printf '%s' "$TICK_GO" | sed "$1"; }
+  pc alert "$(chg 's/"producer concentration ok"/"ALERT: the producer screen refuses to lock now (x)"/')"
   check "lock_precheck: an ALERT: note refuses" "1" "$lock_pre_rc"
   check_has "lock_precheck: ... and says what the tick said" "ALERT: the producer screen refuses" "$lock_pre_out"
   # no ALERT, but the fresh decision is not the lock (the engine holds it back for another reason)
-  pc other '{"action":{"action":"wait","reason":"not lock_eth: a second node is required"},"notes":["held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  pc other "$(chg 's/held: fresh decision was lock_eth/held: fresh decision was wait/')"
   check "lock_precheck: a fresh decision that is not the lock refuses" "1" "$lock_pre_rc"
-  pc donotsend '{"action":{"action":"wait","reason":"do NOT send it"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check_has "lock_precheck: ... and says the lock is held back" "the fresh decision is no longer the lock" "$lock_pre_out"
+  pc donotsend "$(chg 's/the chain does not show it yet; reuse the printed parameters/do NOT send it/')"
   check "lock_precheck: a wait that says do NOT send it refuses even beside the lock note" "1" "$lock_pre_rc"
-  pc nonote '{"action":{"action":"wait","reason":"r"},"notes":["frozen parameters of the pending lock_eth: {}"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check_has "lock_precheck: ... and says not to send" "says not to send the pending lock" "$lock_pre_out"
+  pc nonote "$(chg 's/"held: fresh decision was lock_eth",//')"
   check "lock_precheck: no 'held: fresh decision' note refuses" "1" "$lock_pre_rc"
-  pc twonotes '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth","held: fresh decision was wait"],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  check_has "lock_precheck: ... and says there is no decision note" "no 'held: fresh decision' note" "$lock_pre_out"
+  pc twonotes "$(chg 's/"held: fresh decision was lock_eth",/"held: fresh decision was lock_eth","held: fresh decision was wait",/')"
   check "lock_precheck: two decision notes refuse" "1" "$lock_pre_rc"
-  pc nointent '{"action":{"action":"lock_eth"},"notes":[],"intent":{"status":"none","intent":null}}'
+  check_has "lock_precheck: ... and says the decision is not the lock" "the fresh decision is no longer the lock" "$lock_pre_out"
+  pc nointent "$(chg 's/"intent":{"status":"held".*$/"intent":{"status":"none","intent":null}}/')"
   check "lock_precheck: no pending intent refuses (a read-only tick never offers the lock itself)" "1" "$lock_pre_rc"
-  pc recorded '{"action":{"action":"lock_eth"},"notes":[],"intent":{"status":"recorded","intent":{"action":"lock_eth"}}}'
+  check_has "lock_precheck: ... and says to run tick --apply" "run tick --apply first" "$lock_pre_out"
+  pc recorded "$(chg 's/"status":"held"/"status":"recorded"/')"
   check "lock_precheck: an intent only just recorded (status recorded) refuses" "1" "$lock_pre_rc"
-  pc resolved '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"resolved","intent":{"action":"lock_eth"}}}'
+  check_has "lock_precheck: ... and says the tick did not keep it" "intent status: recorded" "$lock_pre_out"
+  pc resolved "$(chg 's/"status":"held"/"status":"resolved"/')"
   check "lock_precheck: an intent the chain resolved (the lock is on chain) refuses" "1" "$lock_pre_rc"
-  pc refund '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"refund_eth"}}}'
+  check_has "lock_precheck: ... and says so" "intent status: resolved" "$lock_pre_out"
+  pc refund "$(chg 's/"intent":{"action":"lock_eth"/"intent":{"action":"refund_eth"/')"
   check "lock_precheck: another action's intent refuses" "1" "$lock_pre_rc"
+  check_has "lock_precheck: ... and names the action" "the pending intent is not a lock_eth (it is: refund_eth)" "$lock_pre_out"
   pc garbage 'not json at all'
   check "lock_precheck: a tick output that is not JSON refuses" "1" "$lock_pre_rc"
   pc empty ''
   check "lock_precheck: an empty tick output refuses" "1" "$lock_pre_rc"
   pc array '[]'
   check "lock_precheck: JSON that is not an object refuses" "1" "$lock_pre_rc"
-  pc badnotes '{"action":{"action":"wait","reason":"r"},"notes":[1,2],"intent":{"status":"held","intent":{"action":"lock_eth"}}}'
+  pc badnotes "$(chg 's/"notes":\[[^]]*\]/"notes":[1,2]/')"
   check "lock_precheck: notes that are not text refuse" "1" "$lock_pre_rc"
+  check_has "lock_precheck: ... and says the notes cannot be read" "no readable notes" "$lock_pre_out"
   lock_pre_out=$(env -i HOME="$TMP/home" PATH="$PATH" HERE="$HERE" L="$PC" "$BASH" -c 'set -u; . "$HERE/env.sh" 2>/dev/null; lock_precheck "$1"' _ "$PC/nonexistent.json" 2>&1); lock_pre_rc=$?
   check "lock_precheck: a missing file refuses" "1" "$lock_pre_rc"
 
@@ -1076,6 +1129,7 @@ STUB
     local name=$1 tick=$2 tex=$3; shift 3
     local d; d=$(mkl "lock-$name"); mkdir -p "$d/bob" "$d/rec"; echo "selftest-passphrase" > "$d/passphrase.txt"
     : > "$d/bin.argv"; : > "$d/node.argv"
+    if [ -n "${LOCK_SWAPFILE_CONTENT:-}" ]; then printf '%s' "$LOCK_SWAPFILE_CONTENT" > "$d/bob/bob.swap.json"; fi
     LOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$d" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" \
       STUB_BIN_ARGV="$d/bin.argv" STUB_NODE_ARGV="$d/node.argv" STUB_TICK="$tick" STUB_TICK_EXIT="$tex" "$BASH" "$LB/lock.sh" ${1+"$@"} 2>/dev/null)
     LRC=$?
@@ -1085,6 +1139,17 @@ STUB
   lock_run go "$PC/stub-go.json" 0
   check "lock.sh (send): the fresh tick shows the lock: live.js lock runs once, exit 0" "0|1" "$LRC|$(printf '%s\n' "$LNODE" | grep -cx lock)"
   check_has "lock.sh (send): ... and it says the engine still offers the lock" "fresh read-only tick: the engine still offers Bob's lock" "$LOUT"
+  check "lock.sh (send): live.js lock is handed --approved-intent with the decided_at of the intent the TICK held" "1|1" "$(printf '%s\n' "$LNODE" | grep -cx -- --approved-intent)|$(printf '%s\n' "$LNODE" | grep -cx 1762000000)"
+  check "lock.sh (send): ... and --approved-terms with the hash the tick's report gives, and --approved-at with the tick's own time" "1|1|1|1" "$(printf '%s\n' "$LNODE" | grep -cx -- --approved-terms)|$(printf '%s\n' "$LNODE" | grep -cx "$V_HASH")|$(printf '%s\n' "$LNODE" | grep -cx -- --approved-at)|$(printf '%s\n' "$LNODE" | grep -cx 1762000010)"
+  # the swap file holds ANOTHER intent (another decided_at): the value handed on still comes from the tick's output, never from the file (live.js then refuses the mismatch)
+  LOCK_SWAPFILE_CONTENT='{"pending_intent":{"action":"lock_eth","decided_at":1762999999}}'
+  lock_run otherintent "$PC/stub-go.json" 0
+  check "lock.sh (send): a tick that approved another intent than the one in the swap file: the value handed on is the tick's, not the file's" "1|0" "$(printf '%s\n' "$LNODE" | grep -cx 1762000000)|$(printf '%s\n' "$LNODE" | grep -c 1762999999)"
+  LOCK_SWAPFILE_CONTENT=""
+  printf '%s' '{"action":{"action":"wait","reason":"r"},"notes":["held: fresh decision was lock_eth"],"intent":{"status":"held","intent":{"action":"lock_eth","decided_at":"soon"}}}' > "$PC/stub-badat.json"
+  lock_run badat "$PC/stub-badat.json" 0
+  check "lock.sh (send): a tick that names no readable decided_at refuses: exit 3, live.js is never run" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
+  check_has "lock.sh (send): ... and the operator reads why" "lock REFUSED, nothing sent" "$LOUT"
   check "lock.sh (send): the tick it asked for is a plain read-only tick (no --apply), of Bob's file" "1|0|1" "$(printf '%s\n' "$LBIN" | grep -cx tick)|$(printf '%s\n' "$LBIN" | grep -cx -- --apply)|$(printf '%s\n' "$LBIN" | grep -c '/bob/bob.swap.json$')"
   lock_run alert "$PC/stub-alert.json" 0
   check "lock.sh (send): the fresh tick shows the screen refusing: exit 3, live.js is never run" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
@@ -1099,8 +1164,27 @@ STUB
   check "lock.sh (send): a tick that prints nothing refuses" "3|0" "$LRC|$(printf '%s' "$LNODE" | grep -c .)"
   lock_run dry "$PC/stub-alert.json" 0 --dry-run
   check "lock.sh --dry-run: no tick at all (the dry run stays offline-style and shows live.js's own checks), live.js runs with --dry-run" "0|0|1" "$LRC|$(printf '%s' "$LBIN" | grep -c .)|$(printf '%s\n' "$LNODE" | grep -cx -- --dry-run)"
+  check "lock.sh --dry-run: live.js is not handed --approved-intent (a dry run needs none)" "0" "$(printf '%s\n' "$LNODE" | grep -cx -- --approved-intent)"
   lock_run flags "$PC/stub-go.json" 0
   check "lock.sh (send): the tick gets the same node flags as tick.sh" "1" "$(printf '%s\n' "$LBIN" | grep -cx -- --noid-rpc)"
+  # the time limit of the fresh tick: a tick that does not finish is stopped, the lock is refused (exit 3), live.js is never run
+  cat > "$TMP/lockbinslow" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" >> "$STUB_BIN_ARGV"
+sleep 30
+exit 0
+STUB
+  chmod +x "$TMP/lockbinslow"
+  TD=$(mkl lock-timeout); mkdir -p "$TD/bob" "$TD/rec"; echo "selftest-passphrase" > "$TD/passphrase.txt"; : > "$TD/bin.argv"; : > "$TD/node.argv"
+  T0=$(date +%s)
+  LOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinslow" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" LOCK_PRECHECK_TIMEOUT=2     STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" "$BASH" "$LB/lock.sh" 2>/dev/null); LRC=$?
+  T1=$(date +%s)
+  check "lock.sh (send): a tick that does not finish within LOCK_PRECHECK_TIMEOUT is stopped: exit 3, live.js is never run, well before the tick's own end" "3|0|1" "$LRC|$(grep -c . "$TD/node.argv")|$([ $((T1 - T0)) -lt 20 ] && echo 1 || echo 0)"
+  check_has "lock.sh (send): ... and says so, and not to call live.js directly" "did not finish within 2 s" "$LOUT"
+  check_has "lock.sh (send): ... naming the direct call" "do not call live.js lock directly" "$LOUT"
+  TD=$(mkl lock-timeout-bad); mkdir -p "$TD/bob"; echo "selftest-passphrase" > "$TD/passphrase.txt"
+  env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" LOCK_PRECHECK_TIMEOUT=abc STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" "$BASH" "$LB/lock.sh" >/dev/null 2>&1
+  check "lock.sh (send): a LOCK_PRECHECK_TIMEOUT that is not a whole number refuses with exit 2" "2" "$?"
   # the passphrase is for the tick only: the node that sends the lock does not inherit it
   cat > "$TMP/locknodeenv" <<'STUB'
 #!/bin/sh
