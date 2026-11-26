@@ -16,6 +16,7 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
+const isolated = require("./helpers/isolated-home"); // before anything else: the per-user lock record must never touch the real home
 const live = require("../scripts/live.js");
 
 const HOUR = 3600;
@@ -404,6 +405,35 @@ describe("live.js with the poseidon lock kind (HTLCPoseidonV2)", function () {
   });
 
   describe("--swap FILE with lock_kind poseidon", () => {
+    it("a real lock leaves the per-user record keyed on the lock address (no local key: no hash), and a renamed file with a blind log query is refused by it", async () => {
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const lockFile = swapFile({ intent: lockIntent(tReveal) });
+      const l = await lockApproved(provider, bob, { swap: lockFile });
+      const p = live.userLockSentPath(31337, bobAddr, lockAddr);
+      expect(path.dirname(p)).to.equal(isolated.recordsDir());
+      const rec = JSON.parse(fs.readFileSync(p, "utf8"));
+      expect(rec).to.include({ version: 1, lock_id: l.lockId, sender: bobAddr, tx_hash: null, chain_id: "31337", lock_kind: "poseidon" });
+      expect(rec.lock_word.toLowerCase()).to.equal(lockAddr.toLowerCase());
+      expect(rec.contract.toLowerCase()).to.equal(addr.toLowerCase());
+      expect(rec.swap_file).to.equal(fs.realpathSync(lockFile));
+      // the outside probe: renamed file, a new T_reveal, a node whose log query answers nothing
+      const renamed = path.join(dir, "renamed.json");
+      fs.renameSync(lockFile, renamed);
+      const j = JSON.parse(fs.readFileSync(renamed, "utf8"));
+      j.pending_intent.params.t_reveal = tReveal + 60;
+      fs.writeFileSync(renamed, JSON.stringify(j, null, 2));
+      const blind = new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "getLogs") return async () => [];
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      const n = await nonce(bobAddr);
+      await expect(lockApproved(blind, bob, { swap: renamed })).to.be.rejectedWith(/refusing: the per-user lock record .*\.json exists \(it records sender 0x[0-9a-fA-F]{40}, nonce \d+, transaction hash unknown \(no local key\)/);
+      expect(await nonce(bobAddr)).to.equal(n);
+    });
+
     it("lock, reveal and refund all follow the file: the lock word, the V2 artifact, the pinned code hash (REAL CLAIM 3)", async () => {
       const tReveal = (await latestTs()) + 2 * HOUR;
       const lockFile = swapFile({ intent: lockIntent(tReveal) });

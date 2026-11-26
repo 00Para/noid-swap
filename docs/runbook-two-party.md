@@ -219,8 +219,8 @@ answer was lost, run `contract instances` before funding again. Tell Bob the fun
 **Step 3, Bob locks ETH.** Send the lock through `scripts/live/lock.sh` (`lock.sh --dry-run`, then `lock.sh`): it runs a fresh read-only tick right before the
 send and hands `live.js lock` the approval of that tick: three values from the tick's own output (`--approved-intent`, the `decided_at` of the intent it held; `--approved-terms`, the
 SHA-256 of the lock's terms; `--approved-at`, the tick's own time). `live.js lock --swap FILE` refuses a real send when any is missing or different, or when the tick is older than 120 s, so
-do not call `live.js lock` by hand against a swap file. The approval is not single-use: the duplicate rule, the lock lock `FILE.lock-lock`, the pending-nonce check and the lock record
-`FILE.lock-sent` make a second send FROM THIS SWAP FILE impossible while the first is unresolved (a copy of the file or another machine shares only the duplicate rule, which reads mined locks only, and the node-local pending-nonce check; a lock without `--swap` has the duplicate rule alone; see "Clearing a FILE.lock-sent record" below). A `FILE.lock-lock` that a killed process left behind is never taken over: when you are sure no lock is running, delete it by hand. The commands below are the form without a swap file (a hostile-counterparty test, a rehearsal
+do not call `live.js lock` by hand against a swap file. The approval is not single-use: the duplicate rule, the lock lock `FILE.lock-lock`, the pending-nonce check, the lock record
+`FILE.lock-sent` and the per-user lock record (one file per chain, sender and lock word in `.noid-swap/lock-sent/` of the home of the user that runs `live.js`) are meant to make a second send of the same lock impossible while the first is unresolved, whatever the swap file is called (tested offline only). A lock without `--swap` meets a per-user record that a swap-file lock left, but writes none itself: two locks without `--swap` share only the duplicate rule. Another machine or another user account has neither record: it has the duplicate rule, which reads mined locks only, and with a swap file the node-local pending-nonce check; send the lock from one machine and one account. See "Clearing a FILE.lock-sent record" below. A `FILE.lock-lock` that a killed process left behind is never taken over: when you are sure no lock is running, delete it by hand. The commands below are the form without a swap file (a hostile-counterparty test, a rehearsal
 by hand), which makes no producer check and no fresh check; copy `--hashlock`, `--t-reveal`, `--receiver`, `--amount-wei` from the tick (from `eth/`):
 ```sh
 node scripts/live.js lock --key-file keys/bob.key --contract 0xC --chain-id 11155111 \
@@ -241,31 +241,52 @@ intent (`swap-cli intent FILE --cancel`, same chain flags as `tick`); the ways o
 (printed and recorded, trial amounts only) or a new swap file. Even after the screen passes again, a latch on record keeps `live.js lock`
 refusing for that intent until you cancel the intent (the flag writes no override on a pass); while the screen still refuses, the flag does work. `live.js lock` without `--swap` makes no producer check and says so.
 
-The fresh tick has a time limit (`LOCK_PRECHECK_TIMEOUT`, default 3 x `RPC_TIMEOUT`); one that does not finish is stopped and refuses the same way (exit 3, nothing sent). A swap file with more than one hard link is refused by `live.js` for `lock` and `claim` (keep one name).
+The fresh tick has a time limit (`LOCK_PRECHECK_TIMEOUT`, default 3 x `RPC_TIMEOUT` cut to 90 s; a larger value is refused, because `live.js` accepts the approval of a tick for 120 s only); one that does not finish is stopped and refuses the same way (exit 3, nothing sent). A swap file with more than one hard link is refused by `live.js` for `lock` and `claim` (keep one name).
 
 **`ACCEPT_PRODUCER_CONCENTRATION=1` is a standing waiver.** It waives the refusal for the concentration you looked at and also a LATER finding that a node is misreporting the producers. Set it for one command only, on the command line, never as a line in `env.local.sh` (every call prints a warning while it is on).
 
 **Clearing a FILE.lock-sent record.**
 
-A real `lock --swap FILE` writes `FILE.lock-sent` (lock word, lock id, sender, nonce, the signed hash when the key is local, time; nothing secret) and syncs it BEFORE the lock is broadcast. While it exists, every later real lock for that swap file refuses, because the lock may be in flight and the duplicate rule reads mined locks only. A record that cannot be examined or read counts as present. The tool never removes it: only a call that was refused before the broadcast takes back the record it made itself. Refusing a lock is always the safe direction (no lock means no ETH at risk), so when in doubt wait, or let the swap abort.
+A real `lock --swap FILE` writes TWO records and syncs both BEFORE the lock is broadcast (nothing in them is secret):
 
-Remove the record by hand ONLY if one of two proofs holds (both read-only; `$ETH_RPC` is the endpoint of `env.local.sh`, ask `$ETH_RPC2` too when you have it; `SENDER`, `HASH` and `NONCE` are in the record: `cat bob.swap.json.lock-sent`):
+- `FILE.lock-sent`, beside the swap file: lock word, lock id, sender, nonce, the signed hash when the key is local, time.
+- The per-user record: one file per chain id, sender and lock word, `CHAIN-SENDER-LOCKWORD.json` (sender and lock word in lower case, without `0x`), in the folder `.noid-swap/lock-sent/` of the home directory of the user that runs `live.js` (on Windows `%USERPROFILE%\.noid-swap\lock-sent\`). It holds the same fields, the same time, plus the chain id, the contract, the lock kind and the real path of the swap file. It is named from WHAT is locked, not from the swap file, so a renamed or copied swap file (and a lock without `--swap`) finds it.
+
+While either exists, every later real lock refuses (the per-user record is looked for by every real lock, `--swap` or not), because the lock may be in flight and the duplicate rule reads mined locks only. A record that cannot be examined or read counts as present, and so does a home directory that cannot be placed. If a record cannot be made durable, nothing is sent. The tool never removes a record: only a call that was refused before the broadcast takes back the records it made itself. Refusing a lock is always the safe direction (no lock means no ETH at risk), so when in doubt wait, or let the swap abort. A dry run writes no record and warns when one exists. These checks are meant to prevent a second send and were tested offline only.
+
+**What they do not cover.** Another machine, or another user account on this machine, has neither record: it has the duplicate rule (mined locks only) and, with a swap file, the pending-nonce check of its own node. A lock sent from there is not stopped by a record here. Send Bob's lock from one machine and one account.
+
+Remove a record by hand ONLY if one of two proofs holds AND the contract reads of step 3 show no lock (all read-only; `$ETH_RPC` is the endpoint of `env.local.sh`, ask `$ETH_RPC2` too when you have it; `SENDER`, `HASH`, `NONCE`, `LOCK_ID` and `LOCK_WORD` are in the record: `cat bob.swap.json.lock-sent`):
 
 1. Look up the recorded hash for a receipt, and the finalized block:
    ```bash
    curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["HASH"]}'
    curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["finalized",false]}'
    ```
-   **Proof 1:** the receipt exists and its `blockNumber` is at or below the finalized block's `number` (both are hex). `"status":"0x1"`: the lock is mined (the duplicate rule then refuses a second lock anyway); `"status":"0x0"`: it reverted and locked nothing. `"result":null` is no receipt: not mined, or not seen by this node.
+   **Proof 1:** the receipt exists and its `blockNumber` is at or below the finalized block's `number` (both are hex). `"status":"0x0"`: it reverted and locked nothing. `"status":"0x1"`: the lock is mined, which is not a reason to remove anything: step 3 will show it, and a record of a mined lock is kept (no second lock under this lock word is ever wanted). `"result":null` is no receipt: not mined, or not seen by this node.
 2. Read the sender's nonce at the finalized block and compare it with the record:
    ```bash
    curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":["SENDER","finalized"]}'
    ```
-   **Proof 2:** the result (hex) is ABOVE the record's `nonce` (decimal), and step 1 shows no receipt for HASH on any endpoint you have: that nonce was used by another transaction, so the recorded one can never be mined. A record with no hash (`tx_hash` null: the key was not local) can only be cleared by this proof.
-3. Remove the record (`rm bob.swap.json.lock-sent`) only if proof 1 or proof 2 holds. If neither holds, do not remove it: wait (a pending transaction is mined, replaced or dropped), or let the swap abort.
-4. A send that no node ever accepted (HTTP 429, a refused redirect or connection, "fee too low") leaves a record too, and the sender's nonce never moves, so proof 2 cannot come by waiting. The way out is to spend the recorded nonce yourself: send a 0-ETH transfer from the sender to itself at exactly that nonce (from the wallet that holds the key, with a fee above the base fee). Once that transaction is in a finalized block, proof 2 holds.
+   **Proof 2:** the result (hex) is ABOVE the record's `nonce` (decimal), and step 1 shows no receipt for HASH on any endpoint you have: that nonce was used by another transaction, so the recorded one can never be mined. **Proof 2 alone is not enough**: a replacement of the same call under another hash (a wallet's "speed up") uses the same nonce, so "no receipt for the recorded hash" proves nothing by itself, and the replacement can be the lock that was mined. A record with no hash (`tx_hash` null: the key was not local) has no hash to look up at all: for it proof 2 only says that the nonce has passed, and step 3 is the whole check.
+3. **Read the contract, on two endpoints, before you remove a record under EITHER proof.** Both reads are mandatory when the record has `tx_hash` null.
+   - The record's lock id, from `eth/` (the endpoint is `ETH_RPC_URL`; run it once with `$ETH_RPC` and once with `$ETH_RPC2`; `--from-block` is a block a little before the lock was sent):
+     ```bash
+     ETH_RPC_URL="$ETH_RPC" node scripts/live.js status --contract CONTRACT --lock-id LOCK_ID --from-block BLOCKNUMBER
+     ```
+     It prints the lock (sender, receiver, amount, timelock, claimed, refunded) or says there is none.
+   - The `Locked` events of this sender, up to the finalized block (`SENDERPAD` is the sender, 24 zeros then the 40 hex digits without `0x`; if the endpoint caps the range, ask in ranges of at most 50,000 blocks from a little before the lock was sent):
+     ```bash
+     curl -s -X POST "$ETH_RPC" -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getLogs","params":[{"address":"CONTRACT","fromBlock":"0xFROM","toBlock":"finalized","topics":["0x578af4d125bb96ec89cd1ade591cb196f35d15047d5b096c478e45e311d84263",null,"0xSENDERPAD"]}]}'
+     ```
+     In every log, the second 32-byte word of `data` (after the amount) is the lock word. A log whose lock word is the record's `lock_word` is a lock of this sender under this lock word, whatever its lock id and its timelock.
 
-A node that is behind, or a load-balanced endpoint, can answer `null` for a mined hash or an old nonce: ask more than once and from two endpoints. The pending-nonce check of `live.js` is only an extra, because nodes drop pending transactions; this record is what counts.
+   If either read shows a lock, that lock IS mined: do not send another, and keep the records.
+4. Remove the record (`rm bob.swap.json.lock-sent`, and the per-user file under `.noid-swap/lock-sent/`; remove the two together) only if proof 1 or proof 2 holds and step 3 shows no lock. If neither holds, do not remove it: wait (a pending transaction is mined, replaced or dropped), or let the swap abort.
+5. A send that no node ever accepted (HTTP 429, a refused redirect or connection, "fee too low") leaves a record too, and the sender's nonce never moves, so proof 2 cannot come by waiting. The way out is to spend the recorded nonce yourself: send a 0-ETH transfer from the sender to itself at exactly that nonce (from the wallet that holds the key, with a fee above the base fee). Once that transaction is in a finalized block, proof 2 holds; the reads of step 3 still have to show no lock.
+6. **An empty or half-written record.** A crash between creating a record and writing it leaves a file that is empty or holds part of the line. It normally comes from BEFORE the signature (the whole record is synced and read back before the signature is used), so no lock went out from that call; on a share that does not keep its promise to sync (the `\\wsl.localhost` path), after a power loss, treat it like a full record. It refuses like any record and the tool does not remove it. Remove it (and its twin, if there is one) only when (a) the sender's pending nonce equals its latest nonce on two endpoints (`eth_getTransactionCount` with `"pending"` and with `"latest"`: nothing of this sender is in flight) and (b) the reads of step 3 show no lock of this sender under the swap's lock word (a lock id is not in such a record: use the `Locked` events search, and the lock word of the swap file; the name of a per-user record carries the sender and the lock word).
+
+A node that is behind, or a load-balanced endpoint, can answer `null` for a mined hash or an old nonce, or no logs for a lock that exists (a stale log index): ask more than once and from two endpoints. The pending-nonce check of `live.js` is only an extra, because nodes drop pending transactions; the records and the contract reads are what count.
 
 **Step 5, Alice reveals** (only when `tick` says `reveal_eth`; the dry run needs no secret):
 ```sh

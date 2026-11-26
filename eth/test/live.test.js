@@ -8,6 +8,7 @@ const path = require("path");
 const http = require("http");
 const { execFileSync, spawn, spawnSync } = require("child_process");
 
+const isolated = require("./helpers/isolated-home"); // before anything else: the per-user lock record must never touch the real home
 const live = require("../scripts/live.js");
 const { startProxy } = require("../scripts/rpc-proxy.js");
 
@@ -1582,6 +1583,312 @@ describe("live.js --swap FILE (REVIEW-3 F3)", function () {
         expect(fs.existsSync(lockFileOf(swap2)), "the lock lock is let go").to.equal(false);
         // and the next attempt refuses on the record, whatever the node says
         await expect(lockApproved(provider, bob, { swap: swap2 })).to.be.rejectedWith(/refusing: the lock record .*\.lock-sent exists/);
+      });
+
+      // ---- the per-user lock record (an outside read of the public copy 70be980): keyed by chain, sender and lock word, not by the name of the swap file
+      describe("the per-user lock record", () => {
+        const userRecordOf = (hash = hashlock) => live.userLockSentPath(31337, bobAddr, hash);
+        /** A provider that sees no Locked logs (a stale log index): the duplicate rule is blind, as in the outside probe. */
+        const blindProvider = () =>
+          new Proxy(provider, {
+            get(t, prop) {
+              if (prop === "getLogs") return async () => [];
+              const v = t[prop];
+              return typeof v === "function" ? v.bind(t) : v;
+            },
+          });
+        const PER_USER = /refusing: the per-user lock record .*\.json exists \(it records sender 0x[0-9a-fA-F]{40}, nonce \d+, transaction hash 0x[0-9a-f]{64}, lock id 0x[0-9a-f]{64}, written at Unix second \d+, swap file /;
+        const captureStderr = async (fn) => {
+          const written = [];
+          const realWrite = process.stderr.write.bind(process.stderr);
+          process.stderr.write = (chunk) => {
+            written.push(String(chunk));
+            return true;
+          };
+          try {
+            return { result: await fn(), stderr: written.join("") };
+          } finally {
+            process.stderr.write = realWrite;
+          }
+        };
+        beforeEach(() => isolated.clearRecords());
+
+        it("the tests run on a temporary home, never the real one", () => {
+          expect(path.resolve(live.userLockSentDir())).to.equal(path.resolve(isolated.recordsDir()));
+          expect(path.resolve(live.userLockSentDir()).startsWith(path.resolve(os.tmpdir()))).to.equal(true);
+        });
+
+        it("it is named from chain id, sender and lock word (lower case), and a term that is not well formed cannot name one", () => {
+          const p = live.userLockSentPath("31337", bobAddr.toUpperCase().replace("0X", "0x"), hashlock.toUpperCase().replace("0X", "0x"));
+          expect(path.basename(p)).to.equal(`31337-${bobAddr.toLowerCase().slice(2)}-${hashlock.slice(2)}.json`);
+          expect(path.dirname(p)).to.equal(live.userLockSentDir());
+          expect(() => live.userLockSentPath("1.5", bobAddr, hashlock)).to.throw(/chain id/);
+          expect(() => live.userLockSentPath(1, "0x12", hashlock)).to.throw(/sender is not an address/);
+          expect(() => live.userLockSentPath(1, bobAddr, "0x12")).to.throw(/lock word/);
+        });
+
+        it("it is written before the broadcast, with the content of the record beside the swap file plus chain, contract, kind and the real path; both stay after the send", async () => {
+          const { swap } = await fileWith();
+          const seen = [];
+          const realBroadcast = provider.broadcastTransaction.bind(provider);
+          provider.broadcastTransaction = async (raw) => {
+            seen.push({ file: fs.existsSync(recordOf(swap)) ? fs.readFileSync(recordOf(swap), "utf8") : null, user: fs.existsSync(userRecordOf()) ? fs.readFileSync(userRecordOf(), "utf8") : null });
+            return realBroadcast(raw);
+          };
+          let r;
+          try {
+            r = await lockApproved(provider, wallet, { swap });
+          } finally {
+            provider.broadcastTransaction = realBroadcast;
+          }
+          expect(seen).to.have.length(1);
+          expect(seen[0].file, "the record beside the file is there when the bytes go out").to.not.equal(null);
+          expect(seen[0].user, "so is the per-user record").to.not.equal(null);
+          const fileRec = JSON.parse(fs.readFileSync(recordOf(swap), "utf8"));
+          const userRec = JSON.parse(fs.readFileSync(userRecordOf(), "utf8"));
+          expect(JSON.parse(seen[0].user)).to.deep.equal(userRec);
+          const { chain_id: chainId, contract, lock_kind: kind, swap_file: swapFileName, ...rest } = userRec;
+          expect(rest, "the same fields, the same time").to.deep.equal(fileRec);
+          expect(chainId).to.equal("31337");
+          expect(contract.toLowerCase()).to.equal(htlcAddr.toLowerCase());
+          expect(kind).to.equal("sha256");
+          expect(swapFileName).to.equal(fs.realpathSync(swap));
+          expect(r.userLockRecord).to.equal(userRecordOf());
+          expect(fs.existsSync(userRecordOf()), "it stays after the send").to.equal(true);
+          expect(fs.readdirSync(live.userLockSentDir())).to.deep.equal([path.basename(userRecordOf())]);
+          if (process.platform !== "win32") expect(fs.statSync(userRecordOf()).mode & 0o777).to.equal(0o600);
+        });
+
+        it("a renamed swap file with a new T_reveal, a blind duplicate rule: the second lock is refused by the per-user record (and goes out without it)", async () => {
+          const a = await fileWith();
+          const first = await lockApproved(provider, wallet, { swap: a.swap });
+          // the outside probe: the intent is cancelled and recorded again with a new T_reveal, the file is renamed, the node's log query returns nothing
+          const renamed = path.join(dir, "renamed.json");
+          fs.renameSync(a.swap, renamed);
+          const j = JSON.parse(fs.readFileSync(renamed, "utf8"));
+          j.pending_intent.params.t_reveal = a.tReveal + 60;
+          fs.writeFileSync(renamed, JSON.stringify(j, null, 2));
+          expect(fs.existsSync(recordOf(renamed)), "the record beside the old name is not found under the new one").to.equal(false);
+          const n = await nonce(bobAddr);
+          const e = await lockApproved(blindProvider(), wallet, { swap: renamed }).then(() => null, (x) => x);
+          expect(e && e.message).to.match(PER_USER);
+          expect(e.message).to.match(/Nothing was sent/);
+          expect(e.message).to.match(/the contract itself shows no lock: read the record's lock id on two endpoints \(`live\.js status`\) and search the Locked events of this sender for this lock word up to the finalized block/);
+          expect(e.message).to.match(/a replacement of the same call under another hash.*uses the same nonce/s);
+          expect(e.message).to.match(/no transaction hash \(no local key\).*the two contract reads are mandatory/s);
+          expect(e.message).to.match(/section "Clearing a FILE\.lock-sent record" of scripts\/live\/README\.md and docs\/runbook-two-party\.md/);
+          expect(await nonce(bobAddr)).to.equal(n);
+          expect(fs.existsSync(recordOf(renamed)), "no record is made for a lock that was refused").to.equal(false);
+          expect(fs.existsSync(lockFileOf(renamed))).to.equal(false);
+          expect(JSON.parse(fs.readFileSync(userRecordOf(), "utf8")).lock_id).to.equal(first.lockId); // the record is the first lock's, untouched
+          // a copy of that file under yet another name: the same
+          const copy = path.join(dir, "copy.json");
+          fs.copyFileSync(renamed, copy);
+          await expect(lockApproved(blindProvider(), wallet, { swap: copy })).to.be.rejectedWith(PER_USER);
+          expect(await nonce(bobAddr)).to.equal(n);
+          // the control: the record is what stopped it (without it the blind rule lets a second lock out)
+          fs.unlinkSync(userRecordOf());
+          const second = await lockApproved(blindProvider(), wallet, { swap: renamed });
+          expect(second.lockId).to.not.equal(first.lockId);
+          expect(await nonce(bobAddr)).to.equal(n + 1);
+        });
+
+        it("a lock without --swap is refused by the per-user record too (and the same lock goes out without it)", async () => {
+          const { swap, tReveal } = await fileWith();
+          await lockApproved(provider, wallet, { swap });
+          const n = await nonce(bobAddr);
+          const bare = { ...tgt, contract: htlcAddr, hashlock, tReveal: String(tReveal + 60), receiver: aliceAddr, amountWei: amount.toString() };
+          const e = await live.lock(blindProvider(), wallet, bare).then(() => null, (x) => x);
+          expect(e && e.message).to.match(PER_USER);
+          expect(await nonce(bobAddr)).to.equal(n);
+          // another lock word of the same sender is not in the way
+          expect((await live.lock(provider, wallet, { ...bare, hashlock: sha256Raw(rand32()) })).lockId).to.match(/^0x[0-9a-f]{64}$/);
+          // a lock without --swap writes no per-user record of its own (it has no swap file, no pre-send step)
+          expect(fs.readdirSync(live.userLockSentDir())).to.have.length(1);
+          fs.unlinkSync(userRecordOf());
+          expect((await live.lock(blindProvider(), wallet, bare)).lockId).to.match(/^0x[0-9a-f]{64}$/);
+        });
+
+        it("a record that cannot be read, is empty, is too large or is a directory refuses, and is never touched", async () => {
+          const { swap } = await fileWith();
+          const n = await nonce(bobAddr);
+          fs.mkdirSync(live.userLockSentDir(), { recursive: true });
+          for (const content of ["", "not json", '{"version":2}', "x".repeat(5000)]) {
+            fs.writeFileSync(userRecordOf(), content);
+            const e = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+            expect(e && e.message, JSON.stringify(content.slice(0, 20))).to.match(/refusing: the per-user lock record .*\.json exists \((its content could not be read|it is not a record this tool wrote)/);
+            expect(fs.readFileSync(userRecordOf(), "utf8")).to.equal(content);
+            const bare = await live.lock(provider, wallet, { ...tgt, contract: htlcAddr, hashlock, tReveal: String((await latestTs()) + HOUR), receiver: aliceAddr, amountWei: "1" }).then(() => null, (x) => x);
+            expect(bare && bare.message, "without --swap too").to.match(/refusing: the per-user lock record/);
+          }
+          fs.rmSync(userRecordOf());
+          fs.mkdirSync(userRecordOf()); // a directory at the name
+          const e2 = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+          expect(e2 && e2.message).to.match(/per-user lock record .* exists \(it is not a record this tool wrote/);
+          expect(fs.statSync(userRecordOf()).isDirectory()).to.equal(true);
+          expect(await nonce(bobAddr)).to.equal(n);
+          expect(fs.existsSync(recordOf(swap)), "no record beside the file for a refused lock").to.equal(false);
+          expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+        });
+
+        it("a place that cannot be examined or made refuses: `.noid-swap` is a file; a home that is not an absolute path", async () => {
+          const { swap } = await fileWith();
+          const n = await nonce(bobAddr);
+          fs.writeFileSync(path.join(isolated.home, ".noid-swap"), "in the way");
+          const e = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+          expect(e && e.message).to.match(/per-user lock record/);
+          expect(await nonce(bobAddr)).to.equal(n);
+          expect(fs.existsSync(recordOf(swap)), "no debris beside the swap file").to.equal(false);
+          expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+          fs.rmSync(path.join(isolated.home, ".noid-swap"));
+          // a home that cannot be placed counts as a record that is there
+          const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+          process.env.HOME = "relative-home";
+          process.env.USERPROFILE = "relative-home";
+          try {
+            const e2 = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+            expect(e2 && e2.message).to.match(/refusing: the per-user lock record \(unknown place\) exists \(its place cannot be determined .*home directory of this user cannot be determined.*which counts as present\)/);
+            const bare = await live.lock(provider, wallet, { ...tgt, contract: htlcAddr, hashlock, tReveal: String((await latestTs()) + HOUR), receiver: aliceAddr, amountWei: "1" }).then(() => null, (x) => x);
+            expect(bare && bare.message).to.match(/its place cannot be determined/);
+            const { result, stderr } = await captureStderr(() => live.lock(provider, bob, { swap, dryRun: true }));
+            expect(result.dryRun, "a dry run still answers").to.equal(true);
+            expect(stderr).to.match(/WARNING: the per-user lock record .*its place cannot be determined/);
+          } finally {
+            process.env.HOME = saved.HOME;
+            process.env.USERPROFILE = saved.USERPROFILE;
+          }
+          expect(await nonce(bobAddr)).to.equal(n);
+          expect(fs.existsSync(recordOf(swap))).to.equal(false);
+        });
+
+        it("a write of the per-user record that fails sends nothing and leaves no debris: the half-written record and the one beside the file are taken back", async () => {
+          const { swap } = await fileWith();
+          const n = await nonce(bobAddr);
+          const realOpen = fs.openSync;
+          const realFsync = fs.fsyncSync;
+          const realClose = fs.closeSync;
+          const bad = new Set();
+          fs.openSync = (p, ...rest) => {
+            const fd = realOpen(p, ...rest);
+            if (String(p).startsWith(live.userLockSentDir())) bad.add(fd);
+            return fd;
+          };
+          fs.fsyncSync = (fd) => {
+            if (bad.has(fd)) throw Object.assign(new Error("input/output error (test)"), { code: "EIO" });
+            return realFsync(fd);
+          };
+          fs.closeSync = (fd) => {
+            bad.delete(fd);
+            return realClose(fd);
+          };
+          let e;
+          try {
+            e = await lockApproved(provider, wallet, { swap }).then(() => null, (x) => x);
+          } finally {
+            fs.openSync = realOpen;
+            fs.fsyncSync = realFsync;
+            fs.closeSync = realClose;
+          }
+          expect(e && e.message).to.match(/the per-user lock record .* could not be written durably \(EIO\); nothing was sent\. The per-user lock record this call had written was removed again/);
+          expect(e.message).to.match(/The lock record this call had written was removed again/);
+          expect(fs.existsSync(userRecordOf())).to.equal(false);
+          expect(fs.existsSync(recordOf(swap))).to.equal(false);
+          expect(fs.existsSync(lockFileOf(swap))).to.equal(false);
+          expect(await nonce(bobAddr)).to.equal(n);
+          // and the retry on a healthy disk goes out
+          expect((await lockApproved(provider, wallet, { swap })).lockId).to.match(/^0x[0-9a-f]{64}$/);
+        });
+
+        it("a dry run writes nothing (not even the directory) and warns when a per-user record exists", async () => {
+          const { swap } = await fileWith();
+          const quiet = await captureStderr(() => live.lock(provider, bob, { swap, dryRun: true }));
+          expect(quiet.result.dryRun).to.equal(true);
+          expect(quiet.stderr).to.not.match(/per-user lock record/);
+          expect(fs.existsSync(path.join(isolated.home, ".noid-swap")), "no directory made").to.equal(false);
+          expect(fs.existsSync(recordOf(swap))).to.equal(false);
+          fs.mkdirSync(live.userLockSentDir(), { recursive: true });
+          fs.writeFileSync(userRecordOf(), "x");
+          const loud = await captureStderr(() => live.lock(provider, bob, { swap, dryRun: true }));
+          expect(loud.result.dryRun).to.equal(true);
+          expect(loud.stderr).to.match(/WARNING: the per-user lock record .*\.json exists .*a real lock of this sender under this lock word would refuse, whatever the swap file is called.*Clearing a FILE\.lock-sent record/s);
+          expect(fs.readFileSync(userRecordOf(), "utf8")).to.equal("x");
+          // without --swap as well
+          const tRev = String((await latestTs()) + HOUR);
+          const bare = await captureStderr(() => live.lock(provider, bob, { ...tgt, contract: htlcAddr, hashlock, tReveal: tRev, receiver: aliceAddr, amountWei: "1", dryRun: true }));
+          expect(bare.result.dryRun).to.equal(true);
+          expect(bare.stderr).to.match(/WARNING: the per-user lock record/);
+        });
+
+        it("the record stays after a broadcast that then fails (the node refuses, a timeout, a 429, a revert), and every later lock refuses on it", async () => {
+          const reverted = () => ({
+            hash: "0x" + "ab".repeat(32),
+            nonce: 0,
+            wait: async () => {
+              throw Object.assign(new Error("transaction execution reverted (test)"), { code: "CALL_EXCEPTION", receipt: { status: 0, hash: "0x" + "ab".repeat(32) } });
+            },
+          });
+          const cases = [
+            ["the node refused", async () => { throw new Error("the node did not answer (test)"); }, /the node did not answer \(test\)/],
+            ["a timeout", async () => { throw Object.assign(new Error("timeout (test)"), { code: "TIMEOUT" }); }, /timeout \(test\)/],
+            ["a 429", async () => { throw Object.assign(new Error("server response 429 Too Many Requests (test)"), { code: "SERVER_ERROR", status: 429 }); }, /429/],
+            ["a revert", async () => reverted(), /failed \(status 0\)/],
+          ];
+          for (const [name, stub, re] of cases) {
+            const { swap } = await fileWith(sha256Raw(rand32()));
+            const hash = JSON.parse(fs.readFileSync(swap, "utf8")).public.hashlock;
+            const realBroadcast = provider.broadcastTransaction;
+            provider.broadcastTransaction = stub;
+            let e;
+            try {
+              e = await lockApproved(provider, new ethers.Wallet(BOB_KEY, provider), { swap }).then(() => null, (x) => x);
+            } finally {
+              provider.broadcastTransaction = realBroadcast;
+            }
+            expect(e && e.message, name).to.match(re);
+            expect(e.message, name).to.match(/was written before the send and STAYS.*The per-user lock record .*\.json was written too and STAYS: every later lock of this sender under this lock word refuses/s);
+            expect(fs.existsSync(recordOf(swap)), name).to.equal(true);
+            expect(fs.existsSync(userRecordOf(hash)), name).to.equal(true);
+            // a copy of the file under another name meets the per-user record
+            const copy = path.join(dir, `copy-${nSwap}.json`);
+            fs.copyFileSync(swap, copy);
+            await expect(lockApproved(provider, wallet, { swap: copy }), name).to.be.rejectedWith(/refusing: the per-user lock record .*\.json exists/);
+            expect(fs.existsSync(lockFileOf(swap)), name).to.equal(false);
+          }
+        });
+
+        it("a send refused before the broadcast takes back both of this call's records (and a refusal before the records writes none)", async () => {
+          const { swap } = await fileWith();
+          const failing = new ethers.Wallet(BOB_KEY, provider);
+          const realSign = failing.signTransaction.bind(failing);
+          let calls = 0;
+          failing.signTransaction = async (tx) => {
+            calls++;
+            if (calls >= 2) throw new Error("signing refused by the test");
+            return realSign(tx);
+          };
+          const n = await nonce(bobAddr);
+          const e = await lockApproved(provider, failing, { swap }).then(() => null, (x) => x);
+          expect(e && e.message).to.match(/signing refused by the test.*The lock record this call had written was removed again.*The per-user lock record this call had written was removed again/s);
+          expect(fs.existsSync(recordOf(swap))).to.equal(false);
+          expect(fs.existsSync(userRecordOf())).to.equal(false);
+          expect(await nonce(bobAddr)).to.equal(n);
+          // an approval that does not match: refused before anything is written
+          await expect(live.lock(provider, wallet, { swap, ...approvalOf(swap), approvedIntent: "7" })).to.be.rejectedWith(/is not the decided_at/);
+          expect(fs.existsSync(userRecordOf())).to.equal(false);
+          // a per-user record someone else wrote between the check and the write is never overwritten and refuses the call (exclusive create)
+          fs.mkdirSync(live.userLockSentDir(), { recursive: true });
+          const racing = new ethers.Wallet(BOB_KEY, provider);
+          const realEstimate = racing.estimateGas.bind(racing);
+          racing.estimateGas = async (tx) => {
+            fs.writeFileSync(userRecordOf(), "written by someone else, after the check");
+            return realEstimate(tx);
+          };
+          const e2 = await lockApproved(provider, racing, { swap }).then(() => null, (x) => x);
+          expect(e2 && e2.message).to.match(/refusing: the per-user lock record .*exists \(its content could not be read\)/);
+          expect(fs.readFileSync(userRecordOf(), "utf8")).to.equal("written by someone else, after the check");
+          expect(fs.existsSync(recordOf(swap)), "the record beside the file is taken back").to.equal(false);
+          expect(await nonce(bobAddr)).to.equal(n);
+        });
       });
     });
 

@@ -62,10 +62,13 @@
  *                      observation age limit, or more than 5 s ahead of this machine's clock). Any one missing, malformed or different refuses, nothing sent; no
  *                      flag or environment variable skips it. The only supported way to send a lock is scripts/live/lock.sh, which runs that tick right before and
  *                      hands the three values over from the tick's own output. It is a binding, not a proof (whoever reads the swap file can compute the values).
- *                      The approval is NOT single-use; for this swap file a second send of the same lock is made impossible by four checks of this script: the duplicate-hashlock rule
+ *                      The approval is NOT single-use; for this swap file a second send of the same lock is meant to be made impossible by five checks of this script: the duplicate-hashlock rule
  *                      (mined Locked events), the lock lock FILE.lock-lock (exclusive, held from before the checks until the send has settled), the pending-nonce check
- *                      (an extra: nodes drop pending transactions) and the lock record FILE.lock-sent (written and synced before the broadcast, never removed by
- *                      this tool once the bytes may have left; the operator removes it by hand on one of two proofs, see scripts/live/README.md).
+ *                      (an extra: nodes drop pending transactions), the lock record FILE.lock-sent (written and synced before the broadcast, never removed by
+ *                      this tool once the bytes may have left; the operator removes it by hand on one of two proofs, see scripts/live/README.md) and the per-user lock
+ *                      record, one file per chain, sender and lock word in the `.noid-swap/lock-sent` directory of the home of the user that runs this script (written beside
+ *                      FILE.lock-sent, found by every real lock whatever the name of the swap file, also one without --swap; same proofs). The guards are tested offline only.
+ *                      Another machine or another user account still has the duplicate rule only (and, with a swap file, the pending-nonce check of its own node).
  * lock, claim --swap FILE  the file must have ONE name: a swap file with more than one hard link is refused (the claim lock and the marker files are named from
  *                      the path, so a second name gets its own claim lock and misses a marker beside the first). Only where the file system reports a link count.
  *
@@ -149,6 +152,7 @@
  */
 "use strict";
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { ethers } = require("ethers");
@@ -1260,21 +1264,28 @@ function takeSwapLock(file, noun) {
 
 // ------------------------------------------------ the lock lock and the lock record (2026-11-10)
 // The duplicate rule of `lock` reads MINED Locked events only, so a second real lock could pass while the first send is still in flight or timed out
-// unconfirmed (Bob would lock twice). Three layers close that window on the lock side; refusing a lock is always the safe direction (no lock, no ETH at risk):
+// unconfirmed (Bob would lock twice). Four layers are meant to close that window on the lock side; refusing a lock is always the safe direction (no lock, no ETH at risk):
 //  (a) the lock lock `FILE.lock-lock`: a real `lock --swap FILE` takes it exclusively (the claim lock's code and its fail-closed handling, a file of its own
 //      so a claim and a lock never meet) before any check and holds it until the send has settled;
 //  (b) the pending-nonce check: the sender has no transaction pending on the node (pending nonce above latest nonce). An extra only: nodes drop pending
-//      transactions, so (c) is the check that counts;
+//      transactions, so (c) and (d) are the checks that count;
 //  (c) the lock record `FILE.lock-sent`: written and synced BEFORE the broadcast (lock word, lock id, sender, nonce, signed hash when the key is local, time;
 //      nothing secret), created exclusively. A later real lock refuses while it exists. The tool NEVER removes it once the bytes may have left (only a
 //      call that was refused before the broadcast takes back the record it made itself). The operator removes it by hand, only on one of two proofs (see
-//      `lockSentRefusal`; scripts/live/README.md, "Clearing a FILE.lock-sent record"). A record that cannot be examined counts as present.
+//      `lockSentRefusal`; scripts/live/README.md, "Clearing a FILE.lock-sent record"). A record that cannot be examined counts as present;
+//  (d) the per-user lock record (an outside read of the public copy 70be980): (c) is named from the swap file's path, so a renamed or copied swap file does not find it.
+//      The per-user record is keyed by WHAT is locked, not by a file name: one file per chain id, sender and lock word in `<home>/.noid-swap/lock-sent/` (the home of the
+//      user that runs this script, `os.homedir()`; nothing in it is secret). It holds what (c) holds plus the chain id, the contract, the lock kind and the real path of the
+//      swap file. It is written in the same step as (c) and by the same rules (exclusive, synced and read back before the broadcast; if it cannot be made durable nothing is
+//      sent and only this call's own bytes are taken back), found by EVERY real lock (with a swap file under any name, and without --swap), never removed once the broadcast
+//      was reached, and cleared by the same two proofs and the same operator section. It does not reach another machine or another user account.
 const LOCK_LOCK_SUFFIX = ".lock-lock";
 const LOCK_SENT_SUFFIX = ".lock-sent";
 const lockLockPath = (swapFile) => String(swapFile) + LOCK_LOCK_SUFFIX;
 const lockSentPath = (swapFile) => String(swapFile) + LOCK_SENT_SUFFIX;
 const LOCK_SENT_MAX_BYTES = 4096;
 const CLEARING_NAME = "Clearing a FILE.lock-sent record"; // the section of scripts/live/README.md and docs/runbook-two-party.md the refusals point at
+const USER_LOCK_SENT_SUBDIR = [".noid-swap", "lock-sent"];
 
 /** What the record at `file` says (for the refusal message; never throws). */
 function describeLockSent(file) {
@@ -1283,7 +1294,8 @@ function describeLockSent(file) {
     if (!st.isFile() || st.size > LOCK_SENT_MAX_BYTES) return "it is not a record this tool wrote (not a regular file, or too large)";
     const j = JSON.parse(fs.readFileSync(file, "utf8"));
     if (j && j.version === 1 && typeof j.sender === "string" && Number.isSafeInteger(j.nonce) && Number.isSafeInteger(j.at)) {
-      return `it records sender ${j.sender}, nonce ${j.nonce}, transaction hash ${j.tx_hash === null ? "unknown (no local key)" : j.tx_hash}, lock id ${j.lock_id}, written at Unix second ${j.at}`;
+      const swap = typeof j.swap_file === "string" ? `, swap file ${j.swap_file}` : "";
+      return `it records sender ${j.sender}, nonce ${j.nonce}, transaction hash ${j.tx_hash === null ? "unknown (no local key)" : j.tx_hash}, lock id ${j.lock_id}, written at Unix second ${j.at}${swap}`;
     }
   } catch {
     /* say so below */
@@ -1308,37 +1320,85 @@ function findLockSent(sw) {
 }
 
 /**
+ * The directory of the per-user lock records: `<home>/.noid-swap/lock-sent`. Throws a UserError when the home of this user cannot be determined (an empty or
+ * relative home is not trusted): a record that cannot be placed counts as present, so the caller refuses.
+ */
+function userLockSentDir() {
+  let home;
+  try {
+    home = os.homedir();
+  } catch (e) {
+    throw new UserError(`the home directory of this user cannot be determined (${codeOf(e)})`);
+  }
+  if (typeof home !== "string" || home === "" || !path.isAbsolute(home)) throw new UserError("the home directory of this user cannot be determined (it is empty or not an absolute path)");
+  return path.join(home, ...USER_LOCK_SENT_SUBDIR);
+}
+
+/** The per-user record of a lock: one file per chain id, sender and lock word (lower case hex), whatever the swap file is called. Throws a UserError for a term that is not well formed. */
+function userLockSentPath(chainId, sender, lockWord) {
+  const chain = String(chainId);
+  if (!/^(0|[1-9][0-9]{0,19})$/.test(chain)) throw new UserError(`the per-user lock record cannot be named: the chain id ${chain} is not a whole number`);
+  const s = String(sender).toLowerCase();
+  const w = String(lockWord).toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(s)) throw new UserError("the per-user lock record cannot be named: the sender is not an address");
+  if (!/^0x[0-9a-f]{64}$/.test(w)) throw new UserError("the per-user lock record cannot be named: the lock word is not 32 bytes of hex");
+  return path.join(userLockSentDir(), `${chain}-${s.slice(2)}-${w.slice(2)}.json`);
+}
+
+/**
+ * The per-user record of this lock, or null if there is none: { kind: "user", file, why } when it exists or cannot be examined (that counts as present), also when its place
+ * cannot be determined. Never throws, never creates anything (a missing directory means no record).
+ */
+function findUserLockSent(chainId, sender, lockWord) {
+  let file;
+  try {
+    file = userLockSentPath(chainId, sender, lockWord);
+  } catch (e) {
+    return { kind: "user", file: "(unknown place)", why: `its place cannot be determined (${e instanceof UserError ? e.message : codeOf(e)}), which counts as present` };
+  }
+  try {
+    fs.lstatSync(file);
+  } catch (e) {
+    if (e && e.code === "ENOENT") return null;
+    return { kind: "user", file, why: `it cannot be examined (${codeOf(e)}), which counts as present` };
+  }
+  return { kind: "user", file, why: describeLockSent(file) };
+}
+
+/**
  * The refusal when a lock record exists: it says what the record is, what the two proofs are that make removing it by hand safe, and that the tool
  * never removes it. (The duplicate rule refuses first when the lock is mined: this message is for a lock that is not known to be mined.)
+ * `found.kind` is "user" for the per-user record, else it is the record beside the swap file.
  */
 function lockSentRefusal(found) {
+  const user = found.kind === "user";
   return new UserError(
-    `refusing: the lock record ${found.file} exists (${found.why}). An earlier real lock for this swap file was signed and may have reached the network, and no Locked event of ours for this hashlock is mined, ` +
+    `refusing: the ${user ? "per-user lock record" : "lock record"} ${found.file} exists (${found.why}). ${user ? "An earlier real lock of this sender under this lock word" : "An earlier real lock for this swap file"} was signed and may have reached the network, and no Locked event of ours for this hashlock is mined, ` +
       "so it is not known whether that lock is pending, dropped or will still be mined; a second lock now could lock ETH twice. Nothing was sent. " +
       "Look the recorded hash up (receipt) and the sender's nonce at a FINALIZED block. Remove the record by hand ONLY if (1) the recorded transaction has a receipt in a finalized block " +
-      "(status 0x1: the lock is mined and the duplicate rule refuses a second one anyway; status 0x0: it reverted and locked nothing), or (2) the sender's nonce at a FINALIZED block is above the recorded nonce " +
-      "while the recorded hash has no receipt (it can never be mined). If neither holds, wait, or let the swap abort: no lock means no ETH at risk. " +
+      "with status 0x0 (it reverted and locked nothing; with status 0x1 the lock is mined and the record is kept), or (2) the sender's nonce at a FINALIZED block is above the recorded nonce " +
+      "while the recorded hash has no receipt (it can never be mined), AND, whichever proof you use, the contract itself shows no lock: read the record's lock id on two endpoints (`live.js status`) and search the Locked events of this sender " +
+      "for this lock word up to the finalized block. If either read shows a lock, that lock IS mined: do not send another. " +
+      "\"No receipt for the recorded hash\" proves nothing by itself: a replacement of the same call under another hash (a wallet's \"speed up\") uses the same nonce and can be the one that was mined; " +
+      "a record with no transaction hash (no local key) has only the nonce proof, so the two contract reads are mandatory for it. " +
+      "If neither proof holds, wait, or let the swap abort: no lock means no ETH at risk. " +
+      `${user ? "This per-user record is one file per chain, sender and lock word whatever the swap file is called; remove it only together with a record beside the swap file, if there is one. " : ""}` +
       `This tool never removes the record itself. The exact read-only commands are in the section "${CLEARING_NAME}" of scripts/live/README.md and docs/runbook-two-party.md`
   );
 }
 
 /**
- * Write the lock record exclusively (`wx`), fsync it, sync the directory, read it back. Synchronous. Throws a UserError (nothing was sent) when it cannot be made
+ * Write a lock record exclusively (`wx`), fsync it, sync the directory, read it back. Synchronous. Throws a UserError (nothing was sent) when it cannot be made
  * durable; a file that THIS call created and cannot trust is taken back (only if it holds this call's bytes, or a prefix of them: debris of a short
- * write), and an existing record is never touched. Returns { file, bytes }.
+ * write), and an existing record is never touched. `what` is the noun of the messages, `kind` goes to lockSentRefusal. Returns { file, bytes }.
  */
-function writeLockSent(swapFile, rec) {
-  const target = lockSentPath(swapFile);
-  const body = Buffer.from(
-    JSON.stringify({ version: 1, lock_word: rec.lockWord, lock_id: rec.lockId, sender: rec.sender, nonce: rec.nonce, tx_hash: rec.txHash, at: Math.floor(Date.now() / 1000) }) + "\n",
-    "utf8"
-  );
+function writeRecordExclusive(target, body, what, kind) {
   let fd;
   try {
     fd = fs.openSync(target, "wx", 0o600);
   } catch (e) {
-    if (e && e.code === "EEXIST") throw lockSentRefusal({ file: target, why: describeLockSent(target) });
-    throw new UserError(`refusing: the lock record ${target} could not be created (${codeOf(e)}); it is written before the lock is broadcast so that a lock that may be in flight stays on record; nothing was sent. Fix the directory and retry`);
+    if (e && e.code === "EEXIST") throw lockSentRefusal({ kind, file: target, why: describeLockSent(target) });
+    throw new UserError(`refusing: the ${what} ${target} could not be created (${codeOf(e)}); it is written before the lock is broadcast so that a lock that may be in flight stays on record; nothing was sent. Fix the directory and retry`);
   }
   try {
     writeAllSync(fd, body);
@@ -1346,7 +1406,7 @@ function writeLockSent(swapFile, rec) {
     fs.closeSync(fd);
     fd = undefined;
     fsyncDir(path.dirname(path.resolve(target)));
-    requireBytes(target, body, "the lock record");
+    requireBytes(target, body, `the ${what}`);
   } catch (e) {
     if (fd !== undefined) {
       try {
@@ -1356,11 +1416,46 @@ function writeLockSent(swapFile, rec) {
       }
     }
     const res = removeLockSentIfOurs(target, body);
-    throw new UserError(
-      `refusing: the lock record ${target} could not be written durably (${codeOf(e)}); nothing was sent. ${lockSentFate(res, target)}`
-    );
+    throw new UserError(`refusing: the ${what} ${target} could not be written durably (${codeOf(e)}); nothing was sent. ${lockSentFate(res, target, what)}`);
   }
   return { file: target, bytes: body };
+}
+
+/** The fields of the record beside the swap file, in this order (the bytes of an earlier version of this tool are unchanged). `rec.at` is the time the record gets. */
+function lockSentFields(rec) {
+  return { version: 1, lock_word: rec.lockWord, lock_id: rec.lockId, sender: rec.sender, nonce: rec.nonce, tx_hash: rec.txHash, at: rec.at === undefined ? Math.floor(Date.now() / 1000) : rec.at };
+}
+
+/** The lock record beside the swap file (`swapFile` is its real path). Returns { file, bytes }. */
+function writeLockSent(swapFile, rec) {
+  const body = Buffer.from(JSON.stringify(lockSentFields(rec)) + "\n", "utf8");
+  return writeRecordExclusive(lockSentPath(swapFile), body, "lock record", "file");
+}
+
+/**
+ * The per-user lock record: what writeLockSent holds, plus the chain id, the contract, the lock kind and the real path of the swap file (null without one). The directory is
+ * made (mode 700) if it is not there. A directory that cannot be made, or a file that cannot be made durable, refuses: nothing was sent. Returns { file, bytes }.
+ */
+function writeUserLockSent(rec) {
+  let target;
+  try {
+    target = userLockSentPath(rec.chainId, rec.sender, rec.lockWord);
+  } catch (e) {
+    throw new UserError(`refusing: ${e instanceof UserError ? e.message : codeOf(e)}; the per-user lock record is written before the lock is broadcast; nothing was sent`);
+  }
+  const dir = path.dirname(target);
+  try {
+    const made = fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); // the first directory it had to make, or undefined
+    fsyncDir(path.dirname(dir));
+    if (made !== undefined && path.dirname(path.resolve(made)) !== path.dirname(dir)) fsyncDir(path.dirname(path.resolve(made))); // a new `.noid-swap`: its entry in the home too
+  } catch (e) {
+    throw new UserError(`refusing: the directory ${dir} of the per-user lock records could not be made (${codeOf(e)}); the record is written before the lock is broadcast so that a lock that may be in flight stays on record whatever the swap file is called; nothing was sent. Fix the directory and retry`);
+  }
+  const body = Buffer.from(
+    JSON.stringify({ ...lockSentFields(rec), chain_id: String(rec.chainId), contract: rec.contract, lock_kind: rec.lockKind, swap_file: rec.swapFile === undefined ? null : rec.swapFile }) + "\n",
+    "utf8"
+  );
+  return writeRecordExclusive(target, body, "per-user lock record", "user");
 }
 
 /** Remove `file` only if it still holds exactly `body` or a prefix of it (including nothing: the debris of our own short write). { outcome: "removed" | "other" | "failed", code? }. */
@@ -1387,10 +1482,10 @@ function removeLockSentIfOurs(file, body) {
   return res;
 }
 
-function lockSentFate(res, file) {
-  if (res.outcome === "removed") return "The lock record this call had written was removed again (nothing was sent, so it is not a trace of a send).";
+function lockSentFate(res, file, what = "lock record") {
+  if (res.outcome === "removed") return `The ${what} this call had written was removed again (nothing was sent, so it is not a trace of a send).`;
   if (res.outcome === "other") return `The file ${file} now holds another record and was left in place.`;
-  return `The lock record ${file} this call had written could NOT be removed (${res.code}) and stays: it makes every later lock refuse until you have looked at it (see the section "${CLEARING_NAME}" of scripts/live/README.md).`;
+  return `The ${what} ${file} this call had written could NOT be removed (${res.code}) and stays: it makes every later lock refuse until you have looked at it (see the section "${CLEARING_NAME}" of scripts/live/README.md).`;
 }
 
 /**
@@ -1844,8 +1939,8 @@ function checkApproval(t, decidedAt, args, nowS = Math.floor(Date.now() / 1000))
   }
   if (now - at > BigInt(MAX_OBSERVATION_AGE_S)) {
     throw new UserError(
-      `the fresh check is ${now - at} s old (taken at ${at}, now ${now}); the limit is ${MAX_OBSERVATION_AGE_S} s, the engine's own observation age limit (MAX_OBSERVATION_AGE_S in swap-cli's engine.rs); ` +
-        `${CLOCK_HINT}; nothing was sent; run the fresh check again (scripts/live/lock.sh); refusing`
+      `the fresh check is ${now - at} s old (taken at ${at}, now ${now}); the limit is ${MAX_OBSERVATION_AGE_S} s, the engine's own observation age limit (MAX_OBSERVATION_AGE_S in swap-cli's engine.rs). ` +
+        `It is this old because the check took long to finish or the reads since were slow (run it again), or because the two clocks disagree${CLOCK_HINT}; nothing was sent; run the fresh check again (scripts/live/lock.sh); refusing`
     );
   }
 }
@@ -2217,11 +2312,17 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     // Local read, stderr only: the dry run otherwise looks clean while the real send would refuse on the lock record of an earlier send.
     const earlier = sw ? findLockSent(sw) : null;
     if (earlier !== null) process.stderr.write(`WARNING: the lock record ${earlier.file} exists (${earlier.why}); a real lock for this swap file would refuse (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
+    const earlierUser = findUserLockSent(target.chainId, sender, hashlock);
+    if (earlierUser !== null) process.stderr.write(`WARNING: the per-user lock record ${earlierUser.file} exists (${earlierUser.why}); a real lock of this sender under this lock word would refuse, whatever the swap file is called (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
     return (await execute(provider, signer, args, tx, { expectedLockId, ...checks, ...fp.report }, { fees: fp.fees })).out;
   }
   let r;
   let written = null; // the lock record this call made (a real lock with a swap file)
+  let writtenUser = null; // the per-user lock record this call made (a real lock with a swap file)
   if (sw === null) {
+    // No swap file: no record beside it and no pre-send step, but the per-user record of an earlier real lock still refuses (found by chain, sender and lock word).
+    const stuckUser = findUserLockSent(target.chainId, sender, hashlock);
+    if (stuckUser !== null) throw lockSentRefusal(stuckUser);
     r = await execute(provider, signer, args, tx, {}, { fees: fp.fees });
   } else {
     // The last refusals before the send (every check above stays as it was). First the approval of a fresh read-only tick, of the terms about to be sent.
@@ -2230,6 +2331,9 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     // (c) a lock record of an earlier send that is not known to be mined: refuse. A record that cannot be examined counts as present.
     const stuck = findLockSent(sw);
     if (stuck !== null) throw lockSentRefusal(stuck);
+    // (d) the per-user record of an earlier real lock of this sender under this lock word, whatever the swap file is called (a renamed or copied file does not find (c)).
+    const stuckUser = findUserLockSent(target.chainId, sender, hashlock);
+    if (stuckUser !== null) throw lockSentRefusal(stuckUser);
     // (b) a transaction of this sender still pending on the node: refuse (an extra; nodes drop pending transactions, the record is what counts).
     const [nonceLatest, noncePending] = await Promise.all([provider.getTransactionCount(sender, "latest"), provider.getTransactionCount(sender, "pending")]);
     if (noncePending > nonceLatest) {
@@ -2248,7 +2352,10 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
       // A local key (the command line's) is populated with its nonce; a node-held account is not (the node picks it at the send), so the nonce it will get is read.
       const nonce = populated.nonce !== undefined && populated.nonce !== null ? populated.nonce : await provider.getTransactionCount(sender, "pending");
       if (!Number.isSafeInteger(nonce) || nonce < 0) throw new UserError("refusing: the transaction has no nonce to put in the lock record; nothing was sent");
-      written = writeLockSent(sw.realFile, { lockWord: hashlock, lockId: expectedLockId, sender, nonce, txHash: await presignedHash(signer, populated) });
+      const rec = { lockWord: hashlock, lockId: expectedLockId, sender, nonce, txHash: await presignedHash(signer, populated), at: Math.floor(Date.now() / 1000) };
+      written = writeLockSent(sw.realFile, rec);
+      // The second record, in the same step: if it cannot be made durable nothing is sent, and the catch below takes back both of this call's own records.
+      writtenUser = writeUserLockSent({ ...rec, chainId: target.chainId, contract: contractAddr, lockKind: kind, swapFile: sw.realFile });
     };
     // Runs after the local signature, immediately before the bytes go to the node: from here on the lock may have left this process.
     const lastCheck = () => {
@@ -2260,12 +2367,17 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
       if (written === null) throw e;
       const base = e instanceof UserError ? redact(e.message) : explain(e);
       if (!reachedBroadcast) {
-        throw new UserError(`${base}; ${lockSentFate(removeLockSentIfOurs(written.file, written.bytes), written.file)}`);
+        const fates = [lockSentFate(removeLockSentIfOurs(written.file, written.bytes), written.file)];
+        if (writtenUser !== null) fates.push(lockSentFate(removeLockSentIfOurs(writtenUser.file, writtenUser.bytes), writtenUser.file, "per-user lock record"));
+        throw new UserError(`${base}; ${fates.join(" ")}`);
       }
-      // The record stays whatever happens now (a timeout, an error, a revert): the bytes may have left. This tool never clears it.
+      // The records stay whatever happens now (a timeout, an error, a revert): the bytes may have left. This tool never clears them.
       throw new UserError(
         `${base} (the lock record ${written.file} was written before the send and STAYS: the lock may have reached the network, so every later lock for this swap file refuses until you have looked at it; ` +
-          `see the section "${CLEARING_NAME}" of scripts/live/README.md)`
+          `see the section "${CLEARING_NAME}" of scripts/live/README.md)` +
+          (writtenUser !== null
+            ? ` The per-user lock record ${writtenUser.file} was written too and STAYS: every later lock of this sender under this lock word refuses until you have looked at it, whatever the swap file is called.`
+            : "")
       );
     }
   }
@@ -2294,6 +2406,7 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     sender,
     chainId: target.chainId.toString(),
     ...(written !== null ? { lockRecord: written.file } : {}),
+    ...(writtenUser !== null ? { userLockRecord: writtenUser.file } : {}),
     ...checks,
     ...fp.report,
   };
@@ -2886,6 +2999,7 @@ module.exports = {
   readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
   approvalText, approvalTermsHash, checkApproval, MAX_OBSERVATION_AGE_S, APPROVAL_FUTURE_SKEW_S, lockLockPath, LOCK_LOCK_SUFFIX, lockSentPath, LOCK_SENT_SUFFIX,
+  userLockSentDir, userLockSentPath,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

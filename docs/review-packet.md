@@ -634,7 +634,7 @@ cd equiv && cargo test --release                     # 23 tests; EQUIV_PARITY_N=
 cd equiv/zkvm && cargo test -p equiv-guest-core      # 3 tests; proving needs rzup (equiv/README.md §5)
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=<dir with raw.receipt, stock.receipt> cargo test --release -p equiv-host
 cd swap-cli && cargo test --offline                  # 532 tests (+1 ignored)
-bash scripts/live/selftest.sh                        # 381 cases (315 without python3), no network
+bash scripts/live/selftest.sh                        # 389 cases (315 without python3), no network
 # the Pruv contract, from the vendor workspace:
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   verify parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json --z3 "$(which z3)"

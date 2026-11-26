@@ -44,3 +44,6 @@ btc/keys/
 passphrase*
 env.local.sh
 *.wif
+
+# a Windows shell cache that a tool sometimes drops into the working directory
+%SystemDrive%/

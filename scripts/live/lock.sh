@@ -3,7 +3,7 @@
 # live.js lock --swap FILE fills and checks every term (amount, hashlock, receiver, T_reveal, contract, chain, code hash)
 # against the file and refuses a duplicate hashlock, and (also with --dry-run) a file whose producer screen remembers a detection under
 # production (marker FILE.producer-differs or history entry producer_differs_seen; T21), unless the file records the override. Without --dry-run REAL ETH is locked: owner's go-ahead first.
-# A send (no --dry-run) ALSO runs a fresh read-only `swap-cli tick` of Bob's file right before live.js and refuses (exit 3, nothing sent) unless that tick still shows the pending lock_eth intent and the engine still decides the lock with the producer screen and its other gates (lock_precheck in env.sh); a tick that fails, cannot be read or does not finish within LOCK_PRECHECK_TIMEOUT seconds (default 3 x RPC_TIMEOUT) refuses.
+# A send (no --dry-run) ALSO runs a fresh read-only `swap-cli tick` of Bob's file right before live.js and refuses (exit 3, nothing sent) unless that tick still shows the pending lock_eth intent and the engine still decides the lock with the producer screen and its other gates (lock_precheck in env.sh); a tick that fails, cannot be read or does not finish within LOCK_PRECHECK_TIMEOUT seconds (default 3 x RPC_TIMEOUT, at most 90 s: see APPROVAL_WINDOW_S below) refuses.
 # The lock is sent through THIS script only: it hands live.js lock the APPROVAL of that tick, three values taken from the tick's own output and never from the swap file (--approved-intent: the decided_at of the intent it held; --approved-terms: the SHA-256 of the lock's terms; --approved-at: the tick's own time), and live.js lock refuses a real send without them, with other terms, or when the tick is older than 120 s. Do not call live.js lock directly.
 # Fee flags as in reveal.sh (REVIEW-5 R5-8): MAX_FEE_GWEI (mainnet: --mainnet --max-fee-gwei) or GAS_PRICE_GWEI in env.local.sh; a chain-1 file
 # needs MAX_FEE_GWEI. live.js refuses a cap below 1 x the latest base fee for a lock (R4-1).
@@ -23,8 +23,19 @@ while [ $# -gt 0 ]; do
   shift
 done
 check_fee_settings || exit 2   # a tip with no cap stops here (env.sh)
-LOCK_PRECHECK_TIMEOUT=${LOCK_PRECHECK_TIMEOUT:-$((RPC_TIMEOUT * 3))}
-case "$LOCK_PRECHECK_TIMEOUT" in ''|*[!0-9]*|0) echo "LOCK_PRECHECK_TIMEOUT must be a whole number of seconds above 0 (got '$LOCK_PRECHECK_TIMEOUT')" >&2; exit 2 ;; esac
+# The approval of the tick is good for APPROVAL_WINDOW_S seconds in live.js (MAX_OBSERVATION_AGE_S there and in swap-cli's engine.rs; a test keeps this number in step).
+# The tick's own limit sits well below it (30 s are left for the reads live.js makes before it checks the approval). The tick stamps its time after its reads, so a
+# slow tick is not refused for its age by itself; the limit only keeps the wait short and stops a tick that takes too long HERE, with the message below.
+APPROVAL_WINDOW_S=120
+PRECHECK_MAX=$((APPROVAL_WINDOW_S - 30))
+if [ -z "${LOCK_PRECHECK_TIMEOUT:-}" ]; then
+  LOCK_PRECHECK_TIMEOUT=$((RPC_TIMEOUT * 3))
+  [ "$LOCK_PRECHECK_TIMEOUT" -gt "$PRECHECK_MAX" ] && LOCK_PRECHECK_TIMEOUT=$PRECHECK_MAX
+fi
+case "$LOCK_PRECHECK_TIMEOUT" in ''|*[!0-9]*|0|????*) echo "LOCK_PRECHECK_TIMEOUT must be a whole number of seconds from 1 to $PRECHECK_MAX, at most three digits (got '$LOCK_PRECHECK_TIMEOUT'). Nothing was run or sent" >&2; exit 2 ;; esac
+if [ "$LOCK_PRECHECK_TIMEOUT" -gt "$PRECHECK_MAX" ]; then
+  echo "LOCK_PRECHECK_TIMEOUT $LOCK_PRECHECK_TIMEOUT is above $PRECHECK_MAX: the approval of the tick is good for $APPROVAL_WINDOW_S s only, and the reads live.js makes before it checks the approval need the rest. Nothing was run or sent; use $PRECHECK_MAX or less" >&2; exit 2
+fi
 read_lines FEES fee_flags
 # A SEND (no --dry-run) first asks a fresh read-only `swap-cli tick` of Bob's file (T21 design B): the lock goes out only if that tick still shows the
 # pending lock_eth intent AND the engine, with the producer screen and every other gate, still decides the lock. Three rounds of outside reads found a
@@ -38,7 +49,7 @@ if [ -z "$MODE" ]; then
     "$BIN" tick "$F" ${NODES[@]+"${NODES[@]}"} ${FROM[@]+"${FROM[@]}"} ${REVEAL[@]+"${REVEAL[@]}"}; TEC=$?
   unset SWAP_PASSPHRASE   # the tick needed it; live.js (below) and every other child of this script must not inherit it
   if [ "$RUN_LIMIT_HIT" = 1 ]; then
-    echo "lock REFUSED, nothing sent: the fresh read-only tick right before the send did not finish within $LOCK_PRECHECK_TIMEOUT s (it was stopped), so the engine could not be asked whether the lock is still wanted. Look at the nodes, then run lock.sh again; do not call live.js lock directly (it cannot make this check itself)."
+    echo "lock REFUSED, nothing sent: the fresh read-only tick right before the send did not finish within $LOCK_PRECHECK_TIMEOUT s (it was stopped; the approval of a tick is good for only $APPROVAL_WINDOW_S s, so a slower tick is of no use), so the engine could not be asked whether the lock is still wanted. Look at the nodes (a slow endpoint), then run lock.sh again; do not call live.js lock directly (it cannot make this check itself)."
     exit 3
   fi
   if [ "$TEC" -ne 0 ]; then
@@ -60,7 +71,7 @@ if [ -z "$MODE" ]; then
     exit 3
   fi
   APPROVE=(--approved-intent "$2" --approved-terms "$3" --approved-at "$4")
-  echo "fresh read-only tick: the engine still offers Bob's lock ($L/lock-precheck-$N.json), intent decided_at $2, tick time $4"
+  echo "fresh read-only tick: the engine still offers Bob's lock ($L/lock-precheck-$N.json), intent decided_at $2, tick time $4, tick limit $LOCK_PRECHECK_TIMEOUT s of the $APPROVAL_WINDOW_S s the approval is good for"
 fi
 "$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" ${FEES[@]+"${FEES[@]}"} ${APPROVE[@]+"${APPROVE[@]}"} $MODE \
   > "$L/eth-lock-$N.json" 2> "$L/eth-lock-$N.err"; EC=$?

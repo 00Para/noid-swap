@@ -1139,6 +1139,8 @@ STUB
   lock_run go "$PC/stub-go.json" 0
   check "lock.sh (send): the fresh tick shows the lock: live.js lock runs once, exit 0" "0|1" "$LRC|$(printf '%s\n' "$LNODE" | grep -cx lock)"
   check_has "lock.sh (send): ... and it says the engine still offers the lock" "fresh read-only tick: the engine still offers Bob's lock" "$LOUT"
+  check_has "lock.sh (send): ... and the default limit of the tick is 3 x RPC_TIMEOUT (180 s) cut to 90 s, below the 120 s the approval is good for" "tick limit 90 s of the 120 s the approval is good for" "$LOUT"
+  check "lock.sh: the approval window in the helper is the one live.js uses (MAX_OBSERVATION_AGE_S)" "120|120" "$(sed -n 's/^APPROVAL_WINDOW_S=\([0-9]*\).*/\1/p' "$HERE/lock.sh")|$(sed -n 's/^const MAX_OBSERVATION_AGE_S = \([0-9]*\);.*/\1/p' "$HERE/../../eth/scripts/live.js")"
   check "lock.sh (send): live.js lock is handed --approved-intent with the decided_at of the intent the TICK held" "1|1" "$(printf '%s\n' "$LNODE" | grep -cx -- --approved-intent)|$(printf '%s\n' "$LNODE" | grep -cx 1762000000)"
   check "lock.sh (send): ... and --approved-terms with the hash the tick's report gives, and --approved-at with the tick's own time" "1|1|1|1" "$(printf '%s\n' "$LNODE" | grep -cx -- --approved-terms)|$(printf '%s\n' "$LNODE" | grep -cx "$V_HASH")|$(printf '%s\n' "$LNODE" | grep -cx -- --approved-at)|$(printf '%s\n' "$LNODE" | grep -cx 1762000010)"
   # the swap file holds ANOTHER intent (another decided_at): the value handed on still comes from the tick's output, never from the file (live.js then refuses the mismatch)
@@ -1182,6 +1184,19 @@ STUB
   check "lock.sh (send): a tick that does not finish within LOCK_PRECHECK_TIMEOUT is stopped: exit 3, live.js is never run, well before the tick's own end" "3|0|1" "$LRC|$(grep -c . "$TD/node.argv")|$([ $((T1 - T0)) -lt 20 ] && echo 1 || echo 0)"
   check_has "lock.sh (send): ... and says so, and not to call live.js directly" "did not finish within 2 s" "$LOUT"
   check_has "lock.sh (send): ... naming the direct call" "do not call live.js lock directly" "$LOUT"
+  check_has "lock.sh (send): ... and saying how long the approval of a tick is good for (a slower tick is of no use)" "good for only 120 s" "$LOUT"
+  # a limit above the window is refused before anything runs; one at the cut is taken; a default below the cut stays as it is
+  TD=$(mkl lock-timeout-high); mkdir -p "$TD/bob"; echo "selftest-passphrase" > "$TD/passphrase.txt"; : > "$TD/node.argv"; : > "$TD/bin.argv"
+  HOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" LOCK_PRECHECK_TIMEOUT=91 STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" STUB_TICK="$PC/stub-go.json" "$BASH" "$LB/lock.sh" 2>&1); HRC=$?
+  check "lock.sh (send): a LOCK_PRECHECK_TIMEOUT above 90 refuses with exit 2, and neither swap-cli nor live.js is run" "2|0|0" "$HRC|$(grep -c . "$TD/node.argv")|$(grep -c . "$TD/bin.argv")"
+  check_has "lock.sh (send): ... and says why (the approval is good for 120 s only)" "the approval of the tick is good for 120 s only" "$HOUT"
+  TD=$(mkl lock-timeout-cut); mkdir -p "$TD/bob" "$TD/rec"; echo "selftest-passphrase" > "$TD/passphrase.txt"; : > "$TD/node.argv"; : > "$TD/bin.argv"
+  HOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" LOCK_PRECHECK_TIMEOUT=90 STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" STUB_TICK="$PC/stub-go.json" "$BASH" "$LB/lock.sh" 2>/dev/null); HRC=$?
+  check "lock.sh (send): a LOCK_PRECHECK_TIMEOUT of exactly 90 is taken" "0|1" "$HRC|$(grep -cx lock "$TD/node.argv")"
+  check_has "lock.sh (send): ... and is the limit shown" "tick limit 90 s" "$HOUT"
+  TD=$(mkl lock-timeout-low); mkdir -p "$TD/bob" "$TD/rec"; echo "selftest-passphrase" > "$TD/passphrase.txt"; : > "$TD/node.argv"; : > "$TD/bin.argv"
+  HOUT=$(env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" RPC_TIMEOUT=10 STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" STUB_TICK="$PC/stub-go.json" "$BASH" "$LB/lock.sh" 2>/dev/null); HRC=$?
+  check_has "lock.sh (send): a short RPC_TIMEOUT keeps its own default (3 x 10 s = 30 s), below the cut" "tick limit 30 s" "$HOUT"
   TD=$(mkl lock-timeout-bad); mkdir -p "$TD/bob"; echo "selftest-passphrase" > "$TD/passphrase.txt"
   env -i HOME="$TMP/home" PATH="$PATH" L="$TD" LIVE_PLATFORM=native BIN="$TMP/lockbinstub" NODE="$TMP/locknodestub" ETH_DIR="$TMP/ethdir" LOCK_PRECHECK_TIMEOUT=abc STUB_BIN_ARGV="$TD/bin.argv" STUB_NODE_ARGV="$TD/node.argv" "$BASH" "$LB/lock.sh" >/dev/null 2>&1
   check "lock.sh (send): a LOCK_PRECHECK_TIMEOUT that is not a whole number refuses with exit 2" "2" "$?"
