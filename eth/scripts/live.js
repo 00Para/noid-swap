@@ -66,8 +66,11 @@
  *                      (mined Locked events), the lock lock FILE.lock-lock (exclusive, held from before the checks until the send has settled), the pending-nonce check
  *                      (an extra: nodes drop pending transactions), the lock record FILE.lock-sent (written and synced before the broadcast, never removed by
  *                      this tool once the bytes may have left; the operator removes it by hand on one of two proofs, see scripts/live/README.md) and the per-user lock
- *                      record, one file per chain, sender and lock word in the `.noid-swap/lock-sent` directory of the home of the user that runs this script (written beside
- *                      FILE.lock-sent, found by every real lock whatever the name of the swap file, also one without --swap; same proofs). The guards are tested offline only.
+ *                      record, one file per chain, sender and lock word in the `.noid-swap/lock-sent` directory of the account's home (the home the operating system's
+ *                      account database gives the user that runs this script, not the HOME (Linux, macOS) or USERPROFILE (Windows) of the environment: one that
+ *                      names another directory is refused, and so is a run with SUDO_UID or SUDO_USER set; `su`, `runas`, another login and another machine cannot be
+ *                      detected and have no record). It is written beside FILE.lock-sent, and on its own by a lock without --swap, and found by every real lock whatever the name of the swap
+ *                      file; same proofs. The guards are tested offline only.
  *                      Another machine or another user account still has the duplicate rule only (and, with a swap file, the pending-nonce check of its own node).
  * lock, claim --swap FILE  the file must have ONE name: a swap file with more than one hard link is refused (the claim lock and the marker files are named from
  *                      the path, so a second name gets its own claim lock and misses a marker beside the first). Only where the file system reports a link count.
@@ -1274,11 +1277,25 @@ function takeSwapLock(file, noun) {
 //      call that was refused before the broadcast takes back the record it made itself). The operator removes it by hand, only on one of two proofs (see
 //      `lockSentRefusal`; scripts/live/README.md, "Clearing a FILE.lock-sent record"). A record that cannot be examined counts as present;
 //  (d) the per-user lock record (an outside read of the public copy 70be980): (c) is named from the swap file's path, so a renamed or copied swap file does not find it.
-//      The per-user record is keyed by WHAT is locked, not by a file name: one file per chain id, sender and lock word in `<home>/.noid-swap/lock-sent/` (the home of the
-//      user that runs this script, `os.homedir()`; nothing in it is secret). It holds what (c) holds plus the chain id, the contract, the lock kind and the real path of the
-//      swap file. It is written in the same step as (c) and by the same rules (exclusive, synced and read back before the broadcast; if it cannot be made durable nothing is
-//      sent and only this call's own bytes are taken back), found by EVERY real lock (with a swap file under any name, and without --swap), never removed once the broadcast
-//      was reached, and cleared by the same two proofs and the same operator section. It does not reach another machine or another user account.
+//      The per-user record is keyed by WHAT is locked, not by a file name: one file per chain id, sender and lock word in `<account home>/.noid-swap/lock-sent/` (nothing in it
+//      is secret). The account home is the one the operating system's account database gives the user that runs this script (`os.userInfo().homedir`), NOT the HOME or
+//      USERPROFILE of the environment (`os.homedir()` reads only HOME on Linux and macOS and only USERPROFILE on Windows). What this refuses, and what it does not (see `userLockSentDir`):
+//        - a HOME (Linux, macOS) or USERPROFILE (Windows) that names a directory other than the account's home (a changed variable, a wrapper that moves HOME, a `sudo` that
+//          kept the caller's HOME and cleared its SUDO_ variables) is refused: that would hide the earlier record;
+//        - `sudo` usually runs as another user account (its homes are then usually that account's; some setups keep the caller's HOME), which does not see this user's records.
+//          It is refused through the two variables `sudo` sets: a run with SUDO_UID or SUDO_USER set and not empty (an empty one counts as unset). `su`, `runas`, another
+//          login and another machine cannot be detected and have no record;
+//        - cron, a service unit and `env -i` take HOME from the account database or leave it unset (`os.homedir()` then falls back to the account database), unless they set it
+//          themselves: then the homes are equal and the records are found. One that sets another HOME is a changed HOME and is refused.
+//      Only the mismatch refusal names both homes (it prints "empty or not readable" for an empty one); the sudo refusal and the refusal for an account home that cannot be read
+//      name no path.
+//      It holds what (c) holds plus the chain id,
+//      the contract, the lock kind and the real path of the swap file (null without one). It is written in the same step as (c) and by the same rules (exclusive, synced and
+//      read back before the broadcast; if it cannot be made durable nothing is sent and only this call's own bytes are taken back), by EVERY real lock (with a swap file under
+//      any name, where it is written beside (c), and without --swap, where it is the only record), found by every real lock, never removed once the broadcast was reached,
+//      and cleared by the same two proofs and the same operator section. It does not reach another machine or another user account, and the homes of the helper modes
+//      (the Windows profile folder under `LIVE_PLATFORM=wsl`, the Unix home under `native` on macOS and Linux) are homes of different accounts (`wsl` mode and Git Bash `native` mode
+//      under the same Windows account share the Windows profile folder): see scripts/live/README.md.
 const LOCK_LOCK_SUFFIX = ".lock-lock";
 const LOCK_SENT_SUFFIX = ".lock-sent";
 const lockLockPath = (swapFile) => String(swapFile) + LOCK_LOCK_SUFFIX;
@@ -1319,19 +1336,83 @@ function findLockSent(sw) {
   return null;
 }
 
-/**
- * The directory of the per-user lock records: `<home>/.noid-swap/lock-sent`. Throws a UserError when the home of this user cannot be determined (an empty or
- * relative home is not trusted): a record that cannot be placed counts as present, so the caller refuses.
- */
-function userLockSentDir() {
+// The home the tests give the per-user records. It is set only by `setUserLockSentHomeForTests`: no command line flag and no environment variable sets it, and only code
+// running in this process that loads this file as a module (the tests) can call it. While it is set, the checks of `userLockSentDir` on the account home are skipped.
+let userLockSentHomeSeam = null;
+
+/** Test seam: use `dir` (an absolute path) as the home of the per-user records; `null` clears it. Only code running in this process that loads this file as a module can call it. */
+function setUserLockSentHomeForTests(dir) {
+  if (dir === null) {
+    userLockSentHomeSeam = null;
+    return;
+  }
+  if (typeof dir !== "string" || dir === "" || !path.isAbsolute(dir)) throw new Error("setUserLockSentHomeForTests: the home must be an absolute path, or null");
+  userLockSentHomeSeam = dir;
+}
+
+/** The home of the user account as the operating system's account database gives it (not read from the environment). Throws a UserError when it cannot be determined. */
+function accountHome() {
   let home;
   try {
-    home = os.homedir();
+    home = os.userInfo().homedir;
   } catch (e) {
-    throw new UserError(`the home directory of this user cannot be determined (${codeOf(e)})`);
+    throw new UserError(`the home directory of this user account cannot be determined (${codeOf(e)})`);
   }
-  if (typeof home !== "string" || home === "" || !path.isAbsolute(home)) throw new UserError("the home directory of this user cannot be determined (it is empty or not an absolute path)");
-  return path.join(home, ...USER_LOCK_SENT_SUBDIR);
+  if (typeof home !== "string" || home === "" || !path.isAbsolute(home)) throw new UserError("the home directory of this user account cannot be determined (it is empty or not an absolute path)");
+  return home;
+}
+
+/** True when `a` and `b` are absolute paths of the same directory: equal after path.resolve (without regard to letter case on Windows), else equal after resolving links. */
+function sameDirectory(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a === "" || b === "" || !path.isAbsolute(a) || !path.isAbsolute(b)) return false;
+  const norm = (p) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  if (norm(a) === norm(b)) return true;
+  try {
+    const real = fs.realpathSync.native || fs.realpathSync;
+    return norm(real(a)) === norm(real(b));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The directory of the per-user lock records: `<account home>/.noid-swap/lock-sent`, where the account home is the one the operating system's account database gives this
+ * user (`os.userInfo().homedir`), not the HOME or USERPROFILE of the environment. Throws a UserError (the caller refuses; a record that cannot be placed counts as present):
+ *  - when SUDO_UID or SUDO_USER is set and not empty: the tool runs under sudo, which is another user account that does not see the calling user's records;
+ *  - when the account home cannot be determined (an empty or relative one is not trusted);
+ *  - when the environment's home (`os.homedir()`, which reads only HOME on Linux and macOS and only USERPROFILE on Windows) is not the same directory as the account home, i.e. a
+ *    HOME (Linux, macOS) or USERPROFILE (Windows) that names another directory (a changed variable, a wrapper that moves HOME, a `sudo` that kept the caller's HOME and cleared
+ *    its SUDO_ variables): the records live under the account home, and the tool refuses rather than look in the wrong place. Only this refusal names both homes ("empty or not
+ *    readable" for an empty one); the sudo refusal and the refusal for an unreadable account home name no path. An empty SUDO_UID or SUDO_USER counts as unset.
+ * It does NOT detect `su`, `runas`, another login or another machine: they run as another account or place, which has no record. `sudo` usually runs as another user account
+ * (its homes are then usually that account's; some setups keep the caller's HOME); it is refused through the two variables it sets. Cron, a service unit and `env -i` take HOME
+ * from the account database or leave it unset (`os.homedir()` then falls back to the account database), unless they set it themselves: then the homes are equal and the records
+ * are found; one that sets another HOME is a changed HOME and is refused.
+ * (Under the test seam, see above, the seam's home is used and these checks are skipped.)
+ */
+function userLockSentDir() {
+  if (userLockSentHomeSeam !== null) return path.join(userLockSentHomeSeam, ...USER_LOCK_SENT_SUBDIR);
+  if ((process.env.SUDO_UID !== undefined && process.env.SUDO_UID !== "") || (process.env.SUDO_USER !== undefined && process.env.SUDO_USER !== "")) {
+    throw new UserError(
+      "this tool runs under sudo (SUDO_UID or SUDO_USER is set), which is another user account: the per-user lock records of the calling user are not visible to it. " +
+        "Run it as the user that holds the records"
+    );
+  }
+  const acct = accountHome();
+  let envHome = null;
+  try {
+    envHome = os.homedir();
+  } catch {
+    envHome = null; // counts as "not the same" below
+  }
+  if (!sameDirectory(envHome, acct)) {
+    throw new UserError(
+      `the home of the environment (${typeof envHome === "string" && envHome !== "" ? envHome : "empty or not readable"}) is not the home of this user account (${acct}). ` +
+        `The per-user lock records live under the account's home (${path.join(acct, ...USER_LOCK_SENT_SUBDIR)}), whatever HOME or USERPROFILE say, and this tool refuses rather than look in the wrong place: an earlier lock record could be there. ` +
+        "Run it as the same user, with HOME and USERPROFILE unchanged"
+    );
+  }
+  return path.join(acct, ...USER_LOCK_SENT_SUBDIR);
 }
 
 /** The per-user record of a lock: one file per chain id, sender and lock word (lower case hex), whatever the swap file is called. Throws a UserError for a term that is not well formed. */
@@ -1354,7 +1435,12 @@ function findUserLockSent(chainId, sender, lockWord) {
   try {
     file = userLockSentPath(chainId, sender, lockWord);
   } catch (e) {
-    return { kind: "user", file: "(unknown place)", why: `its place cannot be determined (${e instanceof UserError ? e.message : codeOf(e)}), which counts as present` };
+    return {
+      kind: "user",
+      file: "(unknown place)",
+      why: `its place cannot be determined (${e instanceof UserError ? e.message : codeOf(e)}), which counts as present`,
+      placeError: e instanceof UserError ? e : null,
+    };
   }
   try {
     fs.lstatSync(file);
@@ -1371,6 +1457,8 @@ function findUserLockSent(chainId, sender, lockWord) {
  * `found.kind` is "user" for the per-user record, else it is the record beside the swap file.
  */
 function lockSentRefusal(found) {
+  // A per-user record whose place cannot be determined (an unknown or a different home): there is no record to describe, so the refusal says what is wrong with the place.
+  if (found.placeError) return new UserError(`refusing: ${found.placeError.message}. The per-user lock record cannot be looked up; nothing was sent`);
   const user = found.kind === "user";
   return new UserError(
     `refusing: the ${user ? "per-user lock record" : "lock record"} ${found.file} exists (${found.why}). ${user ? "An earlier real lock of this sender under this lock word" : "An earlier real lock for this swap file"} was signed and may have reached the network, and no Locked event of ours for this hashlock is mined, ` +
@@ -2313,17 +2401,49 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
     const earlier = sw ? findLockSent(sw) : null;
     if (earlier !== null) process.stderr.write(`WARNING: the lock record ${earlier.file} exists (${earlier.why}); a real lock for this swap file would refuse (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
     const earlierUser = findUserLockSent(target.chainId, sender, hashlock);
-    if (earlierUser !== null) process.stderr.write(`WARNING: the per-user lock record ${earlierUser.file} exists (${earlierUser.why}); a real lock of this sender under this lock word would refuse, whatever the swap file is called (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
+    if (earlierUser !== null && earlierUser.placeError) process.stderr.write(`WARNING: a real lock would refuse: ${earlierUser.placeError.message}\n`);
+    else if (earlierUser !== null) process.stderr.write(`WARNING: the per-user lock record ${earlierUser.file} exists (${earlierUser.why}); a real lock of this sender under this lock word would refuse, whatever the swap file is called (see the section "${CLEARING_NAME}" of scripts/live/README.md)\n`);
     return (await execute(provider, signer, args, tx, { expectedLockId, ...checks, ...fp.report }, { fees: fp.fees })).out;
   }
   let r;
   let written = null; // the lock record this call made (a real lock with a swap file)
-  let writtenUser = null; // the per-user lock record this call made (a real lock with a swap file)
+  let writtenUser = null; // the per-user lock record this call made (every real lock)
+  // What both records say: the lock word, the lock id, the sender, the nonce of the transaction (read from the node when the signer does not put one in) and the signed
+  // hash when the key is local. Read in the pre-send step of a real lock.
+  const recordOf = async (populated) => {
+    const nonce = populated.nonce !== undefined && populated.nonce !== null ? populated.nonce : await provider.getTransactionCount(sender, "pending");
+    if (!Number.isSafeInteger(nonce) || nonce < 0) throw new UserError("refusing: the transaction has no nonce to put in the lock record; nothing was sent");
+    return { lockWord: hashlock, lockId: expectedLockId, sender, nonce, txHash: await presignedHash(signer, populated), at: Math.floor(Date.now() / 1000) };
+  };
   if (sw === null) {
-    // No swap file: no record beside it and no pre-send step, but the per-user record of an earlier real lock still refuses (found by chain, sender and lock word).
+    // No swap file: no record beside it, no approval, no lock lock and no pending-nonce check. The per-user record of an earlier real lock refuses (found by chain, sender
+    // and lock word), and this lock writes the per-user record itself, by the same rules as one with a swap file: the very last step before the broadcast, so the gas is
+    // estimated here and the record is written in the pre-send step.
     const stuckUser = findUserLockSent(target.chainId, sender, hashlock);
     if (stuckUser !== null) throw lockSentRefusal(stuckUser);
-    r = await execute(provider, signer, args, tx, {}, { fees: fp.fees });
+    const gasLimit = await signer.estimateGas({ ...tx, ...fp.fees });
+    let reachedBroadcast = false;
+    const preSend = async (populated) => {
+      writtenUser = writeUserLockSent({ ...(await recordOf(populated)), chainId: target.chainId, contract: contractAddr, lockKind: kind, swapFile: null });
+    };
+    // Runs after the local signature, immediately before the bytes go to the node: from here on the lock may have left this process.
+    const lastCheck = () => {
+      reachedBroadcast = true;
+    };
+    try {
+      r = await execute(provider, signer, args, tx, {}, { fees: fp.fees, fixedGas: gasLimit, preSend, lastCheck });
+    } catch (e) {
+      if (writtenUser === null) throw e;
+      const base = e instanceof UserError ? redact(e.message) : explain(e);
+      if (!reachedBroadcast) {
+        throw new UserError(`${base}; ${lockSentFate(removeLockSentIfOurs(writtenUser.file, writtenUser.bytes), writtenUser.file, "per-user lock record")}`);
+      }
+      // The record stays whatever happens now (a timeout, an error, a revert): the bytes may have left. This tool never clears it.
+      throw new UserError(
+        `${base} (the per-user lock record ${writtenUser.file} was written before the send and STAYS: the lock may have reached the network, so every later lock of this sender under this lock word refuses until you have looked at it, whatever the swap file is called; ` +
+          `see the section "${CLEARING_NAME}" of scripts/live/README.md)`
+      );
+    }
   } else {
     // The last refusals before the send (every check above stays as it was). First the approval of a fresh read-only tick, of the terms about to be sent.
     const approvedTerms = { chainId: target.chainId, contract: contractAddr, lockKind: kind, codeHash: target.codeHash, bobSender: sender, receiver, amountWei: amount, lockWord: hashlock, tReveal };
@@ -2350,9 +2470,7 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
       // judged again, locally, at the last step before the record is written and the bytes are signed.
       checkApproval(approvedTerms, sw.intent.decided_at, args);
       // A local key (the command line's) is populated with its nonce; a node-held account is not (the node picks it at the send), so the nonce it will get is read.
-      const nonce = populated.nonce !== undefined && populated.nonce !== null ? populated.nonce : await provider.getTransactionCount(sender, "pending");
-      if (!Number.isSafeInteger(nonce) || nonce < 0) throw new UserError("refusing: the transaction has no nonce to put in the lock record; nothing was sent");
-      const rec = { lockWord: hashlock, lockId: expectedLockId, sender, nonce, txHash: await presignedHash(signer, populated), at: Math.floor(Date.now() / 1000) };
+      const rec = await recordOf(populated);
       written = writeLockSent(sw.realFile, rec);
       // The second record, in the same step: if it cannot be made durable nothing is sent, and the catch below takes back both of this call's own records.
       writtenUser = writeUserLockSent({ ...rec, chainId: target.chainId, contract: contractAddr, lockKind: kind, swapFile: sw.realFile });
@@ -2999,7 +3117,7 @@ module.exports = {
   readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
   approvalText, approvalTermsHash, checkApproval, MAX_OBSERVATION_AGE_S, APPROVAL_FUTURE_SKEW_S, lockLockPath, LOCK_LOCK_SUFFIX, lockSentPath, LOCK_SENT_SUFFIX,
-  userLockSentDir, userLockSentPath,
+  userLockSentDir, userLockSentPath, setUserLockSentHomeForTests,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

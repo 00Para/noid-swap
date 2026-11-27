@@ -434,6 +434,26 @@ describe("live.js with the poseidon lock kind (HTLCPoseidonV2)", function () {
       expect(await nonce(bobAddr)).to.equal(n);
     });
 
+    it("a real lock without --swap leaves the per-user record too (swap_file null), and a second one under the same lock address with a blind log query is refused by it", async () => {
+      const tReveal = (await latestTs()) + 2 * HOUR;
+      const args = { ...tgt, lockKind: "poseidon", contract: addr, lockAddr, receiver: aliceAddr, amountWei: amount.toString() };
+      const l = await live.lock(provider, bob, { ...args, tReveal: String(tReveal) });
+      const p = live.userLockSentPath(31337, bobAddr, lockAddr);
+      expect(l.userLockRecord).to.equal(p);
+      const rec = JSON.parse(fs.readFileSync(p, "utf8"));
+      expect(rec).to.include({ version: 1, lock_id: l.lockId, sender: bobAddr, tx_hash: null, chain_id: "31337", lock_kind: "poseidon", swap_file: null });
+      const blind = new Proxy(provider, {
+        get(t, prop) {
+          if (prop === "getLogs") return async () => [];
+          const v = t[prop];
+          return typeof v === "function" ? v.bind(t) : v;
+        },
+      });
+      const n = await nonce(bobAddr);
+      await expect(live.lock(blind, bob, { ...args, tReveal: String(tReveal + 60) })).to.be.rejectedWith(/refusing: the per-user lock record .*\.json exists \(it records sender 0x[0-9a-fA-F]{40}, nonce \d+, transaction hash unknown \(no local key\)/);
+      expect(await nonce(bobAddr)).to.equal(n);
+    });
+
     it("lock, reveal and refund all follow the file: the lock word, the V2 artifact, the pinned code hash (REAL CLAIM 3)", async () => {
       const tReveal = (await latestTs()) + 2 * HOUR;
       const lockFile = swapFile({ intent: lockIntent(tReveal) });
