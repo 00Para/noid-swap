@@ -174,6 +174,8 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 
 ### L1 (run 15). A6: Alice prepares and never funds
 
+**DONE 2026-11-11** (`docs/live-run-15.md`): both files ended `aborted` with the expected texts, the lock dry run was refused, nothing was sent. Run on one machine in both roles, with ticks by hand.
+
 - Proves: Bob's tool ends `aborted` on real nodes without any spend.
 1. Alice's machine: setup, prepare, object check as usual. Hand over the bundle. **Do not run `fund.sh`.**
 2. Bob's machine: `new-bob`, then `watch.sh bob 30`. Expected loop: `wait` "waiting for Alice's funding"
@@ -203,6 +205,8 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   intent and how it was dropped.
 
 ### L2 (run 16). A2: Alice funds the wrong amount
+
+**DONE 2026-11-11** (`docs/live-run-16.md`): both tools refused to count the 4 NOID instance and ended `aborted`, the lock dry run was refused, and the recovery with `AMOUNT=4000000` as the last line of `env.local.sh` returned 3,994,200 micro-NOID; `--closed-by` was refused for the already aborted file. Run on one machine in both roles.
 
 - Proves: Bob's tool refuses a real instance of another amount; Alice's NOID comes back by hand.
 1. Alice's machine: setup, prepare, object check. `fund.sh --dry-run` (expected OK for 5 NOID). Then the deviation.
@@ -240,6 +244,8 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Record: the instance listing, every refusal text, the recovery receipt.
 
 ### L3 (run 17). B5 and B8: Bob locks with a too-short timelock
+
+**DONE 2026-11-15** (`docs/live-run-17.md`): Alice's tool rejected the hand-made lock with the I3 note (1704 s after its block, less than 3360 s) until `D` and never offered the reveal; Bob's file adopted the lock in `funding_final` and the `lock_eth` intent was resolved, so the later `refund_eth` was not held; both early-refund refusals appeared; the ETH was refunded and the NOID recovered (14,800 micro-NOID). `lock.sh --dry-run` was refused at the intent check, so the duplicate-lock check of `live.js` was not reached. Run on one machine in both roles.
 
 - Proves: Alice's (I3) check on a real lock; Bob's tool with a lock of his own sender made outside it; an early
   refund refused.
@@ -280,7 +286,11 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   price (about 0.0006 ETH for the lock alone at 1 gwei); 14,800 μNOID. Duration: about 2 h 40.
 - Record: the I3 text with the real block timestamp, Bob's file phases, both refusals of step 5.
 
-### L4 (run 18). T1 and A9: a third party closes to Bob first
+### L4 (runs 18 and 19). T1 and A9: a third party closes to Bob first
+
+**TRIED 2026-11-15, NOT DONE** (`docs/live-run-18.md`): the funding, Bob's lock, the third party's copy adopting the real lock and the A9 dry run before `D` went as expected, but the operator's reveal came 110 s after its cutoff and the tool refused it; the step was cancelled, the ETH was refunded and the NOID recovered at `D` (14,800 μNOID). Steps 3, 5 and 6 were not run. **Second try: run 19**, with the operator at the keyboard before the reveal window opens (19 minutes 31 seconds from the offer to the cutoff). L5 and L6, in one run, move to run 20.
+
+**DONE 2026-11-16, second try** (`docs/live-run-19.md`): the swap settled. The third party's copy, started after the real lock was mined, took no lock step of its own, read the secret from Ethereum and sent the close; it paid Bob's payout address 4.994200 NOID. Bob's real tool showed both texts of step 5 (the pending one and the "instance is gone" one), and `--closed-by` gave `claim_included` and then `done`. Bob's file held no recorded `claim_noid` step at that moment (single ticks show the offer without recording it), so the held case stays covered by its test only. Step 2 (A9) is in run 18.
 
 - Proves: a close made by someone other than Bob, from the secret Alice published, pays Bob; Bob's real tool reads
   it and records it with `--closed-by`. The third party is the copy of Bob's file that `prepare.sh` made on Alice's
@@ -312,7 +322,9 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
   or two blocks.
 - Record: whether Bob's tool saw the close pending, the exact texts, Bob's net payout (amount - 5,800).
 
-### L5 (run 19). C5: the second node goes away at Bob's lock
+### L5 (run 20, in one run with L6). C5: the second node goes away at Bob's lock
+
+**DONE 2026-11-16** (`docs/live-run-20.md`): with the tunnel closed one block before Bob's funding finality, three ticks answered `wait` with the F5 text and the note "not lock_eth: … (fail closed)", and `lock.sh --dry-run` refused (no step recorded); the first tick after the tunnel was back offered `lock_eth` with "second Parano1d node agrees". The case of a tunnel lost after the step was recorded was not run.
 
 - Proves the fail-closed half of `live-scenarios.md` 8. Two nodes per chain, no `SINGLE_NODE_OK`, the tunnel of
   `mac-setup.md` 6.
@@ -326,7 +338,9 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
 - Abort path: if the tunnel cannot be restored before the hard lock-by (`h_create + 92`), Bob does not lock and the
   run ends as run 4 (Alice's `recover-noid.sh` at `D`). Cost: as a normal swap. Duration: about 1 hour.
 
-### L6 (run 20). C1: an epoch rotation around Bob's claim
+### L6 (run 20, in one run with L5). C1: an epoch rotation around Bob's claim
+
+**DONE 2026-11-16** (`docs/live-run-20.md`), in a changed form: the reveal placed before the rotation at 315360 landed one block after it, so Bob's claim was held for the next rotation at 315504. There the claim dry run proved 8 blocks before the boundary, a tick and the dry run 3 blocks before it said "epoch anchor rotates in 3 block(s); proving after the boundary (T6)", and after it the claim was proved, sent to both nodes, included at 315513 and final at 315531. The edge of the guard (4 blocks) was not probed block by block.
 
 Run `live-scenarios.md` 6 as written, on raw v1 `poseidon`: pick the boundary `B` (a multiple of 144), set `HC_LEAD`,
 fund promptly, delay `reveal.sh` until `tip >= B - 6` (still well before the cutoff), and expect Bob's `claim.sh`
