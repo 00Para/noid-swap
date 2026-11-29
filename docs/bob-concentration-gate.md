@@ -160,7 +160,7 @@ producer concentration ok (T21 screen, not a defence): largest producer {31.4} %
 ALARM: producer concentration too high, not locking (T21): producer {7f3a9c21} mined {52.7} % of the last 2,880 blocks (limit 35 %) and {61.0} % of the last 720 (limit 35 %); the two largest together {71.5} % and {78.0} % (warning above 50 %). A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. This is a screen, not a defence. Wait for the share to fall, or pass --accept-producer-concentration to accept the risk
 ```
 
-If the largest producer differs between the windows: `producer {A} mined {x} % of the last 2,880 blocks (limit 35 %) and producer {B} mined {y} % of the last 720 (limit 35 %)`.
+When a second Parano1d node was read and agreed, the text above carries one more clause after the shares, before "A miner who is Alice ...": `; the second node gives the same block at height {291911} and the same producers for {64} sampled heights, so this is not one node's view` (`1 sampled height` for one). It is absent without a second node and when that node did not agree. If the largest producer differs between the windows: `producer {A} mined {x} % of the last 2,880 blocks (limit 35 %) and producer {B} mined {y} % of the last 720 (limit 35 %)`.
 
 *cannot read* (production):
 

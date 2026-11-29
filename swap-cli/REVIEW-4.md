@@ -277,6 +277,8 @@ Erratum (2026-11-08): the chain's finality rule is 18 blocks after inclusion (`i
 
 The CHAOS open findings F-2, F-6, F-7, F-8, F-10, F-11 and F-14 are as described there. I found none worse than its stated severity. F-11 and R4-6 share an end state.
 
+*Later (2026-11-16):* F-10 and F-14 were fixed on that day, and a second batch (commit `198241c`) answered F-11 in part (a close by someone else is recorded on both files once it is final, and Bob's file then ends with the evidence named) and F-6 for `locked`. The open list in `swap-cli/CHAOS.md` is now F-2, F-6, F-7, F-8, F-11 and F-21.
+
 ## Must fix before real money (ordered)
 
 These apply even with a trusted counterparty or the owner in both roles: they strand or expose a leg through chain conditions or a tool gap, not through malice.

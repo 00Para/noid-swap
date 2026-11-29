@@ -113,8 +113,9 @@ fn production_the_refusal_text_is_pinned() {
     let mut s = scenario(ProfileName::Production);
     let r = s.tick_bob_with(|n, _| shape(n, 1_009, 253, 1_600, 400));
     let id = producer_id(A);
+    let agreed_at = s.world.borrow().tip - 3;
     let want = format!(
-        "ALARM: producer concentration too high, not locking (T21): producer {id} mined 35.1 % of the last 2,880 blocks (limit 35 %) and 35.2 % of the last 720 (limit 35 %); the two largest together 55.6 % and 55.6 % (warning above 50 %). A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. This is a screen, not a defence. Wait for the share to fall, or pass --accept-producer-concentration to accept the risk"
+        "ALARM: producer concentration too high, not locking (T21): producer {id} mined 35.1 % of the last 2,880 blocks (limit 35 %) and 35.2 % of the last 720 (limit 35 %); the two largest together 55.6 % and 55.6 % (warning above 50 %); the second node gives the same block at height {agreed_at} and the same producers for 64 sampled heights, so this is not one node's view. A miner who is Alice can keep Bob's claim from becoming final until D and take both legs. This is a screen, not a defence. Wait for the share to fall, or pass --accept-producer-concentration to accept the risk"
     );
     assert_eq!(wait_reason(&r), want);
     assert_eq!(id.len(), 8);
@@ -346,11 +347,11 @@ fn the_override_waives_the_production_refusals_prints_every_tick_and_writes_one_
     s.world.borrow_mut().accept_producer_concentration = true;
     let id = producer_id(A);
     // Read-only decisions: the warning is there on every one of them.
-    let (noid, eth, now) = {
+    let (noid, eth, now, agreed_at) = {
         let w = s.world.borrow();
         let mut n = w.noid_obs(None);
         shape(&mut n, 1_500, 400, 1_800, 500);
-        (n, w.eth_obs(), w.eth_time)
+        (n, w.eth_obs(), w.eth_time, w.tip - 3)
     };
     for _ in 0..3 {
         let d = decide(&s.bob.file, &noid, &eth, now);
@@ -360,7 +361,7 @@ fn the_override_waives_the_production_refusals_prints_every_tick_and_writes_one_
         assert_eq!(
             warn[0],
             &format!(
-                "WARNING: producer concentration gate OVERRIDDEN by {OVERRIDE_FLAG} (T21): producer {id} mined 52.1 % of the last 2,880 blocks (limit 35 %) and 55.6 % of the last 720 (limit 35 %); the two largest together 62.5 % and 69.5 % (warning above 50 %). This is the exposure the gate exists to prevent. Amounts must stay trial-sized"
+                "WARNING: producer concentration gate OVERRIDDEN by {OVERRIDE_FLAG} (T21): producer {id} mined 52.1 % of the last 2,880 blocks (limit 35 %) and 55.6 % of the last 720 (limit 35 %); the two largest together 62.5 % and 69.5 % (warning above 50 %); the second node gives the same block at height {agreed_at} and the same producers for 64 sampled heights, so this is not one node's view. This is the exposure the gate exists to prevent. Amounts must stay trial-sized"
             )
         );
         no_address(warn[0]);
@@ -1239,17 +1240,19 @@ fn a_failed_producer_confirmation_does_not_throw_away_a_hash_difference_seen_in_
 #[test]
 fn the_confirmation_has_its_own_time_when_the_shared_deadline_is_already_spent() {
     // As the anchor's second ask: the first node relabels one block (a producer lie, true hash); its slow cache-top header spends the reading's
-    // shared budget (2 s) right after the sample batch returns (cache-top header 1,200 ms; anchor ask, second node 500 ms, ends at 1,700; sample
-    // batch 500 ms ends at 2,200). The confirmation starts there, past the shared deadline, and still gets its own time.
+    // shared budget (2.3 s) right after the sample batch returns (cache-top header 500 ms; anchor ask, second node 1,000 ms, ends at 1,500; sample
+    // batch 1,000 ms ends at 2,500). The confirmation starts there, past the shared deadline, and still gets its own time. The margins are wide
+    // on purpose: the sample batch must START before the shared deadline (800 ms to spare, so a loaded machine that is late by a few hundred
+    // milliseconds does not fail the test falsely), and it must END after it (a late machine only makes that easier, so it cannot pass falsely).
     let first = FakeNode::new(10_000);
     first.relabel.borrow_mut().insert(8_010, "synthetic-miner-Z".into());
     let second = FakeNode::new(10_000);
     let dir = tempfile::tempdir().unwrap();
     assert!(read_producers(&first, None, &cache_in(&dir), 10_000, &cfg()).complete, "a warm cache that holds the relabelled block");
-    first.delay_one.set(Some((10_000, 1_200)));
-    second.delay_ms.set(500);
+    first.delay_one.set(Some((10_000, 500)));
+    second.delay_ms.set(1_000);
     let mut c = cfg();
-    c.budget = Duration::from_millis(2_000);
+    c.budget = Duration::from_millis(2_300);
     c.sampler = fixed_sampler(with_height(7_500));
     let sum = read_producers(&first, sec(&second, Some(10_000)), &cache_in(&dir), 10_000, &c);
     assert!(sum.complete, "{sum:?}");
@@ -1330,20 +1333,22 @@ fn a_hash_difference_at_the_anchor_or_with_an_anchor_that_moves_or_cannot_be_ask
 #[test]
 fn a_first_node_that_uses_up_the_shared_budget_right_after_the_sample_cannot_make_a_hit_unreadable() {
     // The first node relabels one block and gives it a made-up hash; the sample hits it. The first node's cache-top header is slow, so that the
-    // reading's shared budget (2 s) is spent just after the sample batch returns: the anchor ask and the sample batch fit, a second ask against
-    // the SHARED deadline would not. The second ask has its own time, so the result is still the remembered `SampledDiffers`. (On the shared
-    // deadline this test gets `Unreadable`.) Timeline in ms: the cache-top header returns at 1,200; the anchor ask (second node, 500) ends at
-    // 1,700, with 300 ms to spare against the budget; the sample batch (500) ends at 2,200, past the budget; the second ask starts there.
+    // reading's shared budget (2.3 s) is spent just after the sample batch returns: the anchor ask and the sample batch start in time, a second
+    // ask against the SHARED deadline would not. The second ask has its own time, so the result is still the remembered `SampledDiffers`. (On
+    // the shared deadline this test gets `Unreadable`.) Timeline in ms: the cache-top header returns at 500; the anchor ask (second node,
+    // 1,000) ends at 1,500 and the sample batch starts there, with 800 ms to spare against the budget (a loaded machine that is late by a few
+    // hundred ms does not fail the test falsely); the sample batch (1,000) ends at 2,500, past the budget (lateness only makes that surer, so the
+    // test cannot pass falsely); the second ask starts there.
     let first = FakeNode::new(10_000);
     first.relabel.borrow_mut().insert(8_010, "synthetic-miner-Z".into());
     first.fake_hash.borrow_mut().insert(8_010);
     let second = FakeNode::new(10_000);
     let dir = tempfile::tempdir().unwrap();
     assert!(read_producers(&first, None, &cache_in(&dir), 10_000, &cfg()).complete, "a warm cache that holds the made-up block");
-    first.delay_one.set(Some((10_000, 1_200)));
-    second.delay_ms.set(500);
+    first.delay_one.set(Some((10_000, 500)));
+    second.delay_ms.set(1_000);
     let mut c = cfg();
-    c.budget = Duration::from_millis(2_000);
+    c.budget = Duration::from_millis(2_300);
     c.sampler = fixed_sampler(with_height(7_500));
     let sum = read_producers(&first, sec(&second, Some(10_000)), &cache_in(&dir), 10_000, &c);
     assert!(sum.complete, "{sum:?}");
@@ -2011,6 +2016,44 @@ fn sepolia_and_rehearsal_still_lock_on_one_node_and_say_the_cross_check_is_not_p
     });
     assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
     assert!(note_starting(&r, "producer concentration ok").iter().any(|n| n.contains("single node, the producer cross-check is not possible")), "{:?}", r.notes);
+}
+
+#[test]
+fn the_over_limit_note_says_the_second_node_agreed_when_it_did_and_not_otherwise() {
+    // Over the limit under rehearsal (it only warns) on one node: the note says nothing about a second node agreeing.
+    let mut s = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
+    s.world.borrow_mut().single_node = true;
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 2_000, 700, 2_100, 710);
+        tweak(n, |p| p.second = SecondCheck::NotConfigured);
+    });
+    assert_eq!(r.action.kind(), "lock_eth", "the verdict is unchanged: {r:?}");
+    let warn = note_starting(&r, "WARNING: producer concentration too high");
+    assert_eq!(warn.len(), 1, "{:?}", r.notes);
+    assert!(!warn[0].contains("second node gives the same block") && !warn[0].contains("not one node's view"), "{}", warn[0]);
+    // The same shares with the second node agreeing: the clause is there, in the over-limit note, and the verdict is the same.
+    let mut s = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| shape(n, 2_000, 700, 2_100, 710));
+    assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
+    let warn = note_starting(&r, "WARNING: producer concentration too high");
+    assert_eq!(warn.len(), 1, "{:?}", r.notes);
+    assert!(
+        warn[0].contains("the second node gives the same block at height") && warn[0].contains("and the same producers for 64 sampled heights, so this is not one node's view"),
+        "{}",
+        warn[0]
+    );
+    assert!(!warn[0].contains("second node holds the same block"), "the ok-note wording stays out of the over-limit note: {}", warn[0]);
+    // A second node that differs is a refusal of its own, never the clause.
+    let mut s = Scenario::with_profile(Variant::Raw, ProfileName::Rehearsal);
+    at_bob_lock(&mut s);
+    let r = s.tick_bob_with(|n, _| {
+        shape(n, 2_000, 700, 2_100, 710);
+        tweak(n, |p| p.second = SecondCheck::ProducerDiffers { height: 5 });
+    });
+    assert!(note_starting(&r, "WARNING: producer concentration too high").is_empty(), "{:?}", r.notes);
+    assert!(r.notes.iter().all(|n| !n.contains("second node holds the same block") && !n.contains("not one node's view")), "{:?}", r.notes);
 }
 
 // ================================================================== the remembered detection (T21-13)

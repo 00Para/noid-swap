@@ -2,7 +2,7 @@
 //! each one says whether that behaviour is the one wanted or a recorded weakness; a test whose name ends in `_current_behaviour` documents a
 //! weakness (nothing is fixed here: a change of the engine is a later, reviewed step, and this file then changes with it).
 //!
-//! Not in this file: G7 (Alice's file after a reveal sent outside the tool; not part of this batch), G8 (`recover-noid.sh` against an
+//! Not in this file: G8 (`recover-noid.sh` against an
 //! instance of another amount: a shell helper, not testable offline without a scripted wallet in `scripts/live/selftest.sh`), G10 (the
 //! mempool stall under load: not testable offline without an isolated node and a fee override) and G11 (a consistent lie from the only node:
 //! a stated limit of `--single-node-ok`, not a test gap).
@@ -95,16 +95,21 @@ fn has_note(notes: &[String], needle: &str) -> bool {
     notes.iter().any(|n| n.contains(needle))
 }
 
+fn notes_with_text<'a>(notes: &'a [String], needle: &str) -> Vec<&'a String> {
+    notes.iter().filter(|n| n.contains(needle)).collect()
+}
+
 // ================================================================================================ G1
 
-/// G1 (B2): Alice facing a lock of Bob's that was mined after Bob's last lock height, every other term right.
+/// G1 (B2): Alice facing a lock of Bob's that was first seen after Bob's last lock height, every other term right.
 ///
-/// CURRENT BEHAVIOUR, A RECORDED WEAKNESS. `alice_check_lock` looks at the terms, the reveal window (I3) and the margin `M_A`; it looks at
-/// neither Bob's lock-by nor `D`. So Alice's file takes the lock (`eth_lock_seen`), waits for Ethereum finality (`eth_lock_final`) and then
-/// offers `reveal_eth`, with no note that Bob locked late and that his claim may not fit before `D`. It can only harm Bob, whose own tool
-/// refuses to lock past that height (the contrast at the end of the test). Whether Alice should refuse or warn is a later decision.
+/// DECIDED: A NOTE, NO REFUSAL. `alice_check_lock` looks at the terms, the reveal window (I3, measured from the lock's own block, so a late lock
+/// still leaves her the full window) and the margin `M_A`; it looks at neither Bob's lock-by nor `D`, and that stays. Alice's file takes the lock
+/// (`eth_lock_seen`), waits for Ethereum finality (`eth_lock_final`) and then offers `reveal_eth` exactly as before. What is new is a note, built
+/// from a log-only history marker written at adoption, that states the two heights: where the tip was when the lock was first seen and Bob's last lock
+/// height. It is a statement only (no word about revealing). Bob's own tool refuses to lock past that height (the contrast at the end of the test).
 #[test]
-fn g1_alice_accepts_and_reveals_on_a_lock_made_after_bobs_lock_by_current_behaviour() {
+fn g1_alice_notes_a_lock_first_seen_after_bobs_last_lock_height_and_acts_exactly_as_before() {
     for kind in KINDS {
         let mut s = alice_at_funding_final(kind);
         let g = s.gates();
@@ -121,14 +126,51 @@ fn g1_alice_accepts_and_reveals_on_a_lock_made_after_bobs_lock_by_current_behavi
         assert_eq!(r.events, vec!["eth_lock_seen"], "{kind}: {r:?}");
         assert_eq!(s.alice_phase(), "lock_seen", "{kind}");
         assert!(matches!(&r.action, Action::Wait { reason } if reason == "waiting for Bob's lock to be finalized"), "{kind}: {r:?}");
-        assert!(!has_note(&r.notes, "lock-by") && !has_note(&r.notes, "late") && !has_note(&r.notes, "after"), "{kind}: no note about the late lock: {:?}", r.notes);
+        let want = format!(
+            "Bob's lock 0x{}.. was first recorded at Parano1d height {tip}, after Bob's last lock height {hard} (nominal lock-by {}); it may have been mined in an earlier block than that poll",
+            hex::encode(&lock.lock_id[..4]),
+            s.public.params.lock_by_height
+        );
+        assert_eq!(notes_with_text(&r.notes, "was first recorded at Parano1d height"), vec![&want], "{kind}: {:?}", r.notes);
+        // A statement of heights: nothing in it tells her to reveal or not to reveal.
+        assert!(!want.contains("reveal") && !want.contains("must") && !want.contains("do not") && !want.contains("claim"), "{want}");
+        let marker = format!("lock_seen_late:{}:{tip}:{hard}", hex::encode(lock.lock_id));
+        assert_eq!(s.alice.file.history.iter().filter(|h| h.event == marker).count(), 1, "{kind}: one log-only marker");
         let lag = s.world.borrow().finality_lag;
         s.world.borrow_mut().advance_eth(lag + 1);
+        // The tip has moved on by now: the note still names the heights of the poll that first saw the lock, not the current ones.
+        s.world.borrow_mut().advance_noid(1);
         let r = s.tick_alice();
         assert_eq!(r.events, vec!["eth_lock_final", "reveal_submitted"], "{kind}: {r:?}");
         assert_eq!(r.action.kind(), "reveal_eth", "{kind}: {r:?}");
         assert_eq!(s.alice_phase(), "reveal_submitted", "{kind}");
-        assert!(!has_note(&r.notes, "lock-by"), "{kind}: {:?}", r.notes);
+        assert_eq!(notes_with_text(&r.notes, "was first recorded at Parano1d height"), vec![&want], "{kind}: {:?}", r.notes);
+        assert_eq!(s.alice.file.history.iter().filter(|h| h.event.starts_with("lock_seen_late:")).count(), 1, "{kind}: the marker is written once");
+    }
+    // A lock first seen inside Bob's window, between the nominal lock-by and the last lock height, gets no note: Bob's tool may lock there.
+    for kind in KINDS {
+        let mut s = alice_at_funding_final(kind);
+        let lock_by = s.public.params.lock_by_height;
+        let hard = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
+        let tip = s.world.borrow().tip;
+        s.world.borrow_mut().advance_noid(hard - tip);
+        let lock = agreed_lock(&s, s.gates().w_a_s);
+        mine(&s, lock);
+        let r = s.tick_alice();
+        assert_eq!(r.events, vec!["eth_lock_seen"], "{kind}: {r:?}");
+        assert!(lock_by < hard && s.world.borrow().tip == hard);
+        assert!(!has_note(&r.notes, "was first recorded at Parano1d height"), "{kind}: {:?}", r.notes);
+        assert!(s.alice.file.history.iter().all(|h| !h.event.starts_with("lock_seen_late:")), "{kind}");
+    }
+    // The normal case (a lock seen far before the lock-by) is untouched too.
+    for kind in KINDS {
+        let mut s = alice_at_funding_final(kind);
+        let lock = agreed_lock(&s, s.gates().w_a_s);
+        mine(&s, lock);
+        let r = s.tick_alice();
+        assert_eq!(r.events, vec!["eth_lock_seen"], "{kind}: {r:?}");
+        assert!(!has_note(&r.notes, "was first recorded at Parano1d height") && !has_note(&r.notes, "last lock height"), "{kind}: {:?}", r.notes);
+        assert!(s.alice.file.history.iter().all(|h| !h.event.starts_with("lock_seen_late:")), "{kind}");
     }
     // The contrast: Bob's own tool, at the same height, does not lock; it ends `aborted`.
     let mut s = bob_ready(LockKind::Sha256);
@@ -612,6 +654,119 @@ fn g6_bob_misses_a_secret_that_is_only_in_a_reverted_claim_unless_given_its_hash
     assert_eq!(r.events, vec!["eth_preimage_seen", "claim_submitted"], "{r:?}");
     assert_eq!(r.action.kind(), "claim_noid", "{r:?}");
     assert!(has_note(&r.notes, "refund_eth is also due"), "{:?}", r.notes);
+}
+
+// ================================================================================================ G7
+
+/// Alice's world for G7: her file is in `lock_final` (Bob's lock final, the reveal not sent by the tool) and the lock's `T_reveal`.
+fn alice_lock_final_with_no_reveal_sent(kind: LockKind) -> (Scenario, [u8; 32], u64) {
+    let mut s = scenario(kind);
+    s.run_to_lock_final();
+    // The tool decides the reveal but does not send it: the operator sends it by hand. The executor is offline for this one tick only.
+    s.alice.executor.offline_for.insert("reveal_eth");
+    let r = s.tick_alice();
+    assert_eq!(r.action.kind(), "reveal_eth", "{kind}: {r:?}");
+    assert_eq!(s.alice_phase(), "lock_final", "{kind}");
+    assert!(s.alice.file.pending_intent.is_none(), "{kind}: no intent");
+    assert!(!s.alice.file.history.iter().any(|h| h.event == "reveal_submitted"), "{kind}: no recorded reveal");
+    s.alice.executor.offline_for.clear();
+    let (lock_id, timelock) = {
+        let w = s.world.borrow();
+        let l = w.lock.as_ref().unwrap();
+        (l.lock_id, l.timelock)
+    };
+    (s, lock_id, timelock)
+}
+
+/// The outside reveal (`live.js claim` without `--swap`) is mined: the lock is claimed with the preimage in the `Claimed` log.
+fn mine_the_outside_reveal(s: &Scenario, lock_id: [u8; 32]) {
+    let mut w = s.world.borrow_mut();
+    w.claim_pending = Some(PendingPreimage { lock_id, preimage: *s.secret.bytes(), tx_hash: [0xaa; 32] });
+    w.advance_eth(1);
+    assert!(w.claimed.is_some() && w.lock.as_ref().unwrap().claimed, "the claim is mined");
+}
+
+/// G7 (A8): Alice's file is in `lock_final`, the tool decided `reveal_eth` but did not send it (no intent, no `reveal_submitted`, no sidecar,
+/// no pending record), and the reveal was sent outside the tool (`live.js claim` without `--swap`): the lock is claimed by her receiver with the
+/// preimage in the `Claimed` log.
+///
+/// DESIRED BEHAVIOUR (the one `docs/hostile-run-plan.md` expected). The next tick reads the claim from the chain: the event `eth_claim_mined`,
+/// the phase `revealed`, no new reveal and no note about a passed cutoff, also when the tick is made after the cutoff (the claim was mined
+/// before it); when the claim is final the phase is `done`. The executor is online after the first tick, so a `reveal_eth` that the engine
+/// wrongly offered would be executed and counted: the assertions on the action kind and on the executor's count are real.
+#[test]
+fn g7_alice_after_a_reveal_sent_outside_the_tool_records_the_claim_and_reaches_done() {
+    for kind in KINDS {
+        for after_cutoff in [false, true] {
+            let tag = format!("{kind} after_cutoff {after_cutoff}");
+            let (mut s, lock_id, timelock) = alice_lock_final_with_no_reveal_sent(kind);
+            mine_the_outside_reveal(&s, lock_id);
+            let cutoff = timelock - s.gates().m_a_s;
+            if after_cutoff {
+                // Alice's tool was not run for a while: the next tick comes after the reveal cutoff (the claim itself was mined before it).
+                s.world.borrow_mut().warp_eth_to(cutoff + 60);
+                assert!(s.now() > cutoff && s.now() < timelock, "{tag}");
+            }
+            let r = s.tick_alice();
+            assert_eq!(r.events, vec!["eth_claim_mined"], "{tag}: {r:?}");
+            assert_eq!(s.alice_phase(), "revealed", "{tag}");
+            assert_ne!(r.action.kind(), "reveal_eth", "{tag}: {r:?}");
+            assert!(matches!(&r.action, Action::Wait { reason } if reason == "waiting for ETH claim finality"), "{tag}: {r:?}");
+            assert!(!has_note(&r.notes, "cutoff") && !has_note(&r.notes, "not revealing"), "{tag}: {:?}", r.notes);
+            assert_eq!(s.alice.executor.count("reveal_eth"), 0, "{tag}: nothing is sent again");
+            // Final: done.
+            let lag = s.world.borrow().finality_lag;
+            s.world.borrow_mut().advance_eth(lag + 1);
+            let r = s.tick_alice();
+            assert_eq!(r.events, vec!["eth_claim_final"], "{tag}: {r:?}");
+            assert_eq!(s.alice_phase(), "done", "{tag}");
+            assert_ne!(r.action.kind(), "reveal_eth", "{tag}: {r:?}");
+            assert!(matches!(&r.action, Action::Wait { reason } if reason.starts_with("done: ETH received")), "{tag}: {r:?}");
+            assert_eq!(s.alice.executor.count("reveal_eth"), 0, "{tag}");
+        }
+    }
+}
+
+/// G7, the `--apply` path: the tick recorded a `reveal_eth` intent (the file holds it, nothing was sent by the tool), the operator sent the reveal
+/// by hand, and the next tick comes after the cutoff. Pinned as what the engine does today.
+///
+/// The claim in the `Claimed` log is read first: `eth_claim_mined`, the phase `revealed`, no new reveal offered, no cutoff note,
+/// and the intent is resolved into the history (the chain shows its effect).
+#[test]
+fn g7_a_recorded_reveal_intent_is_resolved_by_the_outside_claim_even_after_the_cutoff() {
+    for kind in KINDS {
+        let mut s = scenario(kind);
+        s.run_to_lock_final();
+        let (lock_id, timelock) = {
+            let w = s.world.borrow();
+            let l = w.lock.as_ref().unwrap();
+            (l.lock_id, l.timelock)
+        };
+        let tick = |s: &Scenario, file: &mut swap_cli::swapfile::SwapFile| {
+            let (noid, eth, now) = {
+                let w = s.world.borrow();
+                (w.noid_obs(None), w.eth_obs(), w.eth_time)
+            };
+            tick_apply(file, &noid, &eth, now, true).unwrap()
+        };
+        let mut file = s.alice.file.clone();
+        // First tick (--apply): the lock is final, the reveal is decided and recorded as an intent; the operator sends it outside the tool.
+        let first = tick(&s, &mut file);
+        assert_eq!(first.decision.action.kind(), "reveal_eth", "{kind}: {first:?}");
+        assert!(file.pending_intent.as_ref().is_some_and(|i| i.action == "reveal_eth"), "{kind}: the intent is recorded");
+        mine_the_outside_reveal(&s, lock_id);
+        let cutoff = timelock - s.gates().m_a_s;
+        s.world.borrow_mut().warp_eth_to(cutoff + 60);
+        assert!(s.now() > cutoff && s.now() < timelock, "{kind}");
+        let second = tick(&s, &mut file);
+        assert_eq!(second.decision.events.iter().map(|e| e.name()).collect::<Vec<_>>(), vec!["eth_claim_mined"], "{kind}: {second:?}");
+        assert_eq!(file.phase.name(), "revealed", "{kind}");
+        assert_ne!(second.decision.action.kind(), "reveal_eth", "{kind}: {second:?}");
+        assert!(matches!(&second.decision.action, Action::Wait { reason } if reason == "waiting for ETH claim finality"), "{kind}: {second:?}");
+        assert!(!has_note(&second.decision.notes, "cutoff") && !has_note(&second.decision.notes, "not revealing"), "{kind}: {:?}", second.decision.notes);
+        assert!(file.pending_intent.is_none(), "{kind}: the intent is resolved");
+        assert!(matches!(second.intent, swap_cli::engine::IntentStatus::Resolved(_)), "{kind}: {:?}", second.intent);
+    }
 }
 
 // ================================================================================================ G9

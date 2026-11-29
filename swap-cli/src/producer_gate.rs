@@ -221,6 +221,8 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
         return screen(Finding::Unverifiable { headline: HEADLINE_STALE, detail: stale.join("; ") });
     }
     // The second Parano1d node: when one is configured it must agree on the block at the anchor height.
+    // Set only when the second node was read and agreed: the over-limit note says so too.
+    let mut second_agreed: Option<String> = None;
     let second_line = if noid.second_error.is_some() {
         // A configured second node that could not be read at all holds `lock_eth` through the F5 rule, with F5's own reason, whatever this screen says.
         "the second node could not be read, F5 holds the lock".to_string()
@@ -230,10 +232,18 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
             SecondCheck::Agrees { sampled: 0, .. } => {
                 return cannot("the second Parano1d node's producer cross-check recorded no sampled heights".into());
             }
-            SecondCheck::Agrees { height, sampled } => format!(
-                "second node holds the same block at height {height} and names the same producer for {sampled} sampled height{}",
-                if *sampled == 1 { "" } else { "s" }
-            ),
+            SecondCheck::Agrees { height, sampled } => {
+                let clause = format!(
+                    "second node holds the same block at height {height} and names the same producer for {sampled} sampled height{}",
+                    if *sampled == 1 { "" } else { "s" }
+                );
+                // In the over-limit note the same fact is worded as a cross-check of the finding, not as a reassurance.
+                second_agreed = Some(format!(
+                    "the second node gives the same block at height {height} and the same producers for {sampled} sampled height{}, so this is not one node's view",
+                    if *sampled == 1 { "" } else { "s" }
+                ));
+                clause
+            }
             SecondCheck::Differs { height, first, second } => {
                 return screen(Finding::Unverifiable {
                     headline: HEADLINE_DISAGREE,
@@ -291,7 +301,12 @@ pub fn evaluate(g: &Gates, noid: &NoidObservation, now: u64) -> Screen {
     }
     // R1.
     if over(long.largest, long.n, g.producer_limit_permille) || over(short.largest, short.n, g.producer_limit_permille) {
-        result.finding = Finding::Concentrated { detail: shares_sentence(g, long, short) };
+        let shares = shares_sentence(g, long, short);
+        let detail = match second_agreed {
+            Some(clause) => format!("{shares}; {clause}"),
+            None => shares,
+        };
+        result.finding = Finding::Concentrated { detail };
         return result;
     }
     let age = s.read_at.map_or_else(String::new, |t| format!(", read {} s ago", now.saturating_sub(t)));

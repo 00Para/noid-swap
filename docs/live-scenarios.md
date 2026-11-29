@@ -1,6 +1,6 @@
 # Live scenarios still open in M2.7: the operator's plan
 
-Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d) and the two-machine happy path (run 11, section 2e) and the two-node happy path (run 12, sections 2f and 8) and the run driven from the operator console (run 13, section 2g), which were run and settled; the rest was not run, funded or sent. **The next free run number is 14.** Parano1d mainnet (tiny NOID) against public
+Status 2026-11-06. Plan, except scenario 1+2 (live run 4, `live-run-4.md`), the `poseidon` happy path (run 5), scenario 3 (run 6), the mainnet happy path (run 8, section 2c) and the two-machine abort runs 9 and 10 (section 2d) and the two-machine happy path (run 11, section 2e) and the two-node happy path (run 12, sections 2f and 8) and the run driven from the operator console (run 13, section 2g), which were run and settled; the rest was not run, funded or sent, except what the later runs did: run 14 (a plain two-machine swap with the finality-18 code), the hostile-counterparty campaign of `hostile-run-plan.md` as runs 15 to 20 (the abort before any funding, a wrong amount, a short lock, the third-party close, the second node away at Bob's lock, an epoch rotation before Bob's claim; see `live-run-15.md` to `live-run-20.md`), which cover parts of sections 1+2, 6 and 8 below. **The next free run number is 21.** Still open here: contract version 2 (section 4), the stock variant (section 5), the conflicting close and the `F_max` burn (section 7). Parano1d mainnet (tiny NOID) against public
 Sepolia, `sepolia` profile, the owner in both roles, with the versioned helpers of `scripts/live/` (README there).
 Every step that moves NOID or ETH needs the owner's go-ahead in the same session (`PROJECT.md`); a blanket "do all"
 from an earlier session does not carry over. Clock times are UTC. Sources: `live-run-2.md`, `live-run-3.md`,
@@ -22,6 +22,8 @@ Per-run setup (same for every run N; `export RUN=N` in EVERY shell, `env.sh` der
 bash scripts/live/install.sh N ; export RUN=N ; bash ~/live-run-N/bin/setup.sh      # then edit ~/live-run-N/env.local.sh:
   ALICE_NOID=o1...  BOB_NOID=o1...  ALICE_ETH=0x...  BOB_ETH=0x...  CONTRACT=0x...   # CONTRACT = the run-3 Sepolia HTLC (reuse)
   VARIANT=raw|stock   CONTRACT_VERSION=1|2   HC_LEAD=<blocks>   AMOUNT=10000000   NOID_RPC2= ETH_RPC2=   # last two only in scenario 8
+# BEFORE prepare: `parano1d-cli address` must show Alice's address as the active one (the funding and the recovery are made from the
+#   active address; it was the wrong one at the start of runs 14 and 16). If not: `parano1d-cli address --use INDEX`, then check again.
 bash ~/live-run-N/bin/prepare.sh        # Alice's file, proof 20-36 min, Bob's file, swap.def.json -> $PUB. Sends nothing.
 # Windows:  parano1d-cli contract create swap.def.json --out swap.object.json
 bash ~/live-run-N/bin/check-object.sh   # must print "object file OK"
@@ -33,7 +35,7 @@ Send the owner at every run the contract root (`o1...`) and the Sepolia contract
 helper after `install.sh`. Keep `swap.object.json` and both swap files: the opening cannot be recovered from the chain.
 
 Alice's recovery close (the one command used by scenarios 1, 3 and as the fallback elsewhere; since runs 9 and 10 `scripts/live/recover-noid.sh`
-does the same for every instance at the root, not yet run live in that form). Only at
+does the same for every instance at the root, run live in runs 16, 17 and 18). Only at
 tip + 1 >= `D`; her index-0 address must be the active one (`parano1d-cli address --use INDEX`); S and C come from
 `parano1d-cli contract instances swap.object.json`. Preview and send chained in ONE command (run 2 lost 20 s between
 two; the `--json` key `txid` is assumed from the run-2 text, check it on the first preview):
@@ -53,7 +55,8 @@ different swap files, passphrases, secrets and contract roots, so they can overl
 **Result (`live-run-4.md`).** Settled 20:41:43 UTC: 10 NOID funded 17:49:49, no Bob, no Sepolia transaction; `refund_noid` offered at tip 284,173
 (`D` = 284,172), chained preview and send, recovery close confirmed at 284,179, receipt verified, Alice's file `refunded` at 284,197 (18 blocks
 later); cost 14,800 μNOID (9,000 + 5,800), exactly the bound below. The Bob-side checks of this section (`lock_eth` refused after `h_create` + 50,
-`lock.sh --dry-run` refusing after `+92`, Bob's file reaching `aborted`) were not run, because Bob never appeared: they remain open.
+`lock.sh --dry-run` refusing after `+92`, Bob's file reaching `aborted`) were not run, because Bob never appeared. They ran later as run 15
+(`live-run-15.md`): Bob's file kept waiting past the lock-by, gave up at the last lock height (`aborted`) and `lock.sh --dry-run` was refused; nothing was sent.
 
 - **Merge.** From the chain's view both are "NOID funded, no Sepolia lock": Alice does nothing until `D`. The only
   difference is a person's intent, so one run covers both. Extra check for Bob's side: his engine must stop offering
@@ -120,8 +123,8 @@ The sequel of section 2e and the execution of section 8: the same parties and se
 the other machine's, joined by one SSH tunnel with a local and a remote forward, so the node's RPC stayed on loopback) and two Sepolia endpoints. It
 **settled** in 45 minutes from funding to both sides final (`live-run-12.md`). Covered: the F5 cross-checks live, on both sides and in both directions (Bob's lock
 behind two Parano1d nodes, Alice's reveal and Bob's reading of the secret behind two Ethereum endpoints), the tunnel recipe of `mac-setup.md` section 6. **Not covered:**
-the fail-closed refusal with the tunnel killed (section 8 listed it as a test; it was not run live), two second nodes on independent networks, a hostile
-counterparty. Open low items from the run are in `TASKS.md` (M2.7b) and finding 1 to 5 of `live-run-12.md`.
+the fail-closed refusal with the tunnel killed (section 8 listed it as a test; it was not run live in run 12 and ran later, in run 20), two second nodes on independent networks, a hostile
+counterparty (the campaign of runs 15 to 20 ran later; two separate people did not). Open low items from the run are in `TASKS.md` (M2.7b) and finding 1 to 5 of `live-run-12.md`.
 
 ## 2g. Two machines, Alice driven from the operator console: run 13 — DONE 2026-11-06
 
@@ -194,7 +197,13 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   swap files `done`. If the stock claim cannot be made in time Bob gets nothing and Alice refunds at `D` AND keeps the
   ETH: do not reveal until the throwaway node is synced and a `--preview` succeeded against the real opening.
 
-## 6. Forced epoch rotation (T6): overlay on run 6 (or a plain raw v1 run)
+## 6. Forced epoch rotation (T6): overlay on run 6 (or a plain raw v1 run): RAN 2026-11-16 as run 20
+
+**Result (`live-run-20.md`).** The plan's form (the reveal a few blocks before the boundary) missed the rotation at 315360 by one block, so Bob's
+claim was held for the next rotation at 315504. Three blocks before it the tick and the claim dry run said `wait` ("epoch anchor rotates in 3
+block(s); proving after the boundary (T6)"); one block after it the claim was proved (`call_height` above the boundary) and sent, and it was final
+43 blocks before `D`. Not done: a claim already pending when the anchor rotates, posting a pre-rotation proof after the rotation (the optional
+item below). The text below is the plan as written.
 
 - **Proves (new).** The `sepolia` profile budgets `B_epoch` = 0 and the window (302 blocks) always contains a rotation, but
   nothing in 3 runs was near one. What can be forced: Bob's tick refuses to prove within 4 blocks of a boundary ("epoch
@@ -235,7 +244,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
   **Recover.** If (b) is not included within a few blocks, Bob's own close (a higher fee is NOT possible: first seen) waits
   for the anchor rotation (up to 144 blocks) or `D`; record the wait, it is the measurement Q1 wants.
 
-## 8. Two-node run: EXECUTED 2026-11-06 as run 12 (section 2f, `live-run-12.md`); the plan below is kept for the part that did not run (the tunnel killed at the `lock_eth` tick). The next free run number is 14.
+## 8. Two-node run: EXECUTED 2026-11-06 as run 12 (section 2f, `live-run-12.md`); the plan below is kept for the part that did not run (the tunnel killed at the `lock_eth` tick), which ran as run 20 (`live-run-20.md`, hostile plan L5): with the second Parano1d node's link closed one block before Bob's funding finality, three ticks answered `wait` with the F5 text and `lock.sh --dry-run` refused; the first tick after the link was back offered the lock. The next free run number is 21.
 
 - **Setup.** `docs/mac-setup.md` 5-8: node synced, `ssh -N -L 127.0.0.1:19601:127.0.0.1:9601 USER@MACADDR` running on
   Windows (loopback only; never expose 9601), a second distinct Sepolia RPC. Put `NOID_RPC2=http://127.0.0.1:19601` and
@@ -255,7 +264,7 @@ Result: settled with the proof-free lock kind (`poseidon`), raw v1, `sepolia` pr
 - Whether the hidden `--import-wallet-secret` exists in the installed 2.1.0 binary; second-node sync time.
 - That the node accepts the v2 program (`fee == max_fee`) end to end; the `--json` output key `txid` of `contract call --preview`.
 - How to inject a stale-anchor intent (scenario 6) and whether an isolated node can be built from the Mac setup (scenario 7a).
-- The Bob-side terminal phase after an abort before any lock (`aborted` is listed in `watch.sh`, not confirmed for this path).
+- ~~The Bob-side terminal phase after an abort before any lock~~ confirmed in run 15: `aborted` (`live-run-15.md`).
 
 ## 10. Summary and schedule
 

@@ -342,6 +342,14 @@ pub enum Event {
     /// M2.5d: the instance was closed OUTSIDE this tool (the wallet CLI) by `txid`, confirmed at `height`
     /// (`tick --closed-by`). Alice: her recovery close; Bob: his claim.
     NoidClosedExternally { txid: String, height: u64 },
+    /// CHAOS F-11 (Bob, log-only): the instance was closed OUTSIDE this tool by `txid`, confirmed at `height >= D` (`tick --closed-by`). A close
+    /// at or after `D` is the recovery branch, which pays Alice: Bob's claim can no longer happen. The phase does not move; the engine reads this
+    /// entry as the evidence that ends the NOID side (an `abort`, given once Bob's ETH leg is settled).
+    NoidClosedAfterDeadline { txid: String, height: u64 },
+    /// CHAOS F-11 (Alice, log-only): the instance was closed OUTSIDE this tool by `txid`, confirmed at `height < D` (`tick --closed-by`), in a phase
+    /// where her secret may be public (`lock_final`, `reveal_submitted`). A close before `D` is the claim branch, which pays Bob: it is no recovery
+    /// of hers. The phase does not move; `alice_both_legs_lost` reads the entry as the evidence F-18 asks for (the NOID went to Bob).
+    NoidClosedBeforeDeadline { txid: String, height: u64 },
     // Ethereum facts
     EthLockSeen { lock: LockSummary },
     EthLockFinal,
@@ -563,6 +571,8 @@ fn alice(p: &AlicePhase, e: &Event) -> Option<AlicePhase> {
             A::FundingFinal { .. } | A::LockSeen { .. } | A::LockFinal { .. } | A::RevealSubmitted { .. } | A::Revealed { .. } | A::Done { .. },
             E::NoidInstanceAliveAtD | E::NoidInstanceGoneBeforeD | E::NoidInstanceBackAfterGone,
         ) => p.clone(),
+        // CHAOS F-11 (Alice): log-only, the operator's evidence that the instance went by the claim branch (to Bob).
+        (A::LockFinal { .. } | A::RevealSubmitted { .. }, E::NoidClosedBeforeDeadline { .. }) => p.clone(),
         // Log-only fact: Bob's ETH lock was refunded. Alice's phase does not move
         // (she still waits for D and never reveals); the engine emits it once.
         (
@@ -580,7 +590,8 @@ fn bob(p: &BobPhase, e: &Event) -> Option<BobPhase> {
         // Before locking: Bob simply walks away. After the secret is seen: the
         // claim branch closed on him (he lost); the phase records why.
         (
-            B::Received | B::Funded { .. } | B::FundingFinal { .. } | B::SecretSeen { .. } | B::ClaimSubmitted { .. } | B::LockSubmitted { .. },
+            // CHAOS F-6: also `locked`, but only for a lock that is gone for good (the engine's `bob_lock_gone_for_good`).
+            B::Received | B::Funded { .. } | B::FundingFinal { .. } | B::SecretSeen { .. } | B::ClaimSubmitted { .. } | B::LockSubmitted { .. } | B::Locked { .. },
             E::Abort { reason },
         ) => B::Aborted { reason: reason.clone() },
         // CHAOS F-3: the instance left the chain before it was final; the finality count starts over when it is seen again.
@@ -717,6 +728,9 @@ fn bob(p: &BobPhase, e: &Event) -> Option<BobPhase> {
             preimage: Some(*preimage),
             attempts: *attempts,
         },
+        // CHAOS F-11 (Bob): log-only. A close at or after `D` made outside this tool, and the instance seen alive when the claim branch had
+        // already closed (the Bob counterpart of CHAOS F-17): either one tells the engine that a later disappearance is Alice's recovery close.
+        (B::SecretSeen { .. } | B::ClaimSubmitted { .. }, E::NoidClosedAfterDeadline { .. } | E::NoidInstanceAliveAtD) => p.clone(),
         (B::Locked { instance, lock }, E::EthRefundSubmitted { tx_hash, at }) => B::RefundSubmitted {
             instance: instance.clone(),
             lock: lock.clone(),
@@ -854,9 +868,11 @@ mod tests {
         p = transition(&p, &Event::NoidFundingFinal { tip: 27 }).unwrap();
         p = transition(&p, &Event::LockSubmitted { t_reveal: 1_000_000, amount_wei: 1, tx_hash: None, at: 3 }).unwrap();
         p = transition(&p, &Event::EthLockSeen { lock: lock() }).unwrap();
-        // Once locked, Bob cannot abort; he refunds.
-        assert!(transition(&p, &Event::Abort { reason: "x".into() }).is_err());
+        // Once locked, an abort is accepted by the machine only for CHAOS F-6 (a lock that can no longer land; the engine alone decides that and
+        // emits it); it is refused again once the refund is submitted: from there Bob refunds.
+        assert!(transition(&p, &Event::Abort { reason: "x".into() }).is_ok());
         p = transition(&p, &Event::EthRefundSubmitted { tx_hash: None, at: 1_000_001 }).unwrap();
+        assert!(transition(&p, &Event::Abort { reason: "x".into() }).is_err());
         // A preimage seen while the refund is unconfirmed moves Bob to claiming (his refund may have reverted).
         let late = transition(&p, &Event::EthPreimageSeen { preimage: [7; 32], tip: 1, time: 1 }).unwrap();
         assert!(matches!(late, Phase::Bob(BobPhase::SecretSeen { .. })));

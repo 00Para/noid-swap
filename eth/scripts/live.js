@@ -70,7 +70,8 @@
  *                      account database gives the user that runs this script, not the HOME (Linux, macOS) or USERPROFILE (Windows) of the environment: one that
  *                      names another directory is refused, and so is a run with SUDO_UID or SUDO_USER set; `su`, `runas`, another login and another machine cannot be
  *                      detected and have no record). It is written beside FILE.lock-sent, and on its own by a lock without --swap, and found by every real lock whatever the name of the swap
- *                      file; same proofs. The guards are tested offline only.
+ *                      file; same proofs. The guards were tested offline (Hardhat's in-process network and stubs); real locks were sent through them in live runs 17 to 20,
+ *                      but the REFUSAL of a second send has never run against a real chain.
  *                      Another machine or another user account still has the duplicate rule only (and, with a swap file, the pending-nonce check of its own node).
  * lock, claim --swap FILE  the file must have ONE name: a swap file with more than one hard link is refused (the claim lock and the marker files are named from
  *                      the path, so a second name gets its own claim lock and misses a marker beside the first). Only where the file system reports a link count.
@@ -126,20 +127,60 @@
  * Reveal sidecar (T21-11): with --swap, a real claim writes FILE.reveal-sent (lock id, the signed hash when a local key shows it, epoch seconds; exclusive,
  * mode 600, fsynced with its directory) as the last step before the broadcast and sends nothing if that fails. A sidecar of THIS lock beside the file is read
  * as evidence that the secret may be public, like the history events below (same late cutoff); one of another lock is ignored and reported. swap-cli's
- * `tick` reads the same file (history name reveal_sidecar_seen).
+ * `tick` reads the same file (history name reveal_sidecar_seen). It is looked for beside the swap file's real path and, when the file was reached by
+ * another name (a link), beside that name too, as swap-cli does (an older `live.js` wrote it there); a match at either place counts. Leftover `*.tmp`
+ * files of an interrupted sidecar write are never removed: a claim lists them in its output (`revealSidecarTmpFiles`) and says they are no evidence.
  *
- * Claim lock: a real `claim --swap FILE` first creates FILE.claim-lock exclusively (pid and time, nothing secret) and holds it until the send has settled
- * (not through the wait for the receipt, so `claim --replace-tx` from another terminal still works then). If that file exists, or cannot be created, the
+ * Receiver code (R7-7, T11: EOAs only): a claim is never estimated, so the receiver's code is read at "latest" and "pending" twice: early (after the cutoff
+ * check, before the log scans; also in --dry-run, which then shows what the real run would do) and immediately before signing, in one round with the latest
+ * block. The order in the last step is: code read and block read together, the code judged, the cutoff and timelock evaluated from that block, the reveal
+ * sidecar written (with --swap), the signature, then the synchronous wall-clock check, then the broadcast. A FIRST claim refuses on any code (a contract, or
+ * an EIP-7702 delegation, 0xef0100...), on a failed read and on an answer that is not hex: nothing signed, nothing sent. With --replace (a verified pending
+ * claim of this lock exists, so the secret is already public in it and the replacement has the same nonce and receiver) the read is informational: the claim
+ * goes on and the output carries `receiverCodeWarning`, with a WARNING line on stderr. That holds only when the pending claim carries THIS lock's secret (the lock word computed locally
+ * from its preimage argument equals the lock's hashlock: decided the same with and without --secret, so a dry run and the real run agree); a pending claim with another
+ * preimage is judged by the rule of a first claim, for the receiver's code AND for the late cutoff below (replacePreimageNote, and a NOTE on stderr). Applies with
+ * and without --swap. (The nonce and fee rules of --replace do not depend on the preimage: see the code of claimChecked.)
+ *
+ * status: read-only (signs nothing, sends nothing, writes nothing). Flags --contract, --lock-id (required), --from-block, --lock-kind, and optionally
+ * --chain-id (must equal eth_chainId) and --code-hash (must equal the keccak256 of the code at the address). A refusal names the flag or the cause: no
+ * code at the address, a code hash that is not an HTLC's, a node error (its own words are printed, not ethers' "could not coalesce error"; anything that
+ * looks like an address, scheme://..., is cut out of them). Every contract read is made at the one block the run started from. A lock that is not found is
+ * reported as missing (`exists: false`, `trustworthy: true`) only when that block is at most 120 s old (STATUS_FRESH_BLOCK_S) AND --chain-id was given and
+ * matched (the same contract address can exist on another chain). On an older block it is `exists: null`, state "unknown (the node is behind the chain's tip)",
+ * `trustworthy: false`; on a fresh block without --chain-id it is `exists: false`, `trustworthy: false`, state "not found on chain N, but not trusted: --chain-id was not given", with a note that says so (exit 0 in every case). The note
+ * names the chain id the node reported, says whether --chain-id and --code-hash were checked, gives the block's time and this machine's clock in UTC, and says
+ * that a lock still pending in the mempool is not seen. A getLock that says "not found" while the event scan of the same run shows a Locked event for the id is an error (the node
+ * contradicts itself); a lock that exists with no Locked event in the scanned range gets a note.
+ *
+ * Claim lock: a real `claim --swap FILE` first creates FILE.claim-lock exclusively (pid and time, nothing secret) and holds it until the send has settled,
+ * that is until the sender's socket has CLOSED (see "Time bound on the send"; not through the wait for the receipt, so `claim --replace-tx` from another
+ * terminal still works then). If the close cannot be confirmed within 5 s the lock is left on disk with a message, and the operator deletes it by hand. If that file exists, or cannot be created, the
  * claim refuses before it touches the sidecar: a claim that died leaves its lock, and the operator deletes it by hand once sure that no other claim for
  * this swap file is running. The tool never removes a lock it did not make. A dry run takes no lock.
  *
- * No redirect, no library retry for the send: a provider from makeProvider (the command line's) turns every HTTP 3xx answer into an error
- * (REDIRECT_REFUSED; put the endpoint's final URL in ETH_RPC_URL), and the claim's send is not retried on HTTP 429 (see sendGuard).
+ * No redirect, no library retry: a provider from makeProvider (the command line's) turns every HTTP 3xx answer to a READ into an error (REDIRECT_REFUSED; put
+ * the endpoint's final URL in ETH_RPC_URL). The claim's send does not go through the library at all (see the next paragraph); the `lock` send still does,
+ * and is not retried on HTTP 429 (see sendGuard).
+ *
+ * Time bound on the send (claim only; eth/scripts/bounded-send.js states the guarantee and its limits). The claim carries the swap's secret, so the moment its
+ * bytes leave this machine is the moment the secret may be public: it must not be later than the reveal cutoff. ethers cannot bound that (its timeout is an
+ * inactivity timer, DNS and connect have no limit, its abort does not reach the socket, the body is queued before the connection exists, the send is batched with
+ * two reads). So a real claim is sent by a small hand-written sender: ONE unbatched eth_sendRawTransaction on a fresh connection (no agent, no keep-alive, no retry,
+ * no redirect), the connection made FIRST (a stall or failure there is a proven "nothing was sent" and leaves no sidecar), then a synchronous check as the last
+ * statement before the write (now + 20 s answer window + 10 s guard <= the cutoff that rules, and now < the timelock; "now" is the later of the wall clock and
+ * the latest block's time plus the monotonic time elapsed since it was read), a kill timer armed in the same block, and at the deadline the socket is reset.
+ * The send budget is therefore 30 s: the last moment to START the send is cutoff - 30 s, and its bytes are out by cutoff - 10 s. Order inside the last step:
+ * connect, then the code and block reads, the verdicts, the cutoff and timelock evaluation, the sidecar, the signature, the check, the write. Four outcomes:
+ * not_sent (proven: nothing written), accepted, delivered_rejected (the endpoint's node refused it; the endpoint has the secret), unknown (no complete answer, a
+ * redirect, HTTP 429, any other status, a reset); only not_sent says "nothing was sent". A real claim needs a LOCAL key (the command line always has one) and a
+ * provider made by makeProvider (an in-process test provider needs args.unboundedSendInProcess, which the command line cannot set), and is refused while
+ * NODE_USE_ENV_PROXY (or --use-env-proxy) is in effect: the sender connects directly and never uses a proxy. `refund` and `lock` keep the library path.
  *
  * Keys (REVIEW-4 R4-5): with --swap, claim needs the key of the file's alice_receiver, refund and lock that of bob_sender.
  * Late re-send (REVIEW-4 R4-3): with --swap, when the file's history shows the secret may already be public (reveal_submitted,
  * eth_claim_mined, eth_claim_reorged, eth_reveal_dropped), claim takes the cutoff the intent froze (T_reveal - DE) instead of the
- * stricter timelock - 1800 s; an explicit --margin-s still tightens it.
+ * stricter timelock - 1800 s; an explicit --margin-s still tightens it. A --replace of a pending claim grants the late cutoff only when that claim carries this lock's secret.
  *
  * Tied to the swap file (REVIEW-3 F3): lock, claim and refund take --swap FILE, the JSON swap file of
  * `swap-cli` (read-only; the sealed secret in it is never touched). The terms (--chain-id, --contract,
@@ -158,7 +199,9 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { performance } = require("node:perf_hooks");
 const { ethers } = require("ethers");
+const bsend = require("./bounded-send.js");
 
 const ARTIFACT_PATHS = {
   sha256: path.join(__dirname, "..", "artifacts", "contracts", "HTLC.sol", "HTLC.json"),
@@ -662,7 +705,7 @@ function explain(e) {
     }
   }
   const msg = (e && (e.shortMessage || e.message)) || String(e);
-  return redact(String(msg).split("\n")[0]);
+  return redact(plainNodeText(String(msg).split("\n")[0]));
 }
 
 async function readStdinText(maxBytes = 4096) {
@@ -768,6 +811,7 @@ async function requireFundsFor(provider, from, req, gasLimit) {
 // (REDIRECT_REFUSED) before the library looks at the status. `clone()` copies `getUrlFunc` as well, so the wrapper reaches every clone. This tool
 // follows no redirect, for a read or for the send; the operator puts the endpoint's final address into ETH_RPC_URL.
 const sendGuard = { noRetry: false };
+const BOUNDED_URL = Symbol("noid-swap.bounded-url");
 
 /** The error a provider from `makeProvider` throws for an HTTP 3xx answer. It carries no part of the configured URL or of the address the answer names. */
 class RedirectRefused extends Error {
@@ -796,17 +840,214 @@ function makeProvider(url) {
     }
     return resp;
   };
-  return new ethers.JsonRpcProvider(request, undefined, { cacheTimeout: -1 });
+  const provider = new ethers.JsonRpcProvider(request, undefined, { cacheTimeout: -1 });
+  // The address the bounded sender (bounded-send.js) connects to for a real claim: the same endpoint the reads use. A private symbol, not printed anywhere.
+  Object.defineProperty(provider, BOUNDED_URL, { value: String(url), enumerable: false });
+  return provider;
 }
 
-/** True when the error is the endpoint's HTTP 429 answer (a server error of the library with that status). */
-function isThrottledAnswer(e) {
-  return !!e && e.code === "SERVER_ERROR" && !!e.response && e.response.statusCode === 429;
+/** The endpoint address a provider from `makeProvider` carries for the bounded sender, or null (an in-process provider of a test has none). */
+function boundedUrlOf(provider) {
+  return provider && typeof provider[BOUNDED_URL] === "string" ? provider[BOUNDED_URL] : null;
 }
 
 /** True when the error is the refusal of a redirect answer by a provider from `makeProvider`. */
 function isRedirectAnswer(e) {
   return !!e && e.code === "REDIRECT_REFUSED";
+}
+
+// ------------------------------------------------ the outcome of the claim's bounded send (bounded-send.js)
+/**
+ * What the bounded sender made of a claim's send, as an error the caller turns into text: outcome "not_sent" (proven: no byte of the claim was written),
+ * "delivered_rejected" (the endpoint's node refused it: the endpoint has the secret) or "unknown" (the secret may be out). Never thrown for "accepted".
+ * Fields: outcome, stage (not_sent), reason (sanitized, from the sender), status, retryAfter, hash (known before the send), alarm, rst, clockJump, closeConfirmed, killedByDeadline.
+ */
+class SendOutcomeError extends Error {
+  constructor(o) {
+    super("");
+    this.name = "SendOutcomeError";
+    this.outcome = o.outcome;
+    this.stage = o.stage || null;
+    this.reason = o.reason || "";
+    this.status = o.status === undefined ? null : o.status;
+    this.retryAfter = o.retryAfter || null;
+    this.hash = o.hash || null;
+    this.alarm = o.alarm || null;
+    this.redirect = o.redirect === true;
+    this.throttled = o.throttled === true;
+    this.rst = o.rst === true;
+    this.clockJump = o.clockJump === true;
+    this.closeConfirmed = o.closeConfirmed !== false;
+    this.killedByDeadline = o.killedByDeadline === true;
+    this.timeBoundBroken = o.timeBoundBroken === true;
+    this.message = sendOutcomeText(this, {});
+  }
+}
+
+const NOT_SENT_STAGE = {
+  url: "the endpoint address could not be used",
+  dns: "stopped while resolving the endpoint's name",
+  connect: "stopped while connecting",
+  tls: "stopped during the TLS handshake",
+  check: "stopped at the check before the write",
+  closed: "the connection was closed before the write",
+  sign: "stopped while signing",
+};
+
+/**
+ * The words for an outcome of the claim's send (one function for every outcome, with and without --swap). ctx: hasSwap, sidecarFile (the sidecar written for
+ * this attempt, or null), fate (not_sent: what happened to a sidecar this call had written), lockFile (the claim lock, when it was left on disk).
+ */
+function sendOutcomeText(o, ctx = {}) {
+  const hash = o.hash ? ` Transaction hash ${o.hash}: look for it on a second endpoint.` : "";
+  const next =
+    ctx.hasSwap === true
+      ? ctx.sidecarFile
+        ? ` Run tick --apply now: the reveal sidecar ${ctx.sidecarFile} was written before the send and stays, so swap-cli treats the secret as possibly public and a re-send is judged by the late cutoff.`
+        : " Run tick --apply now; a re-send is judged by the late cutoff."
+      : " There is no sidecar (no --swap): nothing records this attempt; run swap-cli tick --apply against your swap file now.";
+  const tail =
+    (o.timeBoundBroken ? " TIME BOUND NOT KEPT: the machine was suspended or stalled during the send, so the claim may have reached the network later than the cutoff allowed; treat the secret as public." : "") +
+    (o.alarm ? ` ALARM: ${o.alarm}.` : "") +
+    (o.killedByDeadline && !o.rst ? " The connection could not be reset: the operating system may still retransmit a segment written before the kill for its retransmission period." : "") +
+    (o.closeConfirmed === false
+      ? ` The connection could not be confirmed closed within ${bsend.sendTiming().closeWaitMs / 1000} s${ctx.lockFile ? `; the claim lock file ${ctx.lockFile} is left: delete it by hand after this process has exited` : ""}.`
+      : "");
+  if (o.outcome === "not_sent") {
+    const where = NOT_SENT_STAGE[o.stage] || "stopped before the write";
+    return `Nothing was sent (${where}): ${o.reason}.${ctx.fate ? ` ${ctx.fate.charAt(0).toUpperCase()}${ctx.fate.slice(1)}.` : " No reveal sidecar of this attempt was left."}${tail}`;
+  }
+  if (o.outcome === "delivered_rejected") {
+    return `The endpoint received the claim and its node refused it (${o.reason}). The endpoint has seen the secret: treat it as public.${hash}${next}${tail}`;
+  }
+  // unknown
+  const strict = ` Run tick --apply first in any case; only if you are then certain it was not forwarded, you may re-send with --margin-s ${DEFAULT_MARGIN_S}, which keeps the strict cutoff.`;
+  if (o.throttled) {
+    return (
+      "The endpoint answered HTTP 429 (throttled) to the request that carried only this claim. Endpoints usually refuse a throttled request before a node sees it, " +
+      "but this cannot be known here: the claim MAY have reached the network and the secret may be public. This tool never repeats a reveal by itself." +
+      `${hash}${next}${strict}${tail}`
+    );
+  }
+  if (o.redirect) {
+    return (
+      `The endpoint answered a redirect (HTTP ${o.status}) to the request that carried only this claim; this tool never follows a redirect, so the claim was not sent anywhere else. ` +
+      "Whether the endpoint's own node saw it cannot be known here: the claim MAY have reached the network and the secret may be public. This tool never repeats a reveal by itself." +
+      ` To use the right address, put the endpoint's final URL in ETH_RPC_URL.${hash}${next}${strict}${tail}`
+    );
+  }
+  return `The claim may have reached the network (${o.reason}); the secret may be public. This tool never repeats a reveal by itself.${hash}${next}${tail}`;
+}
+
+/**
+ * Environment settings that would make Node route requests through a proxy. The bounded sender connects directly and never uses one, so the reads and the
+ * send would take different paths: a real claim is refused while any of them is in effect. Returns the sentence, or null.
+ */
+function envProxyRefusal(env = process.env, execArgv = process.execArgv) {
+  const v = env.NODE_USE_ENV_PROXY;
+  const flagged = (list) => list.some((a) => /^--use-env-proxy(=|$)/.test(String(a)));
+  const inOptions = flagged(String(env.NODE_OPTIONS || "").split(/\s+/).map((t) => t.replace(/^["']+|["']+$/g, "")));
+  if ((v !== undefined && v !== "" && v !== "0") || inOptions || flagged(execArgv || [])) {
+    return "refusing: Node is set to route requests through the environment's proxy (NODE_USE_ENV_PROXY or --use-env-proxy), but the claim's send connects directly and never uses a proxy, so the reads and the send would take different paths; unset it for this command (nothing was signed, nothing was sent)";
+  }
+  return null;
+}
+
+/**
+ * The claim's send through the bounded sender. Returns a TransactionResponse (ethers) for the accepted transaction; throws a SendOutcomeError for every
+ * other outcome, or the error opts.lastCheck threw (a refusal at the check, nothing sent). Order (see "Time bound on the send"): connect first (nothing is
+ * written, no sidecar exists yet), then opts.preSend (reads, verdicts, sidecar), the local signature, then the sender's synchronous check, the write and
+ * the kill timer in one block. The claim lock (opts.afterSend) is let go only after the sender's socket has closed.
+ */
+async function boundedBroadcast(provider, signer, args, toSend, opts) {
+  const url = boundedUrlOf(provider);
+  if (url === null) {
+    throw new UserError("refusing: a real claim is sent through the bounded sender, which needs the endpoint address of a provider made by makeProvider (the command line always has one); nothing was signed, nothing was sent");
+  }
+  if (!(signer instanceof ethers.BaseWallet)) {
+    throw new UserError("refusing: a real claim is signed with a local key (--key-file): the bounded sender needs the signed bytes before the send, and a node-held or remote signer would do its own network reads between the last check and the broadcast; nothing was signed, nothing was sent");
+  }
+  const sp = signer.provider;
+  if (sp && sp !== provider && boundedUrlOf(sp) !== url) {
+    throw new UserError("refusing: the signer and the provider talk to different endpoints; nothing was signed, nothing was sent");
+  }
+  if (typeof opts.preSend !== "function" || typeof opts.lastCheck !== "function") throw new Error("execute: opts.boundedSend requires opts.preSend and opts.lastCheck");
+  let conn;
+  try {
+    conn = await bsend.openBoundedConnection(url);
+  } catch (e) {
+    if (e instanceof bsend.BoundedSendError) throw new SendOutcomeError({ outcome: "not_sent", stage: e.stage, reason: e.message });
+    throw e;
+  }
+  try {
+    await opts.preSend(toSend);
+  } catch (e) {
+    conn.destroy(); // nothing was written on it
+    throw e;
+  }
+  let raw;
+  let txObj;
+  try {
+    raw = await signer.signTransaction(toSend);
+    txObj = ethers.Transaction.from(raw);
+  } catch {
+    conn.destroy();
+    throw new SendOutcomeError({ outcome: "not_sent", stage: "sign", reason: "the transaction could not be signed" });
+  }
+  const hash = txObj.hash;
+  let res;
+  try {
+    res = await conn.sendOnce({
+      rawTx: raw,
+      expectedHash: hash,
+      check: opts.lastCheck,
+      sanitize: redact,
+      onSignal: typeof opts.onSignal === "function" ? (sig) => opts.onSignal(sig, { hash }) : undefined,
+    });
+  } catch {
+    // sendOnce throws only before it has done anything (its arguments are refused): nothing was written.
+    conn.destroy();
+    throw new SendOutcomeError({ outcome: "not_sent", stage: "check", reason: "the send could not be started" });
+  }
+  // The socket has closed (or the close wait ran out): no byte of this attempt can leave any more, so the claim lock may go.
+  if (typeof opts.afterSend === "function") opts.afterSend({ closeConfirmed: res.closeConfirmed });
+  if (res.outcome === "not_sent") {
+    // The check's own refusal is a UserError that already carries its sidecar fate. Anything else that failed before the write (a bug in the check, the request
+    // that could not be built or set up) is a plain not_sent: the caller takes the sidecar this call made back, instead of the "may have reached the network" text.
+    if (res.error instanceof UserError) throw res.error;
+    throw new SendOutcomeError({ ...res, stage: res.stage || "check", reason: res.error ? "the check before the write failed unexpectedly" : res.reason });
+  }
+  let r = res;
+  if (r.outcome === "delivered_rejected" && r.nonceTooLow === true) r = await bsend.settleNonceTooLow(r, (h) => provider.getTransactionReceipt(h), hash);
+  if (r.outcome !== "accepted") {
+    throw new SendOutcomeError({ ...r, hash, closeConfirmed: res.closeConfirmed, rst: res.rst, killedByDeadline: res.killedByDeadline, clockJump: res.clockJump, timeBoundBroken: res.timeBoundBroken });
+  }
+  // Accepted by the node (or already known / already mined). Show the hash before the wait: a stuck transaction needs it for --replace-tx.
+  if (typeof args.onSent === "function") args.onSent({ hash, nonce: txObj.nonce, maxFeePerGas: txObj.maxFeePerGas, maxPriorityFeePerGas: txObj.maxPriorityFeePerGas });
+  // The block the replacement scan of resp.wait starts from is the one read BEFORE the write (preSend): a replacement mined between the write and now would
+  // otherwise be missed and the wait could hang. Only without it (no preSend reading) is it read now.
+  let startBlock = typeof opts.startBlock === "function" ? opts.startBlock() : null;
+  if (startBlock === null || startBlock === undefined) {
+    try {
+      startBlock = await provider.getBlockNumber();
+    } catch {
+      startBlock = null; // only the replacement detection of resp.wait is lost
+    }
+  }
+  try {
+    const network = await provider.getNetwork();
+    const wrapped = provider._wrapTransactionResponse(txObj, network);
+    return startBlock === null ? wrapped : wrapped.replaceableTransaction(startBlock);
+  } catch {
+    // A provider without the library's internal wrapper: the minimal response the caller needs.
+    return {
+      hash,
+      nonce: txObj.nonce,
+      maxFeePerGas: txObj.maxFeePerGas,
+      maxPriorityFeePerGas: txObj.maxPriorityFeePerGas,
+      wait: (confirms) => provider.waitForTransaction(hash, confirms),
+    };
+  }
 }
 
 /**
@@ -822,7 +1063,12 @@ function isRedirectAnswer(e) {
  * nothing but the local signature and this synchronous check sits between the sidecar and the bytes going to the node. With any other signer it runs
  * just before `signer.sendTransaction`, which does its own network reads before it broadcasts, so the check is weaker there.
  * opts.afterSend: optional callback (it must not throw), run as soon as the broadcast call has returned or thrown, before the wait for the
- * receipt (only together with opts.preSend). The claim uses it to release its lock file (see takeClaimLock).
+ * receipt (only together with opts.preSend). The claim uses it to release its lock file (see takeClaimLock). On the bounded path it is called with
+ * { closeConfirmed } and only after the sender's socket has closed.
+ * opts.startBlock: () => the block number read in preSend (before the write), where the replacement scan of the receipt wait starts (bounded path).
+ * opts.boundedSend: the claim's send goes through bounded-send.js (see "Time bound on the send" in the header): connect first, then opts.preSend, the
+ * signature, and opts.lastCheck as the synchronous check right before the write. Needs opts.preSend, opts.lastCheck, a local key and a provider from
+ * makeProvider. opts.onSignal(signal, { hash }) is told when a catchable signal reset the socket during the send window.
  */
 async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   const chainId = await assertAllowedChain(provider, args);
@@ -885,52 +1131,59 @@ async function execute(provider, signer, args, tx, extra = {}, opts = {}) {
   }
   let toSend = req;
   let resp;
+  let sentShown = false; // the bounded path shows the hash itself, as soon as the node has accepted the transaction
   if (typeof opts.preSend === "function") {
     // Fill nonce, chain id and fees first, so that no network read is left between the guard and the broadcast. Only with a fixed gas limit: then
     // nothing is estimated and the calldata (the secret) goes to the node only inside the transaction itself.
     if (fixedGas !== null && typeof signer.populateTransaction === "function") toSend = await signer.populateTransaction(req);
-    await opts.preSend(toSend);
-    const sendVia = signer.provider || provider;
-    if (signer instanceof ethers.BaseWallet && sendVia && typeof sendVia.broadcastTransaction === "function") {
-      // A local key: sign here (local work, no network) and hand the signed bytes to the node ourselves. `signer.sendTransaction` would populate
-      // the transaction a second time, and that re-detects the network (an eth_chainId request with a long timeout) before anything is signed
-      // or sent: a stalled endpoint could then delay the broadcast past the cutoff after every check had passed.
-      const raw = await signer.signTransaction(toSend);
-      // Nothing but the synchronous check below may sit between the last cutoff check and the call that sends the bytes: no await, no other call.
-      // The send is one HTTP request and the library never repeats it: the library's own retry (it re-sends a request by itself when the endpoint
-      // answers HTTP 429, with a backoff, for up to the request's 300 s timeout) is switched off for this one send (see sendGuard). A throttled
-      // first attempt was never accepted by the node, so a repeat minutes later would be the real publication, long after the last check; instead
-      // the send fails and the claim says so. What remains, and is NOT fixed here (TASKS.md T21-17): the request's own duration. The node has the
-      // bytes as soon as the request is delivered, but a stalled connection can delay the delivery, and that delay has no firm bound: the
-      // library's 300 s is an inactivity timer on the socket (any traffic resets it), the name lookup and the connect have no library timeout,
-      // and on a timeout the library rejects without aborting the request. A redirect answer (301, 302, 307, 308, or any 3xx) is NOT followed by
-      // a provider from `makeProvider`: it becomes an error (REDIRECT_REFUSED), so the signed bytes are offered to the one endpoint only.
-      if (typeof opts.lastCheck === "function") opts.lastCheck();
-      sendGuard.noRetry = true;
-      try {
-        resp = await sendVia.broadcastTransaction(raw);
-      } finally {
-        sendGuard.noRetry = false; // the receipt polling after the send keeps the library's normal retry behaviour
-        if (typeof opts.afterSend === "function") opts.afterSend(); // the send has settled (answered or failed): the claim lock is let go here, not after the receipt wait
-      }
+    if (opts.boundedSend === true) {
+      // The claim: the bounded sender (bounded-send.js). Order: connect, preSend (reads, verdicts, sidecar), sign, synchronous check, write, kill timer.
+      resp = await boundedBroadcast(provider, signer, args, toSend, opts);
+      sentShown = true;
     } else {
-      // Any other signer (a node-held account, a hardware or remote signer) does its own network reads inside `sendTransaction` before it
-      // broadcasts, so the last check is weaker here. The command line always uses a local key (`loadSigner` builds an ethers.Wallet).
-      // The library's retry on HTTP 429 is off for the whole call here too (it covers those reads as well).
-      if (typeof opts.lastCheck === "function") opts.lastCheck();
-      sendGuard.noRetry = true;
-      try {
-        resp = await signer.sendTransaction(toSend);
-      } finally {
-        sendGuard.noRetry = false;
-        if (typeof opts.afterSend === "function") opts.afterSend();
+      await opts.preSend(toSend);
+      const sendVia = signer.provider || provider;
+      if (signer instanceof ethers.BaseWallet && sendVia && typeof sendVia.broadcastTransaction === "function") {
+        // A local key: sign here (local work, no network) and hand the signed bytes to the node ourselves. `signer.sendTransaction` would populate
+        // the transaction a second time, and that re-detects the network (an eth_chainId request with a long timeout) before anything is signed
+        // or sent: a stalled endpoint could then delay the broadcast past the cutoff after every check had passed.
+        const raw = await signer.signTransaction(toSend);
+        // Nothing but the synchronous check below may sit between the last cutoff check and the call that sends the bytes: no await, no other call.
+        // The send is one HTTP request and the library never repeats it: the library's own retry (it re-sends a request by itself when the endpoint
+        // answers HTTP 429, with a backoff, for up to the request's 300 s timeout) is switched off for this one send (see sendGuard). A throttled
+        // first attempt was never accepted by the node, so a repeat minutes later would be the real publication, long after the last check; instead
+        // the send fails and the claim says so. What remains is the request's own duration (the library's 300 s is an inactivity timer, the name lookup
+        // and the connect have no library timeout, and on a timeout the library rejects without aborting the request). THIS path is no longer the claim's:
+        // a claim goes through the bounded sender (opts.boundedSend, bounded-send.js); this path is the `lock`'s (decision D5: unchanged, a lock carries no
+        // secret) and the in-process path of the tests (args.unboundedSendInProcess). A redirect answer (301, 302, 307, 308, or any 3xx) is NOT followed by
+        // a provider from `makeProvider`: it becomes an error (REDIRECT_REFUSED), so the signed bytes are offered to the one endpoint only.
+        if (typeof opts.lastCheck === "function") opts.lastCheck();
+        sendGuard.noRetry = true;
+        try {
+          resp = await sendVia.broadcastTransaction(raw);
+        } finally {
+          sendGuard.noRetry = false; // the receipt polling after the send keeps the library's normal retry behaviour
+          if (typeof opts.afterSend === "function") opts.afterSend(); // the send has settled (answered or failed): the claim lock is let go here, not after the receipt wait
+        }
+      } else {
+        // Any other signer (a node-held account, a hardware or remote signer) does its own network reads inside `sendTransaction` before it
+        // broadcasts, so the last check is weaker here. The command line always uses a local key (`loadSigner` builds an ethers.Wallet).
+        // The library's retry on HTTP 429 is off for the whole call here too (it covers those reads as well).
+        if (typeof opts.lastCheck === "function") opts.lastCheck();
+        sendGuard.noRetry = true;
+        try {
+          resp = await signer.sendTransaction(toSend);
+        } finally {
+          sendGuard.noRetry = false;
+          if (typeof opts.afterSend === "function") opts.afterSend();
+        }
       }
     }
   } else {
     resp = await signer.sendTransaction(toSend);
   }
   // The hash is shown before the wait: a stuck transaction needs it for --replace-tx. (The command line sets onSent.)
-  if (typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
+  if (!sentShown && typeof args.onSent === "function") args.onSent({ hash: resp.hash, nonce: resp.nonce, maxFeePerGas: resp.maxFeePerGas, maxPriorityFeePerGas: resp.maxPriorityFeePerGas });
   let receipt;
   try {
     receipt = await resp.wait(confirmationsOf(args));
@@ -1250,6 +1503,10 @@ function takeSwapLock(file, noun) {
   let released = false;
   return {
     file,
+    /** The lock stays on disk (the bounded sender could not confirm its socket closed): every later release() does nothing. The operator deletes the file by hand. */
+    leave() {
+      released = true;
+    },
     release() {
       if (released) return;
       released = true;
@@ -1629,6 +1886,36 @@ function readRevealSidecar(swapFile, lockId) {
     return { state: "unreadable", io: true, code: codeOf(e), file, note: `the reveal sidecar ${file} could not be read (${codeOf(e)}); it is ignored` };
   }
   return classifyRevealSidecarText(text, want, file);
+}
+
+/**
+ * The sidecar of a swap file read the way swap-cli reads it (reveal_sidecar.rs `read`), at every place it can be (T21-19 e): beside the REAL path (where
+ * this script writes it) and, when the swap file was reached by another name (a link), beside that name too (where an older `live.js` wrote it). A
+ * matching one at either place is evidence that a reveal send MAY HAVE STARTED, and that evidence moves a re-send to the LATE cutoff (T_reveal - DE, the
+ * cutoff the intent froze) instead of the strict T_reveal - M_A, exactly as swap-cli does; an explicit --margin-s still overrides it. The real path's is
+ * looked at first and wins. When neither matches, the answer is the real path's, unless that one is absent: then the other name's (so that its note, if any,
+ * is shown). So reading the second place can only find evidence that was missed before (and so loosen the cutoff for a re-send to the late one), never hide it.
+ */
+function readRevealSidecarOf(sw, lockId) {
+  const first = readRevealSidecar(sw.realFile, lockId);
+  if (first.state === "matching" || !sw.file || sw.file === sw.realFile) return first;
+  const second = readRevealSidecar(sw.file, lockId);
+  return second.state === "matching" || first.state === "absent" ? second : first;
+}
+
+/**
+ * Leftover temporary files of a crashed sidecar write beside the real swap file (`<sidecar>.<pid>.<random>.tmp`), for a note only (T21-18 e). Nothing here
+ * removes, renames or reads them: a temporary file is made before the sidecar is published, and the sidecar is published before any send, so one that is
+ * left holds no evidence of a send that its sidecar does not. Returns the file names found (a name only; empty when none or the folder cannot be listed).
+ */
+function leftoverSidecarTmpFiles(swapFile) {
+  try {
+    const target = path.resolve(revealSidecarPath(swapFile));
+    const prefix = path.basename(target) + ".";
+    return fs.readdirSync(path.dirname(target)).filter((n) => n.startsWith(prefix) && n.endsWith(".tmp")).map((n) => path.join(path.dirname(target), n));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -2531,10 +2818,11 @@ async function lockChecked(provider, signer, args, sw, lockLock) {
 }
 
 /** getLock as a plain record; `hashlock` is the lock word of either kind (HTLCPoseidonV2 names the field lockAddr). */
-async function fetchLock(provider, contractAddr, lockId, kind = "sha256") {
+async function fetchLock(provider, contractAddr, lockId, kind = "sha256", blockTag = undefined) {
   const c = new ethers.Contract(contractAddr, htlcInterface(kind), provider);
   try {
-    const r = await c.getLock(lockId);
+    // blockTag (status only): the call is made at that block, so a backend that does not have it errors instead of answering from an older state.
+    const r = blockTag === undefined ? await c.getLock(lockId) : await c.getLock(lockId, { blockTag });
     return {
       sender: r.sender,
       receiver: r.receiver,
@@ -2549,6 +2837,88 @@ async function fetchLock(provider, contractAddr, lockId, kind = "sha256") {
     if (/LockNotFound/.test(explain(e)) || (e && e.revert && e.revert.name === "LockNotFound")) return null;
     throw e;
   }
+}
+
+/**
+ * What a --replace did (or, in a dry run, will do) to the reveal sidecar, in words. A replacement never rewrites a sidecar that is there (it records the first
+ * attempt); one that is not there is written, naming the replacement. null without --swap or without --replace. `written` is the result of writeRevealSidecar
+ * (real run), `early` the reading made before the checks (dry run).
+ */
+function replaceSidecarNote(sw, replaced, written, early) {
+  if (!sw || replaced === null) return null;
+  if (written) {
+    if (written.state === "kept") return `the reveal sidecar ${written.file} was there before and is kept: it names the first attempt's transaction, not this replacement`;
+    if (early && early.state === "matching" && path.resolve(early.file) !== path.resolve(written.file)) {
+      return `a sidecar of this lock exists beside the other name ${early.file} and was left as it is; a new one was written beside the real path and names this replacement`;
+    }
+    return "no reveal sidecar was there before: a new one was written and it names this replacement's transaction (the first attempt is not recorded in it)";
+  }
+  // writeRevealSidecar looks at the real path only: a matching sidecar beside another name of the file (a link) is evidence, but it is not the one that is kept.
+  if (early && early.state === "matching") {
+    if (path.resolve(early.file) === path.resolve(revealSidecarPath(sw.realFile))) {
+      return `the reveal sidecar ${early.file} is there and will be kept: it names the first attempt's transaction, not this replacement`;
+    }
+    return `a sidecar of this lock exists beside the other name ${early.file} and is left as it is; a new one will be written beside the real path and names this replacement`;
+  }
+  return "no reveal sidecar of this lock is there: a new one will be written and it will name this replacement's transaction (the first attempt is not recorded in it)";
+}
+
+/** The preimage argument (hex) of the pending transaction `old` when it is a claim call, else null (not a claim, or a call that cannot be decoded). */
+function pendingPreimageOf(kind, old) {
+  if (!old) return null;
+  try {
+    const parsed = htlcInterface(kind).parseTransaction({ data: old.data });
+    return parsed && parsed.name === "claim" ? String(parsed.args[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+// ------------------------------------------------ the receiver's code (R7-7, T11: EOAs only)
+// The claim is never estimated, so nothing else would notice a receiver that has (or has gained) code, for instance an EIP-7702 delegation (code starting
+// 0xef0100): a claim to a receiver that rejects ETH reverts with the secret in its calldata. The code is read twice, early (before the long scans, so a
+// receiver that had code all along fails fast; also in a dry run, so the dry run shows the truth) and again immediately before signing.
+//   A FIRST claim: code, a failed read, or an answer that is not hex refuses (nothing signed, nothing sent).
+//   A --replace re-send (a verified pending claim of this lock at the oldest nonce exists): the secret is ALREADY public in that transaction, the replacement has
+//   the same nonce and the same receiver, so it can never be worse than the pending one, and not sending could leave a stuck claim to miss the timelock.
+//   The read is then informational: the claim goes on and a warning says what was found.
+/** Read the code of `receiver` at "latest" and at "pending" (a node without pending state answers with latest). Code at either tag counts as code. Never throws. */
+async function readReceiverCode(provider, receiver) {
+  const [latest, pending] = await Promise.allSettled([provider.getCode(receiver, "latest"), provider.getCode(receiver, "pending")]);
+  const isHex = (c) => typeof c === "string" && /^0x[0-9a-fA-F]*$/.test(c);
+  if (latest.status === "rejected") return { state: "unreadable", detail: latest.reason instanceof UserError ? latest.reason.message : explain(latest.reason) };
+  if (!isHex(latest.value)) return { state: "notHex" };
+  // The pending read only ever adds care: a node that cannot answer it, or answers nothing usable, leaves the latest answer to decide.
+  const withCode = [latest.value, ...(pending.status === "fulfilled" && isHex(pending.value) ? [pending.value] : [])].find((c) => c !== "0x");
+  return withCode === undefined ? { state: "none" } : { state: "code", bytes: (withCode.length - 2) / 2 };
+}
+
+/**
+ * Judge a reading of the receiver's code. Returns null when there is nothing to say, a warning text (replace mode: `replaced` is the result of resolveReplaced)
+ * or throws the refusal of a first claim. `mayBePublic`: the swap file or the reveal sidecar shows an earlier send (weaker evidence than a pending transaction,
+ * so it changes the words of the refusal, not the refusal). `when`: "just before signing" or "before the long checks".
+ */
+function receiverCodeVerdict(rc, { receiver, replaced, replaceJudgedFirst = false, mayBePublic, when }) {
+  if (rc.state === "none") return null;
+  const codeFact = `the lock's receiver ${receiver} has code on chain (${rc.bytes} bytes, read ${when}; T11: EOAs only, and an EIP-7702 delegation counts too)`;
+  const readFact = `could not read the code of the lock's receiver ${receiver} ${when} (${rc.detail})`;
+  const hexFact = `the node's answer for the code of the lock's receiver ${receiver} is not a hex string`;
+  const fact = rc.state === "code" ? codeFact : rc.state === "unreadable" ? readFact : hexFact;
+  if (replaced !== null) {
+    const hash = replaced.old && replaced.old.hash ? replaced.old.hash : "(its hash was not shown by the node)";
+    return `${fact}; the secret is already public in the pending claim ${hash}; this replacement goes to the same receiver, so if the receiver rejects ETH both revert and only gas is lost`;
+  }
+  if (rc.state === "unreadable") throw new UserError(`refusing: ${readFact}, so it is not known that the receiver is an account without code (T11: EOAs only); nothing was signed, nothing was sent`);
+  if (rc.state === "notHex") throw new UserError(`refusing: ${hexFact} (T11: EOAs only); nothing was signed, nothing was sent`);
+  if (mayBePublic) {
+    throw new UserError(
+      `refusing: ${codeFact}. The secret may already be public (the swap file or the reveal sidecar shows an earlier send), and a claim to a receiver with code can revert; nothing was signed, nothing was sent. ` +
+        (replaceJudgedFirst
+          ? "Ways out: remove the code or the delegation from the receiver's address. The pending claim does not carry this secret, so this replacement is judged as a first reveal"
+          : "Ways out: remove the code or the delegation from the receiver's address, or, if an earlier claim is still pending, use --replace")
+    );
+  }
+  throw new UserError(`refusing: ${codeFact}; a claim to it could revert with the secret public; nothing was signed, nothing was sent`);
 }
 
 async function claim(provider, signer, args0) {
@@ -2580,12 +2950,33 @@ async function claim(provider, signer, args0) {
         "run the dry run WITHOUT --secret-stdin (every gate is checked without it)"
     );
   }
+  // How a real claim is sent (nothing here touches the network): through the bounded sender when the provider carries an endpoint address (the command
+  // line's always does; D2: that needs a local key; D4: and no environment proxy), else only for an in-process test provider that says so.
+  const boundedSend = boundedUrlOf(provider) !== null;
+  if (secret !== null && !args.dryRun) {
+    if (boundedSend) {
+      if (!(signer instanceof ethers.BaseWallet)) {
+        throw new UserError("refusing: a real claim is signed with a local key (--key-file): the bounded sender needs the signed bytes before the send, and a node-held or remote signer would do its own network reads between the last check and the broadcast; nothing was signed, nothing was sent");
+      }
+      const viaProxy = envProxyRefusal();
+      if (viaProxy !== null) throw new UserError(viaProxy);
+      // The endpoint address is parsed now, before any read and before the claim lock, so that an address the sender cannot use is refused with nothing touched.
+      try {
+        bsend.parseEndpoint(boundedUrlOf(provider));
+      } catch (e) {
+        if (e instanceof bsend.BoundedSendError) throw new UserError(`refusing: ${e.message}; nothing was signed, nothing was sent`);
+        throw e;
+      }
+    } else if (args.unboundedSendInProcess !== true) {
+      throw new UserError("refusing: a real claim is sent through the bounded sender, which needs the endpoint address of a provider made by makeProvider (the command line always has one); an in-process provider is for tests and must say so (args.unboundedSendInProcess); nothing was signed, nothing was sent");
+    }
+  }
   let claimLock = null;
   try {
     // A real claim with a swap file holds the claim lock from here (before the sidecar is first read, in claimChecked) until the send has settled
     // (execute's afterSend) or anything before it fails (the finally below). A dry run writes nothing and takes none.
     if (sw && secret !== null && !args.dryRun) claimLock = takeClaimLock(sw.realFile);
-    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock });
+    return await claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock, boundedSend });
   } catch (e) {
     if (e instanceof UserError) throw new UserError(redact(e.message));
     throw new UserError(explain(e)); // ethers errors can carry the calldata, which holds the secret
@@ -2618,8 +3009,14 @@ function assertPoseidonClaimCalldata(iface, data, lockId, secret) {
   if (data.toLowerCase() !== expected) throw new UserError("refusing to sign: the claim calldata is not selector + lock id + secret");
 }
 
-async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock = null }) {
+async function claimChecked(provider, signer, args, { contractAddr, lockId, margin, marginGiven, secret, sw, claimLock = null, boundedSend = false }) {
   const kind = kindOf(args);
+  // The send budget S (answer window + guard, bounded-send.js): the last moment to START the send is the cutoff minus S, so every cutoff test below is
+  // "now + S > cutoff". Only where the claim goes through the bounded sender; the in-process test path has no bound and S = 0 (its tests keep their meaning).
+  const sendTime = bsend.sendTiming();
+  const tailS = Math.ceil(sendTime.tailMs / 1000);
+  const guardS = Math.ceil(sendTime.guardMs / 1000);
+  const S = boundedSend ? BigInt(Math.ceil(bsend.sendBudgetMs() / 1000)) : 0n;
   const target = await verifyTarget(provider, args, contractAddr);
   const l = await fetchLock(provider, contractAddr, lockId, kind);
   if (!l) throw new UserError(`no such lock ${lockId} at ${contractAddr}`);
@@ -2678,23 +3075,49 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   // (swap-cli cannot learn of a claim that was only sent). A FIRST claim never has such a transaction and keeps the strict M_A rule.
   let replaced = null;
   if (args.replace === true) replaced = await resolveReplaced(provider, signer, args, { name: "claim", contractAddr, lockId });
-  if (replaced !== null && intentLateCutoff === null && sw && PROFILE_DE_S[sw.profile] !== undefined) {
+  // T5: the pending claim is evidence that THIS secret is public only when its own preimage argument is this lock's secret. That is decided from the LOCK WORD, locally
+  // (sha256, or the local Addr; nothing is sent anywhere), so a dry run without --secret and the real run agree. Computed once; the late cutoff and the receiver-code
+  // rule below both rest on it. Another preimage is judged as a first reveal (the nonce and fee rules still replace the pending transaction).
+  const pendingPreimage = replaced !== null ? pendingPreimageOf(kind, replaced.old) : null;
+  let carriesSecret = false;
+  if (pendingPreimage !== null) {
+    try {
+      carriesSecret = localLockWord(kind, pendingPreimage).toLowerCase() === l.hashlock.toLowerCase();
+    } catch {
+      carriesSecret = false;
+    }
+  }
+  if (carriesSecret && secret !== null && pendingPreimage.toLowerCase() !== String(secret).toLowerCase()) {
+    throw new UserError(
+      `refusing: the given secret is not the preimage in the pending claim ${replaced.old.hash || "(its hash was not shown by the node)"}, although that preimage hashes to the lock's word; the given secret is wrong; nothing was signed, nothing was sent`
+    );
+  }
+  const replacedForCode = carriesSecret ? replaced : null;
+  const replaceJudgedFirst = replaced !== null && !carriesSecret;
+  let otherPreimageNote = null;
+  if (replaceJudgedFirst) {
+    const pendingHash = replaced.old && replaced.old.hash ? replaced.old.hash : "(its hash was not shown by the node)";
+    otherPreimageNote = `the pending transaction ${pendingHash} is a claim of this lock with a different preimage, so it does not publish this secret; this run is judged as a first reveal (the strict cutoff and the receiver-code refusal apply unless the swap file or the reveal sidecar show an earlier send); it is still replaced (same nonce, same fee rules)`;
+    process.stderr.write(`NOTE: ${otherPreimageNote}\n`);
+  }
+  if (carriesSecret && intentLateCutoff === null && sw && PROFILE_DE_S[sw.profile] !== undefined) {
     intentLateCutoff = l.timelock - PROFILE_DE_S[sw.profile]; // an intent from before REVIEW-5: the profile's DE gives the same number
   }
   // REVIEW-4 R4-3: once the file shows the secret may already be public (swap-cli's late re-send, review H1), a re-send
   // publishes nothing new and the cutoff the intent froze (T_reveal - DE) is the authority, not the stricter default margin.
   // An explicit --margin-s still tightens it. Without that evidence the earlier of the two stays the rule.
   // T21-11: a reveal sidecar of THIS lock beside the file (written just before an earlier claim was broadcast) is the same kind of evidence.
-  const sidecar = sw ? readRevealSidecar(sw.realFile, lockId) : null;
+  const sidecar = sw ? readRevealSidecarOf(sw, lockId) : null;
   const sidecarEvidence = sidecar !== null && sidecar.state === "matching";
-  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || replaced !== null || sidecarEvidence) && !marginGiven;
+  const tmpLeft = sw ? [...new Set([...leftoverSidecarTmpFiles(sw.realFile), ...(sw.file !== sw.realFile ? leftoverSidecarTmpFiles(sw.file) : [])])] : [];
+  const lateResend = intentCutoff !== null && (sw.secretMayBePublic || carriesSecret || sidecarEvidence) && !marginGiven;
   if (lateResend) {
     // The cutoff the intent froze, or the later T_reveal - DE it froze for exactly this case (a secret that is public already).
     const late = intentLateCutoff !== null && intentLateCutoff > intentCutoff ? intentLateCutoff : intentCutoff;
     cutoff = late < l.timelock ? late : l.timelock;
     cutoffRule =
-      replaced !== null
-        ? "T_reveal - DE: the pending claim of this lock at the signer's oldest nonce shows the secret is already public (REVIEW-5 R5-1)"
+      carriesSecret
+        ? "T_reveal - DE: the pending claim of this lock at the signer's oldest nonce carries this secret, so it is already public (REVIEW-5 R5-1)"
         : late === intentCutoff
           ? sw.secretMayBePublic
             ? "the swap file's frozen cutoff (the file shows the secret may already be public)"
@@ -2706,13 +3129,27 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     cutoff = intentCutoff;
     cutoffRule = "the swap file's frozen cutoff";
   }
+  if (now <= cutoff && now + S > cutoff) {
+    throw new UserError(
+      `refusing: less than ${S} s before the reveal cutoff. now ${now}, cutoff ${cutoff} (${cutoffRule}): the send needs a ${tailS} s answer window and a ${guardS} s guard, so the last moment to start it is ${cutoff - S}; ` +
+        `a claim published later can reach the counterparty after the cutoff and lets it take both legs; nothing was sent` +
+        (otherPreimageNote !== null ? ` Note: ${otherPreimageNote}` : "")
+    );
+  }
   if (now > cutoff) {
     throw new UserError(
       `refusing: past the reveal cutoff. now ${now} > cutoff ${cutoff} (timelock ${l.timelock} - margin ${margin} s` +
         `${intentCutoff !== null ? `, or the swap file's frozen cutoff ${intentCutoff}, ${lateResend ? "which rules because the secret may already be public" : "whichever is earlier"}` : ""}) ` +
-        `(a late claim publishes the secret and lets the counterparty take both legs; use --margin-s only if you know the risk)`
+        `(a late claim publishes the secret and lets the counterparty take both legs; use --margin-s only if you know the risk)` +
+        (otherPreimageNote !== null ? ` Note: ${otherPreimageNote}` : "")
     );
   }
+  // R7-7, early: the receiver's code, before the long scans (also in a dry run, which then shows what the real run would do). A first claim to a receiver
+  // with code is refused here; in replace mode the read only warns (see receiverCodeVerdict). The read is made again immediately before signing.
+  const mayBePublic = !!(sw && sw.secretMayBePublic) || sidecarEvidence;
+  // The replace rule of the receiver-code check (a warning, not a refusal) rests on the secret being public in the pending claim: see carriesSecret above.
+  const earlyReceiverWarning = receiverCodeVerdict(await readReceiverCode(provider, l.receiver), { receiver: l.receiver, replaced: replacedForCode, replaceJudgedFirst, mayBePublic, when: "before the long checks" });
+  if (earlyReceiverWarning !== null && args.dryRun) process.stderr.write(`WARNING: ${earlyReceiverWarning}\n`);
   // F3: the lock must be final. Find its Locked event and compare its block with the `finalized` block.
   const fromBlock = await resolveFromBlock(provider, contractAddr, args, blk.number);
   const events = await lockedEvents(provider, contractAddr, lockId, fromBlock, blk.number, kind);
@@ -2760,11 +3197,30 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     revealCutoff: cutoff.toString(),
     revealCutoffRule: cutoffRule,
     secondsToCutoff: (cutoff - now).toString(),
+    ...(boundedSend
+      ? {
+          sendBudgetS: Number(S),
+          sendAnswerWindowS: tailS,
+          sendGuardS: guardS,
+          lastStartAt: (cutoff - S).toString(),
+          secondsToLastStart: (cutoff - S - now).toString(),
+        }
+      : {}),
     lockedBlock: ev.log.blockNumber,
     finalizedBlock: finalized.number,
     codeHash: target.codeHash,
     secretProvided: secret !== null,
     ...(sidecar !== null ? { revealSidecar: sidecar.state, revealSidecarFile: sidecar.file, ...(sidecar.note ? { revealSidecarNote: sidecar.note } : {}) } : {}),
+    ...(tmpLeft.length > 0
+      ? {
+          revealSidecarTmpFiles: tmpLeft,
+          revealSidecarTmpNote:
+            "temporary files of an interrupted sidecar write are left beside the swap file and nothing removed them; they are not evidence that a send happened, and their presence or absence is not evidence that nothing was sent (a sidecar is published before any send: look at the sidecar itself); delete them by hand if you like",
+        }
+      : {}),
+    ...(earlyReceiverWarning !== null ? { receiverCodeWarning: earlyReceiverWarning } : {}),
+    ...(otherPreimageNote !== null ? { replacePreimageNote: otherPreimageNote } : {}),
+    ...(replaceSidecarNote(sw, replaced, null, sidecar) !== null ? { replaceSidecarNote: replaceSidecarNote(sw, replaced, null, sidecar) } : {}),
   };
   // REVIEW-4 R4-1: the fee cap (or the --replace plan) is decided and checked before anything is signed, also without the secret.
   const fp = await feePlan(provider, signer, args, { name: "claim", contractAddr, lockId }, replaced);
@@ -2789,18 +3245,28 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
   if (kind === "poseidon") assertPoseidonClaimCalldata(iface, tx.data, lockId, secret);
   let r;
   let sidecarWritten = null;
+  let lastReceiverWarning = null; // replace mode only: what the read of the receiver's code just before signing found
+  let lockLeft = false; // the claim lock was left on disk because the sender's socket could not be confirmed closed
+  let lastBlockRead = null; // { ts, mono }: the latest block's time and the monotonic clock when it was read (preSend), for the synchronous check
   try {
     // The event scans, the finality lookup and the fee planning above can take minutes on a slow public endpoint: the cutoff is read again
     // (wall clock and latest block, the later one) immediately before the claim is signed, against the same cutoff the early check ended with.
     const preSend = async (populated) => {
-      let late;
-      try {
-        late = await latestBlock(provider);
-      } catch (e) {
+      // R7-7: the claim is never estimated, so a receiver that has gained code since the early checks (a contract, or an EIP-7702 delegation, which
+      // shows as code starting 0xef0100) would make the claim revert with the secret already public. The receiver's code (at "latest" and "pending") and
+      // the latest block are read in ONE round, so the window between the code read and the broadcast is one round trip shorter; the code is judged first
+      // (a first claim to a receiver with code, or whose code cannot be read, is refused; in replace mode the finding is only a warning), then the cutoff
+      // is evaluated from the block just read, and the sidecar is written last. Applies with and without --swap and to a --replace re-send alike.
+      const [receiverRead, lateRead] = await Promise.all([readReceiverCode(provider, l.receiver), latestBlock(provider).then((b) => ({ b }), (e) => ({ e }))]);
+      lastReceiverWarning = receiverCodeVerdict(receiverRead, { receiver: l.receiver, replaced: replacedForCode, replaceJudgedFirst, mayBePublic, when: "just before signing" });
+      if (lastReceiverWarning !== null) process.stderr.write(`WARNING: ${lastReceiverWarning}\n`);
+      if (lateRead.e !== undefined) {
+        const e = lateRead.e;
         throw new UserError(
           `refusing: could not re-read the latest block just before sending (${e instanceof UserError ? e.message : explain(e)}), so the reveal cutoff ${cutoff} cannot be re-checked; nothing was sent`
         );
       }
+      const late = lateRead.b;
       if (BigInt(late.timestamp) >= l.timelock) {
         throw new UserError(
           `refusing: timelock ${l.timelock} has passed (latest block timestamp ${late.timestamp}, re-checked just before sending); the claim would revert with the secret in its calldata; nothing was sent`
@@ -2808,6 +3274,13 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       }
       const wallLate = BigInt(Math.floor(Date.now() / 1000));
       const nowLate = wallLate > BigInt(late.timestamp) ? wallLate : BigInt(late.timestamp);
+      lastBlockRead = { ts: Number(late.timestamp), mono: performance.now(), number: Number(late.number) };
+      if (nowLate <= cutoff && nowLate + S > cutoff) {
+        throw new UserError(
+          `refusing: less than ${S} s before the reveal cutoff. now ${nowLate}, cutoff ${cutoff} (${cutoffRule}; re-checked just before sending: the earlier steps took ${nowLate > now ? nowLate - now : 0n} s): ` +
+            `the send needs a ${tailS} s answer window and a ${guardS} s guard, so the last moment to start it was ${cutoff - S} (a claim published later can reach the counterparty after the cutoff and lets it take both legs; nothing was sent)`
+        );
+      }
       if (nowLate > cutoff) {
         throw new UserError(
           `refusing: past the reveal cutoff. now ${nowLate} > cutoff ${cutoff} (${cutoffRule}; re-checked just before sending: the earlier steps took ${nowLate > now ? nowLate - now : 0n} s) ` +
@@ -2821,9 +3294,9 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
     // The fsyncs and the signature can take time (on a network share above all): the cutoff is checked once more against the WALL CLOCK only, in a
     // synchronous guard that runs immediately before the broadcast (for every claim, with or without --swap). No network read can happen after it.
     // If the time ran out, nothing has been sent.
-    const lastCheck = () => {
-      const wallLast = BigInt(Math.floor(Date.now() / 1000));
-      if (!(wallLast > cutoff || wallLast >= l.timelock)) return;
+    // The refusal of the synchronous check: take back a sidecar THIS call created (only while it still holds this call's bytes), say what became of it, and
+    // throw. `words(afterSidecar)` is the sentence that names the clock reading.
+    const refuseAtLastCheck = (words) => {
       let fate = "no reveal sidecar was involved (no --swap)";
       if (sidecarWritten !== null) {
         fate = sidecarWritten.created
@@ -2832,11 +3305,54 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
       }
       const afterSidecar = sidecarWritten !== null ? ", after the reveal sidecar was written" : "";
       sidecarWritten = null; // the outer catch must not say the claim may have reached the network: it did not
-      throw new UserError(
-        `refusing: past the reveal cutoff. now ${wallLast} > cutoff ${cutoff} or >= timelock ${l.timelock} (${cutoffRule}; re-checked against the wall clock immediately before the broadcast${afterSidecar}, which took too long); ${fate}; nothing was sent`
+      throw new UserError(`${words(afterSidecar)}; ${fate}; nothing was sent`);
+    };
+    const lastCheck = boundedSend
+      ? () => {
+          // The bounded sender runs this as the last statement before the write: the later of the wall clock and the block clock (the block read in preSend plus
+          // the monotonic time since), so that now + the send budget S must still be <= the cutoff, and now < the timelock.
+          const v = bsend.sendWindowVerdict({
+            cutoffS: Number(cutoff),
+            timelockS: Number(l.timelock),
+            blockTsS: lastBlockRead ? lastBlockRead.ts : null,
+            monoAtReadMs: lastBlockRead ? lastBlockRead.mono : null,
+          });
+          if (v.ok) return;
+          const nowS = Math.floor(v.nowMs / 1000);
+          refuseAtLastCheck(
+            (afterSidecar) =>
+              `refusing: too late to start the send. ${v.why === "timelock" ? `now ${nowS} >= timelock ${l.timelock}` : `now ${nowS} + send budget ${S} s > cutoff ${cutoff}`} (${cutoffRule}; re-checked immediately before the write${afterSidecar}, which took too long)`
+          );
+        }
+      : () => {
+          const wallLast = BigInt(Math.floor(Date.now() / 1000));
+          if (!(wallLast > cutoff || wallLast >= l.timelock)) return;
+          refuseAtLastCheck(
+            (afterSidecar) =>
+              `refusing: past the reveal cutoff. now ${wallLast} > cutoff ${cutoff} or >= timelock ${l.timelock} (${cutoffRule}; re-checked against the wall clock immediately before the broadcast${afterSidecar}, which took too long)`
+          );
+        };
+    // The claim lock goes when no byte of this attempt can leave any more: on the bounded path that is after the sender's socket has closed; if the close could not
+    // be confirmed the lock stays on disk (leave) and the operator is told.
+    const afterSend = (info) => {
+      if (claimLock === null) return;
+      if (info && info.closeConfirmed === false) {
+        lockLeft = true;
+        claimLock.leave();
+        process.stderr.write(`WARNING: the sender's connection could not be confirmed closed within ${bsend.sendTiming().closeWaitMs / 1000} s; the claim lock file ${claimLock.file} is left on disk: delete it by hand after this process has exited\n`);
+        return;
+      }
+      claimLock.release();
+    };
+    // A catchable signal during the send window: the sender has reset the socket (nothing more can leave); release the lock, keep the sidecar, say so.
+    const onSignal = (sig, info) => {
+      if (claimLock !== null) claimLock.release();
+      process.stderr.write(
+        `interrupted by ${sig} during the claim's send: the connection was reset, so no more of the claim can leave this machine, but it may already have reached the network${info && info.hash ? ` (transaction hash ${info.hash})` : ""}; ` +
+          `${sidecarWritten ? `the reveal sidecar ${sidecarWritten.file} stays` : "there is no reveal sidecar"}: run tick --apply now\n`
       );
     };
-    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend, lastCheck, afterSend: claimLock === null ? undefined : () => claimLock.release() });
+    r = await execute(provider, signer, args, tx, { ...plan, ...fp.report }, { hideData: true, fees: fp.fees, fixedGas: claimGas === null ? undefined : claimGas, preSend, lastCheck, afterSend, boundedSend, onSignal, startBlock: () => (lastBlockRead ? lastBlockRead.number : null) });
   } catch (e) {
     // REVIEW-6 R6-3: a claim that was mined and REVERTED (it came too late, or lost a race with the refund) paid nobody and still published the
     // secret in its calldata. Say so in the result, with the hash, instead of a bare failure: the caller must treat the secret as public.
@@ -2853,33 +3369,53 @@ async function claimChecked(provider, signer, args, { contractAddr, lockId, marg
           `Tell swap-cli: tick FILE ... --reveal-tx ${e.hash} --apply (it checks the transaction on the node, then judges a re-send by the late cutoff T_reveal - DE). ` +
           "Do not assume the swap is safe; if the lock is still open and the late cutoff has not passed, the claim can be re-sent (live.js claim --swap FILE after that tick)",
         swapCliFlag: `--reveal-tx ${e.hash}`,
+        ...(lastReceiverWarning !== null ? { receiverCodeWarning: lastReceiverWarning } : {}),
+        ...(otherPreimageNote !== null ? { replacePreimageNote: otherPreimageNote } : {}),
         ...(sidecarWritten ? { revealSidecar: sidecarWritten.state, revealSidecarFile: sidecarWritten.file } : {}),
+        ...(replaceSidecarNote(sw, replaced, sidecarWritten, sidecar) !== null ? { replaceSidecarNote: replaceSidecarNote(sw, replaced, sidecarWritten, sidecar) } : {}),
         ...fp.report,
       };
+    }
+    // The bounded sender's answer (see bounded-send.js): one text for every outcome, with and without --swap. Only "not_sent" says nothing was sent, and then a
+    // sidecar this call had written is taken back (only while it still holds this call's bytes); every other outcome leaves the sidecar and says the secret may
+    // be public. The 429 and the redirect are `unknown` now: the request carried only this claim, but what the endpoint did with it cannot be known here.
+    if (e instanceof SendOutcomeError) {
+      let fate = null;
+      if (e.outcome === "not_sent" && sidecarWritten !== null) {
+        fate = sidecarWritten.created
+          ? removalFate(removeCreatedRevealSidecar(sidecarWritten.file, sidecarWritten.bytes, lockId), sidecarWritten.file)
+          : `the reveal sidecar ${sidecarWritten.file} that was there before is kept (it is evidence of an earlier attempt)`;
+        sidecarWritten = null;
+      }
+      throw new UserError(
+        redact(
+          sendOutcomeText(e, {
+            hasSwap: !!sw,
+            sidecarFile: e.outcome !== "not_sent" && sidecarWritten ? sidecarWritten.file : null,
+            fate,
+            lockFile: lockLeft && claimLock !== null ? claimLock.file : null,
+          })
+        )
+      );
     }
     if (sidecarWritten) {
       // The sidecar was written before the broadcast and stays: whether the claim reached the network is not known here.
       const base = e instanceof UserError ? redact(e.message) : explain(e);
-      // A throttled answer (HTTP 429) most likely means the endpoint did NOT accept the claim. The sidecar stays all the same (the outcome is not
-      // proven), and with it a re-run would be judged by the late cutoff: so the advice is to re-run with the strict margin given by hand, which
-      // rules whatever the sidecar or the file says, and not to treat the reveal as sent unless the operator has a reason to.
-      const throttledAnswer = isThrottledAnswer(e);
-      const throttled = throttledAnswer
-        ? ` The endpoint refused the send as throttled (HTTP 429), so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself. To send it again as a first reveal, run the claim again now with --margin-s ${DEFAULT_MARGIN_S} (the strict cutoff, whatever the sidecar says).`
-        : "";
-      // A redirect answer (HTTP 3xx) is the same case: the endpoint did not take the send, and this tool follows no redirect. The advice is the same,
-      // with the endpoint's final address put into ETH_RPC_URL first.
-      const redirectAnswer = isRedirectAnswer(e);
-      const redirected = redirectAnswer
-        ? ` The endpoint answered the send with a redirect (HTTP ${e.statusCode}), which this tool never follows, so it most likely did NOT accept the claim; this tool does not repeat a reveal by itself. To send it again as a first reveal, put the endpoint's final URL in ETH_RPC_URL and run the claim again now with --margin-s ${DEFAULT_MARGIN_S} (the strict cutoff, whatever the sidecar says).`
-        : "";
-      const next = throttledAnswer || redirectAnswer ? "run tick --apply before the claim only if you think it did reach the network" : "run tick --apply";
-      throw new UserError(`${base}${throttled}${redirected} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; ${next})`);
+      throw new UserError(`${base} (the reveal sidecar ${sidecarWritten.file} was written before the send and stays: the claim may have reached the network, so swap-cli treats the secret as possibly public; run tick --apply)`);
     }
     throw e;
   }
   if (r.dry) return r.out;
-  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, ...(sidecarWritten ? { revealSidecar: sidecarWritten.state, revealSidecarFile: sidecarWritten.file } : {}), ...fp.report };
+  return {
+    txHash: r.receipt.hash,
+    blockNumber: r.receipt.blockNumber,
+    ...(sidecarWritten ? { revealSidecar: sidecarWritten.state, revealSidecarFile: sidecarWritten.file } : {}),
+    ...(plan.revealSidecarTmpFiles ? { revealSidecarTmpFiles: plan.revealSidecarTmpFiles, revealSidecarTmpNote: plan.revealSidecarTmpNote } : {}),
+    ...(lastReceiverWarning !== null ? { receiverCodeWarning: lastReceiverWarning } : {}),
+    ...(otherPreimageNote !== null ? { replacePreimageNote: otherPreimageNote } : {}),
+    ...(replaceSidecarNote(sw, replaced, sidecarWritten, sidecar) !== null ? { replaceSidecarNote: replaceSidecarNote(sw, replaced, sidecarWritten, sidecar) } : {}),
+    ...fp.report,
+  };
 }
 
 async function refund(provider, signer, args0) {
@@ -2929,10 +3465,57 @@ async function send(provider, signer, args) {
   return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, from: r.from, to, valueWei: amount.toString() };
 }
 
+// Some providers echo the endpoint, with an API key in it, in their error text: anything that looks like an address (scheme://..., so ws:// and wss:// too) is cut out before the text is printed.
+const plainNodeText = (text) => String(text).replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[address removed]");
+
+// A "no such lock" read is trusted only when the node's latest block is this young (seconds): a lagging or syncing node answers LockNotFound for a lock
+// mined after its own tip.
+const STATUS_FRESH_BLOCK_S = 120;
+
+/**
+ * A read that failed on the node's side, as a plain UserError (A7). ethers hides the node's own words: any JSON-RPC error that is not a call or an
+ * estimate (an eth_getLogs the node refuses because its history is pruned, a range limit, a rate limit) becomes the bare "could not coalesce error",
+ * with the real text in `error.message`. This names the read that failed and prints that text (first line, cut at 300 characters). A UserError and a
+ * refused redirect already say what they mean and pass through.
+ */
+function nodeReadFailure(e, what) {
+  if (e instanceof UserError || isRedirectAnswer(e)) return e;
+  // A programming error is not the node's answer: it passes through unchanged (the command line then prints it as an unlabelled error).
+  if (e instanceof TypeError || e instanceof ReferenceError || e instanceof RangeError || e instanceof SyntaxError) return e;
+  const inner = (e && e.error) || (e && e.info && e.info.error) || null;
+  const method = (e && e.payload && e.payload.method) || (e && e.info && e.info.payload && e.info.payload.method) || null;
+  const raw = inner && typeof inner.message === "string" && inner.message !== "" ? inner.message : (e && (e.shortMessage || e.message)) || String(e);
+  const detail = plainNodeText(String(raw).split("\n")[0]).slice(0, 300);
+  const codeNote = inner && inner.code !== undefined && inner.code !== null ? ` (node error code ${inner.code})` : "";
+  return new UserError(`the node could not answer the read of ${what}${method ? ` (${method})` : ""}: ${detail}${codeNote}; status read nothing more and sent nothing`);
+}
+
 async function status(provider, _signer, args) {
   const contractAddr = address("--contract", need(args, "contract"));
   const lockId = hex32("--lock-id", need(args, "lockId", "lock-id"));
-  const code = await provider.getCode(contractAddr);
+  // Optional here (the documents call status without them), but when given they are checked like the other commands check them.
+  const wantChain = args.chainId === undefined || args.chainId === null ? null : uint("--chain-id", args.chainId);
+  const wantHash = args.codeHash === undefined || args.codeHash === null ? null : hex32("--code-hash", args.codeHash);
+  const read = async (what, fn) => {
+    try {
+      return await fn();
+    } catch (e) {
+      throw nodeReadFailure(e, what);
+    }
+  };
+  const chainId = BigInt(await read("the chain id", () => provider.send("eth_chainId", [])));
+  if (wantChain !== null && wantChain !== chainId) {
+    throw new UserError(`chain id mismatch: --chain-id is ${wantChain} but the RPC endpoint reports ${chainId}; refusing`);
+  }
+  // Every contract read below is pinned to this one block (a backend that lacks it errors; it never answers from an older state).
+  const blk = await read("the latest block", () => latestBlock(provider));
+  const code = await read("the contract code", () => provider.getCode(contractAddr, blk.number));
+  if (code === "0x") {
+    throw new UserError(`no contract code at ${contractAddr} on chain ${chainId}: the address is wrong or this is another chain; there is nothing to read`);
+  }
+  if (wantHash !== null && ethers.keccak256(code) !== wantHash) {
+    throw new UserError(`code hash mismatch: --code-hash is ${wantHash} but keccak256(code at ${contractAddr}) is ${ethers.keccak256(code)}; refusing`);
+  }
   // The kind is the flag's; without one, whichever local artifact's code hash the contract has (else sha256, as before).
   let kind = "sha256";
   if (args.lockKind !== undefined || args.contractKind !== undefined) kind = kindOf(args);
@@ -2948,12 +3531,21 @@ async function status(provider, _signer, args) {
       }) || "sha256";
   }
   const iface = htlcInterface(kind);
-  const blk = await latestBlock(provider);
   const fromBlock = await resolveFromBlock(provider, contractAddr, args, blk.number);
-  const chainId = BigInt(await provider.send("eth_chainId", []));
-  const l = await fetchLock(provider, contractAddr, lockId, kind);
+  let l;
+  try {
+    l = await fetchLock(provider, contractAddr, lockId, kind, blk.number);
+  } catch (e) {
+    // A call that reverts with no reason, or answers with bytes that are no lock: the address has code but is not an HTLC that answers getLock
+    // (the other kind, or another contract). Any other failure of the call is the node's.
+    const inner = e && e.info && e.info.error;
+    if (e && (e.code === "BAD_DATA" || (e.code === "CALL_EXCEPTION" && (!inner || inner.code === 3 || /revert/i.test(String(inner.message)))))) {
+      throw new UserError(`the contract at ${contractAddr} has code but did not answer getLock like an HTLC of this repo (its code hash is ${ethers.keccak256(code)}); is it the right contract${args.lockKind === undefined ? "" : " and the right --lock-kind"}?`);
+    }
+    throw nodeReadFailure(e, "the lock");
+  }
   const topics = ["Locked", "Claimed", "Refunded"].map((n) => iface.getEvent(n).topicHash);
-  const logs = await getLogsChunked(provider, { address: contractAddr, topics: [topics, lockId] }, fromBlock, blk.number);
+  const logs = await read("the lock's events", () => getLogsChunked(provider, { address: contractAddr, topics: [topics, lockId] }, fromBlock, blk.number));
   const events = [];
   let revealed = null;
   for (const log of logs) {
@@ -2988,6 +3580,42 @@ async function status(provider, _signer, args) {
     events,
     preimage: revealed,
   };
+  const lockedEvent = events.find((ev) => ev.event === "Locked");
+  if (!l && lockedEvent) {
+    // The clearing procedure treats "no such lock" as a fact about the contract: a node that contradicts itself must not give it.
+    throw new UserError(
+      `the node contradicts itself: getLock says there is no lock ${lockId} at ${contractAddr} at block ${blk.number}, but the event scan of the same run found a Locked event for it in block ${lockedEvent.blockNumber} (transaction ${lockedEvent.txHash}); do not trust this node for this read, repeat it on another node`
+    );
+  }
+  if (!l) {
+    const nowS = Math.floor(Date.now() / 1000);
+    const ageS = Math.max(0, nowS - Number(blk.timestamp));
+    const checked =
+      `the chain id was ${wantChain !== null ? `checked against --chain-id ${wantChain}` : "NOT checked: pass --chain-id"}; ` +
+      `the code hash was ${wantHash !== null ? "checked against --code-hash" : "NOT checked: pass --code-hash"}`;
+    const where = `contract ${contractAddr} on chain ${chainId} (as the node reports it)`;
+    // The two times the staleness rule used, so that a wrong local clock is visible; and what this read cannot see.
+    const times = `the block's time is ${new Date(Number(blk.timestamp) * 1000).toISOString()}, this machine's clock says ${new Date(nowS * 1000).toISOString()} (UTC); a lock still pending in the mempool is not seen by this read`;
+    if (ageS > STATUS_FRESH_BLOCK_S) {
+      out.exists = null;
+      out.state = "unknown (the node is behind the chain's tip)";
+      out.trustworthy = false;
+      out.note =
+        `the node did not find a lock with this id at ${where}, but its latest block (${blk.number}) is ${ageS} s old, so a missing lock cannot be trusted (a node that lags behind the chain's tip does not see a recent lock); ` +
+        `repeat the read on a node at the chain's tip; ${checked}; ${times}`;
+    } else if (wantChain === null) {
+      out.trustworthy = false;
+      out.state = `not found on chain ${chainId}, but not trusted: --chain-id was not given`;
+      out.note =
+        `no lock with this id was found at ${where} at block ${blk.number}, but this answer cannot be trusted until --chain-id is passed, because the same contract address can exist on another chain; ` +
+        `${checked}; ${times}`;
+    } else {
+      out.trustworthy = true;
+      out.note = `no lock with this id exists at ${where} at block ${blk.number} (the contract answered getLock with LockNotFound; the block is ${ageS} s old); ${checked}; ${times}; check the lock id and the contract`;
+    }
+  } else if (!lockedEvent) {
+    out.note = `the lock exists but no Locked event of it was found in blocks ${fromBlock} to ${blk.number}: the node may have pruned its logs, or --from-block is above the lock's block`;
+  }
   if (l) {
     const expired = BigInt(blk.timestamp) >= l.timelock;
     out.state = l.claimed ? "claimed" : l.refunded ? "refunded" : expired ? "expired-unclaimed (refundable)" : "open (claimable)";
@@ -3028,7 +3656,7 @@ const SPECS = {
   },
   refund: { flags: { ...COMMON, ...KIND, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
   send: { flags: { ...COMMON, "key-file": "v", to: "v", "amount-wei": "v" }, signer: true },
-  status: { flags: { ...KIND, contract: "v", "lock-id": "v", "from-block": "v" }, signer: false },
+  status: { flags: { ...KIND, contract: "v", "lock-id": "v", "from-block": "v", "chain-id": "v", "code-hash": "v" }, signer: false },
 };
 const COMMANDS = { keygen, balance, deploy, lock, claim, refund, send, status };
 
@@ -3114,10 +3742,11 @@ module.exports = {
   keygen, balance, deploy, lock, claim, refund, send, status,
   loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
-  readRevealSidecar, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
+  readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,
   approvalText, approvalTermsHash, checkApproval, MAX_OBSERVATION_AGE_S, APPROVAL_FUTURE_SKEW_S, lockLockPath, LOCK_LOCK_SUFFIX, lockSentPath, LOCK_SENT_SUFFIX,
   userLockSentDir, userLockSentPath, setUserLockSentHomeForTests,
+  SendOutcomeError, sendOutcomeText, envProxyRefusal, boundedUrlOf,
   POSEIDON_CLAIM_GAS_LIMIT, SHA256_CLAIM_GAS_LIMIT, RevertedTx, POSEIDON_CLAIM_CALLDATA_BYTES, localAddr, localLockWord, artifactCodeHash, kindOf, assertPoseidonClaimCalldata, htlcInterface,
 };
 

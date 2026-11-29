@@ -130,6 +130,8 @@ pub struct World {
     pub second_unreadable: Option<String>,
     /// The Ethereum node's `latest` block is this many seconds older than the chain clock (a lagging node).
     pub eth_head_lag: u64,
+    /// Report the finalized block's time in the Ethereum observation, as a real node does (the production profile requires it; the engine's X4 rule). On by default.
+    pub finalized_time_reported: bool,
     seq: u64,
     // Ethereum
     pub eth_block: u64,
@@ -201,6 +203,7 @@ impl World {
             second_lock_hidden: false,
             second_unreadable: None,
             eth_head_lag: 0,
+            finalized_time_reported: true,
             seq: 0,
             eth_block: 100,
             eth_time,
@@ -349,6 +352,9 @@ impl World {
             latest_block: self.eth_block,
             latest_timestamp: self.eth_time.saturating_sub(self.eth_head_lag),
             finalized_block: Some(self.eth_block.saturating_sub(self.finality_lag)),
+            // (the simulator's blocks have no timestamps of their own: reported only where a scenario asks for it, as a node would, at the head time
+            // less the finality lag in 12-second blocks; otherwise not reported and the head-time floor alone applies in the engine's rule)
+            finalized_timestamp: self.finalized_time_reported.then(|| self.eth_time.saturating_sub(self.eth_head_lag).saturating_sub(self.finality_lag * 12)),
             chain_id: Some(self.eth_chain_id),
             contract_code_hash: self.eth_code_hash,
             lock: if extras { all.first().cloned() } else { self.lock.clone() },
@@ -365,6 +371,7 @@ impl World {
                 self.refunded.clone()
             },
             claim_state_from_record: (self.claim_log_lag && self.claimed.is_some()) || (self.refund_log_lag && self.refunded.is_some()),
+            other_claims: Vec::new(),
             pending_preimage: self.claim_pending.clone(),
             overlong_claim: self.overlong_claim.clone(),
             word_locks: if self.lock_kind == LockKind::Poseidon {

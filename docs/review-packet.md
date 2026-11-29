@@ -251,7 +251,7 @@ test in the repository or a recorded scratch run shows it), **verified live** (s
 | A22 | `equiv-prove verify` rejects wrong `H`, `A`, variant, seal, image id, journal and dev-mode receipts | verified by test | the table in `equiv/README.md` §6 lists 139 rejected cases (4 of them garbage files) plus 1 dev-mode receipt and 5 `RISC0_DEV_MODE` refusals, on real receipts; `PROJECT.md` says 138 (section 11, item 16) |
 | A23 | Both parties build the same image id | assumed, known false today | `TASKS.md` M1.1: a second machine got another id (paths in the guest binary) |
 | A24 | The Ethereum contracts enforce disjoint claim and refund windows, fixed receiver, no re-entry | verified by test | `eth/` suite and fuzz campaign (`docs/poseidon-leg.md` §7); no Solidity audit, and the audit task `TASKS.md` M4.2 names only `HTLC.sol` and `HTLCERC20.sol`, not `HTLCPoseidonV2.sol` or `Poseidon2b.sol` (section 5.7) |
-| A25 | Receivers are externally owned accounts | verified by test, with a gap | REVIEW-1 H3 fix (`sender_is_eoa`, `swap-cli/REVIEW-1.md` "Applied"). Gap: a receiver that gains code after the last poll (for example by EIP-7702 delegation) makes the claim revert with the secret already public, because the pre-flight estimate was removed; REVIEW-7 R7-7 proposes a `getCode` re-check just before signing and lists it as not part of its fix (`swap-cli/REVIEW-7.md`, section 7) |
+| A25 | Receivers are externally owned accounts | verified by test, with a gap | REVIEW-1 H3 fix (`sender_is_eoa`, `swap-cli/REVIEW-1.md` "Applied"). Gap: a receiver that gains code after the last poll (for example by EIP-7702 delegation) makes the claim revert with the secret already public, because the pre-flight estimate was removed. Since 2026-11-16 (commit `8e3150c`) `live.js claim` re-reads the receiver's code at `latest` and `pending` just before signing and a first claim refuses on any code; a `--replace` of a pending claim that carries this lock's secret only warns. Covered by tests on a local chain only, never run against a real chain. REVIEW-7 R7-7 proposed a `getCode` re-check just before signing and listed it as not part of its fix (`swap-cli/REVIEW-7.md`, section 7) |
 | A26 | Each party reads each chain through two independent nodes | check exercised live; independence assumed | The two-node check ran once, in run 12 (`docs/live-run-12.md`). On Parano1d each side's second node was the counterparty's own node, reached through a tunnel, and both machines were on one private network, so the nodes were not independent; on Ethereum each side used two different public endpoints. Required before Bob's lock and Alice's reveal unless `--single-node-ok` is set (`swap-cli/src/params.rs` `requires_second_node`); under `production` Bob's lock also needs the second Parano1d node for the producer-concentration check even with `--single-node-ok` (only `--accept-producer-concentration` waives it) |
 | A27 | Each party is online inside its own window | assumed | `docs/protocol-design.md` §2.4, §8 T3 |
 | A28 | The secret stays sealed until the reveal (Argon2id + XChaCha20-Poly1305 file, never on argv) | verified by test | `TASKS.md` M2.3, M2.7a; `SECURITY.md` rule 3 |
@@ -389,7 +389,10 @@ Ordered by how much rests on them.
   inference from the numbers and was not checked against the networks' fork schedules" (`docs/live-run-11.md`
   finding 2). Gas constants must be re-measured after any repricing fork (`HTLCPoseidonV2.sol`, `MIN_CLAIM_GAS`).
   A receiver that gains code after the last poll makes a claim revert with the secret already public (A25, REVIEW-7
-  R7-7).
+  R7-7). Since 2026-11-16 `live.js claim` reads the receiver's code at `latest` and `pending` early and again just before
+  signing, and a first claim refuses on any code (an EIP-7702 delegation included); a `--replace` of a pending claim that
+  carries this lock's secret only warns and goes out (the secret is already public in it). Tested on a local chain only;
+  it has never run against a real chain.
 - **Not done.** A Solidity audit (`TASKS.md` M4.2). The task as written names only `HTLC.sol` and `HTLCERC20.sol`: it
   does not name `HTLCPoseidonV2.sol` or `Poseidon2b.sol`, the contracts used in runs 5, 6 and 8 to 13, so a reviewer
   should ask for them to be in scope. Only the Yul source of `Poseidon2b.sol` was reviewed, not the bytecode solc
@@ -473,20 +476,30 @@ funded (`docs/live-run-8.md`).
 | 11 | 2026-11-06 | 5 NOID ↔ 0.001 Sepolia ETH; `poseidon`; two machines; one node per chain | Settled, 44 min | A hand-copied bundle arrived damaged and was refused before anything was sent (`docs/live-run-11.md`) |
 | 12 | 2026-11-06 | As run 11 with two Parano1d nodes and two Sepolia endpoints per side | Settled, 45 min | The two-node check (F5) live; nodes joined by one SSH tunnel (`docs/live-run-12.md`) |
 | 13 | 2026-11-06 | As run 11; Alice's steps driven from the operator console over the same `scripts/live` helpers | Settled, 50 min (Alice's side) | A damaged bundle refused again; 6 blocks were left to Bob's lock-by when his lock was offered, because funding waited for `h_create` (`docs/live-run-13.md`; `TASKS.md` M2.7b) |
+| 14 | 2026-11-09 | As run 13 (two machines, one node per chain), the first run with the finality-18 code | Settled, 51 min 49 s (Alice's side) | Funding and Bob's claim each final 18 blocks after inclusion; the reveal sidecar written 0.43 s before the broadcast; the producer screen warned and did not refuse; the public Sepolia endpoint had pruned its old logs (`docs/live-run-14.md`) |
+| 15 | 2026-11-11 | Hostile plan L1: Alice prepares and never funds; one machine in both roles | Both files `aborted`, nothing sent | Bob's tool gave up at his last lock height on the real nodes and the lock dry run was refused (`docs/live-run-15.md`) |
+| 16 | 2026-11-11 | Hostile plan L2: Alice funds 4 NOID where 5 was agreed | Both files `aborted`; the 4 NOID recovered after `D` (about 60 blocks after it) less the 5,800 close fee; the run cost 14,800 μNOID in fees | Both tools refused to count the instance; `recover-noid.sh` live; 14,800 μNOID in fees (`docs/live-run-16.md`) |
+| 17 | 2026-11-15 | Hostile plan L3: Bob makes a lock by hand that leaves Alice 28 minutes where 56 are required | Abort path; ETH refunded, NOID recovered after `D` | Alice's tool rejected the lock until `D` and never offered the reveal; Bob's file adopted the lock; the early refund was refused twice; the per-user lock record written by a real lock (`docs/live-run-17.md`) |
+| 18 | 2026-11-15/16 | First try at hostile plan L4 (third-party close) | Abort path; ETH refunded, NOID recovered after `D` | The operator's reveal came 110 s after its cutoff and the tool refused it; the third-party close was not reached (`docs/live-run-18.md`) |
+| 19 | 2026-11-16 | Hostile plan L4, second try; a third party with the public bundle and the secret closes first | Settled, 49 min 41 s (Alice's side) | The close paid Bob's payout address 4.994200 NOID; Bob's tool showed the pending and the mined texts; `tick --closed-by` recorded it (`docs/live-run-19.md`) |
+| 20 | 2026-11-16 | Hostile plan L5 and L6; two nodes per chain, the second Parano1d node on a second machine through an SSH port forward | Settled | With the link closed the lock was refused at three ticks and offered when it was back; three blocks before a rotation the claim was not proved, after it it was proved and sent (`docs/live-run-20.md`) |
 
 Never run (`TASKS.md` M2.7, M2.7b; `docs/live-scenarios.md` §4 to §7; `README.md` "Status and warnings"):
 
-- a hostile counterparty, or two separate people;
+- two separate people (runs 15 to 20 were a hostile counterparty played by the same operator);
 - the stock variant (client S, `--import-wallet-secret`);
 - contract v2 (fixed fee);
-- a forced epoch rotation inside a swap window (the T6 guard and the re-prove path);
+- an epoch rotation that evicts an already-pending claim (the re-prove path after an eviction; the guard that waits for
+  the rotation ran in run 20);
 - a conflicting close at minimum fee, and the `F_max` burn (Q1);
 - second nodes that are independent of the counterparty (in run 12 each side's second Parano1d node was the
   counterparty's own, and both machines were on one private network);
 - the Bitcoin leg (signet: nothing broadcast, `README.md` repository map);
 - the abort paths on Ethereum mainnet;
-- `recover-noid.sh` in its current form ("Not yet run live in this form", `scripts/live/README.md`; run 9 used a
-  hand-made script, `docs/live-run-9-10.md` finding 4).
+- the refusal of a second lock send from one swap file (the lock lock, `FILE.lock-sent`, the per-user record) against a
+  real chain: real locks were sent through the guards (a real `live.js lock` without `--swap` wrote the per-user record in run 17; `lock.sh` sends wrote the lock record beside the swap file and the per-user record in runs 18 and 19; the lock of run 20 went through `lock.sh`, its record does not mention the lock records), a second send was never tried;
+- `reveal.sh`, `prepare.sh`, `fund.sh` and `recover-noid.sh` on a Mac (`recover-noid.sh` itself ran in runs 16, 17 and 18, on
+  the PC; run 9 used a hand-made script, `docs/live-run-9-10.md` finding 4).
 
 ---
 
@@ -527,20 +540,30 @@ for R5-1, R5-2, R5-4, the R4-8 remainder and M1.1.
 **`swap-cli/REVIEW-6.md` (2026-11-05, the `poseidon` kind).** Every kind-confusion and secret-exposure attack refuted;
 1 Medium, 3 Low, 4 Info. REVIEW-7 found R6-1, R6-2, R6-3, R6-5, R6-8 CLOSED, R6-4 and R6-7 PARTIAL, R6-6 OPEN (Info).
 
-**`swap-cli/REVIEW-7.md` (2026-11-05).** 2 Low, 6 Info. R7-1, R7-2, R7-5 and R7-6 fixed; R7-3, R7-4, R7-7, R7-8 not
-part of the fix (`swap-cli/README.md` "What REVIEW-7 changed"); R7-7 is the lost pre-flight for a receiver that gains
-code after the last poll (A25). Verdict: owner in both roles on Sepolia, yes; owner at
+**`swap-cli/REVIEW-7.md` (2026-11-05).** 2 Low, 6 Info. R7-1, R7-2, R7-5 and R7-6 fixed; R7-4 fixed on 2026-11-16 (a
+configured second Ethereum node that cannot be read holds Bob's `poseidon` lock; tested offline only); R7-3, R7-7, R7-8
+not part of the fix (`swap-cli/README.md` "What REVIEW-7 changed"); R7-7 is the lost pre-flight for a receiver that gains
+code after the last poll (A25); its receiver-code part was fixed on 2026-11-16 (`live.js claim` reads the receiver's code again just before signing; tested on a
+local chain only, never run against a real chain). Verdict as written on 2026-11-05: owner in both roles on Sepolia, yes; owner at
 trial amounts on mainnet, nothing in the diff blocks it; before a stranger: R7-1, R7-2, a real build binding (R6-4),
-a required second Ethereum node at Bob's lock (R7-4), the REVIEW-5 items; beyond trial size also M4, the second Yul
+a required second Ethereum node at Bob's lock (R7-4, since fixed), the REVIEW-5 items; beyond trial size also M4, the second Yul
 review and Q8.
 
 No review document covers the changes after REVIEW-7. The bundle check, the funding helper `fund.sh` and the helper
 fixes were each reviewed before commit (the commit messages say "reviewed"); no review document exists.
 
 **`swap-cli/CHAOS.md` (seeded chaos test, 1,000 to 3,000 scenarios per seed).** Sixteen findings at first; nine fixed
-on 2026-11-05 (F-1, F-3, F-4, F-5, F-9, F-12, F-13, F-15, F-16), plus F-17, F-18 and F-19 found later and fixed.
-Open, per the last list in the document: F-2, F-6, F-7, F-8, F-10, F-11, F-14, all Low or Info. "Atomicity held in
-every budgeted scenario of every run." Limits ("Limits of this test"): one real instance and one real lock in the simulator; no real proofs
+on 2026-11-05 (F-1, F-3, F-4, F-5, F-9, F-12, F-13, F-15, F-16), plus F-17, F-18 and F-19 found later and fixed; F-10 (for
+Bob) and F-14 fixed on 2026-11-16 (tested offline only). Open, per the last list in the document: F-2, F-6, F-7, F-8,
+F-11, all Low or Info (F-6 and F-11 only for what is left of them), and F-21 (new, 2026-11-16: Bob's recorded lock is gone
+while another lock of his on the same lock word is open or claimed; the file waits). F-20 (found on 2026-11-16 on the seed
+`0xfeed42`: Alice's recorded instance gone and a newer incarnation in the same slot after reorgs) was fixed the same day for the
+case before any reveal, and F-11 and F-6 in part (a close by someone else recorded once final; a lock that is gone for good ends
+Bob's wait in `locked`), by a second batch (commit `198241c`; reviewed independently in three passes, tested offline only, and five
+minor points left open on purpose, listed in `swap-cli/CHAOS.md`). After a reveal there is deliberately no adoption of another
+instance: Bob may have claimed the recorded one. "Atomicity held in every budgeted scenario of every run." On 2026-11-16 the
+1,000-scenario runs of the five seeds `0x5eed0001`, `0xc4a05eed`, `0xdeadbeef`, `0x5eed01` and `0xfeed42` were green on the commit
+of the second batch; the 3,000-scenario runs are owed. Limits ("Limits of this test"): one real instance and one real lock in the simulator; no real proofs
 or transports; in the hostile scenarios a lost leg is "explained" by any of nine adversity tags, which the document
 itself calls generous, so atomicity is judged exactly only in the budgeted scenarios; a Parano1d chain faster than the
 20 s planning figure is outside the test.
@@ -633,14 +656,14 @@ cd parano1d/harness && cargo test                    # 37 tests (+1 ignored P_au
 cd equiv && cargo test --release                     # 23 tests; EQUIV_PARITY_N=100000 for the large parity run
 cd equiv/zkvm && cargo test -p equiv-guest-core      # 3 tests; proving needs rzup (equiv/README.md §5)
 cd equiv/zkvm && EQUIV_RECEIPT_DIR=<dir with raw.receipt, stock.receipt> cargo test --release -p equiv-host
-cd swap-cli && cargo test --offline                  # 532 tests (+1 ignored)
+cd swap-cli && cargo test --offline                  # 728 tests (+1 ignored)
 bash scripts/live/selftest.sh                        # 389 cases (315 without python3), no network
 # the Pruv contract, from the vendor workspace:
 cargo run -p noid_pruv --manifest-path vendor/parano1d/Cargo.toml -- \
   verify parano1d/contracts/htlc.pruv --params parano1d/contracts/htlc.params.example.json --z3 "$(which z3)"
 ```
 
-The counts for `swap-cli`, `eth` and the self-test are those at the commit that adds this packet (532, 267, 218). The formal model:
+The counts for `swap-cli`, `eth` and the self-test are those at the commit that adds this packet (532, 267, 218; swap-cli is 728 since 2026-11-16). The formal model:
 `cd docs/formal && python model.py all` (`docs/formal/README.md` §1). The chaos test:
 `cd swap-cli && cargo test --offline --test chaos` (`swap-cli/CHAOS.md` "Run it"). Never fund the example params:
 their secret is the public test vector `00 01 … 1f` (`SECURITY.md` rule 1).

@@ -37,7 +37,21 @@ const KNOWN_FINDINGS: &[&str] = &[];
 /// `CHAOS_STRICT=1` they fail it like everything else. A finding that was fixed is NOT in this list: its symptom (a soft code, an
 /// "explained" end state, a documented gate violation) no longer exists in this file, so a regression is a hard failure with its
 /// own invariant id. Every soft code must start with one of these.
-const OPEN_FINDINGS: &[&str] = &["F-2", "F-6", "F-7", "F-8", "F-10", "F-11", "F-14"];
+///
+/// F-10 and F-14 were fixed (2026-11-16) and are no longer here: Bob's give-up heights now come before the "more than one instance" wait
+/// (so a party that waits on that text at the end is a hard `not-terminal`), and a call pending on the contract holds Alice's `refund_noid` as a
+/// wait (so a second print of it beside the first copy is a hard `ledger-duplicate-print`). The F-10 remainder that was named "Alice in
+/// `funding_submitted`" is F-7 (its own code below); there is no separate F-10 remainder.
+///
+/// F-21 (new, 2026-11-16): Bob's lock is gone for good but another lock of his on this lock word (his sender to Alice's receiver) is still open or was
+/// claimed, so the engine cannot say that nothing is locked and keeps waiting (with an alarm once that lock's own T_reveal has passed).
+///
+/// F-6 (Bob's `locked`) and F-11 (Bob's `secret_seen`) were fixed for the cases the engine can decide (2026-11-16): a lock that can no longer land
+/// ends `aborted`, and a close recorded with `tick --closed-by` (or an instance seen alive at D) ends the NOID side. The two codes stay for what is
+/// left: F-6 for `refund_submitted` / `refund_mined` over a lock that left the chain, F-11 for Alice's files whose instance was closed by someone
+/// else in a way the file cannot know (`funding_submitted` with no instance ever seen, and the F-18 state where no poll before D saw it gone and no
+/// `--closed-by` was given).
+const OPEN_FINDINGS: &[&str] = &["F-2", "F-6", "F-7", "F-8", "F-11", "F-21"];
 
 /// A party's clock may be this far from the true time (below the engine's 120-s observation staleness limit).
 const SKEW_TOL: u64 = 100;
@@ -334,6 +348,8 @@ struct Run {
     restarts: u32,
     intents_recorded: u32,
     foreign_adopted: u32,
+    /// Scenarios in which an operator cancelled a `fund_noid` intent that HAD been sent and the file ended `aborted` (see `alice_aborted_after_a_cancelled_funding`).
+    cancel_trace_erased: u32,
     soft: Vec<(&'static str, String)>,
     lock_vanished: bool,
     last_msg: String,
@@ -498,6 +514,7 @@ impl Run {
             restarts: 0,
             intents_recorded: 0,
             foreign_adopted: 0,
+            cancel_trace_erased: 0,
             soft: Vec::new(),
             lock_vanished: false,
             last_msg: String::new(),
@@ -1230,7 +1247,7 @@ impl Run {
                 p.closed_seen = n;
                 // A party that adopted a foreign instance of the agreed amount (F-7/F-10) cannot be run to the end here: the simulator
                 // can only close its one real instance. Counted by the foreign-adoption bookkeeping, not judged.
-                if foreign {
+                if foreign || self.recovery_is_for_a_foreign_instance(i) {
                     // (fall through)
                 } else {
                 let (wi, wtip) = { let w = self.world.borrow(); (w.instance.clone(), w.tip) };
@@ -1354,6 +1371,10 @@ impl Run {
             self.parties[i].sent_since_intent = false;
         }
         let action = out.decision.action.clone();
+        // (The notes of the tick go into the trace of a failing scenario: what the operator was told is part of the replay.)
+        if !out.decision.notes.is_empty() {
+            self.say(format!("{role}: notes {:?}", out.decision.notes));
+        }
         let mut exec_error = None;
         let printed_spend = INTENT_KINDS.contains(&action.kind()) && !matches!(out.intent, IntentStatus::None);
         if printed_spend || action.kind() == "claim_noid" {
@@ -1407,12 +1428,63 @@ impl Run {
         .is_some_and(|inst| inst.slot_index != 7)
     }
 
+    /// CHAOS X1 / M1: Alice's engine is entitled to offer a recovery close for an instance other than the recorded one, and that instance is a foreign
+    /// one (not the simulator's slot 7), which the simulator cannot close. Judged under the engine's OWN adoption conditions, from the file's history
+    /// and the world, never more widely: the phase is one that can offer `refund_noid` after the instance was recorded; the recovery branch is open
+    /// (`tip + 1 >= D`); the recorded instance is not listed; no poll saw it gone before D and no operator recorded a close before D; and no reveal
+    /// is on record or possibly sent (after one the engine never adopts). Used ONLY for `gate-refund-noid`, `closes-a-gone-instance`
+    /// and the end-of-run "file cannot end" skip, never for the reveal gate or any other.
+    fn recovery_is_for_a_foreign_instance(&self, i: usize) -> bool {
+        if i != ALICE {
+            return false;
+        }
+        let file = &self.parties[ALICE].runner.file;
+        let Phase::Alice(p) = &file.phase else { return false };
+        if !matches!(
+            p,
+            AlicePhase::FundingFinal { .. } | AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. } | AlicePhase::RevealSubmitted { .. } | AlicePhase::Revealed { .. } | AlicePhase::Done { .. }
+        ) {
+            return false;
+        }
+        let Some(r) = p.instance() else { return false };
+        let has = |e: &str| file.history.iter().any(|h| h.event == e);
+        let last = |e: &str| file.history.iter().rposition(|h| h.event == e);
+        let gone = last("noid_instance_gone_before_d");
+        let marked_gone = gone.is_some() && last("noid_instance_back_after_gone") < gone;
+        let reveal_out = match p {
+            AlicePhase::RevealSubmitted { .. } | AlicePhase::Revealed { .. } | AlicePhase::Done { .. } => true,
+            // (as `reveal_evidence` / `reveal_may_have_been_sent`: a reveal intent that was decided and later cancelled is no evidence)
+            _ => {
+                let decided = last("intent_decided:reveal_eth");
+                (decided.is_some() && decided > last("intent_cancelled:reveal_eth"))
+                    || has("reveal_submitted")
+                    || has("eth_reveal_dropped")
+                    || has("reveal_maybe_sent")
+                    || has("eth_claim_mined")
+                    || has("eth_claim_reorged")
+            }
+        };
+        // (After a reveal the engine never adopts, whatever markers exist: CHAOS S1.)
+        if marked_gone || has("noid_closed_before_deadline") || reveal_out {
+            return false;
+        }
+        let w = self.world.borrow();
+        if w.tip + 1 < w.deadline {
+            return false;
+        }
+        let listed: Vec<&NoidInstance> = w.instances_before.iter().chain(w.instance.iter()).chain(w.instances_after.iter()).collect();
+        let amount = w.amount;
+        let oldest_fitting = listed.iter().filter(|x| x.amount_micronoid == amount).min_by_key(|x| (x.creation_id, x.slot_index));
+        let recorded_listed = listed.iter().any(|x| x.slot_index == r.slot_index && x.creation_id == r.creation_id);
+        !recorded_listed && oldest_fitting.is_some_and(|x| x.slot_index != 7)
+    }
+
     /// Is the effect of a sent `kind` still in the world (in a mempool or on the chain)? A send that a reorg erased for
     /// good is no reason to keep an intent.
     fn effect_in_world(&self, kind: &str) -> bool {
         let w = self.world.borrow();
         match kind {
-            "fund_noid" => w.instance.is_some() || w.funding_pending.is_some() || w.noid_payout.is_some(),
+            "fund_noid" => fund_noid_effect_in_world(w.instance.is_some(), w.funding_pending.is_some(), w.noid_payout.as_ref().map(|(to, _)| to.as_str()), &w.alice_noid),
             "lock_eth" => w.lock.is_some() || w.lock_pending.is_some(),
             "reveal_eth" => w.claim_pending.is_some() || w.claimed.is_some(),
             "refund_eth" => w.refund_pending || w.refunded.is_some(),
@@ -1440,10 +1512,9 @@ impl Run {
         if !in_flight {
             self.parties[i].sent_kinds.remove(a.kind());
         }
-        if in_flight && sent_before && matches!(a, Action::RefundNoid { .. }) {
-            // F-14: a reorg put the already-resolved refund back into the mempool; the ledger forgot it and prints it again.
-            self.soft.push(("F-14 ledger prints refund_noid again after a reorg re-queued it", format!("{role}: refund_noid printed again while the first copy is back in the mempool")));
-        } else if in_flight && sent_before {
+        // (F-14 was fixed: a refund the reorg put back into the mempool is a wait now, so a second print of any spend beside the first copy
+        // is a hard failure again, `refund_noid` included.)
+        if in_flight && sent_before {
             return fail("ledger-duplicate-print", format!("{role}: the ledger printed a second {} while the first is still in flight", a.kind()));
         }
         if let Err(f) = self.gates_for(i, a, s) {
@@ -1595,8 +1666,24 @@ impl Run {
             }
             Action::RefundNoid { call_height, fee_micronoid } => {
                 need_role(Role::Alice)?;
-                if !s.instance && !self.foreign_recorded(i) {
-                    return fail("gate-refund-noid", "refund_noid although the instance is not at the contract");
+                if !s.instance && !self.foreign_recorded(i) && !self.recovery_is_for_a_foreign_instance(i) {
+                    let (wi, before, after) = {
+                        let w = self.world.borrow();
+                        (w.instance.clone(), w.instances_before.clone(), w.instances_after.clone())
+                    };
+                    return fail(
+                        "gate-refund-noid",
+                        format!(
+                            "refund_noid although the instance is not at the contract (Alice's phase {}, recorded instance {:?}, tip {}, D {d}, world instance {wi:?}, others before {before:?} after {after:?}, history tail {:?})",
+                            self.parties[i].runner.file.phase.name(),
+                            match &self.parties[i].runner.file.phase {
+                                Phase::Alice(p) => p.instance().cloned(),
+                                Phase::Bob(p) => p.instance().cloned(),
+                            },
+                            s.tip,
+                            self.parties[i].runner.file.history.iter().rev().take(6).map(|h| h.event.clone()).collect::<Vec<_>>()
+                        ),
+                    );
                 }
                 if *call_height != s.tip + 1 || s.tip + 1 < d {
                     return fail("gate-refund-noid", format!("refund_noid at call height {call_height} before D {d} (tip {})", s.tip));
@@ -1758,7 +1845,21 @@ impl Run {
             let ph = |i: usize| self.parties[i].runner.file.phase.clone();
             // F-5 and F-9 were fixed (a dropped transaction is noticed; `revealed` re-checks its claim): a file waiting on a
             // transaction that is gone, or an ETH lock left open, is a hard failure below.
-            if self.lock_vanished && matches!(ph(BOB), Phase::Bob(BobPhase::Locked { .. } | BobPhase::RefundSubmitted { .. } | BobPhase::RefundMined { .. })) && w.lock.is_none() {
+            // CHAOS F-6 (2026-11-16): `locked` now ends as `aborted` once the lock can no longer land (T_reveal plus the finality time, every node
+            // agreeing); a Bob still in `locked` at the end is a hard `not-terminal` again. What is left of F-6 is `refund_submitted` /
+            // `refund_mined` over a lock that left the chain, which the engine does not re-check.
+            // (CHAOS m7: and `locked` while ANOTHER open lock of Bob's sender on this swap's lock word is listed: ETH may still be locked there, so the
+            // engine does not say "nothing of Bob's is locked" and keeps waiting.)
+            let pe = &self.public.params.eth;
+            let other_lock_not_closed = w
+                .locks_before
+                .iter()
+                .chain(w.locks_after.iter())
+                .any(|l| l.sender == pe.bob_sender && l.receiver == pe.alice_receiver && l.hashlock == self.public.hashlock && !l.refunded);
+            if self.lock_vanished && matches!(ph(BOB), Phase::Bob(BobPhase::Locked { .. })) && other_lock_not_closed && w.lock.is_none() {
+                explained.push("F-21 Bob stays in `locked` although his lock left the chain for good: another lock of his on this lock word is open or claimed, so the engine does not say that nothing is locked".to_string());
+            }
+            if self.lock_vanished && matches!(ph(BOB), Phase::Bob(BobPhase::RefundSubmitted { .. } | BobPhase::RefundMined { .. })) && w.lock.is_none() {
                 explained.push(format!("F-6 Bob stays in `{}` although his lock left the chain for good", ph(BOB).name()));
             }
         }
@@ -1773,11 +1874,15 @@ impl Run {
                 return fail(
                     "noid-stuck",
                     format!(
-                        "the NOID is still at the contract at the end (tip {}, D {d}): instance {:?}, mempool {}; Alice {} Bob {}",
+                        "the NOID is still at the contract at the end (tip {}, D {d}): instance {:?}, mempool {}; Alice {} (recorded instance {:?}) Bob {}",
                         w.tip,
                         w.instance,
                         w.mempool.len(),
                         alice_ph,
+                        match &self.parties[ALICE].runner.file.phase {
+                            Phase::Alice(p) => p.instance().cloned(),
+                            Phase::Bob(_) => None,
+                        },
                         self.parties[BOB].runner.file.phase.name()
                     ),
                 );
@@ -1809,7 +1914,7 @@ impl Run {
                     Phase::Bob(p) => p.instance(),
                 }
                 .is_some_and(|i| i.slot_index != 7);
-                if foreign {
+                if foreign || (pt.role == Role::Alice && self.recovery_is_for_a_foreign_instance(ALICE)) {
                     // The party adopted a foreign instance of the agreed amount as its own (an attacker's deposit, F-7/F-10): the
                     // simulator can only close its one real instance, so this file cannot end here. Not an engine finding.
                     self.foreign_adopted += 1;
@@ -1837,6 +1942,13 @@ impl Run {
                         || pt.runner.file.history.iter().rposition(|h| h.event == "intent_cancelled:reveal_eth")
                             > pt.runner.file.history.iter().rposition(|h| h.event == "intent_decided:reveal_eth"))
                     && matches!(pt.runner.file.phase.name().as_str(), "funded" | "funding_submitted" | "funding_final" | "lock_seen" | "lock_final");
+                // CHAOS F-18 (seed 0x5eed0001, scenario 715): reveal on record, Bob's refund final, instance gone, no poll before D saw it gone. The file
+                // stays in `lock_final` / `reveal_submitted` by design whatever its last action says ("our reveal lost: ...").
+                let alice_both_legs_unprovable = pt.role == Role::Alice && {
+                    let events: Vec<&str> = pt.runner.file.history.iter().map(|h| h.event.as_str()).collect();
+                    let bob_refund_final = w.refunded.as_ref().is_some_and(|r| r.block_number <= w.eth_block.saturating_sub(w.finality_lag));
+                    alice_reveal_lost_but_unprovable(&pt.runner.file.phase.name(), &events, w.instance.is_none(), bob_refund_final)
+                };
                 // Alice never ticked while the instance was visible and her wallet closed it: `funding_submitted` has nothing to go on.
                 let alice_funding_closed_unseen = pt.role == Role::Alice
                     && pt.runner.file.phase.name() == "funding_submitted"
@@ -1851,14 +1963,12 @@ impl Run {
                 }) {
                     continue;
                 }
-                if pt.last_action.contains("verify the contract receipts manually") || alice_closed_unrecorded || alice_funding_closed_unseen {
+                if pt.last_action.contains("verify the contract receipts manually") || alice_closed_unrecorded || alice_funding_closed_unseen || alice_both_legs_unprovable {
                     explained.push(format!("F-11 {} stays in `{}` after the instance was closed by someone else; the file has no way to end", pt.role, pt.runner.file.phase.name()));
                     continue;
                 }
-                if pt.last_action.contains("more than one instance") {
-                    explained.push(format!("F-10 {} waits for ever on \"more than one instance at the contract root\", also after D, and is never terminal", pt.role));
-                    continue;
-                }
+                // (F-10 was fixed: a party that still waits on "more than one instance at the contract root" at the end is not excused; it falls
+                // through to `not-terminal` below. The Alice side of the old finding is F-7, excused by its own code above.)
                 if pt.runner.file.pending_action.as_ref().is_some_and(|a| a.maybe_sent) {
                     explained.push(format!(
                         "F-2 {}'s file holds a pending {} of unknown outcome for ever",
@@ -1881,8 +1991,8 @@ impl Run {
             let code: &'static str = match e.split(' ').next().unwrap_or("") {
                 "F-2" => "F-2 pending action of unknown outcome never resolves",
                 "F-6" => "F-6 locked phase never re-checks the lock",
-                "F-10" => "F-10 ambiguous instances: the party waits for ever, also after D",
                 "F-11" => "F-11 a close by someone else leaves the file without a way to end",
+                "F-21" => "F-21 Bob's lock is gone but another lock of his on this lock word is open or claimed: the file waits",
                 _ => "F-7 ambiguous funding never accepted, no recovery offered",
             };
             self.soft.push((code, e));
@@ -1915,6 +2025,7 @@ impl Run {
             }
         }
         // The files agree with the chain.
+        let mut cancel_trace_erased = false;
         let alice = &self.parties[ALICE].runner.file.phase;
         let bob = &self.parties[BOB].runner.file.phase;
         let bad = |who: &str, ph: &Phase, why: &str| -> Result<(), Failure> {
@@ -1924,8 +2035,19 @@ impl Run {
             Phase::Alice(AlicePhase::Done { .. }) if eth_to_alice != Some(true) => bad("Alice", alice, "the ETH did not go to Alice")?,
             Phase::Alice(AlicePhase::Refunded { .. }) if noid_to_bob != Some(false) => bad("Alice", alice, "the NOID did not go back to Alice")?,
             Phase::Alice(AlicePhase::Lost { .. }) if !(noid_to_bob == Some(true) && eth_to_alice == Some(false)) => bad("Alice", alice, "she did not lose both legs")?,
-            Phase::Alice(AlicePhase::Aborted { .. }) if funded => bad("Alice", alice, "the NOID was funded")?,
+            Phase::Alice(AlicePhase::Aborted { .. }) if funded => {
+                // Seed 0x5eed0001, scenario 496 (see `alice_aborted_after_a_cancelled_funding`): not a finding, but counted and printed.
+                let events: Vec<&str> = self.parties[ALICE].runner.file.history.iter().map(|h| h.event.as_str()).collect();
+                if alice_aborted_after_a_cancelled_funding(&alice.name(), &events, w.instance.is_none(), w.noid_payout.as_ref().is_some_and(|(to, _)| *to == p.alice_noid)) {
+                    cancel_trace_erased = true;
+                } else {
+                    bad("Alice", alice, "the NOID was funded")?
+                }
+            }
             _ => {}
+        }
+        if cancel_trace_erased {
+            self.cancel_trace_erased += 1;
         }
         match bob {
             Phase::Bob(BobPhase::Done { .. }) if noid_to_bob != Some(true) => bad("Bob", bob, "the NOID did not go to Bob")?,
@@ -1967,6 +2089,45 @@ impl Run {
 
 // ------------------------------------------------------------------------------------------------ the test
 
+/// Oracle helper (seed `0x5eed0001`, scenario 496): is the effect of a sent `fund_noid` still in the world? The funding's effect is an instance at
+/// the contract, a funding in flight, or a close that paid someone other than Alice (Bob's claim). A close that paid ALICE is her own recovery:
+/// the funding came back to her, and a `fund_noid` intent cancelled after that is not a cancel after a send that is still in effect (the next tick
+/// prints an abort, "too late to fund", never a second funding). Pure, so the unit test below can pin it without a 1,000-scenario run.
+fn fund_noid_effect_in_world(instance: bool, funding_pending: bool, payout_to: Option<&str>, alice_noid: &str) -> bool {
+    instance || funding_pending || payout_to.is_some_and(|to| to != alice_noid)
+}
+
+/// Oracle helper (seed `0x5eed0001`, scenario 715; CHAOS F-18): Alice's file cannot reach `lost` and stays where it is, by design, and that is not a
+/// finding. Decided from structured state only (never from the last action's text): the file is in `lock_final` (CLI) or `reveal_submitted`
+/// (library), a reveal is on record (decided and not cancelled afterwards, or sent, or dropped), Bob's ETH refund is final, the instance is gone, and
+/// the file never marked the instance gone in a poll before D (or marked it and saw it alive at D: F-17) - so it cannot tell Bob's claim from her own
+/// recovery close and a terminal `lost` would not be known to be true. `events` are the file's history events in order.
+fn alice_reveal_lost_but_unprovable(phase: &str, events: &[&str], instance_gone: bool, bob_refund_final: bool) -> bool {
+    if !matches!(phase, "lock_final" | "reveal_submitted") || !instance_gone || !bob_refund_final {
+        return false;
+    }
+    let last = |name: &str| events.iter().rposition(|e| *e == name);
+    let decided = last("intent_decided:reveal_eth");
+    let reveal_on_record = (decided.is_some() && decided > last("intent_cancelled:reveal_eth")) || events.iter().any(|e| matches!(*e, "reveal_submitted" | "eth_reveal_dropped"));
+    let gone = last("noid_instance_gone_before_d");
+    let marked_gone = gone.is_some() && last("noid_instance_back_after_gone") < gone;
+    reveal_on_record && (!marked_gone || events.contains(&"noid_instance_alive_at_d"))
+}
+
+/// Oracle helper (seed `0x5eed0001`, scenario 496, after the cancel check was corrected): Alice's file ended `aborted` although the NOID was funded.
+/// The class is the one CHAOS F-19 and F-1 document as "no trace of the funding", reached through `intent --cancel`: the tool decided a `fund_noid`, the
+/// operator SENT it, Alice stopped ticking until after `D`, her own wallet closed the instance with the recovery branch before the file ever saw it,
+/// and the operator then cancelled the held intent (the cancel is the operator's statement that it was not sent; the node shows no instance and no
+/// pending funding, so the tool cannot tell a funding that was recovered from one that never went out). The cancel erases the only trace, and the next
+/// tick (after the hour the engine keeps an abort back after a cancel, review M1) records `aborted` with the reason "too late to fund", which is a
+/// statement about the funding window and claims nothing about what was sent. Excused only when: the file is `aborted`, a `fund_noid` was decided
+/// and cancelled after it, the instance is gone from the world, and the NOID went back to Alice (her own recovery: nothing is lost). Pure.
+fn alice_aborted_after_a_cancelled_funding(phase: &str, events: &[&str], instance_gone: bool, payout_to_alice: bool) -> bool {
+    let last = |name: &str| events.iter().rposition(|e| *e == name);
+    let decided = last("intent_decided:fund_noid");
+    phase == "aborted" && decided.is_some() && last("intent_cancelled:fund_noid") > decided && instance_gone && payout_to_alice
+}
+
 #[derive(Default)]
 struct Stats {
     scenarios: u64,
@@ -1987,6 +2148,7 @@ struct Stats {
     closed_by: u64,
     cancels_ok: u64,
     cancels_refused: u64,
+    cancel_trace_erased: u64,
     restarts: u64,
     intents: u64,
     soft: BTreeMap<&'static str, Vec<(u64, u64, String)>>,
@@ -2055,6 +2217,7 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
         stats.alice_done_to_refund += run.alice_done_to_refund as u64;
         stats.closed_by += run.closed_by_recorded as u64;
         stats.cancels_ok += run.cancels_ok as u64;
+        stats.cancel_trace_erased += run.cancel_trace_erased as u64;
         stats.cancels_refused += run.cancels_refused as u64;
         stats.restarts += run.restarts as u64;
         stats.intents += run.intents_recorded as u64;
@@ -2112,8 +2275,8 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
     println!("chaos: actions performed {:?}", stats.actions);
     println!("chaos: losses excused by {:?}", stats.excuses);
     println!(
-        "chaos: restarts {}, --closed-by recorded {}, intents recorded {}, cancels accepted {} refused {}, Alice done->refund {}",
-        stats.restarts, stats.closed_by, stats.intents, stats.cancels_ok, stats.cancels_refused, stats.alice_done_to_refund
+        "chaos: restarts {}, --closed-by recorded {}, intents recorded {}, cancels accepted {} refused {}, Alice done->refund {}, aborted after a cancelled sent funding {}",
+        stats.restarts, stats.closed_by, stats.intents, stats.cancels_ok, stats.cancels_refused, stats.alice_done_to_refund, stats.cancel_trace_erased
     );
     let mut unexpected = 0;
     for (code, list) in &stats.soft {
@@ -2248,4 +2411,57 @@ fn the_head_lag_degradation_is_beyond_the_engines_limit_for_every_clock_skew() {
         Degrade::EthHeadLag.apply(&mut n, &mut e, now);
         assert!(swap_cli::engine::eth_head_time_blocker(e.latest_timestamp, now).is_some(), "skew {skew}");
     }
+}
+
+#[test]
+fn the_cancel_oracle_does_not_count_alices_own_recovery_as_the_fundings_effect() {
+    // Scenario 496 of seed 0x5eed0001: the instance was closed by Alice's recovery (payout to Alice); the intent cancel after it is fine.
+    let alice = "o1alice";
+    assert!(!fund_noid_effect_in_world(false, false, Some(alice), alice), "her own recovery close is not the funding's effect");
+    assert!(!fund_noid_effect_in_world(false, false, None, alice), "nothing in the world");
+    // Everything else still counts: an instance, a funding in flight, a close that paid Bob (the claim).
+    assert!(fund_noid_effect_in_world(true, false, None, alice));
+    assert!(fund_noid_effect_in_world(false, true, None, alice));
+    assert!(fund_noid_effect_in_world(false, false, Some("o1bob"), alice));
+    assert!(fund_noid_effect_in_world(true, false, Some(alice), alice), "an instance that is still there is still the effect");
+}
+
+#[test]
+fn the_lost_oracle_excuses_only_the_f18_state_decided_from_structure() {
+    // Scenario 715 of seed 0x5eed0001: reveal on record, Bob's refund final, instance gone, no poll before D saw it gone.
+    let ok = |phase: &str, ev: &[&str], gone: bool, fin: bool| alice_reveal_lost_but_unprovable(phase, ev, gone, fin);
+    let sent = ["eth_lock_seen", "eth_lock_final", "reveal_submitted", "eth_refund_mined"];
+    assert!(ok("reveal_submitted", &sent, true, true));
+    // CLI path: the phase stays lock_final and the reveal is a decided intent.
+    assert!(ok("lock_final", &["eth_lock_final", "intent_decided:reveal_eth"], true, true));
+    // Each condition is needed.
+    assert!(!ok("reveal_submitted", &sent, false, true), "instance still there");
+    assert!(!ok("reveal_submitted", &sent, true, false), "Bob's refund not final");
+    assert!(!ok("revealed", &sent, true, true), "another phase");
+    assert!(!ok("lock_final", &["eth_lock_final"], true, true), "no reveal on record");
+    assert!(!ok("lock_final", &["intent_decided:reveal_eth", "intent_cancelled:reveal_eth"], true, true), "a cancelled reveal is no evidence");
+    assert!(ok("lock_final", &["intent_cancelled:reveal_eth", "intent_decided:reveal_eth"], true, true), "a re-decided reveal is");
+    // A poll before D that saw the instance gone makes `lost` provable: the file reaches it, so the oracle must not excuse it.
+    let mut marked = sent.to_vec();
+    marked.push("noid_instance_gone_before_d");
+    assert!(!ok("reveal_submitted", &marked, true, true));
+    // ... unless a reorg put it back and the marker was taken back, or it was seen alive at D (F-17).
+    marked.push("noid_instance_back_after_gone");
+    assert!(ok("reveal_submitted", &marked, true, true));
+    let mut alive = sent.to_vec();
+    alive.extend(["noid_instance_gone_before_d", "noid_instance_alive_at_d"]);
+    assert!(ok("reveal_submitted", &alive, true, true));
+}
+
+#[test]
+fn the_terminal_oracle_excuses_an_abort_after_a_cancelled_sent_funding_only_when_the_noid_came_back_to_alice() {
+    // Scenario 496 of seed 0x5eed0001.
+    let ev = ["intent_decided:fund_noid", "intent_cancelled:fund_noid", "abort"];
+    assert!(alice_aborted_after_a_cancelled_funding("aborted", &ev, true, true));
+    assert!(!alice_aborted_after_a_cancelled_funding("aborted", &ev, false, true), "the instance is still at the contract");
+    assert!(!alice_aborted_after_a_cancelled_funding("aborted", &ev, true, false), "the NOID did not go back to Alice (Bob's claim)");
+    assert!(!alice_aborted_after_a_cancelled_funding("refunded", &ev, true, true), "another phase");
+    assert!(!alice_aborted_after_a_cancelled_funding("aborted", &["abort"], true, true), "no funding was ever decided");
+    assert!(!alice_aborted_after_a_cancelled_funding("aborted", &["intent_decided:fund_noid", "abort"], true, true), "decided and never cancelled");
+    assert!(!alice_aborted_after_a_cancelled_funding("aborted", &["intent_cancelled:fund_noid", "intent_decided:fund_noid", "abort"], true, true), "cancelled BEFORE the last decision");
 }

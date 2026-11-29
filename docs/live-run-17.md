@@ -86,6 +86,9 @@ Bob paid the gas of one lock and one refund (the estimates of the dry runs were 
    short timelock is in his favour), and the file tracked the lock through refund and finality without a hand edit.
 4. **`live.js status` could not be used in this run.** With `--chain-id` it answered "unknown flag --chain-id for
    status"; without it "error: could not coalesce error". Not looked into; the ticks gave the same facts. Low, open.
+   **Answered 2026-11-16:** `status` had no `--chain-id` flag, and the second message was the library hiding the
+   node's own error text (reproduced on a local chain with a node that has pruned its old logs). `status` now takes
+   the flag, prints the node's error, and says when a missing lock cannot be trusted (`eth/README.md`).
 5. **The recovery was sent about 165 blocks after `D`** (included 167 after), with no harm: after `D` only Alice can
    close.
 6. **Durations.** `prepare.sh` to Bob's refund final: 87 minutes. To the recovery in a block: about 3 hours 55

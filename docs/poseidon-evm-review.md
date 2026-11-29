@@ -472,8 +472,10 @@ deployed size of 15,145 bytes is under the 24,576 limit.
 - **Item 5 (protocol and tooling for v2):** contract side done in `HTLCPoseidonV2.sol`: no `addrOf`, lock word and all terms in
   `Locked`, explicit minimum-gas check (`MIN_CLAIM_GAS` 540,000, recommended limit 650,000, measured claim gas 499,288 to 544,584),
   secret exactly 32 bytes, new runtime code hash pinned. Tool and design-document changes are specified in `docs/poseidon-leg.md`
-  section 9 and not implemented (`swap-cli`, `live.js`, `protocol-design.md` untouched).
-- **Item 6 (pick the chain and test there): not done.** Only Hardhat's EVM was used. `docs/poseidon-leg.md` section 5 gives the
+  section 9. When this was written none was implemented. The tool side was implemented later (2026-11-05: the `poseidon` lock kind in `swap-cli` and
+  `live.js`, `swap-cli/README.md` "Ethereum lock kinds"); the design document `protocol-design.md` is still untouched.
+- **Item 6 (pick the chain and test there): not done when this was written; done since.** Only Hardhat's EVM was used then. The kind ran on public
+  Sepolia (run 5 and later) and on Ethereum mainnet (run 8; `docs/live-run-5.md`, `docs/live-run-8.md`). `docs/poseidon-leg.md` section 5 gives the
   minimum swap size on L1 (about 0.055 ETH at 1 gwei for a 1 % fee).
 - **Item 7 (documentation errors): done earlier.**
 - F9: `addrOf` is gone from the production contract (a test checks the ABI and the bytecode selectors).

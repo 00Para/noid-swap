@@ -97,8 +97,11 @@ published.
 4. **A late funding moves everything behind it.** The funding was sent 14 minutes after the offer, at the edge of its
    window, and landed 28 blocks after `h_create`. Bob's file counts the 18 blocks of funding finality from the tip at
    which it first saw the instance (313146), not from the inclusion block (313143), so the lock was offered at 313166:
-   one block after the nominal lock-by, 41 blocks before the hard limit. The tool said so and allowed it. The reveal
-   window was not shortened by this (`T_reveal` is set when the lock is offered).
+   one block after the nominal lock-by. The tool said so and allowed it. The reveal window was not shortened by this
+   (`T_reveal` is set when the lock is offered). **Correction (2026-11-16):** the note named 313207 as the limit, and
+   that text overstated it. Once Bob's file has recorded the funding as final, the tool gives up 20 blocks later in
+   this profile (here after 313186), and that was the real limit of this lock; 313207 applies only while no funding
+   has been seen. The decision of the tool was right, the text of its note was not, and the note has been corrected.
 5. **The wording of two notes.** At the lock offer Bob's note reads "the lock is still allowed until the hard limit";
    the third party's first tick reads "lock-by 313165 has passed: tip 313168 is 3 blocks beyond it" with no word on
    the hard limit. And Alice's (I2) note "do NOT broadcast" was still shown at the tick that offered the recovery,

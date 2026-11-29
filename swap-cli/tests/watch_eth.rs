@@ -267,6 +267,24 @@ fn finalized_tag_error_or_old_block() {
 }
 
 #[test]
+fn the_finalized_blocks_time_is_read_with_the_block_and_its_absence_is_not_an_error() {
+    // CHAOS m6: the `finalized` block comes with its timestamp; a block without a readable one is "not reported", never a failed poll.
+    let mut fx = fixture("locked.json");
+    let id = emitted_lock_id(&mut fx);
+    call_mut(&mut fx, "eth_getBlockByNumber", 1)["result"]["timestamp"] = json!("0x64");
+    assert_eq!(watcher(&fx, id).observe().unwrap().finalized_timestamp, Some(100));
+    let mut without = fx.clone();
+    call_mut(&mut without, "eth_getBlockByNumber", 1)["result"].as_object_mut().unwrap().remove("timestamp");
+    let obs = watcher(&without, id).observe().unwrap();
+    assert_eq!(obs.finalized_timestamp, None);
+    assert!(obs.finalized_block.is_some());
+    // No finalized block at all: no time either.
+    let mut null = fx.clone();
+    call_mut(&mut null, "eth_getBlockByNumber", 1)["result"] = Value::Null;
+    assert_eq!(watcher(&null, id).observe().unwrap().finalized_timestamp, None);
+}
+
+#[test]
 fn absent_lock_asks_get_lock_and_only_a_revert_means_no_lock() {
     // REVIEW-2 F7: with the lock id known, an empty `eth_getLogs` is never read as "no lock" on its own.
     let mut fx = fixture("locked.json");
@@ -291,6 +309,35 @@ fn absent_lock_asks_get_lock_and_only_a_revert_means_no_lock() {
     // Any other node error is an error, not "no lock".
     call_mut(&mut fx, "eth_call", 0)["error"] = json!({"code": -32005, "message": "rate limited"});
     assert!(matches!(watcher(&fx, id).observe(), Err(RpcError::Remote { code: -32005, .. })));
+}
+
+#[test]
+fn a_reverting_get_lock_for_a_lock_the_logs_show_stays_an_error_and_says_what_was_read() {
+    // The logs show the lock and `getLock` reverts (right after a lock was mined, a provider can answer the two reads from different views).
+    let mut fx = fixture("locked.json");
+    let id = emitted_lock_id(&mut fx);
+    let call = call_mut(&mut fx, "eth_call", 0);
+    call.as_object_mut().unwrap().remove("result");
+    call["error"] = json!({"code": 3, "message": "execution reverted"});
+    match watcher(&fx, id).observe() {
+        Err(RpcError::Remote { code: 3, message }) => {
+            // The node's own text is kept, and the cause is added: what was read, that it usually clears, what to check if it does not.
+            assert!(message.starts_with("execution reverted"), "{message}");
+            assert!(message.contains("the getLock read for a lock that eth_getLogs shows, and it reverted"), "{message}");
+            // The check comes first, before the usual cause; the text does not claim that the contract "answered" anything harmless.
+            let check = message.find("Check that --eth-rpc and the contract address").expect("the check");
+            let cause = message.find("usually means the provider").expect("the usual cause");
+            assert!(check < cause && message.contains("clears on the next poll") && message.contains("a reorg can also have removed the lock"), "{message}");
+            assert!(!message.contains("answered that it has no such lock"), "{message}");
+        }
+        other => panic!("expected the revert to stay a remote error, got {other:?}"),
+    }
+    // Another node error on the same read is untouched.
+    call_mut(&mut fx, "eth_call", 0)["error"] = json!({"code": -32005, "message": "rate limited"});
+    assert_eq!(
+        watcher(&fx, id).observe().unwrap_err(),
+        RpcError::Remote { code: -32005, message: "rate limited".into() }
+    );
 }
 
 #[test]

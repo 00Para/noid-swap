@@ -92,9 +92,11 @@ NOID and the funding fee of 9,000 μNOID). Bob's payout address received 4.99420
 1. **Without the second node Bob's tool does not lock, and it says why.** The refusal is the tool's own (the first
    node was healthy and showed the funding final). An operator who sees this text has one thing to fix, the link to
    the second node; two to three blocks after it was back the lock was in a Sepolia block.
-2. **The lock's time budget absorbed the outage.** The funding was final at tip 315298 and the lock was offered at
-   315303, 19 blocks before the lock-by. A longer outage runs into the lock-by and then into the last lock height
-   (`h_create + 92`), after which Bob does not lock at all and Alice recovers at `D`: the safe direction.
+2. **The lock's time budget absorbed the outage.** Bob's file recorded the funding as final at tip 315300 and the
+   lock was offered at 315303. In this profile the tool gives up 20 blocks after it recorded the funding as final,
+   here after 315320, so the outage had 17 blocks of room left. A longer one ends with Bob not locking at all and
+   Alice recovering at `D`: the safe direction. (Corrected 2026-11-16: this paragraph first named the lock-by and
+   `h_create + 92` as the limits; `h_create + 92` applies only while no funding has been seen.)
 3. **A reveal cannot be placed to the block by hand.** The reveal was due 7 blocks before the rotation and was
    sent 3 minutes 40 seconds later, by which time 7 blocks had passed (about one every 31 s). Later in the run
    four blocks took more than 6 minutes and the next six took 76 seconds. A test that depends on a tip within a few

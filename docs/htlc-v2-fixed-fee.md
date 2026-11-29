@@ -141,6 +141,8 @@ file, and the per-tick note and T5 only see the current reading.
 
 - Q1 rerun with v2 on a real chain (two closes across an epoch rotation) to size `B_epoch` / `B_fee` and the shorter
   `D_offset` that ideas.md idea 5 hopes for. Not done: nothing here touches a network.
-- swap-cli, the bundle format and `contract_params.rs` are not changed by this work; §3 lists what to change.
+- When this document was first written, swap-cli, the bundle format and `contract_params.rs` were not changed by it, and §3 listed what
+  to change. The swap-cli side was done on 2026-11-04 (§5, "Implemented in swap-cli": `--contract-version 1|2` in swap files and bundles,
+  the v2 fee rule, the per-tick floor note); a v2 live run has not happened.
 - v2 changes the pinned program, so it needs the same independent review as v1 and must be part of the M4 external review
   before real funds.

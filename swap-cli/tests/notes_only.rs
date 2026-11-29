@@ -25,6 +25,12 @@ fn at_bob_lock(s: &mut Scenario) {
     assert_eq!(s.bob_phase(), "funded");
 }
 
+/// Bob's real last lock height once he has seen the funding final at tip `f`: the engine gives up at `tip > min(bob_lock_by_min_window(D), f + b_bob)`
+/// (`choose_t_reveal`: `PastLockBy` and `PastBobWindow`).
+fn real_limit(s: &Scenario, f: u64) -> u64 {
+    s.gates().bob_lock_by_min_window(s.public.params.deadline_height).min(f + s.gates().b_bob)
+}
+
 // ---------------------------------------------------------------- the second node agreed
 
 #[test]
@@ -174,17 +180,25 @@ fn bob_before_his_lock_sees_the_margin_to_the_lock_by() {
     let lock_by = s.public.params.lock_by_height;
     // Received (waiting for Alice's funding), a long way before the lock-by.
     let tip = s.world.borrow().tip;
+    let hard = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
+    assert!(hard > lock_by);
     assert!(lock_by - tip >= LOCK_BY_MARGIN_WARN_BLOCKS);
     let r = s.tick_bob();
     assert_eq!(r.action.kind(), "wait", "{r:?}");
-    assert!(r.notes.contains(&format!("lock-by margin: {} blocks (lock-by {lock_by}, tip {tip})", lock_by - tip)), "{:?}", r.notes);
+    // Both heights are named: the lock-by and, as an upper bound (the funding is not seen yet, so `F + b_bob` is not known), the last lock height.
+    assert!(r.notes.contains(&format!("lock-by margin: {} blocks (lock-by {lock_by}, tip {tip}); the last lock height is at most {hard}", lock_by - tip)), "{:?}", r.notes);
     // Funding final, the lock is offered: the margin is still said.
     let mut s = Scenario::new(Variant::Raw);
     at_bob_lock(&mut s);
     let tip = s.world.borrow().tip;
+    let limit = real_limit(&s, tip);
+    assert!(limit < hard, "the funding window ends before the hard limit: {limit} {hard}");
     let r = s.tick_bob();
     assert_eq!(r.action.kind(), "lock_eth", "{r:?}");
-    assert!(r.notes.contains(&format!("lock-by margin: {} blocks (lock-by {lock_by}, tip {tip})", lock_by - tip)), "{:?}", r.notes);
+    // Once the funding is final the real limit is `F + b_bob`, not the hard limit, and it is the nearer one: the margin is counted to it.
+    assert!(limit < lock_by);
+    assert!(r.notes.contains(&format!("lock margin: {} blocks to the last lock height {limit} (nominal lock-by {lock_by}, tip {tip})", limit - tip)), "{:?}", r.notes);
+    assert!(notes_with(&r.notes, "lock-by margin").is_empty(), "{:?}", r.notes);
 }
 
 /// What Bob's engine decides on the world as it is now, without executing it (a tick that locks moves him past the margin note).
@@ -208,7 +222,8 @@ fn a_short_margin_is_a_warning_and_the_boundary_is_the_named_constant() {
     let tip = s.world.borrow().tip;
     assert_eq!(lock_by - tip, LOCK_BY_MARGIN_WARN_BLOCKS);
     assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
-    assert!(d.notes.contains(&format!("lock-by margin: {LOCK_BY_MARGIN_WARN_BLOCKS} blocks (lock-by {lock_by}, tip {tip})")), "{:?}", d.notes);
+    let limit = real_limit(&s, tip);
+    assert!(d.notes.contains(&format!("lock-by margin: {LOCK_BY_MARGIN_WARN_BLOCKS} blocks (lock-by {lock_by}, tip {tip}); the last lock height is {limit}")), "{:?}", d.notes);
     assert!(notes_with(&d.notes, "margin is short").is_empty(), "{:?}", d.notes);
     // One block below it: the warning, which points at the action; the action is the same lock.
     s.world.borrow_mut().advance_noid(1);
@@ -217,7 +232,12 @@ fn a_short_margin_is_a_warning_and_the_boundary_is_the_named_constant() {
     let left = lock_by - tip;
     assert_eq!(left, LOCK_BY_MARGIN_WARN_BLOCKS - 1);
     assert!(matches!(d2.action, Action::LockEth { .. }), "{:?}", d2.action);
-    assert!(d2.notes.contains(&format!("lock-by margin is short: {left} blocks (lock-by {lock_by}, tip {tip}); see the action")), "{:?}", d2.notes);
+    let limit = real_limit(&s, tip);
+    assert!(
+        d2.notes.contains(&format!("lock-by margin is short: {left} blocks (lock-by {lock_by}, tip {tip}); the last lock height is {limit}; see the action")),
+        "{:?}",
+        d2.notes
+    );
 }
 
 /// What Alice's engine decides on the world as it is now, without executing it.
@@ -305,7 +325,12 @@ fn bob_with_a_short_margin_and_the_lock_offered_gets_the_short_form_without_an_i
     s.world.borrow_mut().advance_noid(lock_by - 4 - tip);
     let d = bob_decision(&s);
     assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
-    assert!(d.notes.contains(&format!("lock-by margin is short: 4 blocks (lock-by {lock_by}, tip {}); see the action", lock_by - 4)), "{:?}", d.notes);
+    let limit = real_limit(&s, lock_by - 4);
+    assert!(
+        d.notes.contains(&format!("lock-by margin is short: 4 blocks (lock-by {lock_by}, tip {}); the last lock height is {limit}; see the action", lock_by - 4)),
+        "{:?}",
+        d.notes
+    );
 }
 
 #[test]
@@ -316,7 +341,8 @@ fn bob_with_a_short_margin_but_no_lock_offered_gets_the_neutral_form() {
     let tip = s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(lock_by - 4 - tip);
     let tip = s.world.borrow().tip;
-    let short = format!("lock-by margin is short: 4 blocks (lock-by {lock_by}, tip {tip}); see the action");
+    let limit = real_limit(&s, tip);
+    let short = format!("lock-by margin is short: 4 blocks (lock-by {lock_by}, tip {tip}); the last lock height is {limit}; see the action");
     let (noid, eth, now) = {
         let w = s.world.borrow();
         (w.noid_obs(None), w.eth_obs(), w.eth_time)
@@ -333,7 +359,8 @@ fn bob_with_a_short_margin_but_no_lock_offered_gets_the_neutral_form() {
     n.active_authority = Some("not-the-claim-authority".into());
     let d = decide(&s.bob.file, &n, &eth, now);
     assert!(matches!(d.action, Action::Abort { .. }), "{:?}", d.action);
-    assert!(d.notes.contains(&short), "{:?}", d.notes);
+    // Beside an abort for another cause no margin is printed at all (a count of blocks left would sit beside a terminal answer).
+    assert!(notes_with(&d.notes, "margin").is_empty() && notes_with(&d.notes, "last lock height").is_empty(), "{:?}", d.notes);
     assert!(notes_with(&d.notes, "at once").is_empty(), "{:?}", d.notes);
     // A lock_eth intent that is already held: the same text, which points at the action.
     s.bob.file.pending_intent = Some(swap_cli::swapfile::PendingIntent {
@@ -360,7 +387,9 @@ fn bob_past_the_nominal_lock_by_with_the_lock_still_offered_gets_the_hard_limit(
     s.world.borrow_mut().advance_noid(lock_by + 2 - tip);
     let d = bob_decision(&s);
     assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
-    let want = format!("nominal lock-by {lock_by} has passed (tip {}); the lock is still allowed until the hard limit {hard}", lock_by + 2);
+    // The funding is seen final at this very tick, so the real limit is `F + b_bob`, which can be below the hard limit.
+    let limit = real_limit(&s, lock_by + 2);
+    let want = format!("nominal lock-by {lock_by} has passed (tip {}); the lock is still allowed until the hard limit {limit}", lock_by + 2);
     assert!(d.notes.contains(&want), "{:?}", d.notes);
     assert!(notes_with(&d.notes, "beyond it").is_empty() && notes_with(&d.notes, "at once").is_empty(), "{:?}", d.notes);
 }
@@ -369,12 +398,363 @@ fn bob_past_the_nominal_lock_by_with_the_lock_still_offered_gets_the_hard_limit(
 fn past_the_lock_by_the_note_says_so() {
     let mut s = Scenario::new(Variant::Raw);
     let lock_by = s.public.params.lock_by_height;
+    let hard = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
     let tip = s.world.borrow().tip;
     s.world.borrow_mut().advance_noid(lock_by + 4 - tip);
     let r = s.tick_bob();
     // Bob has not locked and the minimum-window limit lies beyond the lock-by: his action is what it was, a wait for the funding.
     assert_eq!(r.action.kind(), "wait", "{r:?}");
-    assert!(r.notes.contains(&format!("lock-by {lock_by} has passed: tip {} is 4 blocks beyond it", lock_by + 4)), "{:?}", r.notes);
+    // The note names the hard limit too, as the one for the lock offered does.
+    assert!(
+        r.notes.contains(&format!("lock-by {lock_by} has passed: tip {} is 4 blocks beyond it; the last lock height is at most {hard}", lock_by + 4)),
+        "{:?}",
+        r.notes
+    );
+    // Past the last lock height as well (Bob gives up): the note says that it has passed.
+    let tip = s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(hard + 1 - tip);
+    let r = s.tick_bob();
+    assert_eq!(r.action.kind(), "abort", "{r:?}");
+    assert!(
+        r.notes.contains(&format!("lock-by {lock_by} has passed: tip {} is {} blocks beyond it; the last lock height, at most {hard}, has passed too", hard + 1, hard + 1 - lock_by)),
+        "{:?}",
+        r.notes
+    );
+}
+
+/// Bob's file in `funding_final`: the funding was seen final at the tip this returns (after `extra` more blocks than the minimum), and the lock was
+/// decided but not sent (the executor is offline for `lock_eth`), so the phase stays.
+fn bob_funding_final_after(extra: u64) -> (Scenario, u64) {
+    let mut s = Scenario::new(Variant::Raw);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    s.world.borrow_mut().advance_noid(18 + extra);
+    s.tick_alice();
+    assert_eq!(s.bob_phase(), "funded");
+    s.bob.executor.offline_for.insert("lock_eth");
+    let f = s.world.borrow().tip;
+    let r = s.tick_bob();
+    assert_eq!(s.bob_phase(), "funding_final", "{r:?}");
+    (s, f)
+}
+
+#[test]
+fn once_the_funding_is_final_the_note_names_the_funding_window_and_not_the_hard_limit() {
+    // (CHAOS-style review of the note: `choose_t_reveal` gives up at `tip > F + b_bob` long before the hard limit.)
+    let (mut s, f) = bob_funding_final_after(0);
+    let lock_by = s.public.params.lock_by_height;
+    let hard = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
+    let limit = real_limit(&s, f);
+    assert_eq!(limit, f + s.gates().b_bob);
+    assert!(limit < hard && limit < lock_by, "F + b_bob {limit} is below the hard limit {hard} and the lock-by {lock_by}");
+    s.world.borrow_mut().advance_noid(10);
+    let d = bob_decision(&s);
+    let tip = s.world.borrow().tip;
+    assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
+    let want = format!("lock margin: {} blocks to the last lock height {limit} (nominal lock-by {lock_by}, tip {tip})", limit - tip);
+    assert!(d.notes.contains(&want), "{:?}", d.notes);
+    assert!(notes_with(&d.notes, &hard.to_string()).is_empty(), "the hard limit is not named: {:?}", d.notes);
+    // The engine really gives up one block after that height, and not before: the note names the height it uses.
+    let at = limit - tip;
+    s.world.borrow_mut().advance_noid(at);
+    assert!(matches!(bob_decision(&s).action, Action::LockEth { .. }), "still offered at {limit}");
+    s.world.borrow_mut().advance_noid(1);
+    let d = bob_decision(&s);
+    assert!(matches!(&d.action, Action::Abort { reason } if reason.contains("B_bob")), "{:?}", d.action);
+    // Beside that abort the note says the height has passed, with no count of blocks left (E5(c): a positive count beside an abort reads as time to spare).
+    let tip = s.world.borrow().tip;
+    assert!(tip > limit && tip <= lock_by, "PastBobWindow case: tip {tip}, last lock height {limit}, nominal lock-by {lock_by}");
+    let want = format!("the last lock height {limit} has passed (nominal lock-by {lock_by}, tip {tip})");
+    assert!(d.notes.contains(&want), "{:?}", d.notes);
+    assert!(notes_with(&d.notes, "margin").is_empty(), "no count beside the abort: {:?}", d.notes);
+}
+
+#[test]
+fn while_the_funding_is_not_final_yet_the_note_says_at_most() {
+    let mut s = Scenario::new(Variant::Raw);
+    s.tick_alice();
+    s.world.borrow_mut().advance_noid(1);
+    s.tick_both();
+    assert_eq!(s.bob_phase(), "funded");
+    let lock_by = s.public.params.lock_by_height;
+    let hard = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
+    let d = bob_decision(&s);
+    let tip = s.world.borrow().tip;
+    assert!(matches!(d.action, Action::Wait { .. }), "{:?}", d.action);
+    let want = format!("lock-by margin: {} blocks (lock-by {lock_by}, tip {tip}); the last lock height is at most {hard}", lock_by - tip);
+    assert!(d.notes.contains(&want), "{:?}", d.notes);
+}
+
+#[test]
+fn beside_an_abort_the_last_lock_height_is_named_only_when_it_has_passed() {
+    // An abort with another cause (the contract is on the recovery branch), the tip still inside the funding window: no margin and no height at all.
+    let (s, f) = bob_funding_final_after(0);
+    let lock_by = s.public.params.lock_by_height;
+    s.world.borrow_mut().advance_noid(5);
+    let tip = s.world.borrow().tip;
+    assert!(tip <= real_limit(&s, f));
+    let (noid, eth, now) = {
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        n.active_authority = Some("not-the-claim-authority".into());
+        (n, w.eth_obs(), w.eth_time)
+    };
+    let d = decide(&s.bob.file, &noid, &eth, now);
+    assert!(matches!(d.action, Action::Abort { .. }), "{:?}", d.action);
+    assert!(notes_with(&d.notes, "margin").is_empty() && notes_with(&d.notes, "last lock height").is_empty(), "{:?}", d.notes);
+    // The same past the nominal lock-by but inside the funding window (the funding became final close to the lock-by).
+    let (_, f0) = bob_funding_final_after(0);
+    let (mut s, f) = bob_funding_final_after(lock_by - 5 - f0);
+    assert_eq!(f, lock_by - 5);
+    let tip = s.world.borrow().tip;
+    assert!(tip + 6 <= real_limit(&s, f) && tip + 6 > lock_by, "tip {tip}, F {f}, lock-by {lock_by}, limit {}", real_limit(&s, f));
+    s.world.borrow_mut().advance_noid(6);
+    let tip = s.world.borrow().tip;
+    assert!(tip > lock_by && tip <= real_limit(&s, f));
+    let (noid, eth, now) = {
+        let w = s.world.borrow();
+        let mut n = w.noid_obs(None);
+        n.active_authority = Some("not-the-claim-authority".into());
+        (n, w.eth_obs(), w.eth_time)
+    };
+    let d = decide(&s.bob.file, &noid, &eth, now);
+    assert!(matches!(d.action, Action::Abort { .. }), "{:?}", d.action);
+    assert!(d.notes.contains(&format!("lock-by {lock_by} has passed: tip {tip} is {} blocks beyond it", tip - lock_by)), "{:?}", d.notes);
+    assert!(notes_with(&d.notes, "last lock height").is_empty(), "{:?}", d.notes);
+}
+
+// ---------------------------------------------------------------- the reveal cutoff text
+
+/// Alice in `lock_final` with Bob's lock final, the clock moved to `T_reveal - M_A + 60`: past the cutoff.
+fn alice_past_the_reveal_cutoff() -> (Scenario, u64, u64) {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    let t_reveal = s.world.borrow().lock.as_ref().unwrap().timelock;
+    let cutoff = t_reveal - s.gates().m_a_s;
+    s.world.borrow_mut().warp_eth_to(cutoff + 60);
+    (s, t_reveal, cutoff)
+}
+
+#[test]
+fn the_not_revealing_note_names_the_reveal_as_what_must_not_be_broadcast() {
+    let (s, _, cutoff) = alice_past_the_reveal_cutoff();
+    let d = alice_decision(&s);
+    assert!(matches!(&d.action, Action::Wait { reason } if reason == "reveal cutoff passed; keeping the secret and waiting for D"), "{:?}", d.action);
+    let n = notes_with(&d.notes, "not revealing:");
+    assert_eq!(n.len(), 1, "{:?}", d.notes);
+    assert!(n[0].starts_with("not revealing: (I2) reveal cutoff passed: now "), "{}", n[0]);
+    assert!(n[0].ends_with(&format!(" > T_reveal - M_A = {cutoff}; the reveal must not be broadcast")), "{}", n[0]);
+}
+
+#[test]
+fn the_re_send_note_beside_reveal_eth_carries_the_cutoff_as_a_statement_and_no_instruction() {
+    // The secret may already be public (a reveal was sent), the cutoff has passed, `T_reveal - DE` has not: the reveal is offered again.
+    let (mut s, t_reveal, cutoff) = alice_past_the_reveal_cutoff();
+    let now = s.now();
+    s.alice.file.log("reveal_submitted", now);
+    let d = alice_decision(&s);
+    assert!(matches!(d.action, Action::RevealEth { .. }), "{:?}", d.action);
+    let n = notes_with(&d.notes, "re-sending the reveal past the M_A cutoff");
+    assert_eq!(n.len(), 1, "{:?}", d.notes);
+    assert!(n[0].contains(&format!("only DE {} s before T_reveal {t_reveal} count ((I2) reveal cutoff passed: now ", s.gates().de_s)), "{}", n[0]);
+    assert!(n[0].ends_with(&format!(" > T_reveal - M_A = {cutoff})")), "{}", n[0]);
+    // Nothing in it forbids the action it stands beside.
+    assert!(!n[0].contains("must not") && !n[0].contains("do NOT"), "{}", n[0]);
+    assert!(notes_with(&d.notes, "not revealing").is_empty(), "{:?}", d.notes);
+}
+
+#[test]
+fn the_short_margin_is_measured_to_the_last_lock_height_when_that_is_the_nearer_limit() {
+    // F + b_bob is below the lock-by: the margin and the warning threshold are counted to the height Bob's engine gives up at.
+    let (mut s, f) = bob_funding_final_after(0);
+    let lock_by = s.public.params.lock_by_height;
+    let limit = real_limit(&s, f);
+    assert!(limit < lock_by);
+    // At the threshold: the plain form.
+    let tip = s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(limit - LOCK_BY_MARGIN_WARN_BLOCKS - tip);
+    let d = bob_decision(&s);
+    let tip = s.world.borrow().tip;
+    assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
+    assert!(
+        d.notes.contains(&format!("lock margin: {LOCK_BY_MARGIN_WARN_BLOCKS} blocks to the last lock height {limit} (nominal lock-by {lock_by}, tip {tip})")),
+        "{:?}",
+        d.notes
+    );
+    // One block below: the short form, which fires although the lock-by is still far away.
+    s.world.borrow_mut().advance_noid(1);
+    let d = bob_decision(&s);
+    let tip = s.world.borrow().tip;
+    assert!(lock_by - tip > LOCK_BY_MARGIN_WARN_BLOCKS, "the lock-by is not the reason");
+    assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
+    let short = format!(
+        "lock margin is short: {} blocks to the last lock height {limit} (nominal lock-by {lock_by}, tip {tip}); see the action",
+        LOCK_BY_MARGIN_WARN_BLOCKS - 1
+    );
+    assert!(d.notes.contains(&short), "{:?}", d.notes);
+    assert!(notes_with(&d.notes, "lock-by margin").is_empty(), "{:?}", d.notes);
+    // At the last lock height itself: still offered. "0 blocks" would read as too late, so the note says that the tip is the last lock height.
+    s.world.borrow_mut().advance_noid(limit - tip);
+    let d = bob_decision(&s);
+    assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
+    let tip = s.world.borrow().tip;
+    assert_eq!(tip, limit);
+    assert!(d.notes.contains(&format!("the tip is the last lock height {limit} (nominal lock-by {lock_by}); see the action")), "{:?}", d.notes);
+    assert!(d.notes.iter().all(|n| !n.starts_with("lock margin") && !n.starts_with("lock-by margin")), "{:?}", d.notes);
+    assert_no_instruction(&d.notes);
+}
+
+#[test]
+fn the_lock_by_form_stays_while_the_lock_by_is_the_nearer_limit() {
+    // The funding became final late: `F + b_bob` is above the lock-by, so the lock-by runs out first and the lock-by form stays, with the clause.
+    let lock_by = Scenario::new(Variant::Raw).public.params.lock_by_height;
+    let (_, f0) = bob_funding_final_after(0);
+    let (mut s, f) = bob_funding_final_after(lock_by - 20 - f0);
+    assert_eq!(f, lock_by - 20);
+    let limit = real_limit(&s, f);
+    assert!(limit > lock_by, "F + b_bob {limit} is above the lock-by {lock_by}");
+    let d = bob_decision(&s);
+    assert!(matches!(d.action, Action::LockEth { .. }), "{:?}", d.action);
+    assert!(
+        d.notes.contains(&format!("lock-by margin: 20 blocks (lock-by {lock_by}, tip {f}); the last lock height is {limit}")),
+        "{:?}",
+        d.notes
+    );
+    s.world.borrow_mut().advance_noid(20 - 4);
+    let tip = s.world.borrow().tip;
+    let d = bob_decision(&s);
+    assert!(
+        d.notes.contains(&format!("lock-by margin is short: 4 blocks (lock-by {lock_by}, tip {tip}); the last lock height is {limit}; see the action")),
+        "{:?}",
+        d.notes
+    );
+}
+
+#[test]
+fn the_hard_limit_is_the_last_lock_height_when_the_funding_is_final_late_and_the_boundary_is_one_block() {
+    // Z < F + b_bob: late funding. The note names Z, the lock is offered at Z and refused at Z + 1.
+    let probe = Scenario::new(Variant::Raw);
+    let z = probe.gates().bob_lock_by_min_window(probe.public.params.deadline_height);
+    let (_, f0) = bob_funding_final_after(0);
+    let (mut s, f) = bob_funding_final_after(z - 10 - f0);
+    let lock_by = s.public.params.lock_by_height;
+    assert!(f + s.gates().b_bob > z && real_limit(&s, f) == z && z > lock_by);
+    s.world.borrow_mut().advance_noid(10);
+    let d = bob_decision(&s);
+    assert_eq!(s.world.borrow().tip, z);
+    assert!(matches!(d.action, Action::LockEth { .. }), "offered at Z: {:?}", d.action);
+    assert!(d.notes.contains(&format!("nominal lock-by {lock_by} has passed (tip {z}); the lock is still allowed until the hard limit {z}")), "{:?}", d.notes);
+    s.world.borrow_mut().advance_noid(1);
+    let d = bob_decision(&s);
+    assert!(matches!(&d.action, Action::Abort { reason } if reason.contains("lock-by")), "refused at Z + 1: {:?}", d.action);
+    assert!(
+        d.notes.iter().any(|n| n.ends_with(&format!("blocks beyond it; the last lock height {z} has passed too"))),
+        "{:?}",
+        d.notes
+    );
+}
+
+#[test]
+fn received_at_the_hard_limit_is_still_a_wait_and_one_block_later_an_abort() {
+    let s = Scenario::new(Variant::Raw);
+    let z = s.gates().bob_lock_by_min_window(s.public.params.deadline_height);
+    let lock_by = s.public.params.lock_by_height;
+    let tip = s.world.borrow().tip;
+    s.world.borrow_mut().advance_noid(z - tip);
+    let d = bob_decision(&s);
+    assert!(matches!(&d.action, Action::Wait { reason } if reason == "waiting for Alice's funding"), "{:?}", d.action);
+    assert!(
+        d.notes.contains(&format!("lock-by {lock_by} has passed: tip {z} is {} blocks beyond it; the last lock height is at most {z}", z - lock_by)),
+        "{:?}",
+        d.notes
+    );
+    s.world.borrow_mut().advance_noid(1);
+    let d = bob_decision(&s);
+    assert!(matches!(&d.action, Action::Abort { reason } if reason.contains(&format!("last lock height {z} passed"))), "{:?}", d.action);
+}
+
+/// Alice in `lock_final` with a `reveal_eth` intent recorded by `tick --apply` (nothing sent by the tool). Returns the file, the cutoff and
+/// `T_reveal`, with the world before the cutoff.
+fn alice_with_a_held_reveal_intent() -> (Scenario, swap_cli::swapfile::SwapFile, u64, u64) {
+    let mut s = Scenario::new(Variant::Raw);
+    s.run_to_lock_final();
+    let t_reveal = s.world.borrow().lock.as_ref().unwrap().timelock;
+    let cutoff = t_reveal - s.gates().m_a_s;
+    let mut file = s.alice.file.clone();
+    let first = apply_tick(&s, &mut file);
+    assert_eq!(first.decision.action.kind(), "reveal_eth", "{first:?}");
+    assert!(file.pending_intent.as_ref().is_some_and(|i| i.action == "reveal_eth"));
+    (s, file, cutoff, t_reveal)
+}
+
+fn apply_tick(s: &Scenario, file: &mut swap_cli::swapfile::SwapFile) -> swap_cli::engine::TickOutcome {
+    let (noid, eth, now) = {
+        let w = s.world.borrow();
+        (w.noid_obs(None), w.eth_obs(), w.eth_time)
+    };
+    swap_cli::engine::tick_apply(file, &noid, &eth, now, true).unwrap()
+}
+
+const REUSE: &str = "reuse the printed parameters";
+
+#[test]
+fn a_held_reveal_intent_past_its_cutoff_says_that_the_printed_parameters_are_not_to_be_used() {
+    let (s, mut file, cutoff, _) = alice_with_a_held_reveal_intent();
+    s.world.borrow_mut().warp_eth_to(cutoff + 60);
+    let second = apply_tick(&s, &mut file);
+    let Action::Wait { reason } = &second.decision.action else { panic!("{second:?}") };
+    let at = file.pending_intent.as_ref().expect("the intent stays held").decided_at;
+    assert_eq!(
+        reason,
+        &format!("intent reveal_eth pending since {at} (unix): the chain does not show it yet and its reveal cutoff has passed, so the printed parameters are not to be used; if nothing was sent, cancel it with `swap-cli intent FILE --cancel` (with the same chain flags as tick); if a reveal may have been sent, look at the contract")
+    );
+    assert!(!reason.contains(REUSE), "{reason}");
+    // The notes are what they were: the cutoff note, the held note and the frozen parameters.
+    let notes = &second.decision.notes;
+    assert!(notes.iter().any(|n| n.starts_with("not revealing: (I2) reveal cutoff passed") && n.ends_with("; the reveal must not be broadcast")), "{notes:?}");
+    assert!(notes.iter().any(|n| n == "held: fresh decision was wait"), "{notes:?}");
+    assert!(notes.iter().any(|n| n.starts_with("frozen parameters of the pending reveal_eth: ")), "{notes:?}");
+    // The intent is still held and unchanged.
+    assert!(matches!(second.intent, swap_cli::engine::IntentStatus::Held(_)), "{:?}", second.intent);
+}
+
+#[test]
+fn a_held_reveal_intent_before_its_cutoff_keeps_the_reuse_reason() {
+    let (s, mut file, cutoff, _) = alice_with_a_held_reveal_intent();
+    s.world.borrow_mut().warp_eth_to(cutoff - 60);
+    let second = apply_tick(&s, &mut file);
+    let Action::Wait { reason } = &second.decision.action else { panic!("{second:?}") };
+    assert!(reason.starts_with("intent reveal_eth pending since ") && reason.contains(REUSE), "{reason}");
+    assert!(!reason.contains("reveal cutoff has passed"), "{reason}");
+}
+
+#[test]
+fn a_held_reveal_intent_past_the_first_cutoff_but_with_the_secret_possibly_public_is_a_re_send_not_the_cutoff_wait() {
+    // The file shows a reveal that reached the network (`reveal_submitted` in its history): the engine's fresh decision past `T_reveal - M_A` is the
+    // re-send (until `T_reveal - DE`), not the cutoff wait, so the reason is the ledger's usual one, never the "cutoff has passed" text.
+    let (s, mut file, cutoff, _) = alice_with_a_held_reveal_intent();
+    let now = s.now();
+    file.log("reveal_submitted", now);
+    s.world.borrow_mut().warp_eth_to(cutoff + 60);
+    let second = apply_tick(&s, &mut file);
+    let Action::Wait { reason } = &second.decision.action else { panic!("{second:?}") };
+    assert!(reason.contains(REUSE) && !reason.contains("reveal cutoff has passed"), "{reason}");
+    assert!(second.decision.notes.iter().any(|n| n == "held: fresh decision was reveal_eth"), "{:?}", second.decision.notes);
+    assert!(notes_with(&second.decision.notes, "not revealing").is_empty(), "{:?}", second.decision.notes);
+}
+
+#[test]
+fn no_other_held_intent_gets_the_cutoff_reason() {
+    // A held `refund_eth`-style or `lock_eth` intent keeps the ledger's usual reason whatever Alice's hint says; here Bob's held `lock_eth`.
+    let mut s = Scenario::new(Variant::Raw);
+    at_bob_lock(&mut s);
+    let mut file = s.bob.file.clone();
+    let first = apply_tick(&s, &mut file);
+    assert_eq!(first.decision.action.kind(), "lock_eth", "{first:?}");
+    let second = apply_tick(&s, &mut file);
+    let Action::Wait { reason } = &second.decision.action else { panic!("{second:?}") };
+    assert!(reason.contains(REUSE) && !reason.contains("reveal cutoff has passed"), "{reason}");
 }
 
 #[test]
@@ -418,7 +798,7 @@ fn alice_with_a_short_funding_window() -> Scenario {
 
 /// No note at all may tell the operator to do something now.
 fn assert_no_instruction(notes: &[String]) {
-    for n in notes.iter().filter(|n| n.starts_with("funding window") || n.starts_with("lock-by")) {
+    for n in notes.iter().filter(|n| n.starts_with("funding window") || n.starts_with("lock-by") || n.starts_with("lock margin")) {
         for word in ["at once", "fund now", "send the lock", "if it is not sent"] {
             assert!(!n.contains(word), "{word:?} in {n:?}");
         }

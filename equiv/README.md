@@ -356,8 +356,9 @@ mutation). Manual check: `BONSAI_API_KEY=x`, `BONSAI_API_URL=…`, `RISC0_PROVER
 
 ## 9. Open issues
 
-* No zkVM toolchain installable here: no measured cycles, proving time or proof size. Run section 5 on a machine
-  with normal internet and fill section 6.
+* The zkVM toolchain could not be installed in the first environment (section 5, as first written); it was installed
+  later in the operator's WSL environment and the cycles, proving time and receipt size are measured in section 6 (M1.2). The
+  proving times there came from a memory-starved VM and are not a benchmark.
 * Derive is verified against its cited source and the report's `o125...` vector, but never against a real running
   wallet.
 * ZK property of the chosen proof system and receipt type is taken from the vendor's documentation, not audited.

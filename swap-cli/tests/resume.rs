@@ -65,7 +65,9 @@ fn restarting_both_parties_before_every_tick_reaches_the_same_outcome() {
     let names: Vec<_> = a.history.iter().map(|h| h.to.as_str()).collect();
     assert_eq!(
         names,
-        ["funding_submitted", "funded", "funding_final", "lock_seen", "lock_final", "reveal_submitted", "revealed", "done"]
+        // (the last `done` is a log-only entry: since CHAOS M1 a `done` file also collects the evidence about when its instance went, here the
+        // "gone before D" poll after Bob's claim)
+        ["funding_submitted", "funded", "funding_final", "lock_seen", "lock_final", "reveal_submitted", "revealed", "done", "done"]
     );
 }
 

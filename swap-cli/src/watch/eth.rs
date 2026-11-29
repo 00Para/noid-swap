@@ -132,6 +132,10 @@ pub const DEFAULT_LOG_RANGE_MAX: u64 = 50_000;
 /// it); the text only says what is the usual cause right after a lock was mined, so that one failed poll there does not alarm.
 pub const NO_LOCKED_EVENT_MSG: &str = "getLock shows this lock but eth_getLogs returned no Locked event for it. Right after a lock was mined this is usually the provider's log index lagging behind its state, and it clears on the next poll. If it does not clear, the cause is one of: --eth-from-block above the lock's block, a provider block-range limit, or a log index that stays behind; fix that and poll again";
 
+/// Added to the node's own text when `getLock` reverts for a lock that `eth_getLogs` shows (the poll still fails; nothing is retried). It says
+/// what was read, what to check first, and the usual cause right after a lock was mined, so that one failed poll there does not alarm.
+pub const GET_LOCK_REVERTED_NOTE: &str = "this was the getLock read for a lock that eth_getLogs shows, and it reverted. Check that --eth-rpc and the contract address are the ones of this lock. The contract reverts for a lock it does not know, which right after a lock was mined usually means the provider answered the two reads from different views of the chain, and that clears on the next poll; a reorg can also have removed the lock";
+
 /// How many matching locks are read in full (events, `getLock`, code, block timestamp) per poll; the rest are only
 /// counted in `EthObservation::lock_count`.
 pub const MAX_LOCKS_READ: usize = 8;
@@ -239,9 +243,10 @@ impl<R: JsonRpc> EthWatcher<R> {
         let latest = self.rpc.call(M_BLK, json!(["latest", false]))?;
         let latest_timestamp = quantity(M_BLK, field(M_BLK, &latest, "timestamp")?)?;
         // Not every node knows the `finalized` tag (or has one yet): that is "unknown", not fatal.
-        let finalized_block = match self.rpc.call(M_BLK, json!(["finalized", false])) {
-            Ok(Value::Null) | Err(RpcError::Remote { .. }) => None,
-            Ok(b) => Some(quantity(M_BLK, field(M_BLK, &b, "number")?)?),
+        let (finalized_block, finalized_timestamp) = match self.rpc.call(M_BLK, json!(["finalized", false])) {
+            Ok(Value::Null) | Err(RpcError::Remote { .. }) => (None, None),
+            // CHAOS m6: the time of that block comes with it; a block without a readable timestamp is "not reported", never an error.
+            Ok(b) => (Some(quantity(M_BLK, field(M_BLK, &b, "number")?)?), b.get("timestamp").and_then(|t| quantity(M_BLK, t).ok())),
             Err(e) => return Err(e),
         };
 
@@ -272,6 +277,7 @@ impl<R: JsonRpc> EthWatcher<R> {
         let (mut lock, mut claimed, mut refunded, mut pending_preimage) = (None, None, None, None);
         let mut claim_state_from_record = false;
         let mut locks: Vec<EthLock> = Vec::new();
+        let mut other_claims: Vec<EthClaimed> = Vec::new();
         let mut lock_count = 0usize;
         for (i, id) in ids.iter().copied().enumerate() {
             if i >= MAX_LOCKS_READ {
@@ -293,6 +299,8 @@ impl<R: JsonRpc> EthWatcher<R> {
                         refunded = r;
                         claim_state_from_record = from_record;
                         lock = Some(l.clone());
+                    } else if let Some(c) = c {
+                        other_claims.push(c);
                     }
                     locks.push(l);
                 }
@@ -360,6 +368,7 @@ impl<R: JsonRpc> EthWatcher<R> {
             latest_block,
             latest_timestamp,
             finalized_block,
+            finalized_timestamp,
             chain_id: Some(chain_id),
             contract_code_hash,
             lock,
@@ -368,6 +377,7 @@ impl<R: JsonRpc> EthWatcher<R> {
             claimed,
             refunded,
             claim_state_from_record,
+            other_claims,
             pending_preimage,
             overlong_claim,
             word_locks,
@@ -641,7 +651,13 @@ impl<R: JsonRpc> EthWatcher<R> {
         const M: &str = "eth_call";
         let mut calldata = SELECTOR_GET_LOCK.to_vec();
         calldata.extend_from_slice(&lock.lock_id);
-        let out = self.rpc.call(M, json!([{ "to": hex0x(&self.contract), "data": hex0x(&calldata) }, "latest"]))?;
+        let out = match self.rpc.call(M, json!([{ "to": hex0x(&self.contract), "data": hex0x(&calldata) }, "latest"])) {
+            // The logs show this lock and the contract says it has none: the error stays an error (code and text kept), with the usual cause added.
+            Err(RpcError::Remote { code, message }) if code == 3 || message.to_ascii_lowercase().contains("revert") => {
+                return Err(RpcError::Remote { code, message: format!("{message} ({GET_LOCK_REVERTED_NOTE})") });
+            }
+            other => other?,
+        };
         let out = bytes(M, &out)?;
         if out.len() != 256 {
             return Err(dec(M, format!("getLock returned {} bytes, expected 256", out.len())));

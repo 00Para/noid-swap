@@ -71,7 +71,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 648 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 728 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -187,6 +187,9 @@ no change to the file, when: the txid is not 64 hex characters; the txid is unkn
 visible; the height is on the wrong side of `D` for the role (a close before `D` paid Bob, at or after `D` paid Alice); the phase makes no sense
 (`created`, `funding_submitted`, `received`, terminal phases, Alice after her reveal, Bob before he knows the secret); or the file already tracks a
 different transaction. Without `--apply` it prints what it would record (`closed_by` in the JSON, `WOULD RECORD` in the notes) and writes nothing.
+Since 2026-11-16 (CHAOS F-11, "Second batch" below) two of those refusals are no longer refusals, when the close is FINAL (18 blocks, and on a configured second node too): on Bob's file a close
+at or after `D` is recorded as `noid_closed_after_deadline:<txid>:<height>` (the recovery branch, which paid Alice) and ends his file with "claim branch closed: ...", and on Alice's file a final
+close before `D` after a reveal is recorded as `noid_closed_before_deadline:<txid>:<height>` (the claim branch, which paid Bob) and counts as the evidence for `lost`. Neither moves the phase.
 What it cannot know: `paranoid_getTx` returns only `{tx_hash, height, block_hash, tx_position}`, no outputs, so the payout is not read from the
 chain; it follows from the branch rule the block proof enforces. The tool cannot prove that the txid is the call that closed THIS instance (only that
 it is confirmed and that the instance is gone), so check it against the wallet's receipt. `paranoid_getObjectStatus` / `getObjectInstances` do not
@@ -254,19 +257,50 @@ nothing, so it has no such note (it keeps its own "read from the SECOND Ethereum
 
 **A second node behind a tunnel.** When both `--noid-rpc` URLs (or both `--eth-rpc`) name the same host, the tick notes that a second node on
 the same machine shares its network view (G3). With an SSH tunnel the second node appears on localhost although it runs elsewhere. Say so
-with `--noid-rpc2-is-remote` (and `--eth-rpc2-is-remote`; no value): the note then reads that the second node is declared to run on another
-machine and be reached through a local port, that the tool cannot verify this, and that two machines may still share one network and one upstream
-connection, so their agreement is still a weaker check than two nodes on separate networks. The flags change that text only. Identical
+with `--noid-rpc2-is-remote` (and `--eth-rpc2-is-remote`; no value): the note is then one sentence, printed in the same place on every tick: `--noid-rpc: both
+endpoints are on the host H (X and Y); --noid-rpc2-is-remote declares the second node remote, which the tool cannot verify, and two nodes on one network are a
+weaker check than two on separate networks (G3)` (for the Ethereum pair `--eth-rpc:` and `--eth-rpc2-is-remote`). The flags change that text only. Identical
 endpoints are still refused, the two-node rule is unchanged, and `--single-node-ok` is not implied. `scripts/live/env.sh` passes them from
 `NOID_RPC2_REMOTE=1` / `ETH_RPC2_REMOTE=1` in `env.local.sh`, and only when the matching second node is set.
 
 **Lock-by margin.** While Alice's file is before `lock_seen` and while Bob's is before his lock is sent, every tick adds a note, worded by the
 action (the note states facts and never an instruction, because the action can still be changed to a wait after the note is built: a held
-intent, an instance already at the root). Bob (and Alice
-after funding): `lock-by margin: N blocks (lock-by H, tip T)` (H is the `lock_by_height` of the file); below
+intent, an instance already at the root). Alice after funding, and Bob until the funding is final: `lock-by margin: N blocks (lock-by H, tip T)` (H is the `lock_by_height` of the file); below
 `engine::LOCK_BY_MARGIN_WARN_BLOCKS` (15, display only) `lock-by margin is short: N blocks (lock-by H, tip T); see the action`. Past H with the lock
-still offered: `nominal lock-by H has passed (tip T); the lock is still allowed until the hard limit X` (X is `bob_lock_by_min_window`, the value
-`bob_action` uses); past H otherwise: `lock-by H has passed: tip T is K blocks beyond it`. Alice before funding: `funding window: N blocks left
+still offered: `nominal lock-by H has passed (tip T); the lock is still allowed until the hard limit L` (or `until at most the hard limit Z` while the
+limit is only an upper bound); past H otherwise: `lock-by H has passed: tip T is K blocks beyond it`. Alice's notes are as they were. For Bob the
+notes also name his last lock height, built by `lock_by_margin_note`, `bob_last_lock_height` and `last_lock_clause` in `engine.rs` (display only, read by
+nothing). In plain words, with Z = `bob_lock_by_min_window` (`D - 541` in `production`, `D - 63` in `rehearsal`, `D - 210` in `sepolia`, which is
+`h_create + 92`; the table of `docs/runbook-two-party.md` has them), F = the tip at which Bob's file recorded the funding as final, and
+L = `min(Z, F + b_bob)` (`b_bob` is 60 blocks in `production` and 20 in `sepolia` and `rehearsal`):
+- Bob `received` and `funded` (the funding is not final, so F is not known): the lock-by forms above, each ending `; the last lock height is at most Z`.
+  Z is only an upper bound until the funding is final. The tool's own gate gives up when the tip passes L once the funding is final, and Z before.
+- Bob `funding_final`, the usual case (L below the lock-by, the tip not past L): `lock margin: N blocks to the last lock height L (nominal lock-by H, tip T)`,
+  and below 15 blocks `lock margin is short: N blocks to the last lock height L (nominal lock-by H, tip T); see the action`. Here the margin and the
+  short-margin threshold are counted to L, the number the tool gives up at, not to the lock-by.
+- At the last lock height itself (the tip is L, the lock still offered) the note does not say `0 blocks`, which would read as too late: `the tip is the last lock
+  height L (nominal lock-by H); see the action`.
+- Bob `funding_final`, a late funding (L at or above the lock-by): the lock-by forms above, ending `; the last lock height is L`; past the lock-by with the
+  lock still offered: `nominal lock-by H has passed (tip T); the lock is still allowed until the hard limit L`.
+- After a cancelled `lock_eth` intent the limit is judged by another rule and is only an upper bound: "at most Z".
+- Beside an `abort` no count of blocks left is printed (a positive count beside a terminal answer reads as time to spare). Once Bob's last lock height has passed
+  (and the tip is not past the nominal lock-by) the note only says so: `the last lock height L has passed (nominal lock-by H, tip T)` (`the last lock height, at most
+  Z, has passed (nominal lock-by H, tip T)` for an upper bound). With any other cause of the abort there is no margin note.
+
+**A lock first recorded after Bob's last lock height (G1, decided 2026-11-16: a note, never a refusal).** When Alice's file adopts Bob's lock and her first
+record of it is at a Parano1d tip above Bob's last lock height Z, her tick adds a note: `Bob's lock 0x<first four bytes>.. was first recorded at Parano1d height T,
+after Bob's last lock height Z (nominal lock-by H); it may have been mined in an earlier block than that poll`. It is a statement of heights only. The decision is
+unchanged: the file waits for finality and then offers `reveal_eth` as before, because the reveal window is measured from the lock's own block (check I3), so a
+late lock still leaves Alice her full window, and refusing would only keep Bob's ETH locked until his refund. The note is built from a log-only history entry
+(`lock_seen_late:<lock id>:<tip>:<Z>`, written once at adoption) and repeats on every later tick while she holds the lock, with the heights of the first poll.
+A lock first recorded between the nominal lock-by and Z gets no note (Bob's tool may still lock there), and neither does a lock seen early. Test:
+`g1_alice_notes_a_lock_first_seen_after_bobs_last_lock_height_and_acts_exactly_as_before` in `tests/hostile_gaps.rs`.
+
+The first form of these notes said "the lock is still allowed until the hard limit Z" with Z alone, where the real limit after funding finality is the
+smaller L = F + `b_bob`; that was a wrong text, not a wrong decision: the decisions of the tool did not change (run 18 showed it: the note said 313207
+where the tool would have given up after 313186). In the usual case the margin is counted to L, the limit the tool gives up at, not to the lock-by.
+
+Alice before funding: `funding window: N blocks left
 before it is too late to fund (lock-by H, tip T)` (N = lock-by - (b_fund + b_final) - tip, the expression the abort uses); below the constant
 `funding window is short: N blocks left before it is too late to fund (lock-by H, tip T); see the action`; once the abort applies,
 `funding window is closed: the last height to fund was X (lock-by H, tip T)`, no urgency wording. In live run 13 Bob's lock was offered
@@ -491,9 +525,11 @@ appeared, `blockCount` said 280,637 while `getObjectInstances.height` said 280,6
 
 ### Things this layer cannot know
 
-- Whether `contract create` (the real node's `createObject`) reproduces our 699 bytes: tested against a step-by-step re-implementation
-  of the node's code, **not** against the node (the coordinator runs the real call; `--check-object` then settles it before funding).
-- The live behaviour of `submitTxIntent` on a real claim (rejection texts, relay floor under load): never exercised.
+- Whether `contract create` (the real node's `createObject`) reproduces our 699 bytes: tested offline against a step-by-step
+  re-implementation of the node's code; against the node it was settled live, by `--check-object` before every funding since live run 1
+  ("object file OK", byte for byte) and by the node's own `contract create` on a draft.
+- The live behaviour of `submitTxIntent` on a real claim: the node accepted Bob's real claim in the live runs that included one, from live run 1 on. Its
+  rejection texts and the relay floor under load are not in any run record.
 - Behaviour outside what LIVE RUN 1 happened to record: a claim stalled behind first-seen admission, an eviction at the deadline, the
   refund branch (`active_authority` after `D`), and any reorg. The funded, pending, included and final states are now recorded.
 - Tokens for a remote node (`Authorization: Bearer`) are supported by `HttpJsonRpc::with_bearer` but not wired to a flag.
@@ -530,7 +566,7 @@ Mocked or synthesized:
 - the Parano1d RPC answers that no recording has: `funded.json` (the seed-0x33 example swap, used by the `cli.rs` tick test),
   `pending_claim.json` (another contract's call in the mempool next to ours) and `malformed.json` (negative), shaped from the vendored type
   definitions (the only values taken from real code are the opening hex and root);
-- submission of a real claim: the `IntentSubmitter` over `paranoid_submitTxIntent` is real code but has only ever talked to a loopback mock; the stock-wallet commands (`CommandRunner`) are scripted but nothing spawns them;
+- submission of a real claim: the `IntentSubmitter` over `paranoid_submitTxIntent` is real code; in the tests it talks to a loopback mock, and against the real node it has sent Bob's claim in the live runs that included one, from run 1 on; the stock-wallet commands (`CommandRunner`) are scripted but nothing spawns them;
 - Alice's Ethereum transactions (the simulator mines them; there is no signer);
 - the equivalence proof π (M1) is not verified by this crate's own code: `new-bob --receipt` runs the `equiv-prove verify` binary
   (the `equiv-host` workspace) as a subprocess (REVIEW-2 F2; tested here only against a shell script standing in for it, never against the
@@ -627,7 +663,7 @@ a swap against a producer that is visibly large, and nothing else.
   and look at the contract if it may have been sent. The `alert` is latched once per intent and per kind of finding
   (`producer_alert_lock_pending:<decided_at>:<kind>`, written by `--apply`, for every kind of refusal, and again after an override entry that follows the last one of its kind), so a later finding of another kind alerts
   again. The `wait` reason changes the same way (the usual "reuse the printed parameters" would
-  send the refused lock). With `--accept-producer-concentration` the screen does not refuse, so there is no alert. Under `sepolia` and
+  send the refused lock; the one other exception to that usual reason is the held `reveal_eth` past its cutoff, described under F3 below). With `--accept-producer-concentration` the screen does not refuse, so there is no alert. Under `sepolia` and
   `rehearsal` the screen only warns, so the same text comes as a `WARNING:` and only for a remembered detection. The tool does not cancel
   the intent by itself and the latch entry above is the mark that the intent is not to be sent, and `live.js lock` and `scripts/live/lock.sh` read it
   (`docs/bob-concentration-gate.md`, section 4; `lock.sh` asks a fresh read-only `tick` right before a send and relies on its note
@@ -679,8 +715,8 @@ correction the tool counted 17 (the vendored documents say "at most 17 blocks of
 ## What REVIEW-7 changed (2026-11-05)
 
 `REVIEW-7.md` (independent, read-only, against the REVIEW-6 fixes) closed R6-1, R6-2, R6-3, R6-5 and R6-8 and found two Low and six Info items. The
-four below are fixed in code; R7-3 (the build string), R7-4 (a failed second Ethereum node at the poseidon lock decision), R7-7 and R7-8 are not part
-of this change.
+four below are fixed in code; R7-3 (the build string), R7-7 and R7-8 are not part of this change. R7-4 (a failed second Ethereum node at the poseidon
+lock decision) was fixed later, on 2026-11-16: see the last bullet of this section. The receiver-code part of R7-7 was fixed on 2026-11-16 in `eth/scripts/live.js` (commit `8e3150c`, below).
 
 - **R7-1, the pre-lock check no longer reads every `Locked` log of the shared contract.** *Plain words:* after R6-2 the only question left before Bob locks
   is "has my own address already locked on this word A" (a lock by anyone else costs him nothing). The lock word is in the log's data, but the sender is
@@ -711,6 +747,18 @@ of this change.
 - **R7-6, a malformed `reveal-reverted-tx.txt` cannot stop a tick or a claim.** `scripts/live/env.sh` `reveal_tx_flags` matches `0x` + exactly 64 hex digits
   (surrounding whitespace allowed); anything else is ignored with a warning on stderr and no `--reveal-tx` is passed. The binary itself still refuses a malformed
   `--reveal-tx` typed on the command line (an explicit flag is an explicit mistake). A run directory installed earlier has a frozen `env.sh`: run `install.sh` again.
+- **R7-4, a configured second Ethereum node that could not be read holds Bob's `poseidon` lock (fixed 2026-11-16).** *Plain words:* before Bob locks with the
+  `poseidon` kind the tool scans for an earlier lock of his own sender on the same word. With the second node down that scan used to run on one node, which a
+  lying or lagging primary could use to hide such a lock. Now, when a second Ethereum node is configured and its poll failed, Bob's lock is a `wait`
+  ("the second Ethereum node could not be read (...): it must agree before this step (F5)"), for the first lock and for the re-send of a dropped one. The
+  wait gives way to the abort once Bob is past his last lock height, like the other pre-lock gates. Without a second node configured (`--single-node-ok`)
+  nothing changes, and the `sha256` kind has no such scan and is not held back. Tests in `tests/corner_cases.rs`: `r7_4_*` (five). Tested offline only.
+- **R7-7, the receiver's code is re-read before a claim is signed (fixed 2026-11-16, commit `8e3150c`, in `eth/scripts/live.js`).** The claim is never estimated, so
+  `live.js claim` now reads the receiver's code at the `latest` and `pending` tags early (before the log scans, also in `--dry-run`) and again just before signing. A
+  first claim refuses on any code (an EIP-7702 delegation included), on a failed read and on a non-hex answer, before anything is signed and before the reveal sidecar
+  is written. A `--replace` of a pending claim that carries this lock's secret warns instead (`receiverCodeWarning`) and goes out, because the secret is already public
+  and the replacement has the same receiver. The margin of the fixed gas limit (the other half of R7-7) is unchanged. Tests are in `eth/test/live.test.js`, on a local
+  chain only; it has never run against a real chain (`eth/README.md`).
 
 ## What REVIEW-6 changed (2026-11-05)
 
@@ -798,11 +846,12 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
   `intent_decided:reveal_eth`, and a re-send past `T_reveal - M_A` would be judged as a first publication while the secret may already be known to
   anyone who watched the pool.
   *The reveal sidecar* (`swap-cli/src/reveal_sidecar.rs`, `eth/scripts/live.js`): `live.js claim --swap FILE` writes `FILE.reveal-sent` as the last
-  step before it broadcasts (after the cutoff re-check, with the transaction populated). The bytes go to a temporary file beside it (mode 600,
+  step before it signs and sends (a sidecar: a small file written beside the swap file before the send, so a later run knows a reveal may be out; it comes after the
+  connection to the endpoint is up and the cutoff check, with the transaction populated). The bytes go to a temporary file beside it (mode 600,
   written in a loop until every byte is out, fsynced); that file is published with a hard link (an existing name is never replaced) or, where hard
   links are refused (the `\\wsl.localhost` share), renamed onto the final name (atomic, not exclusive; the final name is never written in place);
-  the directory is synced and the file is read back and compared byte for byte. Then the cutoff is checked once more against the wall clock, and
-  only then is the claim sent. It holds `version` 1, the lock id (64 lower-case hex), the
+  the directory is synced and the file is read back and compared byte for byte. Then the claim is signed and the sender checks the cutoff once more (the later of the wall clock and the latest block's time plus the time since it was read), and
+  only then is the claim written. It holds `version` 1, the lock id (64 lower-case hex), the
   signed transaction's hash (64 hex, or `null` when the signer is not a local key and the hash is not known before the broadcast) and the UTC epoch
   seconds; never the secret, a key, or anything of the swap file. If it cannot be written and made durable `live.js` sends nothing, and a file this
   call had created is removed again (nothing was sent, so it is not evidence; only while the file still holds this call's own bytes, so a
@@ -812,8 +861,8 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
   whose content is not a sidecar of this lock (another lock, not the format, not a regular file, too large) is moved aside under `.stale-*`,
   never deleted; one that cannot be examined or read at all (an I/O error) is left where it is and the claim is refused. Two `claim` commands
   for one swap file must never run at the same time: each can replace, or after a refusal remove, the record the other relies on
-  (`TASKS.md` T21-17). With a local key the claim is signed locally and the signed bytes are handed to the node directly, so that no network
-  read sits between that last check and the send. (Hardened 2026-11-09 after an outside read: before, a short write was not noticed, and on
+  (`TASKS.md` T21-17). The claim needs a local key; it is signed locally and sent by the time-bounded sender (`eth/scripts/bounded-send.js`; `eth/README.md`, "The send of a claim has a time bound"):
+  the connection is made first (a stall there leaves no sidecar at all), the write follows the last check in one step, and the connection is cut 20 s after that check. (Hardened 2026-11-09 after an outside read: before, a short write was not noticed, and on
   the share a failed fsync left a half-made file that a retry accepted.) `tick` (read-only or `--apply`, so the watch loop too) reads it before it decides: for Alice's file, a sidecar whose lock id equals the
   lock of her phase writes `reveal_sidecar_seen` once (read-only: in memory only), and a re-send is judged by the late cutoff `T_reveal - DE` (the
   intent's `cutoff`, and the check in the engine); `live.js` reads the same file for the same purpose (and the history name `reveal_sidecar_seen`).
@@ -824,10 +873,17 @@ code as the review read it, the `live.js` ones by tests in `eth/test/live.test.j
   in the saved file, so deleting the sidecar later changes nothing. A sidecar proves that a send was STARTED, not that it succeeded: a claim the node
   refused, an unreachable endpoint or a crash before the send leaves one too. The cost: after such a failure the FIRST reveal can be sent as late as
   `T_reveal - DE` (about two minutes before the timelock under production), and a claim not mined by `T_reveal` reverts with the secret in its calldata,
-  which can cost Alice both legs. When `live.js` reports a send error that you know never left the machine (connection refused, a local error),
+  which can cost Alice both legs. When `live.js` says `Nothing was sent` it has already taken the sidecar of that attempt back. After any other outcome (`The claim may have reached the network`, a refusal by the node, an HTTP 429 or a redirect: all of them "unknown" or "refused") run `tick --apply` first; only if you are then certain the claim never left this machine,
   re-send with `live.js claim --swap FILE ... --margin-s 1800` run by hand (`reveal.sh` has no such flag), which keeps the strict rule whatever the file says; or delete the sidecar BEFORE the next tick, because the first
   `tick --apply` (the watch loop runs one every 30 s by default) writes the marker into the file for good and deleting the sidecar afterwards changes
   nothing. When in doubt, leave it: an unknown outcome is exactly what it is for.
+  The residual window of the time-bounded send (since 2026-11-16): no byte of the claim leaves this machine after the last check plus 20 s, and the check demands 30 s (that 20 s and a 10 s guard) before the
+  cutoff, so by design the bytes reach the endpoint no later than about 10 s before it; but between the last check and the cut the claim can still reach the endpoint, and what the endpoint does with it
+  afterwards (queue it, forward it later, keep it to itself) is not in the tool's hands: to Alice that looks like a dropped claim, and the sidecar is why a re-send is then judged by the
+  late cutoff. A machine that sleeps or stalls between the write and the cut breaks the bound: the sender notices and says `TIME BOUND NOT KEPT` (the secret is then treated as
+  public); SIGKILL and a power cut cannot be caught (the operating system may still send a segment it had queued). If the operating system refuses the hard cut, the sender
+  closes the connection by hand, and data already handed to the system can still go out: the outcome is then "unknown". Reviewed independently twice; tested on a local
+  chain and local stub servers only, never against a real endpoint. Left open on purpose: `eth/README.md`, "The send of a claim has a time bound".
   Platform note: on Windows (the default path of `reveal.sh`, through the `\\wsl.localhost` share) a directory cannot be synced from Node and the
   mode bits are not applied. Measured 2026-11-09: there the file's own fsync is requested and reports success, hard links are refused, a rename
   over an existing file works; whether that fsync reaches the disk inside the Linux VM is not known. So on that path the sidecar's durability is
@@ -1112,13 +1168,14 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
   While it is pending and the chain does not show its effect (the phase moved, a funded instance is visible,
   the recovery close removed the instance), `tick` answers `wait` with "intent <action> pending since <unix>:
   the chain does not show it yet; reuse the printed parameters, or `swap-cli intent FILE --cancel` …", the
-  frozen parameters in a note and the `intent` object, and never emits that action again. It resolves into the
+  frozen parameters in a note and the `intent` object, and never emits that action again. One exception to that reason: a held `reveal_eth` step whose reveal cutoff has passed, when the engine's fresh decision is the cutoff wait (and, since 2026-11-16, also beside a due refund: "`refund_noid` is due but intent reveal_eth pending ..."), gets the reason "intent reveal_eth pending since <unix> (unix): the chain does not show it yet and its reveal cutoff has passed, so the printed parameters are not to be used; if nothing was sent, cancel it with `swap-cli intent FILE --cancel` (with the same chain flags as tick); if a reveal may have been sent, look at the contract" (`reveal_cutoff_wait_reason` in `engine.rs`). The action (`wait`), the held step and the notes are unchanged. When the file holds evidence that the secret may already be public, the fresh decision is a re-send and the usual reason stays. Tests in `tests/notes_only.rs`: `a_held_reveal_intent_past_its_cutoff_says_that_the_printed_parameters_are_not_to_be_used`, `a_held_reveal_intent_before_its_cutoff_keeps_the_reuse_reason`, `a_held_reveal_intent_past_the_first_cutoff_but_with_the_secret_possibly_public_is_a_re_send_not_the_cutoff_wait`. It resolves into the
   history (`intent_resolved:…`) when the chain shows the effect. `fund_noid` is also not offered while an
   instance already sits at our root, nor `refund_noid` when it is gone. A read-only `tick` records nothing but
   still holds. New command: `swap-cli intent FILE [--show]` prints it; `swap-cli intent FILE --cancel` (with the
   same chain flags as `tick`: it must look at the chain) drops an intent that was never sent and REFUSES if the
   chain already shows its effect (REVIEW-3 F3 made the cancel fail closed and tied `live.js` to the file: see "What REVIEW-3
-  changed"). The tool still does not send these actions; the operator uses the parameters `tick --apply` printed. Funding
+  changed"). Cancelling a `fund_noid` is the operator's statement that nothing was sent. After `D`, with no instance visible, the tool cannot tell a
+  funding that was recovered outside it (Alice's own recovery close) from one that never went out; the recorded `abort` then carries a note that says so (a `fund_noid` was decided and later cancelled, taken as not sent; no instance is visible and the funding window is closed; if a funding was sent it is no longer at the contract: check the wallet's history). Check the wallet's history before relying on that `abort`. The tool still does not send these actions; the operator uses the parameters `tick --apply` printed. Funding
   discipline: Alice funds only from the parameters a `tick --apply` has just recorded, and `tick --apply` refuses `fund_noid` while any
   instance exists at the root (`tick_apply`, the `noid.instance.is_some()` guard); the manual `parano1d-cli contract fund` has no
   other guard, so a second fund from a stale printout creates a second instance.
@@ -1179,6 +1236,10 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
     fits). While `done` and the NOID is still there, the wait reason says when `refund_noid` opens. The phase path is the existing one
     (`refund_submitted` -> `refund_included` -> `refunded`, a rollback falls back as in F6); `tick --closed-by` now also accepts the
     wallet CLI's recovery close from these three phases (the existing `h >= D` rule still refuses an earlier close, which paid Bob).
+    The note beside it reads "REVIEW-2 F9: the secret is public but Bob never claimed the NOID; D <D> is reached and the instance is still at the contract;
+    refund_noid is due". Since 2026-11-16 (CHAOS F-14) this `refund_noid`, and Alice's recovery close in every other phase, is a `wait` while a call on the
+    contract (one of its instances) is pending in the node's mempool, for instance a recovery close that a reorg put back; it is offered again only if that
+    call is evicted and the instance is still there. A second node that is fresh, level with the first and sees no pending call lets the refund go on, as for Bob's claim.
     The final `refunded` reason says "NOID refunded after the reveal; Bob never claimed it, so both legs ended with Alice" only when the
     history shows the ETH claim mined (final, or mined and not removed by a reorg since). With any other reveal evidence (a decided intent, a
     sent or dropped reveal, a reverted claim, the sidecar, an unknown outcome) it says that the file shows a reveal that was started or sent,
@@ -1205,7 +1266,8 @@ Ethereum says the block is final (the rule the tool already applied to Parano1d 
   - **Engine, instances.** Dust (or any other instance that does not fit: another amount, or an opening mismatch) no longer hides the
     real one: when exactly ONE instance fits the agreement, every check reads that one (Bob locks on it) and the others are named in
     the `notes` ("N instances at our contract root: slot … "). When SEVERAL fit, Bob does not lock (`wait`: "more than one instance at the
-    contract root", not an abort, it may clear up) and Alice records none; the notes list them. Dust alone is still "instance seen but not
+    contract root", not an abort, it may clear up; since 2026-11-16, CHAOS F-10, Bob's give-up heights are checked before this wait: past his last lock height,
+    or past funding finality plus `B_bob` while no `lock_eth` intent was cancelled, he aborts as he would with one instance) and Alice records none; the notes list them. Dust alone is still "instance seen but not
     accepted". Alice's `fund_noid` guard is unchanged: any instance at the root stops a second funding (so dust placed BEFORE she funds
     stops her, loudly; fund first, the dust cannot hide anything after).
   - **Engine, locks.** Alice judges each matching lock on its own (terms, closed, (I3), cutoff): with exactly one acceptable she takes
@@ -1237,6 +1299,44 @@ reach `lost`; the reveal needs the instance in that very poll; funding finality 
 another incarnation; `refund_noid` is not offered for an instance that is gone, on either path; `done` is *settled* but no longer *terminal*
 (`Phase::is_settled()` vs `is_terminal()`); the formal-model findings: `Gates::validate` checks the two `DE`/`RA` relations and the production
 `B_safety` is 30 (`D_offset` 735; since the finality correction of 2026-11-08, 31 and 738).
+
+Since 2026-11-16 two of the findings that stayed open there are fixed, with their tests in `tests/corner_cases.rs` (`CHAOS.md` has the sections): F-10 (with more than one fitting
+instance Bob gives up at the same heights as with one) and F-14 (`refund_noid` is a wait while a call on the contract is pending). A second batch the same day (commit `198241c`,
+below) answered F-20 (a recorded instance that is gone while a newer incarnation holds its slot) before any reveal, and parts of F-11 and F-6. The open list is F-2, F-6, F-7, F-8,
+F-11 and the new F-21.
+
+### Second batch (2026-11-16): recovery for another instance, closes recorded once final, a lock that is gone for good
+
+Reviewed independently in three passes and tested offline only (`tests/recovery_cases.rs`; the suite is 728 passing plus 1 ignored; the chaos run is green on five seeds). These
+change decisions and add end states in narrow cases. `CHAOS.md` has the full sections and the open points.
+
+- **Recovery for another instance (F-20), before any reveal.** At and after `D`, in `funding_final`, `lock_seen` and `lock_final` with no reveal on record, when the recorded
+  instance is not listed (and a configured second node is fresh and does not list it either) and no close before `D` was recorded, `refund_noid` is offered for the oldest
+  instance of the agreed amount at the contract root. The note says that it is not the recorded instance ("... which is NOT the recorded one ...") and names the other instances,
+  which this close does not cover. The history gets `noid_recovery_adopted:<slot>:<creation>:<amount>` (and `noid_recovery_adopted:recorded` when the recorded instance comes
+  back and a recovery close is decided for it again); the later texts of the file end with "; the instance recovered was not the one this file recorded: ...". A final adopted close does
+  not make the file `refunded` while the recorded instance is listed again (the file goes back to waiting for its recovery); where the second node does not confirm the recorded
+  instance absent, the file stays open and says why. **Limit, on purpose: after a reveal there is no such adoption, whatever markers exist.** After a reveal Bob may have claimed
+  the recorded instance before `D`, so the file cannot know whether the NOID is Alice's to take back, and it must not end with a label it cannot know. It says "whether Bob
+  claimed the recorded instance before D is not known to this file; the instance at the root can be recovered with the wallet".
+- **`tick --closed-by` for a close by someone else, on both files, once it is final (F-11).** The close must be 18 blocks deep, and on a configured second node too, or nothing is recorded.
+  On Bob's file a close at or after `D` is the recovery branch (it paid Alice) and is recorded log-only as `noid_closed_after_deadline:<txid>:<height>` (the phase does not move); his file
+  then ends with "claim branch closed: ..." naming its evidence: the operator's recorded close, or the instance seen listed when block `D - 1` was final and a second node agreed.
+  On Alice's file a final close before `D`, after a reveal, is the claim branch (it paid Bob) and is recorded as `noid_closed_before_deadline:<txid>:<height>`; it counts as the evidence
+  for the `lost` end state. Still open of F-11: Alice in `funding_submitted`, and the F-18 state when no `--closed-by` is given.
+- **A lock that is gone for good ends Bob's wait in `locked` (F-6).** Bob's file ends `aborted` when no node used has the lock, each on the pinned chain id and contract code hash, the head time is at
+  least `T_reveal` plus the profile's finality time, the finalized block's time (`EthObservation.finalized_timestamp`, read with the finalized block; required under `production`) is at least
+  `T_reveal`, and no other lock of his on this swap's lock word is open or claimed. Why that is enough: `newLock` reverts once the timelock is not in the future and `claim` reverts at or after
+  the timelock, so a lock that is absent then can neither appear nor be claimed. Still open of F-6: `refund_submitted` and `refund_mined`.
+- **Another lock of Bob's on the same lock word (F-21, open).** The file waits. An open one raises an `ALARM:` that names it once its own `T_reveal` has passed ("... it can be refunded by hand with
+  `live.js refund` ..."; the tool offers no action for a lock that is not in the file). A CLAIMED one means the secret is public: the watcher reads that lock's claim (`EthObservation.other_claims`, not
+  exercised against a real node, and never filled by the simulator), Bob's file takes the preimage through the usual check, moves to `secret_seen` and offers the NOID claim.
+- **Notes.** Two forms of "abort not recorded": "abort not recorded: a <kind> was decided for this swap and never cancelled, so it may have been sent ..." and "abort not recorded yet: ... cancelled at
+  <unix> (unix), <hold> s are kept back after a cancel (<left> s left) ...". A recorded "too late to fund" abort after a cancelled funding with no instance at the root carries "a fund_noid was decided and
+  later cancelled (taken as not sent); no instance of this contract is visible and the funding window is closed; if a funding was sent, it is no longer at the contract: check the wallet's history".
+- **Five minor points left open on purpose** (low; listed in `CHAOS.md`): the read cap of eight locks in the F-21 check is not known to the check; a listing of the recorded instance on the second node
+  alone also sends a file with a final adopted close back (and the history line is `noid_tx_reorged` although nothing was reorged); after such a go-back the final text is plain "done: NOID refunded";
+  and Bob in `secret_seen` reached through another lock's claim, whose recorded lock stays invisible, cannot end if his claim becomes too late (no money is held by the file).
 
 ## The bundle and its carrier check (`bundle_check`)
 
@@ -1407,7 +1507,7 @@ The Ethereum leg is locked in one of two contracts. Which one is a swap paramete
   reported as `EthObservation.overlong_claim`, never as Alice's reveal, and Bob claims the NOID from it. `TimelockExpired`, `BadCalldataLength` and
   `InsufficientGas` reverts all mean "the reveal did not happen, `s` may be public"; the engine learns that from the chain, not from revert names (`live.js`
   names them).
-- **Bob's pre-lock gates** (`engine::poseidon_prelock_blocker`; `wait`, not `abort`, so a held-back Bob still aborts when the last lock height passes):
+- **Bob's pre-lock gates** (`engine::poseidon_prelock_blocker`; `wait`, not `abort`, so a held-back Bob still aborts when the last lock height passes; since 2026-11-16 a configured second Ethereum node that could not be read is one more wait, R7-4):
   1. *client R works on this machine* (review V2-10): the file holds a passed `client_r_selftest` for the owner-authorization version of the next block
      (`params::auth_version_at(tip + 1)`), **bound** (REVIEW-6 R6-4) to this file's lock word, this swap's contract version, this build
      (`swap_cli::build_id()`) and younger than 24 hours. `new-bob` runs it before it writes the file; `swap-cli self-test FILE [--noid-rpc URL | --call-height N]`
@@ -1507,11 +1607,12 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   the tip itself was not checked against a block-header timestamp or a second node (REVIEW-2 F5, fixed: see "F5: second node,
   header time, plain HTTP"; the poll-age rule alone still lets a lagging node that answers quickly look fresh).
 
-- From REVIEW-1 (not applied): no automatic clean-up of the leftover leg after a reveal
-  (M1: Bob's ETH refund after a failed claim, Alice's NOID refund after Bob never claims); client R takes its chain snapshot in separate RPCs
+- From REVIEW-1 (not applied): client R takes its chain snapshot in separate RPCs
   instead of one locked read and does not preflight with `previewObjectCall` (M7); client S
-  reuses the `--out` path across retries (M8); a mined-but-reverted claim is not scanned for
-  the preimage (L5); `B_bob` counts from Bob's observation tip (L7).
+  reuses the `--out` path across retries (M8); a mined-but-reverted claim is not found by a scan of recent `claim` calls (L5: it is read
+  when the operator passes its hash with `--reveal-tx`, R6-3); `B_bob` counts from Bob's observation tip (L7).
+  Applied since: the clean-up of the leftover leg after a reveal (M1: Bob's ETH refund after a failed claim, Alice's NOID refund after Bob never
+  claims), by REVIEW-2 F9 (2026-11-04).
 
 - If Bob's claim is included by a submission the file never recorded (a crash between
   submit and record), the engine sees a pending close it does not own, holds without
@@ -1527,5 +1628,5 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   (`getObjectInstances.height`, `getObjectStatus.tip_height`); `recorded_funded_first_seen` pins it (tip 280,638).
 - Bob's refund of ETH uses the latest block timestamp; it does not wait for finality of
   Alice's non-claim (the HTLC's `refund` reverts if she claimed first, so nothing is lost).
-- `PROJECT.md`'s repository map does not list this crate yet.
+- `PROJECT.md`'s repository map lists this crate (the `swap-cli/` row).
 - **Several instances at the contract root after an abort (runs 9 and 10, low; messages fixed, recovery still outside the tool).** When MORE THAN ONE instance of the agreed amount sits at her root, Alice in `created` now says so first, whatever the tip is: the `wait` reason names how many instances sit there (and how many have the agreed amount), that the swap cannot go on with them (Bob does not lock on more than one fitting instance, Alice does not reveal), that nothing must be funded again, and that they can be recovered after `D`. `scripts/live/recover-noid.sh` closes the instances of the agreed amount only, and an instance not larger than the close fee (at least 5,800 micro-NOID, more under load) cannot be recovered at all. A single instance that does not fit (a foreign deposit, dust, another amount) gets a different, precise reason: it sits at the root, it is not the agreed one, it is not counted as a funding, and the tool does not fund beside it until the contract state is checked; nothing is claimed about the swap or about a recovery. The `abort` decided there ("too late to fund") and every later tick of the `aborted` file carry a note while instances remain: they hold NOID at the root (slot, creation, amount), those of the agreed amount are not lost, they can be recovered after `D` (the note says "now" once the next call height has reached `D`) with `scripts/live/recover-noid.sh`, and the tool will not close them; the note goes away when no instance is left. The one exception is CHAOS F-19 (a funding decided by the tool is on record and several instances fit): the file stays `created`, and the note says that at `D` this file adopts the oldest fitting instance and offers `refund_noid` for it itself, that the OTHER instances need the helper, and that running the helper for all of them before the tool's own refund means recording the tool's instance with `tick --closed-by TXID`. Alice's `aborted` only ever comes from `created`, so this is the one path. The `fund_noid` guard (no funding beside an instance that was not accepted) is now one function used by both `tick_apply` and `Runner::tick`; before, the library path would have funded beside it. Not done: the tool still does not close the other instances itself (no `refund_noid` is offered for an instance the file never recorded); `recover-noid.sh` does it outside the tool (`docs/live-run-9-10.md`, finding 2). Tests: `run9_*` in `tests/scenarios.rs`.

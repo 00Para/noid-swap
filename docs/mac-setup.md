@@ -119,7 +119,7 @@ Run each from the repo root in a Terminal with the same `RUSTUP_TOOLCHAIN`. Coun
 |---|---|
 | `cd eth && npx hardhat test` | `265 passing`, `0 failing` (that pass saw 243 in 70 s, peak memory about 1.2 GB; 22 tests were added after it. Of those, the macOS memory fix was re-run on a Mac 2026-11-06: `npx hardhat test test/free-mem.test.js test/Poseidon2b.test.js` gave `28 passing` without any workaround; the full suite was not re-run there) |
 | `cd btc && npm ci && npm test` | 91 pass (Bitcoin is not used by an ETH swap; optional) |
-| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 532 passing, 1 ignored |
+| `cd swap-cli && cargo test --offline --locked --no-fail-fast` | 728 passing, 1 ignored (532 when this table was first written) |
 | `cd equiv && cargo test --release --locked` | 23 pass |
 | `cd equiv/zkvm && cargo test --locked -p equiv-guest-core` | 3 pass |
 
@@ -186,7 +186,54 @@ the operator key does not cover them, and `swap-cli` has no way to send a key (`
    This was run in live run 12 (`docs/live-run-12.md`): one SSH connection from the PC with a local and a remote port forward, so the
    PC saw the Mac's node on a local port and the Mac saw the PC's node on a local port. The Mac end answered with the same height and
    best block hash as the Mac's own node. If the client offers keys the Mac does not know, the server may refuse before it asks for
-   the password: force password login for that connection (the SSH option `PreferredAuthentications=password`).
+   the password: force password login for that connection (the SSH option `PreferredAuthentications=password`). When the
+   read-only producer check of `TASKS.md` T21-21 was made after run 12, the Mac's address had changed and its password login was refused, so a key
+   was used that can do nothing but the forwards: see step 2a. Use step 2a from the start; it is the form to keep.
+
+   **2a. A key that can only open the two forwards (the authoritative place for this setup; the runbook and the helpers' README link here).**
+   An SSH key is a pair of files: a private key that stays on the PC and a public key that the Mac is told to accept. A normal key lets its
+   holder log in and run commands on the Mac. This one is limited on the Mac's side to the port forwards this check needs, and anything else its
+   holder asks to run is replaced by a program that does nothing, so it gives no shell and no command. Check that once after the setup (see the
+   check below); do not take it on trust.
+   - On the PC, make a dedicated key without a passphrase (it is used by a script that cannot type one) and keep it only on the PC, readable by your
+     account only: `ssh-keygen -t ed25519 -N "" -C "noid-swap-tunnel" -f KEYFILE`. It is used for nothing else. Whoever holds this file can open the same
+     forwards, and through them reach the node's RPC as a loopback caller (see the facts above), so do not copy it anywhere, and remove its line from the
+     Mac's `authorized_keys` and delete the file when the check is over.
+   - On the Mac, add the public key (`KEYFILE.pub`, one line) to `~/.ssh/authorized_keys` of MACUSER with options in front of it, on the same line:
+     ```
+     restrict,port-forwarding,command="/usr/bin/false",permitopen="127.0.0.1:9601",permitlisten="127.0.0.1:MACPORT" ssh-ed25519 AAAA...rest-of-the-public-key... noid-swap-tunnel
+     ```
+     What each option does. `restrict` switches off the forwarding kinds (port, agent and X11), terminals and the `~/.ssh/rc` file; it does NOT stop
+     the key holder from running a command or a shell without a terminal. `port-forwarding` switches port forwarding back on.
+     `command="/usr/bin/false"` replaces whatever the key holder asks to run with a program that does nothing and fails, so the key gives no shell and no
+     command; the tunnel client below uses `-N`, which asks for no session at all, so the forwards still work. `permitopen` limits the forwards the PC
+     may open to the Mac's own node on 9601 (the `-L` forward). `permitlisten` limits the ports the PC may open on the Mac (the `-R` forward, MACPORT
+     below); leave it out if the Mac does not use the PC's node. Write the host and port exactly as the `-L` and `-R` options below spell them. If you
+     set the key up earlier with `restrict,port-forwarding,permitopen,permitlisten` only, add `command="/usr/bin/false"` to that line now.
+   - **Check once, from the PC, after setting it up:**
+     `ssh -i KEYFILE -o IdentitiesOnly=yes -o BatchMode=yes MACUSER@MACADDRESS true`
+     must end with exit status 1 and print nothing (in PowerShell the status is in `$LASTEXITCODE`). Status 1 is the answer of `/usr/bin/false`: the
+     Mac accepted the key and replaced `true` by the forced command. Status 255 means that ssh itself failed (the key was refused, or the host key is
+     unknown under `BatchMode`) and proves nothing about the limit: fix that and repeat the check. Status 0 means that `true` ran: the line in
+     `authorized_keys` is not limiting the key (a typo, the line in another user's file, or an option dropped); remove the key from the Mac and start
+     again.
+   - On the PC, open the tunnel with the key and these options:
+     `ssh -N -o IdentitiesOnly=yes -o BatchMode=yes -o IdentityAgent=none -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=yes -i KEYFILE -L 127.0.0.1:19601:127.0.0.1:9601 -R 127.0.0.1:MACPORT:127.0.0.1:9601 MACUSER@MACADDRESS`
+     What each option does: `IdentitiesOnly` offers only the key named by `-i`, not the others in the PC's ssh folder; `IdentityAgent=none` means
+     the SSH agent is not asked (`IdentitiesOnly` and `BatchMode` alone do not switch the agent off); `BatchMode` makes ssh fail instead of asking for a
+     password or a passphrase, so there is no password fallback; `ExitOnForwardFailure` ends the connection if the Mac refuses a forward, instead of
+     leaving a tunnel that forwards nothing; `StrictHostKeyChecking=yes` refuses a host key it does not know. Leave the `-R` part out if the Mac does
+     not use the PC's node.
+     After the tunnel is open, check that the forwards work: the `curl.exe` call of step 2 answers with a height.
+   - **The Mac's address can change** (it did after run 12). Read it again before each run, in the same place as in step 1.
+     If it changed, do not accept the new address's host key blindly. The first connection to a new address would ask you to trust a key you have never
+     compared. Keep checking against the host key you already trust, by telling ssh to look it up under the old address: add
+     `-o HostKeyAlias=OLDMACADDRESS` and connect to the new address. If ssh then reports that the host key differs, stop: that is either another machine
+     at that address or a changed key, and neither is what you want to tunnel to. Do not answer "yes" and do not delete the old line from `known_hosts` to
+     make the message go away; check the Mac's key at the Mac itself (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the Mac), compared with the
+     fingerprint you trusted, which you print on the PC with `ssh-keygen -lF OLDMACADDRESS`. A way to keep one trusted name across address changes is a
+     `Host` entry in the PC's ssh configuration with a fixed `HostKeyAlias` (the entry names the Mac's current address as `HostName` and is edited when
+     the address changes, while the alias, and so the trusted key, stays the same).
 3. The PC passes both nodes: `--noid-rpc http://127.0.0.1:9601 --noid-rpc http://127.0.0.1:19601`. The tool accepts another
    port on the same machine "with a note" because it shares one network view of the endpoint; the Mac node syncs independently,
    which is the point. From WSL on the PC use `--transport curl` (WSL cannot reach the Windows loopback by TCP). The tool prints the

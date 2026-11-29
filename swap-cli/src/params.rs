@@ -611,7 +611,7 @@ impl fmt::Display for GateError {
             ),
             GateError::RevealCutoffPassed { now, cutoff } => write!(
                 f,
-                "(I2) reveal cutoff passed: now {now} > T_reveal - M_A = {cutoff}; do NOT broadcast"
+                "(I2) reveal cutoff passed: now {now} > T_reveal - M_A = {cutoff}"
             ),
             GateError::LockNotFinalized => write!(f, "(I2) Bob's Ethereum lock is not finalized"),
             GateError::VersionBoundaryInWindow { h_create, d, window_end, boundary } => write!(

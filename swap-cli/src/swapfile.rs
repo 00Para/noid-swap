@@ -1092,6 +1092,13 @@ impl SwapFile {
             to: next.name(),
         });
         self.phase = next;
+        // CHAOS M3: the two log-only events of `tick --closed-by` carry the transaction and the height, which the name alone loses; the engine names them
+        // in the abort reason it gives. A second entry, so that the first one keeps the plain event name every reader keys on.
+        match event {
+            Event::NoidClosedAfterDeadline { txid, height } => self.log(format!("noid_closed_after_deadline:{txid}:{height}"), now),
+            Event::NoidClosedBeforeDeadline { txid, height } => self.log(format!("noid_closed_before_deadline:{txid}:{height}"), now),
+            _ => {}
+        }
         Ok(())
     }
 

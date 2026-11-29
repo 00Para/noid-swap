@@ -115,6 +115,9 @@ pub struct Decision {
     pub notes: Vec<String>,
     /// Log-only history entries to append after the events (G9: `late_lock:` markers); they never change a phase.
     pub log: Vec<String>,
+    /// Internal hint, never printed, saved or read by anything but the intent ledger's wait reason: this decision is Alice's `wait` that comes from
+    /// the failed reveal cutoff `(I2)` (`GateError::RevealCutoffPassed`), not from any other cause.
+    pub reveal_cutoff_passed: bool,
 }
 
 /// Close fee for Bob's claim or Alice's refund under contract v1 (see [`close_fee_for`] for v2): the live relay minimum, never
@@ -584,6 +587,20 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
             }
         }
     }
+    // Bob only (CHAOS F-11): the instance was alive when his claim branch had closed; log-only, once. The tip of that poll goes into the abort reason.
+    let mut bob_alive_tip: Option<u64> = None;
+    if let Phase::Bob(p) = &phase {
+        if let Some(e) = bob_alive_at_d(file, p, noid, now) {
+            match transition(&phase, &e) {
+                Ok(np) => {
+                    phase = np;
+                    events.push(e);
+                    bob_alive_tip = Some(noid.tip);
+                }
+                Err(err) => notes.push(format!("internal: {err}")),
+            }
+        }
+    }
     // Bob only (REVIEW-2 F9): the same kind of log-only fact for his ETH refund after the secret is known.
     if let Phase::Bob(p) = &phase {
         if let Some(e) = bob_refund_seen(file, p, eth) {
@@ -610,30 +627,84 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     }
     // Bob only (G9): a late lock of his own sender that the file did not send is adopted like any other and carries an ALARM note.
     let mut log = Vec::new();
+    log.extend(bob_alive_tip.map(|t| format!("{BOB_ALIVE_TIP}{t}")));
     if let Phase::Bob(p) = &phase {
         let (marker, note) = bob_late_lock(file, p, &events, noid, eth, now);
         log.extend(marker);
         notes.extend(note);
     }
+    // Alice only (G1): a note when Bob's lock was first recorded after his last lock height. Decides nothing.
+    if let Phase::Alice(p) = &phase {
+        let (marker, note) = alice_late_lock(file, p, &events, noid);
+        log.extend(marker);
+        notes.extend(note);
+    }
+    let mut reveal_cutoff_passed = false;
     let action = match &phase {
-        Phase::Alice(p) => alice_action(file, p, noid, eth, now, &mut notes),
+        Phase::Alice(p) => alice_action(file, p, noid, eth, now, &mut notes, &mut reveal_cutoff_passed),
         Phase::Bob(p) => bob_action(file, p, noid, eth, now, &mut notes),
     };
     // CHAOS F-4: a recovery close of an instance that is not at the contract is not offered, on either path (the node would only
     // refuse it, tick after tick, until `--closed-by` is run).
     let action = match action {
+        // CHAOS X1: at and after D, the recorded instance is not at the contract (it came back as another incarnation after reorgs) but an
+        // instance of the agreed amount is: the recovery close is offered for that one. Any instance at this opening pays Alice on the
+        // recovery branch, so nothing is risked; nothing before D reads this.
+        refund @ Action::RefundNoid { .. } if instance_gone_in(&phase, noid) && alice_recovery_adoption(file, &phase, noid, now).is_some() => {
+            if let Some(a) = alice_recovery_adoption(file, &phase, noid, now) {
+                notes.push(a.note(file));
+                let marker = format!("{RECOVERY_ADOPTED}{}:{}:{}", a.adopted.instance.slot_index, a.adopted.instance.creation_id, a.adopted.instance.amount_micronoid);
+                if recovery_target(file).as_ref() != Some(&a.adopted.instance) {
+                    log.push(marker);
+                }
+            }
+            refund
+        }
         Action::RefundNoid { .. } if instance_gone_in(&phase, noid) => {
             let why = "the instance is not visible, so there is nothing to refund (already closed? verify the contract receipts)".to_string();
             notes.push(format!("not refund_noid: {why}"));
+            // CHAOS S3: a recovery close for another instance was ruled out only because the second node does not back the first one's word.
+            if let RecoveryCheck::Blocked(why) = alice_recovery_check(file, &phase, noid, now) {
+                notes.push(format!("a recovery close for another instance of the agreed amount at the root is not offered: {why}"));
+            }
             // Review M5: another instance at the root (the funding came back as a new incarnation) is not the recorded one; name it.
             let all = noid.all_instances();
             if !all.is_empty() {
                 notes.push(format!("the recorded instance is gone but {} other instance(s) sit at the contract root and are NOT refunded by this tool (refund them with the wallet): {}", all.len(), describe_instances(&all, None)));
+                // M1 (c): after a reveal, without evidence that the recorded instance was alive when Bob could no longer claim, the file does not
+                // know whether he claimed it before D.
+                if matches!(&phase, Phase::Alice(p) if alice_reveal_may_be_out(file, p)) {
+                    notes.push("whether Bob claimed the recorded instance before D is not known to this file; the instance at the root can be recovered with the wallet".to_string());
+                }
             }
             Action::Wait { reason: why }
         }
         other => other,
     };
+    // (A second match, so that a recovery close for an adopted instance (CHAOS X1) also goes through the F-14 wait.)
+    let action = match action {
+        // CHAOS F-14: a call on this contract sits in the node's mempool (the watcher's `pending_calls` are all mempool calls whose contract opening
+        // equals ours, so a call on any instance at the root counts; it may be a recovery close that a reorg put back). A second
+        // `refund_noid` would only be refused by the first-seen mempool, and on the CLI path it would be recorded as a second intent. The same
+        // wait as Bob's claim has (T2), with the same second-node exception: a second node that is fresh, level with the first and sees no
+        // pending call lets the refund go on.
+        Action::RefundNoid { .. } if !noid.pending_calls.is_empty() && !second_node_sees_no_pending_call(noid, &mut notes) => {
+            let txids = noid.pending_calls.iter().map(|c| c.txid.as_str()).collect::<Vec<_>>().join(", ");
+            let why = format!(
+                "a call on this contract (one of its instances) is pending in the node's mempool ({txids}); it may be the recovery close sent earlier, put back by a reorg; refund_noid is offered again only if it is evicted and the instance is still there (CHAOS F-14)"
+            );
+            notes.push(format!("not refund_noid: {why}"));
+            Action::Wait { reason: why }
+        }
+        other => other,
+    };
+    // CHAOS S3 (b): a recovery close for the RECORDED instance is decided again (it came back): the file no longer carries the adoption label.
+    if matches!(action, Action::RefundNoid { .. })
+        && recovery_target(file).is_some()
+        && !(instance_gone_in(&phase, noid) && alice_recovery_adoption(file, &phase, noid, now).is_some())
+    {
+        log.push(format!("{RECOVERY_ADOPTED}recorded"));
+    }
     // Live run 9: an Alice file that gives up (the `abort` is decided now) or has given up while instances still hold NOID at her
     // root. The file ends, the loop stops, and nothing else says where the NOID is. Alice's `aborted` only comes from `created`.
     let alice_gives_up = match &phase {
@@ -688,7 +759,7 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
             log.extend(producer_gate::override_history_entry(file.public.params.profile.gates(), noid, now));
         }
     }
-    Decision { events, action, notes, log }
+    Decision { events, action, notes, log, reveal_cutoff_passed }
 }
 
 /// REVIEW-4 R4-11: a `done` file that still holds a leg the tool can refund: Alice's NOID instance still listed, Bob's Ethereum lock still
@@ -701,7 +772,7 @@ fn has_leftover_leg(phase: &Phase, noid: &NoidObservation, eth: &EthObservation)
     }
 }
 
-/// Below this many blocks between the tip and Bob's lock-by height, the lock-by margin note is phrased as a warning. Display only: it
+/// Below this many blocks between the tip and the nearer of Bob's lock-by height and his last lock height, the margin note is phrased as a warning. Display only: it
 /// decides nothing (live run 13: Bob's lock was offered six blocks before the lock-by and nothing had said the window was short; in runs 10
 /// to 12 he had 59 to 62 blocks).
 pub const LOCK_BY_MARGIN_WARN_BLOCKS: u64 = 15;
@@ -710,8 +781,9 @@ pub const LOCK_BY_MARGIN_WARN_BLOCKS: u64 = 15;
 /// his lock is sent (`received` to `funding_final`). `None` in every other phase. The note states facts (heights, blocks left) and never
 /// an instruction: it is built inside `decide`, and the caller may still change the action afterwards (the intent ledger holds a spend as
 /// a wait, `guard_fund_noid` turns a funding into a wait), so a command in the note could sit beside a wait. A short margin therefore ends
-/// in `see the action`. The action is read only to tell whether Bob's lock is still offered past the nominal lock-by (a statement of
-/// fact). Neither the action nor its reason is touched by this function.
+/// in `see the action`. The action is read only to tell whether Bob's lock is still offered past the nominal lock-by and whether an abort
+/// stands beside the note (then no count of blocks left is printed: only the forms that say a height has passed). Neither the action nor its reason
+/// is touched by this function.
 fn lock_by_margin_note(file: &SwapFile, phase: &Phase, action: &Action, tip: u64) -> Option<String> {
     let params = &file.public.params;
     let g = params.profile.gates();
@@ -733,21 +805,112 @@ fn lock_by_margin_note(file: &SwapFile, phase: &Phase, action: &Action, tip: u64
         }
         Phase::Alice(AlicePhase::FundingSubmitted { .. } | AlicePhase::Funded { .. } | AlicePhase::FundingFinal { .. })
         | Phase::Bob(BobPhase::Received | BobPhase::Funded { .. } | BobPhase::FundingFinal { .. }) => {
+            // Bob's last lock height as the engine's own gates compute it; Alice's notes do not name it.
+            let last_lock = bob_last_lock_height(file, phase);
             if tip > lock_by {
-                // The file's lock-by is the nominal one (the bundle states it); Bob's lock is offered up to the hard limit of `bob_action`.
-                if matches!(action, Action::LockEth { .. }) {
-                    let hard = g.bob_lock_by_min_window(params.deadline_height);
-                    return Some(format!("nominal lock-by {lock_by} has passed (tip {tip}); the lock is still allowed until the hard limit {hard}"));
+                // The file's lock-by is the nominal one (the bundle states it); Bob's lock is offered up to the last lock height.
+                if let (Action::LockEth { .. }, Some(last)) = (action, last_lock) {
+                    return Some(format!(
+                        "nominal lock-by {lock_by} has passed (tip {tip}); the lock is still allowed until {}the hard limit {}",
+                        if last.exact { "" } else { "at most " },
+                        last.height
+                    ));
                 }
-                return Some(format!("lock-by {lock_by} has passed: tip {tip} is {} blocks beyond it", tip - lock_by));
+                let beyond = format!("lock-by {lock_by} has passed: tip {tip} is {} blocks beyond it", tip - lock_by);
+                return Some(format!("{beyond}{}", last_lock_clause(last_lock, action, tip)));
+            }
+            // The last lock height is the nearer limit (exact, below the nominal lock-by) and still ahead, with no abort beside the note: the margin is
+            // counted to it, and so is the short-margin threshold; the number that matters is the one Bob's engine gives up at.
+            if let Some(last) = last_lock {
+                if last.exact && last.height < lock_by && tip <= last.height && !matches!(action, Action::Abort { .. }) {
+                    let left = last.height - tip;
+                    // At the last lock height itself the lock is still allowed; "0 blocks" would read as too late, so the fact is said instead.
+                    if left == 0 {
+                        return Some(format!("the tip is the last lock height {} (nominal lock-by {lock_by}); see the action", last.height));
+                    }
+                    let what = format!("{left} blocks to the last lock height {} (nominal lock-by {lock_by}, tip {tip})", last.height);
+                    if left >= LOCK_BY_MARGIN_WARN_BLOCKS {
+                        return Some(format!("lock margin: {what}"));
+                    }
+                    return Some(format!("lock margin is short: {what}; see the action"));
+                }
+            }
+            // Beside an abort no count of blocks left is printed (a positive count beside a terminal answer reads as time to spare): with the last
+            // lock height passed (Bob's `PastBobWindow` or `PastLockBy`) the note says that, with the nominal lock-by and the tip and no count; with
+            // any other cause of the abort nothing is printed.
+            if matches!(action, Action::Abort { .. }) {
+                return last_lock.filter(|l| tip > l.height).map(|l| {
+                    if l.exact {
+                        format!("the last lock height {} has passed (nominal lock-by {lock_by}, tip {tip})", l.height)
+                    } else {
+                        format!("the last lock height, at most {}, has passed (nominal lock-by {lock_by}, tip {tip})", l.height)
+                    }
+                });
             }
             let margin = lock_by - tip;
+            let last = last_lock_clause(last_lock, action, tip);
             if margin >= LOCK_BY_MARGIN_WARN_BLOCKS {
-                return Some(format!("lock-by margin: {margin} blocks (lock-by {lock_by}, tip {tip})"));
+                return Some(format!("lock-by margin: {margin} blocks (lock-by {lock_by}, tip {tip}){last}"));
             }
-            Some(format!("lock-by margin is short: {margin} blocks (lock-by {lock_by}, tip {tip}); see the action"))
+            Some(format!("lock-by margin is short: {margin} blocks (lock-by {lock_by}, tip {tip}){last}; see the action"))
         }
         _ => None,
+    }
+}
+
+/// Bob's last lock height for the notes. `exact`: the engine gives up at the first tip above `height`; otherwise `height` is only an upper bound
+/// (the real limit is lower, or not known yet).
+#[derive(Clone, Copy)]
+struct LastLock {
+    height: u64,
+    exact: bool,
+}
+
+/// Bob's last lock height, from the conditions the engine's gates use (display only; read by nothing):
+/// - `received` (no funding seen): `bob_action` aborts at `tip > g.bob_lock_by_min_window(D)`, but the limit that will apply to the lock is
+///   `min(that, F + b_bob)` with `F` not known yet, so the height is only an upper bound.
+/// - `funded` (funding seen, not final): the same height is only an upper bound, because `choose_t_reveal` will also stop `b_bob` blocks after the
+///   funding is final, and that height is not known yet.
+/// - `funding_final`: `choose_t_reveal` gives up at `tip > bob_lock_by_min_window(D)` (`PastLockBy`) and at `tip > final_at_tip + b_bob`
+///   (`PastBobWindow`); exact. After a cancelled `lock_eth` intent the send is judged by `lock_reuse_safe` instead (`tip <= bob_lock_by_min_window(D)`
+///   and more), so there the upper bound only.
+///
+/// `None` for Alice.
+fn bob_last_lock_height(file: &SwapFile, phase: &Phase) -> Option<LastLock> {
+    let params = &file.public.params;
+    let g = params.profile.gates();
+    let hard = g.bob_lock_by_min_window(params.deadline_height);
+    match phase {
+        Phase::Bob(BobPhase::Received) => Some(LastLock { height: hard, exact: false }),
+        Phase::Bob(BobPhase::Funded { .. }) => Some(LastLock { height: hard, exact: false }),
+        Phase::Bob(BobPhase::FundingFinal { final_at_tip, .. }) => match cancelled_lock(file) {
+            CancelledLock::None => Some(LastLock { height: hard.min(final_at_tip.saturating_add(g.b_bob)), exact: true }),
+            _ => Some(LastLock { height: hard, exact: false }),
+        },
+        _ => None,
+    }
+}
+
+/// The sentence about the last lock height that goes after the lock-by margin note. Empty for Alice. Never printed next to an `abort` unless it
+/// says that the height has passed (the abort may have another cause, and then the height says nothing about it). Statements only.
+fn last_lock_clause(last: Option<LastLock>, action: &Action, tip: u64) -> String {
+    let Some(last) = last else {
+        return String::new();
+    };
+    if tip > last.height {
+        return if last.exact {
+            format!("; the last lock height {} has passed too", last.height)
+        } else {
+            format!("; the last lock height, at most {}, has passed too", last.height)
+        };
+    }
+    if matches!(action, Action::Abort { .. }) {
+        return String::new();
+    }
+    if last.exact {
+        format!("; the last lock height is {}", last.height)
+    } else {
+        format!("; the last lock height is at most {}", last.height)
     }
 }
 
@@ -1338,7 +1501,24 @@ fn alice_fact(
         },
         A::RefundSubmitted { txid: Some(txid), .. } => tracked_outcome(noid, txid),
         A::RefundSubmitted { txid: None, .. } => None,
-        A::RefundIncluded { txid, height, .. } => match included_outcome(noid, txid, *height) {
+        A::RefundIncluded { txid, height, instance } => match included_outcome(noid, txid, *height) {
+            // CHAOS S3 (c): a close that took ANOTHER instance than the recorded one does not make the file `refunded` while the recorded one is at
+            // the contract (it came back): the file goes back to waiting for its recovery (the event of a dropped close), and the normal path offers
+            // `refund_noid` for it. Where a second node does not confirm the recorded instance absent, the file stays open and says so.
+            Included::Final if recovery_target(file).is_some() => match recorded_instance_absence(file, instance, noid, now) {
+                Absence::Absent => Some(Event::NoidTxFinal { tip: noid.tip }),
+                Absence::Listed => {
+                    notes.push(format!(
+                        "the recovery close {txid} took another instance than the one this file recorded, and the recorded instance (slot {}, creation {}) is at the contract again: its recovery is due; the file is not `refunded`",
+                        instance.slot_index, instance.creation_id
+                    ));
+                    Some(Event::NoidTxReorged { txid: txid.clone(), was_height: *height, still_pending: false, preimage: None })
+                }
+                Absence::Unconfirmed(why) => {
+                    notes.push(format!("the recovery close {txid} is final but the file stays open: {why}"));
+                    None
+                }
+            },
             Included::Final => Some(Event::NoidTxFinal { tip: noid.tip }),
             Included::Waiting => None,
             Included::Reincluded(h) => Some(Event::NoidTxReincluded { txid: txid.clone(), was_height: *height, height: h }),
@@ -1507,6 +1687,40 @@ fn alice_alive_at_d(file: &SwapFile, p: &AlicePhase, noid: &NoidObservation) -> 
     seen.then_some(Event::NoidInstanceAliveAtD)
 }
 
+/// CHAOS M3: the log-only entry `noid_alive_at_d_tip:<tip>` beside Bob's `noid_instance_alive_at_d`: the Parano1d tip of the poll that wrote it.
+const BOB_ALIVE_TIP: &str = "noid_alive_at_d_tip:";
+
+/// CHAOS F-11, Bob (the counterpart of CHAOS F-17): once the recorded instance has been seen at the contract in a poll in which his claim could no
+/// longer be included, its later disappearance can only be a RECOVERY close (a close at `h >= D` pays Alice), never a claim of his. A log-only fact,
+/// once, only in `secret_seen`. Because a false "alive at D" would end his file as "claim can no longer happen" although he was paid (a one-block
+/// reorg at the boundary can still put his own pending claim into block `D - 1`), it is written only from a poll in which block `D - 1` is FINAL
+/// (CHAOS M2), and, where a second node is configured, only when that node is fresh, level (also past the final `D - 1`) and lists the instance too
+/// (the rule of `alice_gone_trace`); with a second node that could not be read, or required and absent, it is not written.
+fn bob_alive_at_d(file: &SwapFile, p: &BobPhase, noid: &NoidObservation, now: u64) -> Option<Event> {
+    let d = file.public.params.deadline_height;
+    if last_history(file, "noid_instance_alive_at_d").is_some() || !params::alice_refund_ready(noid.tip, d) {
+        return None;
+    }
+    if !matches!(p, BobPhase::SecretSeen { .. }) || !params::noid_final(noid.tip, d.saturating_sub(1)) {
+        return None;
+    }
+    let instance = p.instance()?;
+    noid.find_instance(instance)?;
+    match noid.second.as_deref() {
+        Some(second) => {
+            if second_stale("noid (second node)", second.observed_at, now).is_some() || !params::noid_final(second.tip, d.saturating_sub(1)) || second.find_instance(instance).is_none() {
+                return None;
+            }
+        }
+        None => {
+            if noid.second_error.is_some() || (file.public.params.profile.requires_second_node() && !noid.single_node_ok) {
+                return None;
+            }
+        }
+    }
+    Some(Event::NoidInstanceAliveAtD)
+}
+
 /// CHAOS F-19: Alice's file shows that a funding of hers was sent or may have been: the phase says so (`funding_submitted`), or a
 /// `fund_noid` was handed to the executor and its outcome is unknown (`pending_action`), or the CLI decided one and the operator never
 /// cancelled it (`intent_decided:fund_noid`). Without such a trace an instance at the root is nobody's business of hers.
@@ -1518,11 +1732,12 @@ fn alice_funding_on_record(file: &SwapFile, p: &AlicePhase) -> bool {
         || (decided.is_some() && decided > last_history(file, "intent_cancelled:fund_noid"))
 }
 
-/// The phases `lost` can be declared from. The evidence is only collected there: a file that went on to `revealed` and `done` does not
-/// need it and its history stays free of it (a claim of Alice's that a reorg drops sends her back to `reveal_submitted`, where the
-/// next poll before `D` records it).
+/// The phases that collect the evidence about WHEN the recorded instance went (CHAOS F-18): the ones `lost` can be declared from, and, since CHAOS
+/// M1, `revealed` and `done` too (a recovery close for another instance after the reveal is offered only if the recorded one was not claimed by Bob,
+/// which only a poll before `D` that saw it gone can show; a claim of Alice's that a reorg drops sends her back to `reveal_submitted`, which also
+/// records it).
 fn alice_tracks_instance(p: &AlicePhase) -> bool {
-    matches!(p, AlicePhase::LockFinal { .. } | AlicePhase::RevealSubmitted { .. })
+    matches!(p, AlicePhase::LockFinal { .. } | AlicePhase::RevealSubmitted { .. } | AlicePhase::Revealed { .. } | AlicePhase::Done { .. })
 }
 
 /// CHAOS F-18: the recorded instance is marked gone (a poll with `tip < D` did not list it) and not marked back since.
@@ -1615,7 +1830,8 @@ fn alice_both_legs_lost(
     // CHAOS F-18: the instance being gone is not enough, nor is it enough that Bob COULD have claimed it. Positive evidence is needed that
     // it went before `D` (only the claim branch closes then): a poll with `tip < D` that did not list it. Without that poll the close
     // may be Alice's own recovery at `h >= D` that nobody recorded, and `lost` would be false (a terminal state must be true).
-    if !instance_marked_gone_before_d(file) {
+    // CHAOS F-11: the operator's `tick --closed-by` of a close that was included before D is the same evidence, from the chain's receipts.
+    if !instance_marked_gone_before_d(file) && last_history(file, "noid_closed_before_deadline").is_none() {
         notes.push(
             "the NOID instance is gone and the ETH refund is final, but no poll made before D ever saw it gone: a close at or after D is Alice's own recovery, and from a poll after D the tool cannot tell it from Bob's claim; not declaring both legs lost (CHAOS F-18). If your wallet closed it, record that with `tick --closed-by`; if it did not, check the contract receipts: the NOID went to Bob and the file stays in this phase"
                 .to_string(),
@@ -1773,7 +1989,9 @@ pub fn check_external_close_phase(file: &SwapFile, txid: &str) -> Result<(), Str
 ///
 /// Refuses, with a plain message and nothing recorded, when: the phase does not fit ([`check_external_close_phase`]);
 /// the instance is still visible; `txid` is not confirmed on the node (unknown, or still only in the mempool);
-/// or the inclusion height is on the wrong side of the deadline for this role. `getTx` returns only
+/// or Alice's close was included before `D` in a phase before her reveal (it paid Bob). Bob's close at or after `D` is recorded as
+/// [`Event::NoidClosedAfterDeadline`] (it paid Alice, so it is no claim of his), and Alice's close before `D` in `lock_final` /
+/// `reveal_submitted` as [`Event::NoidClosedBeforeDeadline`] (it paid Bob, so it is no recovery of hers); CHAOS F-11. `getTx` returns only
 /// `{tx_hash, height, block_hash, tx_position}`, never the outputs, so the payout is NOT read: it follows from the
 /// branch rule (a close at `h < D` pays Bob, at `h >= D` pays Alice), which the block proof enforces.
 /// It cannot prove that `txid` is the call that closed THIS instance (it only proves that it is confirmed and
@@ -1808,21 +2026,52 @@ pub fn external_close_event(file: &SwapFile, noid: &NoidObservation, txid: &str)
     };
     let d = file.public.params.deadline_height;
     match file.role {
+        // CHAOS F-11: where her secret may be public (`reveal_submitted`, or `lock_final` with a reveal on record), a close before D is the claim branch
+        // (it paid Bob): recorded as such, log-only. Before the reveal nobody can have claimed it, so such a close is not one this file can explain.
+        Role::Alice if c.height < d && (matches!(&file.phase, Phase::Alice(AlicePhase::RevealSubmitted { .. })) || (matches!(&file.phase, Phase::Alice(AlicePhase::LockFinal { .. })) && reveal_evidence(file))) => {
+            require_final_close(&txid, c.height, noid)?;
+            return Ok(Event::NoidClosedBeforeDeadline { txid, height: c.height });
+        }
         Role::Alice if c.height < d => {
             return Err(format!(
                 "transaction {txid} was included at height {}, before the deadline D {d}: a close then pays Bob (the claim branch), so it is not Alice's recovery; nothing is recorded",
                 c.height
             ))
         }
+        // CHAOS F-11: a close at or after D pays Alice, so it is not Bob's claim; it is recorded as what it is (log-only, the phase does not move):
+        // the NOID leg of this file can no longer be claimed, and `bob_claim_action` ends it with an `abort` once the ETH leg is settled.
         Role::Bob if c.height >= d => {
-            return Err(format!(
-                "transaction {txid} was included at height {}, at or after the deadline D {d}: a close then pays Alice (the recovery branch), not Bob; nothing is recorded",
-                c.height
-            ))
+            require_final_close(&txid, c.height, noid)?;
+            return Ok(Event::NoidClosedAfterDeadline { txid, height: c.height });
         }
         _ => {}
     }
     Ok(Event::NoidClosedExternally { txid, height: c.height })
+}
+
+/// CHAOS M3: the two log-only closes of `tick --closed-by` end a leg of the swap file, so the close must be final (18 blocks deep) first.
+fn require_final_close(txid: &str, height: u64, noid: &NoidObservation) -> Result<(), String> {
+    let tip = noid.tip;
+    if !params::noid_final(tip, height) {
+        return Err(format!(
+            "transaction {txid} was included at height {height} but is not final yet (tip {tip}, final from tip {}): a reorg can still move it; run again once it is final, nothing is recorded",
+            height + params::NOID_FINALITY_DEPTH
+        ));
+    }
+    // Where a second node is configured it must see the close final too (as the `lost` path asks of it).
+    if let Some(e) = noid.second_error.as_deref() {
+        return Err(format!("the second node could not be read ({e}): it must see transaction {txid} final too; nothing is recorded"));
+    }
+    if let Some(second) = noid.second.as_deref() {
+        if !params::noid_final(second.tip, height) {
+            return Err(format!(
+                "transaction {txid} was included at height {height}, but the second node's tip {} is below the final height {}: it must see it final too; run again once both do, nothing is recorded",
+                second.tip,
+                height + params::NOID_FINALITY_DEPTH
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What a tick learns about a close that is recorded as included at some height (REVIEW-2 F6).
@@ -1884,6 +2133,7 @@ fn alice_action(
     eth: &EthObservation,
     now: u64,
     notes: &mut Vec<String>,
+    reveal_cutoff_passed: &mut bool,
 ) -> Action {
     use AlicePhase as A;
     let g = file.public.params.profile.gates();
@@ -2000,7 +2250,15 @@ fn alice_action(
                     Action::RevealEth { lock_id: lock.lock_id }
                 }
                 Err(e) => {
-                    notes.push(format!("not revealing: {e}"));
+                    // The cutoff text itself is a statement (it is also part of the re-send note above, beside `reveal_eth`); the sentence about the
+                    // reveal is added here only, where the action is not a reveal, and it names what must not be sent.
+                    notes.push(match &e {
+                        params::GateError::RevealCutoffPassed { .. } => {
+                            *reveal_cutoff_passed = true;
+                            format!("not revealing: {e}; the reveal must not be broadcast")
+                        }
+                        _ => format!("not revealing: {e}"),
+                    });
                     if params::alice_refund_ready(noid.tip, d) {
                         refund(noid)
                     } else {
@@ -2041,8 +2299,8 @@ fn alice_action(
             }
             Action::Wait { reason: "waiting for ETH claim finality".into() }
         }
-        A::RefundSubmitted { .. } => Action::Wait { reason: "NOID refund pending".into() },
-        A::RefundIncluded { .. } => Action::Wait { reason: "waiting for NOID refund finality".into() },
+        A::RefundSubmitted { .. } => Action::Wait { reason: format!("NOID refund pending{}", adoption_suffix(file)) },
+        A::RefundIncluded { .. } => Action::Wait { reason: format!("waiting for NOID refund finality{}", adoption_suffix(file)) },
         A::Done { instance, .. } => {
             if alice_leftover_refund(file, instance.as_ref(), noid, notes) {
                 return refund(noid);
@@ -2058,9 +2316,22 @@ fn alice_action(
         }
         A::Refunded { .. } => Action::Wait {
             reason: {
+                let base: String = {
                 // The ETH claim counts as seen mined when it is final, or when its last `eth_claim_mined` is not followed by an
                 // `eth_claim_reorged` (a claim that was mined and then taken back by a reorg is not a received claim).
                 let claim_seen = last_history(file, "eth_claim_final").is_some() || last_history(file, "eth_claim_mined") > last_history(file, "eth_claim_reorged");
+                if let Some(t) = recovery_target(file) {
+                    // The recovery close took ANOTHER instance than the recorded one (CHAOS X1/S3): what is true for that, and no claim about the
+                    // recorded one.
+                    return Action::Wait {
+                        reason: format!(
+                            "done: NOID refunded; the recovery close took another instance of the agreed amount (slot {}, creation {}) than the one this file recorded, which this file never saw closed{}",
+                            t.slot_index,
+                            t.creation_id,
+                            if claim_seen { "; the ETH claim was seen mined" } else { "" }
+                        ),
+                    };
+                }
                 if claim_seen {
                     "done: NOID refunded after the reveal; Bob never claimed it (as far as this tool saw, the refund closed the instance, so it was still unspent), so both legs ended with Alice".into()
                 } else if reveal_evidence(file) || reveal_may_have_been_sent(file) {
@@ -2070,11 +2341,165 @@ fn alice_action(
                 } else {
                     "done: NOID refunded".into()
                 }
+            };
+                format!("{base}{}", adoption_suffix(file))
             },
         },
         A::Lost { reason, .. } => Action::Wait { reason: format!("lost: {reason}") },
         A::Aborted { reason } => Action::Wait { reason: format!("aborted: {reason}") },
     }
+}
+
+/// CHAOS X1: the instance Alice's recovery close acts on when the one her file recorded is not at the contract any more.
+struct RecoveryAdoption {
+    recorded: NoidInstance,
+    /// The oldest instance of the agreed amount at the root (lowest creation, then slot): the one this recovery is for.
+    adopted: NoidInstanceStatus,
+    /// The other instances at the root (of any amount): not covered by this call.
+    others: Vec<NoidInstanceStatus>,
+}
+
+impl RecoveryAdoption {
+    /// A statement of what is recovered and that it is not the recorded instance; nothing that tells the operator what to do.
+    fn note(&self, file: &SwapFile) -> String {
+        let a = &self.adopted.instance;
+        let mut text = format!(
+            "the recorded instance (slot {}, creation {}) is not at the contract and this file never saw it closed; D {} is reached, so the recovery close (refund_noid) is for the oldest instance of the agreed amount at the root: slot {}, creation {}, which is NOT the recorded one (every instance at this opening pays Alice on the recovery branch)",
+            self.recorded.slot_index, self.recorded.creation_id, file.public.params.deadline_height, a.slot_index, a.creation_id
+        );
+        if !self.others.is_empty() {
+            text.push_str(&format!(
+                "; {} other instance(s) sit at the contract root and are not covered by this close: {}",
+                self.others.len(),
+                describe_instances(&self.others, None)
+            ));
+        }
+        text
+    }
+}
+
+/// CHAOS M1: may Alice's reveal be out (the secret public) in this phase? `reveal_submitted`, `revealed`, `done`, and `lock_final` with a reveal on
+/// record or possibly sent (the command-line path stays in `lock_final` after the operator sent it); and any phase whose history shows a reveal.
+fn alice_reveal_may_be_out(file: &SwapFile, p: &AlicePhase) -> bool {
+    match p {
+        AlicePhase::RevealSubmitted { .. } | AlicePhase::Revealed { .. } | AlicePhase::Done { .. } => true,
+        // Any other phase: by the history, not by the phase (a file sent back to `funding_final` by a reorged close still has its reveal on record).
+        _ => reveal_evidence(file) || reveal_may_have_been_sent(file),
+    }
+}
+
+/// CHAOS M1 (e): the log-only history entry written when a recovery close is offered for an instance other than the recorded one:
+/// `noid_recovery_adopted:<slot>:<creation>:<amount>`. A helper or an executor reads the target from it ([`recovery_target`]).
+const RECOVERY_ADOPTED: &str = "noid_recovery_adopted:";
+
+/// The instance a recovery close is for when the file adopted another one than it recorded (the last `noid_recovery_adopted:` entry), else `None`
+/// (then it is the recorded instance). For executors and helpers: the action itself names no instance.
+pub fn recovery_target(file: &SwapFile) -> Option<NoidInstance> {
+    let e = file.history.iter().rev().find_map(|h| h.event.strip_prefix(RECOVERY_ADOPTED))?;
+    // The reset entry (`noid_recovery_adopted:recorded`): a recovery close was decided for the recorded instance again.
+    if e == "recorded" {
+        return None;
+    }
+    let mut parts = e.split(':');
+    Some(NoidInstance { slot_index: parts.next()?.parse().ok()?, creation_id: parts.next()?.parse().ok()?, amount_micronoid: parts.next()?.parse().ok()? })
+}
+
+/// The sentence added to every text after an adoption: the instance recovered was not the one the file recorded.
+fn adoption_suffix(file: &SwapFile) -> String {
+    match recovery_target(file) {
+        Some(t) => format!(
+            "; the instance recovered was not the one this file recorded: the oldest instance of the agreed amount at the root (slot {}, creation {}) was taken for the recovery close (history entry `{RECOVERY_ADOPTED}`)",
+            t.slot_index, t.creation_id
+        ),
+        None => String::new(),
+    }
+}
+
+/// CHAOS X1 (seed 0xfeed42, scenario 583): Alice's file recorded an instance that is not at the contract in this poll, the recovery branch is open
+/// (`alice_refund_ready`), the file never saw that instance closed, and an instance of the agreed amount sits at the root (the funding came back
+/// as another incarnation after reorgs, or her close was dropped by one). The oldest such instance is the one a recovery close acts on, with the
+/// same choice rule as CHAOS F-19 (`created` / `funding_submitted`). It is decided afresh from the observation at every tick and written nowhere:
+/// the recorded instance of the phase is never replaced, so nothing before `D` (the reveal in particular, which needs the RECORDED instance in view)
+/// reads it, and a reorg that takes the tip back below `D` leaves every earlier decision exactly as it was. Only BEFORE a reveal (CHAOS S1: after
+/// one the recorded instance may have been claimed by Bob, and no evidence the file can collect rules that out), only when no poll saw the instance
+/// gone before `D`, and only when a configured second node backs the first (CHAOS S3).
+fn alice_recovery_adoption(file: &SwapFile, phase: &Phase, noid: &NoidObservation, now: u64) -> Option<RecoveryAdoption> {
+    match alice_recovery_check(file, phase, noid, now) {
+        RecoveryCheck::Yes(a) => Some(a),
+        _ => None,
+    }
+}
+
+/// CHAOS S3: what the adoption rule says about this observation.
+enum RecoveryCheck {
+    /// The rule does not apply (phase, height, evidence), or no instance of the agreed amount is at the root.
+    No,
+    /// Everything holds but the second node does not back the first one's word that the recorded instance is gone: not adopted, and the reason.
+    Blocked(String),
+    Yes(RecoveryAdoption),
+}
+
+/// CHAOS S3: is the recorded instance confirmed absent? The first node does not list it, and a configured second node is fresh and does not list it
+/// either (the rule of `alice_gone_trace`); a second node that could not be read, or one that the profile requires and is absent, confirms nothing.
+enum Absence {
+    Absent,
+    /// A node lists it.
+    Listed,
+    Unconfirmed(String),
+}
+
+fn recorded_instance_absence(file: &SwapFile, recorded: &NoidInstance, noid: &NoidObservation, now: u64) -> Absence {
+    if noid.find_instance(recorded).is_some() {
+        return Absence::Listed;
+    }
+    match noid.second.as_deref() {
+        Some(second) => {
+            if let Some(why) = second_stale("noid (second node)", second.observed_at, now) {
+                return Absence::Unconfirmed(why);
+            }
+            if second.find_instance(recorded).is_some() {
+                return Absence::Listed;
+            }
+            Absence::Absent
+        }
+        None => {
+            if let Some(e) = noid.second_error.as_deref() {
+                return Absence::Unconfirmed(format!("the second node could not be read ({e}), so it does not confirm that the recorded instance is gone"));
+            }
+            if file.public.params.profile.requires_second_node() && !noid.single_node_ok {
+                return Absence::Unconfirmed("this profile asks for a second node and none was given (--single-node-ok was not passed), so nothing confirms that the recorded instance is gone".to_string());
+            }
+            Absence::Absent
+        }
+    }
+}
+
+fn alice_recovery_check(file: &SwapFile, phase: &Phase, noid: &NoidObservation, now: u64) -> RecoveryCheck {
+    let Phase::Alice(p) = phase else { return RecoveryCheck::No };
+    // CHAOS S1: only BEFORE a reveal. After one (or where one may have been sent) Bob can have claimed the recorded instance, no marker proves he
+    // did not (a one-block reorg at D can still include his claim), and a lookalike must not stand in for it: never adopted.
+    if !matches!(p, AlicePhase::FundingFinal { .. } | AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. }) || alice_reveal_may_be_out(file, p) {
+        return RecoveryCheck::No;
+    }
+    let Some(recorded) = p.instance() else { return RecoveryCheck::No };
+    if !params::alice_refund_ready(noid.tip, file.public.params.deadline_height) || noid.find_instance(recorded).is_some() || instance_marked_gone_before_d(file) {
+        return RecoveryCheck::No;
+    }
+    // M1 (a): the operator recorded a close before D (the claim branch, which pays Bob): the recorded instance went to Bob.
+    if last_history(file, "noid_closed_before_deadline").is_some() {
+        return RecoveryCheck::No;
+    }
+    let all = noid.all_instances();
+    let mut fitting: Vec<NoidInstanceStatus> = all.iter().filter(|v| instance_fits(file, v)).cloned().collect();
+    fitting.sort_by_key(|v| (v.instance.creation_id, v.instance.slot_index));
+    let Some(adopted) = fitting.first().cloned() else { return RecoveryCheck::No };
+    match recorded_instance_absence(file, recorded, noid, now) {
+        Absence::Absent => {}
+        Absence::Listed => return RecoveryCheck::No,
+        Absence::Unconfirmed(why) => return RecoveryCheck::Blocked(why),
+    }
+    let others = all.into_iter().filter(|o| o.instance.slot_index != adopted.instance.slot_index || o.instance.creation_id != adopted.instance.creation_id).collect();
+    RecoveryCheck::Yes(RecoveryAdoption { recorded: recorded.clone(), adopted, others })
 }
 
 /// REVIEW-2 F9, Alice after the reveal: should she take the NOID back? Yes when the next call height has reached `D`
@@ -2088,6 +2513,8 @@ fn alice_leftover_refund(file: &SwapFile, recorded: Option<&NoidInstance>, noid:
     let Some(v) = noid.find_instance(recorded) else {
         let all = noid.all_instances();
         if !all.is_empty() {
+            // CHAOS M1 (c), S1: after a reveal the file cannot tell whether Bob claimed the recorded instance, whatever markers it holds.
+            notes.push("whether Bob claimed the recorded instance before D is not known to this file; the instance at the root can be recovered with the wallet".to_string());
             // REVIEW-3 F10: name the slots so the operator can refund the others with the wallet.
             notes.push(format!(
                 "the instance we recorded (slot {}, creation {}) is gone; another one sits at the root and is not refunded here: {}",
@@ -2103,7 +2530,7 @@ fn alice_leftover_refund(file: &SwapFile, recorded: Option<&NoidInstance>, noid:
         return false;
     }
     notes.push(format!(
-        "REVIEW-2 F9: the secret is public but Bob never claimed the NOID and D {} is reached: taking it back (refund_noid)",
+        "REVIEW-2 F9: the secret is public but Bob never claimed the NOID; D {} is reached and the instance is still at the contract; refund_noid is due",
         file.public.params.deadline_height
     ));
     // REVIEW-3 F10: any other instance at the root is not covered by this refund; say which slots, for a wallet refund.
@@ -2190,6 +2617,60 @@ fn bob_late_lock(file: &SwapFile, after: &BobPhase, events: &[Event], noid: &Noi
             .map(str::to_string)
     });
     let note = marker.and_then(|m| late_lock_note(&m, file.public.params.deadline_height));
+    (fresh, note)
+}
+
+/// G1: the start of the history entry that records, at adoption, that Alice first recorded Bob's lock at a Parano1d tip above Bob's last lock height:
+/// `lock_seen_late:<lock id, 64 hex>:<tip>:<last lock height>`. Log only (no phase change, no decision reads it); the note is built from it on every
+/// later tick while she holds the lock, because the tip moves on and a note computed from the current tip would say something else.
+const LOCK_SEEN_LATE_MARKER: &str = "lock_seen_late:";
+
+/// G1 (decided: a note only, never a refusal): the marker for the lock adopted in this tick's events, or `None`. The tip is the poll's, not the
+/// lock's own block (the Ethereum lock carries no Parano1d height), and a read-only tick does not save the marker, so the recorded height can be
+/// later than the first sight: the note says "first recorded". The limit is the height Bob's own tool gives up
+/// at ([`params::Gates::bob_lock_by_min_window`]); between the nominal lock-by and that height Bob may still lock with a shorter window, and
+/// nothing is said.
+fn lock_seen_late_marker(file: &SwapFile, events: &[Event], tip: u64) -> Option<String> {
+    let last = file.public.params.profile.gates().bob_lock_by_min_window(file.public.params.deadline_height);
+    if tip <= last {
+        return None;
+    }
+    events.iter().find_map(|e| match e {
+        Event::EthLockSeen { lock } => Some(format!("{LOCK_SEEN_LATE_MARKER}{}:{tip}:{last}", hex::encode(lock.lock_id))),
+        _ => None,
+    })
+}
+
+/// G1: the note for a late-seen lock, from its marker. A statement of heights only: it says neither that Alice should reveal nor that she should not.
+fn lock_seen_late_note(marker: &str, lock_by: u64) -> Option<String> {
+    let mut parts = marker.strip_prefix(LOCK_SEEN_LATE_MARKER)?.split(':');
+    let id: [u8; 32] = hex::decode(parts.next()?).ok()?.try_into().ok()?;
+    let tip: u64 = parts.next()?.parse().ok()?;
+    let last: u64 = parts.next()?.parse().ok()?;
+    Some(format!(
+        "Bob's lock {} was first recorded at Parano1d height {tip}, after Bob's last lock height {last} (nominal lock-by {lock_by}); it may have been mined in an earlier block than that poll",
+        short_id(&id)
+    ))
+}
+
+/// G1, Alice's file after this tick's events: the marker to log (a lock adopted THIS tick that was first recorded above Bob's last lock height) and
+/// the note (that marker, or the one in the history for the lock she holds), the note only in `lock_seen`, `lock_final` and `reveal_submitted` (the library path moves there in the tick that sends the reveal). Nothing here changes an
+/// event or an action.
+fn alice_late_lock(file: &SwapFile, after: &AlicePhase, events: &[Event], noid: &NoidObservation) -> (Option<String>, Option<String>) {
+    let fresh = lock_seen_late_marker(file, events, noid.tip);
+    let Some(lock) = after.lock().filter(|_| matches!(after, AlicePhase::LockSeen { .. } | AlicePhase::LockFinal { .. } | AlicePhase::RevealSubmitted { .. })) else {
+        return (fresh, None);
+    };
+    let id = hex::encode(lock.lock_id);
+    let marker = fresh.clone().or_else(|| {
+        file.history
+            .iter()
+            .rev()
+            .map(|h| h.event.as_str())
+            .find(|e| e.strip_prefix(LOCK_SEEN_LATE_MARKER).is_some_and(|rest| rest.starts_with(&id)))
+            .map(str::to_string)
+    });
+    let note = marker.and_then(|m| lock_seen_late_note(&m, file.public.params.lock_by_height));
     (fresh, note)
 }
 
@@ -2354,7 +2835,19 @@ fn bob_preimage_fact(
     now: u64,
     notes: &mut Vec<String>,
 ) -> Option<Option<Event>> {
-    let candidates = preimage_candidates(eth, lock.lock_id);
+    let mut candidates = preimage_candidates(eth, lock.lock_id);
+    // CHAOS S2: a CLAIMED lock of Bob's other than the one in this file, on this swap's lock word, published the secret too. It gets the same
+    // verification as every candidate below (it must open the lock word and match the NOID address) before anything is done with it.
+    let other_claims = |e: &EthObservation| e.other_claims.iter().map(|c| c.preimage).collect::<Vec<_>>();
+    let mut from_other: Vec<[u8; 32]> = other_claims(eth);
+    if let Some(second) = eth.second.as_deref() {
+        from_other.extend(other_claims(second));
+    }
+    for x in &from_other {
+        if !candidates.contains(x) {
+            candidates.push(*x);
+        }
+    }
     if candidates.is_empty() {
         return None;
     }
@@ -2366,7 +2859,12 @@ fn bob_preimage_fact(
                     || eth.overlong_claim.as_ref().is_some_and(|p| p.lock_id == lock.lock_id && p.preimage == *x)
                     || eth.reverted_claim.as_ref().is_some_and(|p| p.lock_id == lock.lock_id && p.preimage == *x)
                     || eth.claimed.as_ref().is_some_and(|c| c.lock_id == lock.lock_id && c.preimage == *x);
-                if !on_primary {
+                if from_other.contains(x) && !on_primary {
+                    notes.push(
+                        "the secret was read from a CLAIMED lock of Bob's other than the one in this file (same lock word): it is checked against the hashlock and the NOID address"
+                            .to_string(),
+                    );
+                } else if !on_primary {
                     notes.push(
                         "REVIEW-4 R4-8: the secret was read from the SECOND Ethereum node; the first one does not show it (lagging or silent). It is checked against the hashlock and the NOID address"
                             .to_string(),
@@ -2420,11 +2918,35 @@ fn bob_claim_action(file: &SwapFile, preimage: &[u8; 32], noid: &NoidObservation
     let g = params_.profile.gates();
     let d = params_.deadline_height;
     if our_instance_gone(file, noid) {
+        // CHAOS F-11: positive evidence that the close came at or after D (the recovery branch, which pays Alice): the instance was seen alive
+        // when the claim branch had closed (the file's own poll), or the operator recorded a close at or after D with `tick --closed-by`. Then
+        // Bob's NOID leg is over, whoever closed it; the abort is given once his ETH leg is settled (the caller).
+        if params::alice_refund_ready(noid.tip, d) {
+            // The reason names the evidence (CHAOS M3): the operator's recorded close, or the poll that listed the instance.
+            let operator = file.history.iter().rev().find_map(|h| h.event.strip_prefix("noid_closed_after_deadline:"));
+            if let Some(detail) = operator {
+                let (txid, height) = detail.split_once(':').unwrap_or((detail, "?"));
+                return Action::Abort {
+                    reason: format!(
+                        "claim branch closed: the operator recorded the close {txid} at height {height} (at or after D {d}, the recovery branch, which pays Alice), so Bob's NOID claim can no longer happen"
+                    ),
+                };
+            }
+            if last_history(file, "noid_instance_alive_at_d").is_some() {
+                let tip = file.history.iter().rev().find_map(|h| h.event.strip_prefix(BOB_ALIVE_TIP)).unwrap_or("?");
+                return Action::Abort {
+                    reason: format!(
+                        "claim branch closed: the instance was listed at tip {tip}, when the claim branch had closed (D {d}) and block D - 1 was final, and it is gone now (a recovery close, which pays Alice, took it), so Bob's NOID claim can no longer happen"
+                    ),
+                };
+            }
+        }
         // Closed by a transaction we did not track (a lost submission of
         // ours after a crash, or a third party paying Bob): a human must
-        // check the receipts; re-proving would only burn time.
+        // check the receipts; re-proving would only burn time. Without evidence of WHEN it was closed the file does not guess who was paid:
+        // a close before D paid Bob, one at or after D paid Alice; `tick --closed-by TXID` records either.
         return Action::Wait {
-            reason: "the instance is gone but no tracked transaction closed it; verify the contract receipts manually".into(),
+            reason: "the instance is gone but no tracked transaction closed it; verify the contract receipts manually (then `tick --closed-by TXID` records it: a close before D paid Bob, one at or after D paid Alice)".into(),
         };
     }
     if !noid.pending_calls.is_empty() {
@@ -2553,6 +3075,115 @@ fn lock_reuse_safe(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation
         && t0.saturating_sub(chain_now.saturating_add(g.de_s)) >= g.w_a_min_s
 }
 
+/// CHAOS F-6: is the lock of a Bob file in `locked` gone for good?
+enum LockGone {
+    /// The lock can never be on the chain again: the abort reason (a statement of the facts).
+    ForGood(String),
+    /// It may still be (or come back): why the file keeps waiting.
+    NotYet(String),
+}
+
+/// CHAOS F-6: Bob's file is in `locked` and the poll shows no such lock. `newLock` reverts once `block.timestamp >= T_reveal`, and Alice's `claim`
+/// reverts too, so after `T_reveal` a lock that is not on the chain cannot come into it, whatever happens to the transaction that made it. The
+/// rule is therefore time-bound, not poll-bound: the lock is gone for good only when, on EVERY node asked, the contract shows no such lock, the
+/// head is fresh and past `T_reveal` by the profile's Ethereum finality time (a reorg of the blocks around `T_reveal` is then impossible). (The
+/// block number the lock was recorded at says nothing here: after a reorg the new chain's finalized number passes it while the lock's block is
+/// in the abandoned fork.) Before that the file keeps its phase: it still watches for Alice's secret, and a lock that comes back is seen as before.
+fn bob_lock_gone_for_good(file: &SwapFile, lock: &LockSummary, eth: &EthObservation, now: u64) -> LockGone {
+    let g = file.public.params.profile.gates();
+    if let Some(alarm) = eth_lag_alarm(file, eth, now) {
+        return LockGone::NotYet(format!("the Ethereum node lags, so its answer proves nothing: {alarm}"));
+    }
+    let mut nodes: Vec<(&str, &EthObservation)> = vec![("first", eth)];
+    match eth.second.as_deref() {
+        Some(second) => {
+            if let Some(why) = second_stale("eth (second node)", second.observed_at, now) {
+                return LockGone::NotYet(why);
+            }
+            nodes.push(("second", second));
+        }
+        None => {
+            if let Some(e) = eth.second_error.as_deref() {
+                return LockGone::NotYet(format!("the second Ethereum node could not be read ({e}): it must confirm that the lock is not there"));
+            }
+            if file.public.params.profile.requires_second_node() && !eth.single_node_ok {
+                return LockGone::NotYet("a second Ethereum node is required to confirm that the lock is not there (pass --eth-rpc twice, or --single-node-ok to accept the risk)".to_string());
+            }
+        }
+    }
+    // CHAOS M4: a node on another chain, or with other code at the contract address, answers "no such lock" for the wrong reasons.
+    let pinned = &file.public.params.eth;
+    for (name, e) in &nodes {
+        match e.chain_id {
+            Some(id) if id == pinned.chain_id => {}
+            Some(id) => return LockGone::NotYet(format!("the {name} Ethereum node is on chain {id}, the swap is on {}", pinned.chain_id)),
+            None => return LockGone::NotYet(format!("the {name} Ethereum node's chain id is unknown")),
+        }
+        match (pinned.code_hash, e.contract_code_hash) {
+            (Some(a), Some(b)) if a == b => {}
+            (Some(_), Some(_)) => return LockGone::NotYet(format!("the {name} Ethereum node shows other code at the contract address than the pinned one")),
+            (None, _) => return LockGone::NotYet("no HTLC code hash is pinned in the swap file".to_string()),
+            (_, None) => return LockGone::NotYet(format!("the {name} Ethereum node's contract code hash is unknown")),
+        }
+    }
+    if let Some((name, _)) = nodes.iter().find(|(_, e)| e.find_lock(&lock.lock_id).is_some()) {
+        return LockGone::NotYet(format!("the {name} Ethereum node shows it"));
+    }
+    // CHAOS S2 (m7): "nothing of Bob's is locked and no secret can be published" needs more than this lock being absent: no OTHER lock of Bob's
+    // sender to Alice's receiver on this swap's lock word may be open or claimed. The filter is the engine's own, not the watcher's.
+    for (name, e) in &nodes {
+        let others: Vec<EthLock> = e
+            .all_locks()
+            .into_iter()
+            .filter(|l| l.lock_id != lock.lock_id && l.sender == pinned.bob_sender && l.receiver == pinned.alice_receiver && l.hashlock == file.public.hashlock)
+            .collect();
+        // A CLAIMED one means the secret is public. Where the observation carries its preimage Bob's file has already moved to `secret_seen`
+        // (`bob_preimage_fact`); here it did not, so the file waits and says what it means.
+        if let Some(c) = others.iter().find(|l| l.claimed) {
+            return LockGone::NotYet(format!(
+                "ALARM: another lock of Bob's on this lock word ({}) was CLAIMED (on the {name} Ethereum node), so the secret is public although this file has not read it: claim the NOID before D {} (read the preimage from that lock's Claimed event or getLock record)",
+                short_id(&c.lock_id),
+                file.public.params.deadline_height
+            ));
+        }
+        // An OPEN one: ETH may still be locked there. Once its own T_reveal has passed it can be refunded by hand.
+        if let Some(o) = others.iter().find(|l| !l.refunded) {
+            if e.latest_timestamp >= o.timelock {
+                return LockGone::NotYet(format!(
+                    "ALARM: another lock of Bob's on this lock word ({}) is still open on the {name} Ethereum node and its T_reveal {} has passed: it can be refunded by hand with `live.js refund` (this tool offers no action for a lock that is not in this file)",
+                    short_id(&o.lock_id),
+                    o.timelock
+                ));
+            }
+            return LockGone::NotYet(format!("the {name} Ethereum node lists another open lock of Bob's on this swap's lock word ({}), so ETH may still be locked", short_id(&o.lock_id)));
+        }
+    }
+    let gate = lock.t_reveal.saturating_add(g.eth_finality_s);
+    if let Some((name, e)) = nodes.iter().find(|(_, e)| e.latest_timestamp < gate) {
+        return LockGone::NotYet(format!(
+            "it could still land or come back until T_reveal {} plus the Ethereum finality time {} s (chain time on the {name} node {})",
+            lock.t_reveal, g.eth_finality_s, e.latest_timestamp
+        ));
+    }
+    // CHAOS m6: where the node reports the FINALIZED block's time, that time must have reached T_reveal too (the head time above is the floor); under
+    // `production` it must be reported.
+    if file.public.params.profile == params::ProfileName::Production {
+        if let Some((name, _)) = nodes.iter().find(|(_, e)| e.finalized_timestamp.is_none()) {
+            return LockGone::NotYet(format!("the {name} Ethereum node does not report the finalized block's time, which the production profile requires before it says that the lock is gone"));
+        }
+    }
+    if let Some((name, t)) = nodes.iter().find_map(|(n, e)| e.finalized_timestamp.filter(|t| *t < lock.t_reveal).map(|t| (*n, t))) {
+        return LockGone::NotYet(format!("the finalized block's time on the {name} Ethereum node ({t}) has not reached T_reveal {} yet", lock.t_reveal));
+    }
+    LockGone::ForGood(format!(
+        "the ETH lock {} (recorded in block {}) is not on the chain on any node asked, and chain time is past T_reveal {} by the finality time {} s: a lock can no longer be created or claimed, so nothing of Bob's is locked and no secret can be published against it",
+        short_id(&lock.lock_id),
+        lock.block_number,
+        lock.t_reveal,
+        g.eth_finality_s
+    ))
+}
+
 /// REVIEW-4 R4-6: why Bob's Ethereum leg is not settled for good yet, or `None` when the lock is closed in a final block (a refund of his, or
 /// Alice's claim).
 fn eth_leg_not_settled(file: &SwapFile, lock: &LockSummary, eth: &EthObservation) -> Option<String> {
@@ -2662,6 +3293,7 @@ fn bob_with_eth_left(base: Action, left: EthLeft, notes: &mut Vec<String>) -> Ac
 /// `poseidon` kind, Bob, before a lock transaction goes out (`None` for the `sha256` kind and when everything holds):
 /// - (only `first`, i.e. the first lock, not a re-send) his client R passed its self-test on this machine for the owner-authorization
 ///   version of the next block (review V2-10: with a lock on `Addr(s)` the stock wallet import cannot claim, only client R can);
+/// - a second Ethereum node that is configured answered (REVIEW-7 R7-4: its failed poll is a wait, not a scan on one node);
 /// - the query for `Locked` logs of Bob's own sender (indexed topic; REVIEW-7 R7-1) ran and is complete on every node asked (review V2-8,
 ///   REVIEW-6 R6-1: the check is a state of the observation, and a failed or absent one holds the lock back; it never fails a poll). A check
 ///   that cannot be trusted is "wait", not "go";
@@ -2677,6 +3309,11 @@ fn poseidon_prelock_blocker(file: &SwapFile, noid: &NoidObservation, eth: &EthOb
         if let Some(why) = selftest_blocker(file, noid, now) {
             return Some(why);
         }
+    }
+    // REVIEW-7 R7-4: a second Ethereum node that was configured but could not be read is not dropped silently: the scan below would then rest
+    // on one node, which can hide an earlier lock of Bob's own sender. Without a second node configured (`--single-node-ok`) nothing changes.
+    if let Some(e) = eth.second_error.as_deref() {
+        return Some(format!("the second Ethereum node could not be read ({e}): it must agree before this step (F5)"));
     }
     let nodes: Vec<(&str, &EthObservation)> = std::iter::once(("first", eth)).chain(eth.second.as_deref().map(|s| ("second", s))).collect();
     for (name, e) in &nodes {
@@ -2815,6 +3452,24 @@ fn bob_action(
                 Ok(()) => {}
                 // REVIEW-2 F10: several instances fit; the tool does not lock on a guess. Not an abort: it may clear up.
                 Err(InstanceProblem::Ambiguous(why)) => {
+                    // CHAOS F-10: the give-up heights come before the wait. A lock that can no longer be made is not waited for for ever
+                    // because the root lists a lookalike: past Bob's last lock height, or past `B_bob` blocks after funding finality (that one only
+                    // while no lock_eth intent was cancelled, as in `bob_last_lock_height`), Bob gives up at the same heights as with one instance.
+                    // Before those heights the wait stands, and no lock goes out on a guess. Three small differences from the one-instance path,
+                    // all on the safe side: (1) that path first waits on pending calls at the instance, (2) and on an unknown Ethereum timestamp
+                    // (this one aborts on the heights alone, which need neither); (3) with a cancelled lock intent (Known or Unrecorded) that path
+                    // judges the send by `lock_reuse_safe` and can abort earlier than the heights used here.
+                    let last = g.bob_lock_by_min_window(d);
+                    let past = if noid.tip > last {
+                        Some(params::GateError::PastLockBy { h_now: noid.tip, lock_by: last })
+                    } else if matches!(cancelled_lock(file), CancelledLock::None) && noid.tip > final_at_tip.saturating_add(g.b_bob) {
+                        Some(params::GateError::PastBobWindow { h_now: noid.tip, h_final: *final_at_tip, b_bob: g.b_bob })
+                    } else {
+                        None
+                    };
+                    if let Some(e) = past {
+                        return Action::Abort { reason: format!("not locking: {e}") };
+                    }
                     notes.push(format!("not lock_eth: {why}"));
                     return Action::Wait { reason: format!("more than one instance at the contract root: {why}") };
                 }
@@ -2950,6 +3605,17 @@ fn bob_action(
             Action::Wait { reason: "lock not yet visible".into() }
         }
         B::Locked { lock, .. } => {
+            // CHAOS F-6: the file holds a lock that this poll does not show. The watcher asks the contract itself (`getLock`, which reverts
+            // `LockNotFound` for an unknown id) whenever the logs show nothing, so "not visible" is the contract's own answer, and a lock that
+            // exists but is missing from the logs fails the poll instead. A lock missing from one poll is NOT gone (a reorg can put it back, a node can
+            // lag): the file ends only when it can no longer land, and says why it keeps waiting until then.
+            if eth.find_lock(&lock.lock_id).is_none() {
+                match bob_lock_gone_for_good(file, lock, eth, now) {
+                    LockGone::ForGood(reason) => return Action::Abort { reason },
+                    LockGone::NotYet(why) if why.starts_with("ALARM") => notes.push(why),
+                    LockGone::NotYet(why) => notes.push(format!("the ETH lock is not visible in this poll (the contract shows no such lock): {why}")),
+                }
+            }
             if params::bob_eth_refund_ready(eth.latest_timestamp, lock.t_reveal) {
                 return Action::RefundEth { lock_id: lock.lock_id };
             }
@@ -3048,6 +3714,12 @@ fn intent_effect_seen(file: &SwapFile, intent: &PendingIntent, noid: &NoidObserv
     use crate::state::{AlicePhase as A, BobPhase as B};
     match intent.action.as_str() {
         "refund_noid" => {
+            // CHAOS X1: a recovery close for another incarnation names it: seen when that one is gone.
+            if let Some(r) = intent.params.get("recovery_instance") {
+                let (slot, creation) = (r.get("slot_index").and_then(Value::as_u64), r.get("creation_id").and_then(Value::as_u64));
+                let still_there = noid.all_instances().iter().any(|v| Some(u64::from(v.instance.slot_index)) == slot && Some(v.instance.creation_id) == creation);
+                return !still_there || matches!(&file.phase, Phase::Alice(A::RefundSubmitted { .. } | A::RefundIncluded { .. } | A::Refunded { .. }));
+            }
             return our_instance_gone(file, noid)
                 || matches!(&file.phase, Phase::Alice(A::RefundSubmitted { .. } | A::RefundIncluded { .. } | A::Refunded { .. }))
         }
@@ -3094,6 +3766,14 @@ fn intent_effect_seen(file: &SwapFile, intent: &PendingIntent, noid: &NoidObserv
 fn intent_wait_reason(intent: &PendingIntent) -> String {
     format!(
         "intent {} pending since {} (unix): the chain does not show it yet; reuse the printed parameters, or `swap-cli intent FILE --cancel` (with the same chain flags as tick) if nothing was sent",
+        intent.action, intent.decided_at
+    )
+}
+
+/// The wait reason of a held `reveal_eth` intent whose reveal cutoff has passed: the printed parameters are no longer to be used.
+fn reveal_cutoff_wait_reason(intent: &PendingIntent) -> String {
+    format!(
+        "intent {} pending since {} (unix): the chain does not show it yet and its reveal cutoff has passed, so the printed parameters are not to be used; if nothing was sent, cancel it with `swap-cli intent FILE --cancel` (with the same chain flags as tick); if a reveal may have been sent, look at the contract",
         intent.action, intent.decided_at
     )
 }
@@ -3153,7 +3833,7 @@ pub fn tick_apply(
     let kind = decision.action.kind();
     if kind == "fund_noid" {
         guard_fund_noid(file, noid, &mut decision);
-    } else if kind == "refund_noid" && our_instance_gone(file, noid) {
+    } else if kind == "refund_noid" && our_instance_gone(file, noid) && alice_recovery_adoption(file, &file.phase, noid, now).is_none() {
         let why = "the instance is not visible, so there is nothing to refund (already closed? verify the contract receipts)".to_string();
         decision.notes.push(format!("not refund_noid: {why}"));
         decision.action = Action::Wait { reason: why };
@@ -3164,10 +3844,19 @@ pub fn tick_apply(
     // let the chain resolve it, and the next tick records it. A read-only tick (`record == false`) records nothing.
     if let Action::Abort { reason } = &decision.action {
         if record {
-            if let Some(kind) = spend_may_be_in_flight(file, now) {
-                decision.notes.push(format!(
-                    "abort not recorded: a {kind} was decided for this swap and never cancelled, so it may have been sent (a funding or a lock that the chain does not show yet, or that a reorg took back). Look at the wallet / the contract; `swap-cli intent FILE --cancel` records that it was not sent"
-                ));
+            if let Some((kind, cancelled_at)) = spend_may_be_in_flight(file, now) {
+                decision.notes.push(match cancelled_at {
+                    None => format!(
+                        "abort not recorded: a {kind} was decided for this swap and never cancelled, so it may have been sent (a funding or a lock that the chain does not show yet, or that a reorg took back). Look at the wallet / the contract; `swap-cli intent FILE --cancel` records that it was not sent"
+                    ),
+                    Some(at) => {
+                        let hold = file.public.params.profile.gates().abort_after_cancel_s;
+                        let left = hold.saturating_sub(now.saturating_sub(at));
+                        format!(
+                            "abort not recorded yet: a {kind} was decided for this swap and cancelled at {at} (unix), {hold} s are kept back after a cancel ({left} s left) because a cancel rests on one node's view of the mempool, so the send may still land (a funding or a lock that the chain does not show yet, or that a reorg took back). Look at the wallet / the contract; the abort is recorded then, if it still stands"
+                        )
+                    }
+                });
             } else if let Some(why) = abort_eth_blocker(file, eth, now) {
                 decision.notes.push(format!("abort not recorded: {why}"));
                 decision.action = Action::Wait { reason: format!("{reason}; abort not recorded yet: {why}") };
@@ -3184,6 +3873,27 @@ pub fn tick_apply(
                 if file.apply(&event, now).is_ok() {
                     decision.events.push(event);
                     file.pending_action = None;
+                    // A funding that was decided and then cancelled is taken as not sent, which is the operator's word; if it was sent and then
+                    // closed (by Alice's own recovery) the tool had no way to see it. Said as a fact, beside the recorded abort.
+                    // CHAOS m11: Bob's `locked` ended because the lock can never exist: a pending `refund_eth` intent can never take effect, so the
+                    // ledger resolves it here (as it resolves any intent whose effect is seen or superseded) instead of holding it for ever.
+                    if matches!(&file.phase, Phase::Bob(BobPhase::Aborted { .. })) {
+                        if let Some(i) = file.pending_intent.clone().filter(|i| i.action == "refund_eth") {
+                            file.log("intent_resolved:refund_eth", now);
+                            file.pending_intent = None;
+                            decision.notes.push("the pending refund_eth intent is resolved: the lock is not on the chain and cannot be created or claimed any more, so there is nothing to refund".to_string());
+                            status = IntentStatus::Resolved(i);
+                        }
+                    }
+                    // (Only for the window abort, with nothing visible at the root: the other cases have their own notes, and the text says both.)
+                    let window_abort = matches!(&decision.events.last(), Some(Event::Abort { reason }) if reason.starts_with("too late to fund"));
+                    if matches!(file.phase, Phase::Alice(_))
+                        && window_abort
+                        && noid.all_instances().is_empty()
+                        && last_history(file, "intent_cancelled:fund_noid") > last_history(file, "intent_decided:fund_noid")
+                    {
+                        decision.notes.push(ABORT_AFTER_CANCELLED_FUNDING_NOTE.to_string());
+                    }
                 } else {
                     decision.notes.push(format!("abort not recorded: not allowed in phase `{}`", file.phase.name()));
                 }
@@ -3209,7 +3919,9 @@ pub fn tick_apply(
                     intent.action, intent.decided_at
                 ));
                 decision.notes.push(format!("frozen parameters of the pending {}: {}", intent.action, intent.params));
-                decision.action = Action::Wait { reason: format!("{due} is due but {}", intent_wait_reason(&intent)) };
+                // A held reveal whose cutoff has passed: its printed parameters are not to be used, so the cancel is the step that lets the refund out.
+                let held = if intent.action == "reveal_eth" && decision.reveal_cutoff_passed { reveal_cutoff_wait_reason(&intent) } else { intent_wait_reason(&intent) };
+                decision.action = Action::Wait { reason: format!("{due} is due but {held}") };
             } else {
                 if decision.action.has_side_effect() || matches!(decision.action, Action::Wait { .. }) {
                     decision.notes.push(format!("held: fresh decision was {}", decision.action.kind()));
@@ -3247,6 +3959,10 @@ pub fn tick_apply(
                 decision.action = Action::Wait {
                     reason: match &screen_refuses {
                         Some(f) => producer_gate::pending_lock_wait_reason(f, intent.decided_at),
+                        // A held `reveal_eth` whose fresh decision is the failed reveal cutoff (the structured hint, not the reason text).
+                        None if intent.action == "reveal_eth" && decision.reveal_cutoff_passed && matches!(decision.action, Action::Wait { .. }) => {
+                            reveal_cutoff_wait_reason(&intent)
+                        }
                         None => intent_wait_reason(&intent),
                     },
                 };
@@ -3268,6 +3984,13 @@ pub fn tick_apply(
                 params["late_cutoff"] = serde_json::json!(l.timelock.saturating_sub(file.public.params.profile.gates().de_s));
             }
         }
+        // CHAOS X1: a recovery close that is for an instance other than the recorded one names it, so that the intent resolves when THAT instance is
+        // gone (the recorded one is gone already) and so that a second round for another instance is a new intent.
+        if matches!(decision.action, Action::RefundNoid { .. }) {
+            if let Some(a) = alice_recovery_adoption(file, &file.phase, noid, now).filter(|_| instance_gone_in(&file.phase, noid)) {
+                params["recovery_instance"] = serde_json::json!({ "slot_index": a.adopted.instance.slot_index, "creation_id": a.adopted.instance.creation_id });
+            }
+        }
         let intent = PendingIntent {
             action: decision.action.kind().to_string(),
             params,
@@ -3285,7 +4008,7 @@ pub fn tick_apply(
 
 /// CHAOS F-1: has a `fund_noid` / `lock_eth` been decided for this swap (a ledger intent) without a later `intent_cancelled`? If so
 /// it may have been sent, and a file must not say `aborted` over a funding or a lock the chain has not shown (yet). Returns its kind.
-fn spend_may_be_in_flight(file: &SwapFile, now: u64) -> Option<&'static str> {
+fn spend_may_be_in_flight(file: &SwapFile, now: u64) -> Option<(&'static str, Option<u64>)> {
     // REVIEW-4 R4-6: the hold applies only while the spend may still be on its way. A `lock_eth` the file has already SEEN on chain (the
     // phase holds the lock: Bob is past `funding_final` / `lock_submitted`, e.g. in `secret_seen`) is not in flight any more, so an abort
     // decided then (the claim branch closed on him) is recorded. A `fund_noid` stays held: the only phase an abort can end Alice's file
@@ -3295,16 +4018,22 @@ fn spend_may_be_in_flight(file: &SwapFile, now: u64) -> Option<&'static str> {
         Phase::Bob(p) => p.lock().is_some(),
         Phase::Alice(_) => false,
     };
-    ["fund_noid", "lock_eth"].into_iter().find(|kind| {
-        if *kind == "lock_eth" && lock_seen {
-            return false;
+    // `None`: nothing in flight. `Some((kind, None))`: decided and never cancelled. `Some((kind, Some(at)))`: decided, cancelled at `at`, and
+    // the hold after a cancel has not run out.
+    ["fund_noid", "lock_eth"].into_iter().find_map(|kind| {
+        if kind == "lock_eth" && lock_seen {
+            return None;
         }
         let decided = last_history(file, &format!("intent_decided:{kind}"));
         let cancelled = last_history(file, &format!("intent_cancelled:{kind}"));
+        decided?;
+        if decided > cancelled {
+            return Some((kind, None));
+        }
         // Review M1: a cancel is only as good as the one node's view of the mempool behind it, so a cancelled send keeps the abort
         // back for an hour (the next ticks record it): a transaction still queued elsewhere has landed by then.
-        let recently_cancelled = cancelled.is_some_and(|c| now.saturating_sub(file.history[c].at) < file.public.params.profile.gates().abort_after_cancel_s);
-        decided.is_some() && (decided > cancelled || recently_cancelled)
+        let at = file.history[cancelled?].at;
+        (now.saturating_sub(at) < file.public.params.profile.gates().abort_after_cancel_s).then_some((kind, Some(at)))
     })
 }
 
@@ -3352,6 +4081,9 @@ fn abort_eth_blocker(file: &SwapFile, eth: &EthObservation, now: u64) -> Option<
         }
     }
 }
+
+/// X2: the note beside a recorded Alice `aborted` whose history shows a `fund_noid` that was decided and then cancelled.
+const ABORT_AFTER_CANCELLED_FUNDING_NOTE: &str = "a fund_noid was decided and later cancelled (taken as not sent); no instance of this contract is visible and the funding window is closed; if a funding was sent, it is no longer at the contract: check the wallet's history";
 
 /// What the recorded reason of an abort over a lock that never showed says to do if one lands after all (REVIEW-5 R5-4).
 const ABORT_LOCK_MAY_LAND: &str =

@@ -17,7 +17,7 @@ const path = require("path");
 const { spawn } = require("child_process");
 
 const isolated = require("./helpers/isolated-home"); // before anything else: the per-user lock record must never touch the real home
-const live = require("../scripts/live.js");
+const { live } = require("./helpers/live-module"); // live.js, its claim told that the tests use the in-process provider (see the helper)
 
 const HOUR = 3600;
 const rand32 = () => "0x" + crypto.randomBytes(32).toString("hex");

@@ -4,7 +4,7 @@ Atomic swaps between **Parano1d (NOID)** and **Ethereum or Bitcoin**, with a has
 on each chain and nothing in between: no bridge, no custodian, no multisig, no wrapped token. Either both
 sides settle or both sides get their own coins back after a deadline, provided each party stays online and
 acts before its own deadline: a party that goes offline after the reveal can lose its side (design §8). The design, four component
-prototypes, a command-line swap tool and the logs of twelve real runs (numbered 1 to 13; there is no run 7 log), one of them on Ethereum mainnet, are in this repository.
+prototypes, a command-line swap tool and the logs of nineteen real runs (numbered 1 to 20; there is no run 7 log), one of them on Ethereum mainnet, are in this repository.
 
 > **Known limit: concentrated mining on Parano1d.** One address has mined between 45 % and 63 % of every day's blocks for the last 20 days
 > (52.7 % of the last 24 hours, read from a node's own block headers on 2026-11-08). The swap assumes that no party holds a majority of the hashrate,
@@ -46,7 +46,7 @@ chain needs nothing more than a hashlock and a timelock, which is why the same d
 (`HTLC.sol`) and Bitcoin (a P2WSH script, `btc/`). Not a market: the two parties find each other and
 agree on a price elsewhere.
 
-## Proof that it works: twelve runs on 4–6 November 2026 (UTC)
+## Proof that it works: nineteen runs on 4–16 November 2026 (UTC)
 
 | Run | What | Result |
 |---|---|---|
@@ -62,9 +62,18 @@ agree on a price elsewhere.
 | 11 | the retry of runs 9 and 10: 5 NOID against 0.001 ETH on Sepolia, happy path, `poseidon` lock kind, the two roles on two machines | settled; 44 minutes from funding to both sides final, Bob's claim sent from the Mac ([`docs/live-run-11.md`](docs/live-run-11.md)) |
 | 12 | the same swap as run 11 with the two-node check on: two Parano1d nodes and two Sepolia endpoints for each side, the Parano1d nodes joined by one SSH tunnel | settled; 45 minutes from funding to both sides final ([`docs/live-run-12.md`](docs/live-run-12.md)) |
 | 13 | the same swap as run 11 (one node per chain) with Alice's steps driven from the operator console over the same `scripts/live` helpers; Bob's side from a terminal | settled; 50 minutes from funding to Alice's side final ([`docs/live-run-13.md`](docs/live-run-13.md)) |
+| 14 | the same setting as run 13, the first run with the finality-18 code (Alice's steps from the helpers, not the console) | settled; 51 minutes 49 seconds from funding to Alice's side final ([`docs/live-run-14.md`](docs/live-run-14.md)) |
+| 15 | hostile counterparty, group L1: Alice prepares and never funds | both tools gave up by themselves on the real nodes, Bob at his last lock height; nothing was sent ([`docs/live-run-15.md`](docs/live-run-15.md)) |
+| 16 | group L2: Alice funds 4 NOID where 5 was agreed | both tools refused to count the instance, Bob never locked; the 4 NOID came back after `D` less the 5,800 close fee; the run cost 14,800 μNOID in fees ([`docs/live-run-16.md`](docs/live-run-16.md)) |
+| 17 | group L3: Bob makes a lock by hand that leaves Alice 28 minutes where 56 are required | Alice's tool rejected it and never offered the reveal; the early refund was refused twice; the ETH was refunded and the NOID came back after `D` ([`docs/live-run-17.md`](docs/live-run-17.md)) |
+| 18 | group L4, first try: a third party closes the contract after the reveal | ended on its abort path: the operator's reveal came 110 seconds after its cutoff and the tool refused it; the close was not reached ([`docs/live-run-18.md`](docs/live-run-18.md)) |
+| 19 | group L4, second try | settled; a third party with only the public bundle and the secret read from Ethereum closed the contract before Bob, and the close paid Bob; 49 minutes 41 seconds from funding to Alice's side final ([`docs/live-run-19.md`](docs/live-run-19.md)) |
+| 20 | groups L5 and L6 in one run: the second Parano1d node away at Bob's lock, and an epoch rotation before Bob's claim; two nodes per chain | settled; with the link closed the lock was refused and offered when it was back; the claim was not proved three blocks before a rotation and was proved after it ([`docs/live-run-20.md`](docs/live-run-20.md)) |
 
-Runs 1–8 were played by the author in both roles on one machine. Runs 9 to 13 used two machines (the roles on different computers with
-different Parano1d nodes), but all five were still played by the same person; runs 9 and 10 ended as aborts and runs 11 to 13 as settled swaps.
+Runs 1–8 were played by the author in both roles on one machine. Runs 9 to 14 used two machines (the roles on different computers with
+different Parano1d nodes), but all six were still played by the same person; runs 9 and 10 ended as aborts and runs 11 to 14 as settled swaps.
+Runs 15 to 20 were the hostile-counterparty campaign: one person played the misbehaving side as well, on one PC in every role (in run 20 the second
+Parano1d node ran on a second machine); runs 15 to 17 ended on their abort paths as planned; run 18 ended on its abort path after a reveal that came 110 seconds after its cutoff and was refused by the tool (retried as run 19); runs 19 and 20 settled.
 No swap between two separate people has run yet. The amounts are trial amounts.
 
 > **Optional block: on-chain pointers.** Publishing them ties the handle "00" to the NOID wallet that funded
@@ -83,14 +92,15 @@ No swap between two separate people has run yet. The amounts are trial amounts.
 | `docs/review-packet.md` | The starting point for an external reviewer: the four questions that matter most, what is promised, the assumptions with their status, what was run, what is still open | written for review |
 | `docs/review-1.md`, `docs/poseidon-evm-review.md`, `docs/poseidon-v2-review.md`, `swap-cli/REVIEW-1.md` to `-7.md` | Internal adversarial reviews of the design, the Poseidon2b Solidity port and the swap tool | done; see "Status" |
 | `docs/q2-history-step.md` | Does Parano1d's block proof force a close to pay the committed recipient? Constraint path with citations and a negative test | confirmed |
-| `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md`, `-11.md`, `-12.md`, `-13.md` | Logs of the twelve runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
+| `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md`, `-11.md` to `-20.md` | Logs of the nineteen runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
+| `docs/hostile-run-plan.md`, `docs/live-scenarios.md` | The plan of the hostile-counterparty runs (groups L1 to L6 ran as runs 15 to 20) and the operator's plan of the other live scenarios | done; what stays open is listed in them |
 | `docs/htlc-v2-fixed-fee.md`, `docs/poseidon-evm.md`, `docs/ideas.md` | A fixed-fee contract variant, `Addr(s)` on the EVM (an alternative hashlock), ranked improvements | notes |
-| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 383 tests (385 on Linux and macOS, where two symlink tests run that skip on Windows) |
+| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 508 tests (510 on Linux and macOS, where two symlink tests run that skip on Windows) |
 | `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 91 tests; nothing broadcast on signet yet |
 | `parano1d/` | `contracts/htlc.pruv` (`HashTimeLock`), the v2 fixed-fee variant, example params (never fund them), a Rust harness that builds, proves and verifies real calls against the vendored node code | 37 tests (+1 ignored benchmark), `pruv verify` passes |
 | `equiv/` | The equivalence proof: `portable/` (no_std Poseidon2b + Derive + SHA-256, the zkVM guest code), `reference/` (parity against the vendored code, 100,000 inputs), `zkvm/` (RISC Zero guest and host, `equiv-prove`) | 23 + 3 + 14 tests; receipts proved and verified |
-| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | 648 tests; drove every run |
-| `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6, 8, 9 and 10 (on a Mac in native mode for Bob's side in 9 and 10) |
+| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | 728 tests; drove every run |
+| `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 to 20 (on a Mac in native mode for Bob's side in runs 9 to 14) |
 | `scripts/` | `setup.sh` / `setup.ps1` (build and test everything), `fetch-vendor.sh` | — |
 | `ui/` | A private prototype | not part of this repository |
 | `vendor/parano1d` | Unmodified copy of the Parano1d source at commit `d29b801` (Apache-2.0, see `THIRD-PARTY-NOTICES.md`) | read-only |
@@ -110,8 +120,10 @@ Each component's `README.md` is the source of truth for that component.
 - **Hard rules** (details in `SECURITY.md`): never fund the example params; never use Parano1d's stock
   `refundable_payment` template for a swap; one fresh secret per swap, sealed, never on a command line;
   `max_fee` at least 5,800 μNOID; the NOID claim must be *final* before the deadline.
-- **Still to run**: the stock-wallet variant, two separate people (the two-node check has run live, in run 12, but with both nodes of each kind on one private network),
-  the Bitcoin leg on signet, an epoch rotation inside a swap window.
+- **Still to run**: the stock-wallet variant, two separate people (the two-node check has run live, in runs 12 and 20: in run 12 with both nodes of each kind on one
+  private network, in run 20 with the second Parano1d node on a second machine through an SSH port forward), a close at a chosen fee and a conflicting close, contract
+  version 2, the abort paths on Ethereum mainnet, the Bitcoin leg on signet. The hostile-counterparty groups L1 to L6 and an epoch rotation before Bob's claim ran as runs 15 to 20
+  (a claim already pending when the rotation comes is not among them).
 - Commit hashes quoted in the documents (review fix-status tables, `TASKS.md`) refer to the private
   development history and will not resolve in this repository.
 
@@ -120,7 +132,7 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 383 passing on Windows (385 on Linux and macOS: two symlink tests skip on Windows); solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd eth && npm install && npx hardhat test      # 508 passing on Windows (510 on Linux and macOS: two symlink tests skip on Windows); solc falls back to the npm solc@0.8.24 package if the download is blocked
 cd btc && npm install && npm test              # 91 passing (node --test)
 ```
 

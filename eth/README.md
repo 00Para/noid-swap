@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-383 passing and 2 pending on Windows (the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 385 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
+508 passing and 2 pending on Windows (the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 510 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -247,7 +247,7 @@ setting). `sha256` is `HTLC.sol` and the default; `poseidon` is `HTLCPoseidonV2.
 | `lock` | `--lock-addr 0x…` (the NOID claim authority `A`) replaces `--hashlock`; each is refused for the other kind. REVIEW-7 R7-1: the pre-lock check asks the node only for the `Locked` logs of **your own sender** (`eth_getLogs` with the indexed sender as topic2, in 50,000-block chunks from the from-block; `HTLCPoseidonV2`'s `Locked` has `sender` indexed, the lock word is in the data and is compared locally, every log re-checked locally), and refuses an earlier lock of your own sender on that address (any receiver). It no longer reads every `Locked` log of the shared contract, so there is no provider-cap size rule any more (nobody can hold your lock back by padding the contract). A lock of another sender on the same address does not block (REVIEW-6 R6-2: Bob's lock pays only the fixed receiver, for an `x` with `Addr(x) = A`, so a stranger's 1-wei lock must not be able to veto the swap) and, for this kind, is not read: `foreignLocksSameHashlock` stays `[]`, `lockedEventsQuery` is `"sender"` and `lockedEventsScanned` counts your own sender's logs |
 | `claim` | compares `Addr(secret)` with the lock **locally** (`scripts/poseidon/poseidon2b.js`, the port the vector test ties to the vendor crate); builds the calldata itself and **refuses to sign anything but exactly 68 bytes** that equal selector + lock id + secret (V2-7); sends it with a **fixed gas limit of 1,000,000** (V2-6; the contract's own floor is 540,000 and recommendation 650,000, both read from the pinned contract and checked), and requires the balance to cover `limit × fee cap`; **never simulates**: no `eth_estimateGas`, no `eth_call` carries the secret, only the signed `eth_sendRawTransaction` does (tested by recording every JSON-RPC request); `--dry-run` therefore reports `gasLimit` and `gasEstimate: null`, and a dry run **with** the secret is refused when `ETH_RPC_URL` is not on this machine (run it without `--secret-stdin`: every gate is checked without the secret); `--replace` re-sends with the same limit |
 | `refund` | as before, against the V2 ABI |
-| `status` | detects the kind from the contract's code hash when no flag is given; output keeps the key `hashlock` (it holds the lock word), adds `lockKind`, and `preimageMatchesHashlock` is the local `Addr` comparison |
+| `status` | detects the kind from the contract's code hash when no flag is given (or takes `--lock-kind`); output keeps the key `hashlock` (it holds the lock word), adds `lockKind`, and `preimageMatchesHashlock` is the local `Addr` comparison |
 
 A claim that reverts (`TimelockExpired`, `BadCalldataLength`, `InsufficientGas`, `TransferFailed`) is decoded by name with a note that the claim transaction carried the secret.
 A claim that is **mined and reverts** (either kind; for example it was mined after the timelock) is no longer a bare "failed" (REVIEW-6 R6-3): `claim` prints a JSON
@@ -337,7 +337,9 @@ for `lock`.
 
 **A stuck first reveal can be replaced past the `M_A` cutoff** (REVIEW-5 R5-1). A claim in the public mempool has already
 published the secret, so `M_A` (which protects a first publication) no longer applies: with `--swap FILE`, a `claim --replace`
-that found and identified the signer's pending claim of this lock uses the late cutoff `T_reveal - DE` (the intent's
+that found and identified the signer's pending claim of this lock, **and that carries this lock's secret** (its preimage argument hashes to the lock word, decided locally
+with or without `--secret`; since 2026-11-16, otherwise the run is judged as a first reveal, the plan carries `replacePreimageNote`, a NOTE goes to stderr, and the
+pending transaction is still replaced), uses the late cutoff `T_reveal - DE` (the intent's
 `late_cutoff`, which `swap-cli` freezes in every `reveal_eth` intent; an older intent gets the profile's `DE`), whether or not the
 file's history has a marker. The plan prints `revealCutoffRule`. A first claim, which has no pending transaction, keeps the strict
 `M_A` rule, and an explicit `--margin-s` still tightens either. One case where the flag reaches below `M_A` (since 2026-11-09): `swap-cli`
@@ -354,33 +356,78 @@ claim in the mempool while a `reveal_eth` intent is held); the same events as `s
 new, and the intent's own cutoff (`T_reveal - DE`, which `swap-cli` froze for exactly that case) rules even when it is later than
 `timelock - 1800 s`. An explicit `--margin-s` still tightens it. The plan prints `revealCutoffRule`.
 
+#### The receiver's code is read before a claim is signed (REVIEW-7 R7-7, T11; since 2026-11-16)
+
+A claim is never estimated, so nothing else would notice a receiver that has, or has gained, code (for example an EIP-7702 delegation, code starting `0xef0100`):
+a claim to a receiver that rejects ETH reverts with the secret in its calldata. `claim` reads the receiver's code at the `latest` and `pending` tags twice: early
+(after the cutoff check and before the long log scans, also in `--dry-run`, which then shows what the real run would do) and again immediately before signing,
+together with the latest block. For a **first** claim any code, a failed read or an answer that is not hex refuses it before anything is signed and before the
+reveal sidecar is written. For a `--replace` of a pending claim that carries this lock's secret (the secret is already public in that transaction and the
+replacement has the same receiver) the read is informational: the claim goes out and the output carries `receiverCodeWarning`, with a WARNING line on stderr. A pending
+claim with another preimage is judged by the rule of a first claim. This applies with and without `--swap`. It was tested on a local chain only and has never run
+against a real chain.
+
+#### The send of a claim has a time bound (since 2026-11-16)
+
+A claim carries the swap's secret in its data, so the moment its bytes leave this machine is the moment the secret may be public, and that must not be after the
+reveal cutoff. The library's own send cannot promise this (its timeout is an inactivity timer, the name lookup and the connect have no limit, an abort does not reach
+the socket, and the send is batched with two reads). So a real `claim` is sent by a small hand-written sender, `scripts/bounded-send.js` (standard library only;
+every read still goes through ethers):
+
+* It connects first (name lookup, TCP, TLS) under its own limit and writes no byte of the claim until that connection is up. A stall or failure there is a proven
+  "nothing was sent" and leaves no sidecar.
+* Then, in one step with nothing waiting in between: a last check (now plus the 30 s send budget, a 20 s answer window and a 10 s guard, must be at or before the
+  cutoff, and now before the timelock; "now" is the later of the wall clock and the latest block's time plus the monotonic time since it was read), the building of
+  one unbatched `eth_sendRawTransaction` request on that connection (no keep-alive, no retry, no redirect), a timer, and the write. The dry run prints
+  `sendBudgetS`, `lastStartAt` and `secondsToLastStart`.
+* At the deadline (20 s after the check) the connection is cut (reset, so the operating system drops what it has not sent yet); the same on SIGINT, SIGTERM,
+  SIGHUP and at exit. The claim lock is let go only when the connection has closed.
+* There are four outcomes, in words that say only what is known: "not sent" (proven: nothing was written), "accepted" (the node's answer carries the hash that was
+  signed), "refused by the node" ("The endpoint received the claim and its node refused it") and "unknown". Only the first says nothing was sent; the others say the
+  secret may be public. A suspend or stall of the machine during the send is noticed and reported as "TIME BOUND NOT KEPT".
+* A real claim needs a local key (`--key-file`) and refuses while Node is set to use an environment proxy (`NODE_USE_ENV_PROXY`, `--use-env-proxy`): the sender
+  connects directly. `lock` and `refund` are unchanged (they still use the library; they carry no secret).
+
+What it does not promise: what the endpoint (or a front end in front of it) does with the bytes once it has them (it may queue or forward them later, or keep the
+transaction to itself, which looks to Alice like a dropped claim); the case of SIGKILL or a power cut (the operating system may still retransmit a segment already
+written); a machine that sleeps between the write and the cut (reported, not prevented, so never let the machine sleep during a reveal).
+
+Reviewed independently twice (the second time nothing had to be fixed). Tested on a local chain and on local stub servers only (508 tests); it has never been
+run against a real endpoint. `docs/runbook-two-party.md` has the checklist for the next live reveal. Left open on purpose:
+
+1. If the operating system refuses the hard cut, the sender closes the connection by hand, and that is a graceful close: data already handed to the system can still
+   go out. The text and the header's invariant I7 say this too weakly. The outcome is "unknown" in all these cases.
+2. The text for an interrupting signal says "the connection was reset" even when it was not (the real flag is not passed on).
+3. `rpc-proxy.js`: a second key that differs only in case ("METHOD") could hide a send from the proxy for a node that matches keys without regard to case. Neither
+   tool sends such a body. To do: count keys without regard to case and refuse bytes at or above 0x80.
+4. "Already known" counts as accepted without a hash check, and the wait for the receipt has no timeout (the `lock` path never had one either).
+5. Not tested: the shutdown-flag branch under TLS, a real suspend, a failing socket option on Windows, a peer close on plain http while data is queued.
+6. An older nit: flags are looked up in a plain object, so names such as `--toString` are accepted (this cannot reach the unbounded path).
+
 #### The reveal sidecar (T21-11)
 
-`claim --swap FILE` writes `FILE.reveal-sent` as its last step before the broadcast (after the cutoff re-check, with the transaction populated and,
-for a local key, signed to get its hash): one small JSON file `{"version":1,"lock_id":"<64 hex>","tx_hash":"<64 hex>|null","at":<epoch seconds>}`,
+`claim --swap FILE` writes `FILE.reveal-sent` as its last step before the claim is signed and sent (after the connection to the endpoint is up and the cutoff
+check, with the transaction populated and signed locally to get its hash): one small JSON file `{"version":1,"lock_id":"<64 hex>","tx_hash":"<64 hex>|null","at":<epoch seconds>}`,
 written to a temporary file first (mode 600, in a loop until every byte is out, fsynced), then published with a hard link (an existing name is never
 replaced) or, on a file system without hard links, renamed onto the final name (atomic, not exclusive; the final name is never written in place);
-the directory is synced, the file is read back and compared byte for byte, and the cutoff is checked once more against the wall clock before the
-send (on Windows neither mode nor directory sync exists, and durability through the `\\wsl.localhost` share is best effort: `swap-cli/README.md`,
+the directory is synced, the file is read back and compared byte for byte, and the sender checks the cutoff once more as the last statement before the
+write (on Windows neither mode nor directory sync exists, and durability through the `\\wsl.localhost` share is best effort: `swap-cli/README.md`,
 "Residual window"). It never
-holds the secret, a key, or anything of the swap file. If it cannot be written and checked, or the last wall-clock check refuses, the command sends
+holds the secret, a key, or anything of the swap file. If it cannot be written and checked, or the sender's last check refuses, the command sends
 nothing and removes a file this call had created (nothing was sent, so it is not evidence; only while the file still holds this call's own
-bytes). With a local key the claim is then signed locally and the signed bytes are handed to the node directly (`broadcastTransaction`), so no
-network read sits between the last check and the send. That send is one HTTP request which the library never repeats: its automatic retry on
-an HTTP 429 answer is switched off for this one request (a throttled first attempt was not accepted, and a repeat minutes later would be the
-real publication, after the last check). A throttled send fails with the sidecar in place; the endpoint most likely did not accept the claim,
-so run the claim again with `--margin-s 1800`, which keeps the strict cutoff whatever the sidecar says. The provider the command line builds
-follows no redirect either (for a read or for the send): any HTTP 3xx answer becomes the error `REDIRECT_REFUSED` (the library would have sent
-the request to the new address as a fresh request, without the 429 switch above). The message names the status, never the configured URL or the
-address the answer names; put the endpoint's final URL in `ETH_RPC_URL`. A send answered that way is treated like the throttled one: the
-sidecar stays, the endpoint most likely did not accept the claim, and the advice is the same plus the new URL. Not bounded: how long a stalled
-connection takes to deliver that one request (`TASKS.md` T21-17). A sidecar of this lock that
+bytes). A connection that stalls or fails before the write leaves no sidecar at all (the connection is made first: see "The send of a claim has a time bound"
+above). The claim is then signed locally and sent by the time-bounded sender, as one request that is never repeated. Its outcome decides the sidecar: "not sent"
+(proven: nothing was written) takes back a sidecar this call had created; "accepted", "refused by the node" and "unknown" leave it in place, and `swap-cli` then
+treats the secret as possibly public. After "unknown", "refused by the node", an HTTP 429 or a redirect answer (both are "unknown" now) run `tick --apply` first;
+only if you are then certain the claim was not forwarded, run the claim again with `--margin-s 1800`, which keeps the strict cutoff whatever the sidecar says.
+The provider the command line builds follows no redirect for a read either: any HTTP 3xx answer becomes the error `REDIRECT_REFUSED`; the message names the
+status, never the configured URL or the address the answer names; put the endpoint's final URL in `ETH_RPC_URL`. A sidecar of this lock that
 exists already is never deleted: its own bytes are written again through a new fsynced temporary file and renamed over it (the first attempt's time
 stays), and if that fails nothing is sent. A file there whose content is not a sidecar of this lock is moved aside to
 `FILE.reveal-sent.stale-*`, never deleted; one that cannot be examined or read (an I/O error) is left alone and the claim is refused.
 Two `claim` commands for one swap file cannot send at the same time (a second one started after the first send has settled, without `--replace`, is not blocked: it signs a new claim at the next nonce, which reverts once the first lands and costs gas only): a real `claim --swap FILE` first creates `FILE.claim-lock` exclusively (one
-small JSON line: version, pid, Unix seconds) and holds it from before the sidecar is read until the send has settled (the broadcast call returned
-or failed, or anything before it failed); it is not held through the wait for the receipt, so `claim --replace --replace-tx HASH` from another
+small JSON line: version, pid, Unix seconds) and holds it from before the sidecar is read until the sender's connection has closed (so no byte of the claim can leave any more; if the close cannot be confirmed
+within 5 s, the lock file stays and the command says to delete it by hand after the process has exited); it is not held through the wait for the receipt, so `claim --replace --replace-tx HASH` from another
 terminal works then. If that file exists, or cannot be created, the claim refuses before it touches anything beside the swap file, and says which
 pid and time the lock records. The tool never removes, takes over or judges a lock by itself (no pid check, no age): a claim that died leaves its
 lock, and you delete the file by hand once you are sure that no other claim for this swap file is running. A dry run takes no lock. The
@@ -390,10 +437,19 @@ frozen cutoff; `--margin-s` still tightens). A sidecar of another lock or one no
 `revealSidecarNote` in the plan). The result of a send prints `revealSidecar: "written" | "kept"` and `revealSidecarFile`. `swap-cli tick` reads the same
 file and records `reveal_sidecar_seen` (`swap-cli/README.md`, "Residual window").
 
+Since 2026-11-16 the sidecar is looked for beside the swap file's real path and, when the file was reached by another name (a link), beside that name too, as
+the Rust tool does; a match at either place is evidence that a reveal send may have started, which moves a re-send to the late cutoff. Leftover `*.tmp` files of an
+interrupted sidecar write are listed in both folders in the claim's output (`revealSidecarTmpFiles`, with `revealSidecarTmpNote`) and are never removed; they are
+evidence neither of a send nor of none (a sidecar is published before any send: look at the sidecar itself). A `claim --replace` adds `replaceSidecarNote`, which says
+whether an existing sidecar was kept (it names the first attempt's transaction: the sidecar records the first attempt and is never rewritten with the replacement's
+hash), a new one was written, or one exists beside the other name.
+
 `--chain-id` comes from your own records, not from the counterparty: the chain id of the network you mean
 to use. The code hash is not typed at all (REVIEW-3 F1): it is the hash of this repo's compiled artifact, so a
 look-alike contract deployed by the other side is refused whatever hash they send. `deploy` reports
-`matchesArtifact`; `status` prints `chainId` and `codeHash` for the contract it is asked about, for information.
+`matchesArtifact`; `status` prints `chainId` and `codeHash` for the contract it is asked about, for information. `status` also accepts `--chain-id` and
+`--code-hash`, both optional: when given, the first is checked against the node's `eth_chainId` and the second against `keccak256` of the code at the address, and a
+mismatch refuses. Without `--chain-id` a missing lock is not trusted (see "Notes" under the sequence below).
 
 Log scans (`lock` and `claim`) start at `--from-block` if given, otherwise at the contract's deployment
 block when the node can answer `eth_getCode` for old blocks (a binary search, about 25 calls), otherwise at
@@ -451,7 +507,7 @@ recomputes the hash from what it is about to send and refuses a real send with a
 single-use: the duplicate-hashlock rule, the lock lock `FILE.lock-lock`, the pending-nonce check (an extra: nodes drop pending transactions), the lock record `FILE.lock-sent`
 (written and synced before the broadcast, never removed by the tool, cleared by hand on one of two proofs and two contract reads: "Clearing a FILE.lock-sent record" in `scripts/live/README.md`) and the per-user lock record
 (one file per chain id, sender and lock word in `.noid-swap/lock-sent/` of the account's home, written in the same step, found by every real lock whatever the swap file is called, a lock without `--swap` included, never removed by the tool) are meant to prevent a
-second send of the same lock while the first is unresolved (tested offline only). A copy or a renamed swap file meets the per-user record. The account's home is the one the operating system's account database gives the user that runs `live.js`, not the `HOME` (Linux, macOS) or `USERPROFILE` (Windows) of the environment. A `HOME` or `USERPROFILE` that names another directory is refused, nothing is sent, and the refusal names both homes (run it as the same user, with them unchanged); a `sudo` that kept the caller's `HOME` and cleared its `SUDO_` variables is such a case. A run with `SUDO_UID` or `SUDO_USER` set and not empty is refused too (the refusal names no path): `sudo` usually runs as another user account, which does not see this user's records. `su`, `runas`, another login and another machine cannot be detected and have no record. Cron, a service unit and `env -i` take `HOME` from the account database or leave it unset, unless they set it themselves; then the homes are equal and the records are found, and one that sets another `HOME` is refused. The helpers of `scripts/live/` run `live.js` with the Windows Node under `LIVE_PLATFORM=wsl` (the default; the `NODE` variable overrides it in either mode; the records are then in the Windows profile folder) and with the Node of the shell under `native` (on macOS and Linux the Unix home of that user): different accounts and folders (`wsl` mode and Git Bash `native` mode under the same Windows account share the Windows profile folder), and a different home has no record of the other's locks (`scripts/live/README.md`, "Clearing a FILE.lock-sent record"). Another machine or another user account has neither record, only the duplicate rule (mined locks only) and, with a swap file, the node-local pending-nonce check. The
+second send of the same lock while the first is unresolved (tested offline; real locks have been sent through the guards (a real `live.js lock` without `--swap` wrote the per-user lock record in run 17; `lock.sh` sends wrote the lock record beside the swap file and the per-user record in runs 18 and 19; the lock of run 20 went through `lock.sh`, and its record does not mention the lock records), but the refusal of a second send has never run against a real chain). A copy or a renamed swap file meets the per-user record. The account's home is the one the operating system's account database gives the user that runs `live.js`, not the `HOME` (Linux, macOS) or `USERPROFILE` (Windows) of the environment. A `HOME` or `USERPROFILE` that names another directory is refused, nothing is sent, and the refusal names both homes (run it as the same user, with them unchanged); a `sudo` that kept the caller's `HOME` and cleared its `SUDO_` variables is such a case. A run with `SUDO_UID` or `SUDO_USER` set and not empty is refused too (the refusal names no path): `sudo` usually runs as another user account, which does not see this user's records. `su`, `runas`, another login and another machine cannot be detected and have no record. Cron, a service unit and `env -i` take `HOME` from the account database or leave it unset, unless they set it themselves; then the homes are equal and the records are found, and one that sets another `HOME` is refused. The helpers of `scripts/live/` run `live.js` with the Windows Node under `LIVE_PLATFORM=wsl` (the default; the `NODE` variable overrides it in either mode; the records are then in the Windows profile folder) and with the Node of the shell under `native` (on macOS and Linux the Unix home of that user): different accounts and folders (`wsl` mode and Git Bash `native` mode under the same Windows account share the Windows profile folder), and a different home has no record of the other's locks (`scripts/live/README.md`, "Clearing a FILE.lock-sent record"). Another machine or another user account has neither record, only the duplicate rule (mined locks only) and, with a swap file, the node-local pending-nonce check. The
 engine's producer screen lives in `swap-cli`, so `live.js` cannot make that decision itself: do not call `live.js lock --swap` for a real send by hand. `lock` and `claim`
 also refuse a swap file with more than one hard link (the claim lock and the marker files are named from the path): keep one name. A lock without `--swap` (below) is not
 covered by the approval or the producer check: it makes no producer check and says so. It still refuses on a per-user lock record of the same chain, sender and lock word, and it writes that record itself before the broadcast, by the same rules (a failure before the broadcast takes it back, a failure after it leaves it). It has no record beside a swap file, no approval, no lock lock and no pending-nonce check.
@@ -504,7 +560,8 @@ node scripts/live.js lock --key-file keys/bob.key --contract CONTRACT --chain-id
 #    Optional on lock/claim: --from-block N (default: the contract's deployment block, else 0).
 
 # 6. Anyone can watch the lock; this also prints chainId and codeHash for the contract
-node scripts/live.js status --contract CONTRACT --lock-id 0xLOCKID --from-block BLOCKNUMBER
+#    --chain-id and --code-hash are optional here; without --chain-id a lock that is not found is reported as "not trusted"
+node scripts/live.js status --contract CONTRACT --lock-id 0xLOCKID --chain-id $CHAIN_ID --code-hash $CODE_HASH --from-block BLOCKNUMBER
 
 # 7a. Happy path: Alice claims ETH before T_REVEAL - 1800 s. This publishes the secret on Sepolia.
 #     Dry run first: needs no secret; prints the plan (cutoff, lock and finalized blocks) and "gasEstimate": null.
@@ -518,7 +575,7 @@ node scripts/live.js claim --key-file keys/alice.key --contract CONTRACT --lock-
     --chain-id $CHAIN_ID --code-hash $CODE_HASH --secret-file SECRET_FILE
 #     Add --margin-s N to change the 1800 s reveal margin (only if you know what a late reveal costs).
 #     Bob (or swap-cli) then reads the secret:
-node scripts/live.js status --contract CONTRACT --lock-id 0xLOCKID --from-block BLOCKNUMBER   # "preimage": "0x..."
+node scripts/live.js status --contract CONTRACT --lock-id 0xLOCKID --chain-id $CHAIN_ID --from-block BLOCKNUMBER   # "preimage": "0x..."
 
 # 7b. Failure path: nobody claimed. At or after T_REVEAL, Bob refunds (refused locally before then).
 node scripts/live.js refund --key-file keys/bob.key --contract CONTRACT --lock-id 0xLOCKID \
@@ -529,6 +586,16 @@ Notes:
 
 * `status` needs no key. Its `--from-block` defaults like `lock`/`claim` (deployment block, else 0);
   `eth_getLogs` is issued in chunks of at most 50,000 blocks. Pass the lock's block number to keep it short.
+  `status` is read-only: it signs, sends and writes nothing. It reads the latest block first, then the code, `getLock` and the logs at that one block.
+  An error of the node is printed in the node's own words (not the library's "could not coalesce error"), with anything of the form `scheme://...` cut out of them.
+  A refusal names the flag or the cause: no code at the address, a code hash that is not an HTLC's, a `--chain-id` or `--code-hash` that does not match.
+  A lock that is not found is reported as missing (`exists: false`, `trustworthy: true`) only when the block is at most 120 s old (`STATUS_FRESH_BLOCK_S`) **and**
+  `--chain-id` was given and matched, because the same contract address can exist on another chain. A fresh block without `--chain-id` gives
+  `exists: false`, `trustworthy: false` and the state `not found on chain N, but not trusted: --chain-id was not given`. A node that is behind the chain's tip gives
+  `exists: null`, `trustworthy: false` and the state `unknown (the node is behind the chain's tip)`. Every not-found note carries the block's time and this
+  machine's clock in UTC, and says that a lock still pending in the mempool is not seen. A node that says "no lock" while its own event scan of the same run shows
+  the `Locked` event is an error ("the node contradicts itself"). A lock that exists with no `Locked` event in the scanned range gets a note (pruned logs, or
+  `--from-block` above the lock's block). The exit status is 0 for a missing lock in every case, as before.
 * `refund` compares against the **latest block's** timestamp (not your clock), so it can say "too
   early" for a few seconds after the timelock; just retry. The contract is the real judge.
 * `--preimage` no longer exists (a secret on argv lands in shell history and process listings; the
@@ -546,7 +613,7 @@ Notes:
 
 ```sh
 node scripts/rpc-proxy.js --listen 127.0.0.1:8546 --upstream https://ethereum-sepolia-rpc.publicnode.com
-# swap-cli then uses http://127.0.0.1:8546  (live.js can too: ETH_RPC_URL=http://127.0.0.1:8546)
+# swap-cli then uses http://127.0.0.1:8546  (reads only: the proxy refuses every send; live.js claim, lock and refund must use the real endpoint)
 ```
 
 It forwards each JSON-RPC POST body unchanged to the upstream (HTTP or HTTPS, Node's built-in
@@ -554,7 +621,10 @@ It forwards each JSON-RPC POST body unchanged to the upstream (HTTP or HTTPS, No
 (`eth_blockNumber 200 83ms`; the upstream path, which may hold an API key, is never logged), binds
 to 127.0.0.1 only (any other `--listen` host is refused), and has no auth and no caching.
 Upstream failure becomes a 502 with a JSON-RPC error body; non-POST requests get 405.
-Do not expose it beyond loopback: anyone who can reach it can spend your endpoint's rate limit.
+It forwards only a clean body (one JSON object with a string `method`, or a non-empty array of such objects; anything else gets HTTP 400 and is not
+forwarded) and it never relays a send: a request, alone or in a batch, whose method name contains "send" or "bundle" (any case) is answered with a JSON-RPC error
+and not forwarded, because a relay has no deadline and a claim carries the swap's secret. So `live.js` claim, lock and refund never go through the proxy: give
+them the real endpoint in `ETH_RPC_URL` (its reads may use the proxy). Do not expose it beyond loopback: anyone who can reach it can spend your endpoint's rate limit.
 
 ### Public Sepolia JSON-RPC endpoints (no API key)
 

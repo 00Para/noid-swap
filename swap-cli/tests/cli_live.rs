@@ -553,7 +553,12 @@ fn now_is_refused_together_with_a_live_rpc() {
 
 /// A Parano1d node whose instance is `live` or gone, with at most one transaction `confirmed` at a height or `pending` in the mempool.
 fn closed_node(w: &ClaimWorld, live: bool, confirmed: Option<(&str, u64)>, pending: Option<&str>) -> MockNode {
-    let (public, inst, tip) = (w.public.clone(), w.inst.clone(), w.tip);
+    closed_node_at(w, w.tip, live, confirmed, pending)
+}
+
+/// [`closed_node`] with the node's tip given.
+fn closed_node_at(w: &ClaimWorld, tip: u64, live: bool, confirmed: Option<(&str, u64)>, pending: Option<&str>) -> MockNode {
+    let (public, inst) = (w.public.clone(), w.inst.clone());
     let confirmed = confirmed.map(|(t, h)| (t.to_string(), h));
     let pending = pending.map(str::to_string);
     MockNode::spawn(move |m, p| match m {
@@ -582,6 +587,41 @@ fn closed_by_cmd(w: &ClaimWorld, url: &str, txid: &str, extra: &[&str]) -> (bool
 }
 
 #[test]
+fn tick_closed_by_records_a_final_close_at_or_after_d_as_the_recovery_branch_and_names_it_in_the_abort_reason() {
+    // CHAOS F-11 / M3: Bob's file in `secret_seen`, the instance gone, a close confirmed AT D and final (the node's tip is 18 blocks past it).
+    let w = claim_world();
+    let txid = "cd".repeat(32);
+    let d = w.public.params.deadline_height;
+    let node = closed_node_at(&w, d + 18, false, Some((&txid, d)), None);
+    // Read-only: says what would be recorded, writes nothing.
+    let before = std::fs::read(&w.bob).unwrap();
+    let (ok, out, err) = closed_by_cmd(&w, &node.url, &txid, &[]);
+    assert!(ok, "{err}");
+    assert_eq!(std::fs::read(&w.bob).unwrap(), before, "a read-only tick writes nothing");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["closed_by"]["recorded"], false);
+    assert_eq!(v["closed_by"]["branch"], "recovery");
+    assert_eq!(v["closed_by"]["height"], d);
+    assert_eq!(v["closed_by"]["payout_to"], "Alice (recovery close): Bob's NOID claim is lost");
+    assert_eq!(v["events"][0]["event"], "noid_closed_after_deadline");
+    let note = v["notes"][0].as_str().unwrap();
+    assert!(note.starts_with("WOULD RECORD (add --apply to write it) the close"), "{note}");
+    assert!(note.contains("as a close at or after D, the recovery branch (it paid Alice, so it is no claim of Bob's: his NOID claim can no longer happen)"), "{note}");
+    // With --apply it is recorded, and the same tick's decision names the operator's close as its evidence (his ETH lock is not visible in the
+    // fixture, so the abort itself waits for the Ethereum leg to settle).
+    let (ok, out, err) = closed_by_cmd(&w, &node.url, &txid, &["--apply"]);
+    assert!(ok, "{err}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["closed_by"]["recorded"], true);
+    assert!(v["notes"][0].as_str().unwrap().starts_with("RECORDED the close"), "{}", v["notes"][0]);
+    let reason = v["action"]["reason"].as_str().unwrap();
+    assert!(reason.starts_with(&format!("claim branch closed: the operator recorded the close {txid} at height {d} (at or after D {d}, the recovery branch, which pays Alice)")), "{reason}");
+    let file = SwapFile::load(&w.bob).unwrap();
+    assert!(file.history.iter().any(|h| h.event == "noid_closed_after_deadline"));
+    assert!(file.history.iter().any(|h| h.event == format!("noid_closed_after_deadline:{txid}:{d}")));
+}
+
+#[test]
 fn tick_closed_by_records_an_outside_claim_only_with_apply_and_refuses_everything_doubtful() {
     let w = claim_world();
     let txid = "ab".repeat(32);
@@ -605,9 +645,11 @@ fn tick_closed_by_records_an_outside_claim_only_with_apply_and_refuses_everythin
     refuse(&closed_node(&w, true, Some((&txid, h_closed)), None), &txid, "still visible", "live instance");
     // Not a txid at all.
     refuse(&closed_node(&w, false, None, None), "not-a-txid", "64-hex-character", "bad txid");
-    // Confirmed at or after D: that was the recovery branch (it paid Alice), not Bob's claim.
+    // Confirmed at or after D: that was the recovery branch (it paid Alice), not Bob's claim. CHAOS F-11: it is not refused for that, it is recorded as
+    // what it is (log-only); CHAOS M3: but only once final, and this close is above the tip, so it is refused as not final. (The recorded form is
+    // pinned in `scenarios.rs` and `recovery_cases.rs`.)
     let d = w.public.params.deadline_height;
-    refuse(&closed_node(&w, false, Some((&txid, d)), None), &txid, "pays Alice", "after D");
+    refuse(&closed_node(&w, false, Some((&txid, d)), None), &txid, "not final yet", "after D, not final");
 
     // The good node: confirmed 20 blocks ago, the instance gone.
     let node = closed_node(&w, false, Some((&txid, h_closed)), None);

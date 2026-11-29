@@ -281,7 +281,7 @@ fn check_distinct_endpoints(kind: &str, urls: &[String], declared_remote: bool) 
             redact(first)
         )),
         (Some(a), Some(b)) if a.host == b.host && declared_remote => Ok(Some(format!(
-            "--{kind}-rpc: both endpoints are on the host {} ({} and {}), but --{kind}-rpc2-is-remote declares that the second node runs on another machine and is reached through this local port (for example an SSH tunnel); the tool cannot verify that. Two machines may still share one network and one upstream connection, so their agreement is a weaker check than two nodes on separate networks (G3)",
+            "--{kind}-rpc: both endpoints are on the host {} ({} and {}); --{kind}-rpc2-is-remote declares the second node remote, which the tool cannot verify, and two nodes on one network are a weaker check than two on separate networks (G3)",
             a.host,
             redact(first),
             redact(second)
@@ -670,11 +670,26 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
     decision.notes.extend(obs.source_notes.iter().cloned());
     decision.notes.extend(sidecar_notes);
     let closed_height = match &closed_event {
-        Some(swap_cli::state::Event::NoidClosedExternally { height, .. }) => Some(*height),
+        Some(
+            swap_cli::state::Event::NoidClosedExternally { height, .. }
+            | swap_cli::state::Event::NoidClosedAfterDeadline { height, .. }
+            | swap_cli::state::Event::NoidClosedBeforeDeadline { height, .. },
+        ) => Some(*height),
         _ => None,
     };
+    let closed_before_d = matches!(&closed_event, Some(swap_cli::state::Event::NoidClosedBeforeDeadline { .. }));
+    // CHAOS F-11: on Bob's file a close at or after D is the recovery branch (it paid Alice): his claim is lost, and that is what is recorded.
+    let closed_after_d = matches!(&closed_event, Some(swap_cli::state::Event::NoidClosedAfterDeadline { .. }));
     let closed_json = closed_height.map(|height| {
-        let (to, branch) = if file.role == Role::Alice { ("Alice (refund)", "recovery") } else { ("Bob (claim)", "claim") };
+        let (to, branch) = if closed_after_d {
+            ("Alice (recovery close): Bob's NOID claim is lost", "recovery")
+        } else if closed_before_d {
+            ("Bob (claim): Alice's NOID is gone, her refund can no longer happen", "claim")
+        } else if file.role == Role::Alice {
+            ("Alice (refund)", "recovery")
+        } else {
+            ("Bob (claim)", "claim")
+        };
         serde_json::json!({
             "txid": closed_by,
             "height": height,
@@ -693,7 +708,15 @@ fn tick(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
             if apply { "RECORDED" } else { "WOULD RECORD (add --apply to write it)" },
             closed_by.as_deref().unwrap_or(""),
             closed_height.unwrap_or(0),
-            if file.role == Role::Alice { "Alice's recovery close" } else { "Bob's claim" },
+            if closed_after_d {
+                "a close at or after D, the recovery branch (it paid Alice, so it is no claim of Bob's: his NOID claim can no longer happen)"
+            } else if closed_before_d {
+                "a close before D, the claim branch (it paid Bob, so it is no recovery of Alice's: her NOID refund can no longer happen)"
+            } else if file.role == Role::Alice {
+                "Alice's recovery close"
+            } else {
+                "Bob's claim"
+            },
         ));
     }
     // REVIEW-3 F3: a read-only tick records nothing, so it must not hand out the parameters of a spend. An operator who
@@ -1507,9 +1530,11 @@ mod tests {
         let v = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
         // Through a tunnel the second node appears on localhost: the note says what was declared, what cannot be verified, and what still holds.
         let note = check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://127.0.0.1:9602"), true).unwrap().unwrap();
-        assert!(note.contains("--noid-rpc2-is-remote declares") && note.contains("another machine") && note.contains("local port"), "{note}");
-        assert!(note.contains("cannot verify") && note.contains("share one network and one upstream connection"), "{note}");
+        assert!(note.contains("--noid-rpc2-is-remote declares") && note.contains("second node remote") && note.contains("on the host localhost"), "{note}");
+        assert!(note.contains("cannot verify") && note.contains("weaker check than two on separate networks"), "{note}");
         assert!(!note.contains("shares its network view"), "{note}");
+        // One short sentence: no second full stop and about half the length it had.
+        assert!(note.len() < 300 && !note.contains(". "), "{note}");
         let eth = check_distinct_endpoints("eth", &v("http://127.0.0.1:8545", "http://localhost:8546/key"), true).unwrap().unwrap();
         assert!(eth.starts_with("--eth-rpc: ") && eth.contains("--eth-rpc2-is-remote declares") && !eth.contains("key"), "{eth}");
         // Without the flag the old note is unchanged.
@@ -1519,6 +1544,31 @@ mod tests {
         assert!(check_distinct_endpoints("noid", &v("http://127.0.0.1:9601", "http://localhost:9601"), true).is_err());
         assert_eq!(check_distinct_endpoints("noid", &v("https://a.example.org", "https://b.example.org"), true).unwrap(), None);
         assert_eq!(check_distinct_endpoints("noid", &["http://127.0.0.1:9601".to_string()], true).unwrap(), None);
+    }
+
+    #[test]
+    fn the_declared_remote_note_is_produced_on_every_call_with_the_flag_and_names_the_host_whatever_it_is() {
+        let args = |extra: &[&str]| -> HashMap<String, Vec<String>> {
+            let mut a: Vec<String> = ["--noid-rpc", "http://127.0.0.1:9601", "--noid-rpc", "http://127.0.0.1:9602"].iter().map(|s| s.to_string()).collect();
+            a.extend(extra.iter().map(|s| s.to_string()));
+            parse_flags(&a).1
+        };
+        let net_ = net(&args(&[])).unwrap();
+        // With the flag the note is among the source notes of every call (a tick prints them all), not silenced.
+        for _ in 0..2 {
+            let (_, _, notes) = chain_source(&args(&["--noid-rpc2-is-remote"]), "noid", &net_).unwrap();
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("--noid-rpc2-is-remote declares"), "{notes:?}");
+        }
+        // Without it the old note, as before.
+        let (_, _, notes) = chain_source(&args(&[]), "noid", &net_).unwrap();
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("shares its network view"), "{notes:?}");
+        // Two ports on one host that is not a loopback address: the note must not say "local ports"; it names the host.
+        let v = |a: &str, b: &str| vec![a.to_string(), b.to_string()];
+        let note = check_distinct_endpoints("noid", &v("https://node.example.org:9601", "https://node.example.org:9602"), true).unwrap().unwrap();
+        assert!(note.contains("both endpoints are on the host node.example.org") && !note.contains("local port"), "{note}");
+        assert!(note.contains("--noid-rpc2-is-remote declares the second node remote, which the tool cannot verify"), "{note}");
     }
 
     #[test]

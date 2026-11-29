@@ -61,7 +61,7 @@ Columns: **Hostile act** (the concrete command or manual deviation); **Honest to
 | Id | Hostile act | Honest tool says (Alice) | Refused at | Worst case | Cost | Offline |
 |---|---|---|---|---|---|---|
 | B1 | Never locks. | `"waiting for Bob's lock"` (`engine.rs:1875`), then `refund_noid` once `tip + 1 >= D` | Alice's reveal is never offered | NOID tied up until `D`, 14,800 μNOID | nothing | `alice_funded_but_bob_never_locks_alice_refunds_at_d`, `sepolia_alice_funded_but_bob_never_locks_alice_refunds_at_d`; live run 4 |
-| B2 | Locks after the lock-by, correct terms: `live.js lock` with explicit `--lock-addr --receiver --amount-wei --t-reveal` (no `--swap`; his own file has aborted, so `lock.sh` refuses: `live.js:880`). | Nothing: `alice_check_lock` (`engine.rs:1600`) checks the terms, `W_A_min` and `M_A`, not the lock-by. Alice takes the lock and reveals (pinned by a test, a recorded weakness). | not refused; it harms only Bob (his NOID claim may not fit before `D`) | none for Alice | lock gas, and possibly his 0.001 ETH | Bob's side: `i1_fails_when_bob_locks_too_late` (`par`), `past_the_lock_by_the_note_says_so`; Alice's side: `g1_alice_accepts_and_reveals_on_a_lock_made_after_bobs_lock_by_current_behaviour` (`hostile_gaps.rs`: `eth_lock_seen`, then `eth_lock_final` and `reveal_eth`, no note about the late lock) |
+| B2 | Locks after the lock-by, correct terms: `live.js lock` with explicit `--lock-addr --receiver --amount-wei --t-reveal` (no `--swap`; his own file has aborted, so `lock.sh` refuses: `live.js:880`). | Nothing is refused: `alice_check_lock` (`engine.rs:1600`) checks the terms, `W_A_min` and `M_A`, not the lock-by. Alice takes the lock and reveals; since 2026-11-16 her tick adds a note that states the heights (decided: a note only, see G1). | not refused; it harms only Bob (his NOID claim may not fit before `D`) | none for Alice | lock gas, and possibly his 0.001 ETH | Bob's side: `i1_fails_when_bob_locks_too_late` (`par`), `past_the_lock_by_the_note_says_so`; Alice's side: `g1_alice_notes_a_lock_first_seen_after_bobs_last_lock_height_and_acts_exactly_as_before` (`hostile_gaps.rs`: `eth_lock_seen`, then `eth_lock_final` and `reveal_eth` as before, with the note) |
 | B3 | Locks the wrong amount: `live.js lock ... --amount-wei 900000000000000`. | note `"lock rejected: amount … wei != agreed …"` (`engine.rs:1602`, `184`), reason `"Bob's lock did not pass the checks"` (`engine.rs:1873`) | Alice's lock acceptance | NOID tied up until `D`, 14,800 μNOID | lock + refund gas | `f10_a_bad_first_lock_does_not_hide_the_correct_second_one`, `bob_does_not_lock_on_a_word_that_his_own_sender_already_locked_but_a_strangers_lock_only_makes_a_note` |
 | B4 | Wrong receiver: `live.js lock ... --receiver <not A_eth>`. | The lock is not even found: discovery asks for sender, receiver and lock word together; `"waiting for Bob's lock"` (`engine.rs:1875`). `lock_matches` would also say `"receiver is not A_eth"` (`engine.rs:178`). | Alice's lock discovery | as B1 | lock + refund gas | `alice_discovers_bobs_lock_by_parties_and_hashlock` (discovery); `g2_alice_does_not_take_a_lock_with_another_receiver_or_another_lock_word` and `g2_bob_does_not_take_a_lock_with_another_receiver_or_another_lock_word_as_his_own` (`hostile_gaps.rs`: with the lock put straight into the observation, no `eth_lock_seen`, notes `"lock rejected: receiver is not A_eth"` for Alice and `"a lock exists but is not ours: receiver is not A_eth"` for Bob) |
 | B5 | Too-short timelock: `live.js lock ... --t-reveal <block time + 1800>` (below `W_A_min` 3,360 s). | note `"lock rejected: T_reveal … is only 1800 s after its block (timestamp …), less than W_A_min 3360 s (I3)"` (`engine.rs:1612`), reason `"Bob's lock did not pass the checks"` (`engine.rs:1873`) | Alice's lock acceptance | as B1 | lock + refund gas; refund after 30 min | `alice_rejects_a_lock_whose_reveal_window_is_shorter_than_w_a_min` (`eng`); `live.js` "lock rejects bad inputs before sending"; the opposite case, a `T_reveal` far above the engine's bound, is B5 on Bob's side: `g9_bob_adopts_a_hand_made_lock_with_a_t_reveal_far_beyond_the_engines_bound_current_behaviour` (`hostile_gaps.rs`; Bob's file adopts it and Alice's has no upper bound either) |
@@ -102,12 +102,12 @@ close must pay Bob.
 | C6 | A node that lies (shows a funding, a lock or a secret that is not on the chain). | With two nodes: `"the two eth nodes disagree about the lock …"` (`engine.rs:1063`) and the Parano1d equivalents; a wrong secret is checked against the lock word and dropped (`"preimage seen but rejected"`, `engine.rs:2241`). With one node (`SINGLE_NODE_OK`) a consistent lie is believed: that is why a stranger needs two nodes. | Bob's lock, Alice's reveal (two nodes only) | one node: the lie decides; two nodes: a wait | needs a test-only script (see L7) | `f5_a_second_noid_node_that_shows_another_instance_or_none_blocks_the_lock`, `f5_a_second_eth_node_with_another_lock_record_blocks_the_reveal`, `hostile_node_output_is_a_decode_error_never_a_panic`, `r4_8_a_wrong_secret_on_one_node_does_not_hide_the_right_one_on_the_other` |
 | D1 | A damaged bundle. | `new-bob` refuses it before anything else, nothing is written | `new-bob` | none | nothing | `a_damaged_bundle_is_refused_before_anything_else_and_nothing_is_written`; live runs 11 and 13 |
 | D2 | A replayed bundle (a finished swap's bundle offered again). | `new-bob` accepts it (it is valid; pinned by a test), then Bob's first tick aborts with `"last lock height … passed before Alice's funding was final"` (`engine.rs:2634`) even with an old `Locked` log of his sender on the word; a lock would also be refused because his own sender already locked that word (`engine.rs:2556`). A second `new-bob` of the same bundle into the same folder: `"… already exists; never overwrite a swap file"` for the same path, `"hashlock already used by another swap (T9)"` for another file name | Bob's first tick; `new-bob` (same folder) | none | nothing | `g4_a_bundle_given_to_new_bob_twice_into_one_folder_is_refused_the_second_time`, `g4_the_first_tick_of_a_replayed_bundle_is_an_abort_not_a_lock` (`hostile_gaps.rs`) |
-| D3 | A second swap that reuses a secret (same lock word). `new-alice` always draws a fresh secret, so this needs a test-only script (a bundle built around an old `A`). | `poseidon`: `"… Locked log(s) of the pinned contract made by Bob's own sender already carry this lock word A …, so Bob does not lock on it again"` (`engine.rs:2556`); a lock word first locked by someone else gives only a note | Bob's lock | none for Bob: a public secret lets anyone close the NOID, but only to Bob | nothing | `hashlock_registry_refuses_reuse` (`swf`), `bob_does_not_lock_on_a_word_that_his_own_sender_already_locked_but_a_strangers_lock_only_makes_a_note`; `live.js` "a second lock from the same sender with the same hashlock but another timelock is refused …". The registry is per folder: `g5_the_same_bundle_into_two_folders_is_not_caught_by_the_default_registry_current_behaviour` (`hostile_gaps.rs`) shows the same bundle accepted into two folders (a recorded weakness, defence in depth) |
+| D3 | A second swap that reuses a secret (same lock word). `new-alice` always draws a fresh secret, so this needs a test-only script (a bundle built around an old `A`). | `poseidon`: `"… Locked log(s) of the pinned contract made by Bob's own sender already carry this lock word A …, so Bob does not lock on it again"` (`engine.rs:2556`); a lock word first locked by someone else gives only a note | Bob's lock | none for Bob: a public secret lets anyone close the NOID, but only to Bob | nothing | `hashlock_registry_refuses_reuse` (`swf`), `bob_does_not_lock_on_a_word_that_his_own_sender_already_locked_but_a_strangers_lock_only_makes_a_note`; `live.js` "a second lock from the same sender with the same hashlock but another timelock is refused …". The registry was per folder when this table was written; G5 is fixed since (a per-machine registry, section 6: `g5_the_same_bundle_into_two_folders_is_refused_by_the_per_machine_registry` in `hostile_gaps.rs`) |
 
 Counts: 30 scenarios (9 Bob, 9 Alice, 3 third party, 6 chain and node, 3 bundle). Since the tests of `swap-cli/tests/hostile_gaps.rs`
 (11 tests, written for the gaps of section 6) 29 have a direct offline test and 1 is covered only in part (T3: the simulator has one mempool).
 Before that file: 23 direct, 6 in part (B2, B4, B7, A4, A5, T3), 1 none (D2). Four of the new tests pinned a recorded weakness (names ending in
-`_current_behaviour`: B2/G1 and, of low impact, A8/G6; B5/G9 and D3/G5 were fixed afterwards and their tests now assert the fixed behaviour); see section 6. The table names 78 distinct tests (69 in Rust,
+`_current_behaviour`: B2/G1 and, of low impact, A8/G6; B5/G9 and D3/G5 were fixed afterwards and their tests now assert the fixed behaviour; B2/G1 was decided on 2026-11-16 as a note only, and its test was renamed; of the four, only G6 still ends in `_current_behaviour`); see section 6. The table names 78 distinct tests (69 in Rust,
 9 in `eth/test`), plus the chaos campaign of `CHAOS.md` and live runs 4, 6, 9, 11 and 13 where they apply.
 
 ## 3. Which scenarios need a live run
@@ -134,7 +134,8 @@ Common to every run: the per-run setup of `live-scenarios.md` 0 and `runbook-two
 object check, bundle carried as a file and its `bundle check:` line compared on both machines, `new-bob` on Bob's
 machine), the watch loop on each machine (`watch.sh alice 30` on Alice's machine, `watch.sh bob 30` on Bob's machine),
 and the GO / NO-GO of `live-scenarios.md` 0. Note the contract root and the Sepolia contract link at every
-run. Run numbers below assume the order holds: the next free number is 14.
+run. Run numbers below are the plan's; the campaign ended at run 20 (L4 took two tries, L5 and L6 shared a run) and the next
+free number is 21.
 
 Abort paths, always available: Bob's `refund-eth.sh --dry-run`, then `refund-eth.sh` (Bob's machine) once his loop
 says `refund_eth` (after `T_reveal`); Alice's `recover-noid.sh --dry-run`, then `recover-noid.sh`, then
@@ -407,18 +408,24 @@ Must NOT be run live:
 ## 6. Gaps: behaviours that had no offline test and no safe live procedure
 
 Each with the fixture, the expected engine answer and, where one was written, the test. G1 to G6, G9 and G12 were pinned on
-2026-11-06 by `swap-cli/tests/hostile_gaps.rs` (11 tests, no change to `swap-cli/src` at the time; G5 and G9 were fixed afterwards and their tests were rewritten for the fixed behaviour): each test asserted what the engine did then,
+2026-11-06 by `swap-cli/tests/hostile_gaps.rs` (11 tests, no change to `swap-cli/src` at the time; G5 and G9 were fixed afterwards and their tests were rewritten for the fixed behaviour; G1 was decided on 2026-11-16 and its test was renamed): each test asserted what the engine did then,
 and a name ending in `_current_behaviour` marks a recorded weakness, not a wanted behaviour. G7, G8, G10 and G11 are not in that
 file (reasons below).
 
 - **G1 (B2).** Alice facing a lock made after Bob's lock-by. Fixture: Alice in `funding_final`, a lock on the agreed
   terms mined at a Parano1d tip above the last lock height, `T_reveal` with a full window. Review verdict (2026-11-06):
   real. Alice's lock check and reveal gate look at neither Bob's lock-by nor `D`. It can only harm Bob, whose own tool
-  refuses to lock late. Pinned by `g1_alice_accepts_and_reveals_on_a_lock_made_after_bobs_lock_by_current_behaviour`
-  (both lock kinds): Alice's tick records `eth_lock_seen`, waits for finality, then records `eth_lock_final` and offers
-  `reveal_eth`, with no note about the late lock; Bob's own tool at the same height aborts ("not locking: … past Bob's
-  lock-by height"). RECORDED WEAKNESS; whether a note "Bob locked after his lock-by; his claim may not fit before D" or a
-  refusal is wanted is a later decision.
+  refuses to lock late. **Decided 2026-11-16: a note only, no refusal.** Alice's action is unchanged: her tick records
+  `eth_lock_seen`, waits for finality, then records `eth_lock_final` and offers `reveal_eth`. What is new is a note that
+  states two heights, where the Parano1d tip was when Alice's file first recorded the lock and Bob's last lock height
+  ("Bob's lock 0x....... was first recorded at Parano1d height T, after Bob's last lock height Z (nominal lock-by H); it may
+  have been mined in an earlier block than that poll"). The reason for a note and not a refusal: a late lock still leaves
+  Alice her full reveal window, because check I3 measures the minimum window from the lock's own block, so refusing would
+  only keep Bob's ETH locked until his refund. Pinned by
+  `g1_alice_notes_a_lock_first_seen_after_bobs_last_lock_height_and_acts_exactly_as_before` (both lock kinds; it also checks
+  that a lock first seen between the nominal lock-by and Bob's last lock height, and a lock seen early, get no note); Bob's
+  own tool at the same height aborts ("not locking: … past Bob's lock-by height"). The test used to be named
+  `g1_alice_accepts_and_reveals_on_a_lock_made_after_bobs_lock_by_current_behaviour`.
 - **G2 (B4, B7).** A lock with another receiver or another lock word put directly into `eth.lock` (bypassing
   discovery). Pinned by `g2_alice_does_not_take_a_lock_with_another_receiver_or_another_lock_word` (both kinds) and
   `g2_bob_does_not_take_a_lock_with_another_receiver_or_another_lock_word_as_his_own` (`sha256`; the `poseidon` kind adds the
@@ -467,8 +474,12 @@ file (reasons below).
   with the note `"refund_eth is also due …"`. RECORDED WEAKNESS (low); whether Bob should look for it by himself is a later
   decision.
 - **G7 (A8).** Alice's file after a reveal sent outside the tool (`live.js claim` without `--swap`). Fixture: Alice in
-  `lock_final`, no intent, the lock claimed by her receiver with the preimage. Expected (to be confirmed): the file
-  records the claim and reaches `done`, not "reveal cutoff passed; keeping the secret".
+  `lock_final`, no intent, the lock claimed by her receiver with the preimage. Expected, and CONFIRMED (2026-11-16) by
+  `g7_alice_after_a_reveal_sent_outside_the_tool_records_the_claim_and_reaches_done` and
+  `g7_a_recorded_reveal_intent_is_resolved_by_the_outside_claim_even_after_the_cutoff` in `swap-cli/tests/hostile_gaps.rs`: the
+  event `eth_claim_mined`, the phase `revealed`, no new reveal offered, no cutoff note (also when the tick comes after the cutoff), then `done` once the
+  claim is final; in the second test the recorded `reveal_eth` intent is resolved by the outside claim. The file records the claim and does not say
+  "reveal cutoff passed; keeping the secret".
 - **G8 (A2).** `recover-noid.sh` against an instance of another amount. A `selftest.sh` case with a scripted wallet
   output: expected refusal of that instance with the payout check, and the other instances still closed. Found by
   reading (2026-11-06): the helper compares the payout with `AMOUNT - fee`, and `AMOUNT` is read from `env.local.sh`
@@ -508,6 +519,14 @@ file (reasons below).
   offline without them.
 - **G11 (C6).** A consistent lie from the only node. Not a test gap but a stated limit: with `SINGLE_NODE_OK` the tool
   trusts that node. A stranger needs two nodes on independent networks (run 12 used one private network).
-- **Open chaos findings that a hostile party can trigger** (no funds lost, a file that cannot end): F-10 (two fitting
-  instances waited on after `D`), F-11 (Bob's file after Alice's recovery beat him), F-6 (a lock that left the chain
-  for good). See `swap-cli/CHAOS.md`.
+- **Open chaos findings that a hostile party can trigger** (no funds lost, a file that cannot end): F-21 (Bob's
+  recorded lock is gone while another lock of his on the same lock word is open or claimed: the file waits; only Bob's own key
+  can create such a lock), and what is left of F-11 (Alice in `funding_submitted`, and the F-18 state when no `--closed-by` is
+  given) and of F-6 (the refund phases). F-10 (two fitting instances waited on after `D`) was fixed for Bob on 2026-11-16 and
+  is no longer one of them: with more than one fitting instance Bob gives up at the same heights as with one. Since the second
+  batch of 2026-11-16 (commit `198241c`) Bob's file after Alice's recovery beat him is no longer without an end: a close made
+  by someone else is recorded with `tick --closed-by` once it is final (18 blocks), and the instance seen listed when the claim
+  branch had closed ends the same way. F-20 (a recorded instance that is gone while a newer incarnation holds its slot) is fixed
+  for the case before any reveal: Alice's recovery close is offered for the oldest instance of the agreed amount at the root,
+  with a note that it is not the recorded one; after a reveal there is deliberately no such adoption. All of it is tested offline
+  only. See `swap-cli/CHAOS.md`.

@@ -146,7 +146,7 @@ tests, which pin what must NOT change, and the F-16 predicate test were not muta
 - *M4 (documented, not fixed).* F-3 is fixed for reorgs that a poll observes (absence, or another incarnation). A funding removed and re-included between two polls with the SAME slot and incarnation is invisible; only the inclusion height (`getTx` of the funding txid) would close it, and Bob does not know that txid.
 - *Not changed:* a reveal that was sent, reverted and then cancelled in the ledger counts as no evidence of a reveal (a cancel is allowed once nothing of it is pending or mined), so if Bob took the NOID the file stays `lock_final` (stuck, never wrong); the F-17 marker is taken at a non-final tip (a deep reorg suppresses a true `lost`: the safe direction); a claim recorded from a log and later read from the `getLock` record is not judged as moved (a premature `done` while the log index lags); F-9 reads the reorg without re-checking the chain id (the wrong endpoint recovers with the right one); `lost` could still be declared when Alice's wallet closed the instance while she was not polling around `D` (fixed afterwards by F-18).
 
-**Open (not fixed in this round):** F-2, F-6, F-7, F-8, F-10, F-11, F-14 (described below, unchanged). One new finding, F-17, was found by the longer runs and fixed:
+**Open (not fixed in this round):** F-2, F-6, F-7, F-8, F-10, F-11, F-14 (described below, unchanged; F-10 and F-14 were fixed on 2026-11-16, see their sections, and one finding, F-20, was added the same day; F-20 was fixed the same day, F-6 and F-11 in part, and F-21 was added: the open list is now F-2, F-6, F-7, F-8, F-11, F-21). One new finding, F-17, was found by the longer runs and fixed:
 
 ### F-17 (Low-Medium, new) `lost` while Alice's own un-final recovery close removed the instance — **FIXED 2026-11-05**
 Seen on seed `0x5eed01`, scenario 1009 (replay: `CHAOS_SEED=0x5eed01 CHAOS_ONLY=1009`), and, after the F-12 fix let the CLI path reach `lost`, on
@@ -165,7 +165,8 @@ is refused while the claim is pending or mined, so a cancelled reveal was never 
 
 Severity: Medium = a party can be misinformed about funds or an ETH leg stays locked behind a message that says "pending";
 Low = a file or a swap cannot end by itself, no funds at risk; Info = noted. Seeds are for base `0xc4a05eed` unless given
-(replay: `CHAOS_SEED=<base> CHAOS_ONLY=<index> CHAOS_VERBOSE=1`). Counts are scenarios of the default 1,000.
+(replay: `CHAOS_SEED=<base> CHAOS_ONLY=<index> CHAOS_VERBOSE=1`). Counts are scenarios of the default 1,000. The finding sections keep the text of the day they were written;
+F-6, F-11 and F-20 were answered on 2026-11-16 (second batch, commit `198241c`) and F-21 was added: see their sections and the section "The stuck-instance finding and two chaos findings" below.
 
 ### F-9 (Medium) Alice reaches `done` without re-checking that her claim is still on Ethereum — **FIXED 2026-11-05**
 `engine.rs` `A::Revealed { block_number } -> EthClaimFinal` fires when `finalized_block >= block_number`; it never looks at
@@ -207,22 +208,31 @@ and leaves him nothing to claim until it reappears. **Fix:** in `alice_action`, 
 crash-after-effect the retried `refund_noid` goes against a closed instance every tick until `--closed-by` is run. The node
 refuses it, nothing is lost. 58 scenarios. **Fix:** move the guard into `alice_action` / `decide`, for both paths.
 
-### F-6 (Low) `locked` never re-checks the lock
+### F-6 (Low) `locked` never re-checks the lock. FIXED 2026-11-16 for `locked`; open for the refund phases
 A lock that left the chain for good (reorg, transaction dropped) leaves Bob in `locked` / `refund_submitted` /
 `refund_mined` with "waiting for the secret". No funds at risk (nothing was locked). 75 scenarios (16, 37, 540).
 **Fix:** a poll in which `find_lock` is empty and no lock transaction is pending, for N polls, emits `EthLockLost`
 (back to `funding_final`, or `aborted` after the lock-by).
+*Fixed for `locked` (2026-11-16, commit `198241c`):* see the section below. What remains open of F-6: the refund phases (`refund_submitted`, `refund_mined`) over a lock that left the chain.
 
-### F-11 (Low) Bob's file cannot end after Alice's recovery close beat him
+### F-11 (Low) Bob's file cannot end after Alice's recovery close beat him. FIXED 2026-11-16 for the cases the engine can decide; two remain open
 Instance gone, no tracked transaction: `bob_claim_action` answers "verify the contract receipts manually" before it looks at
 D; `--closed-by` refuses Alice's close ("pays Alice"). So `secret_seen` stays for ever. 5 scenarios (42, 444, 576, 716).
 **Fix:** when the instance is gone, the claim branch is closed (`tip >= D`) and no tracked transaction exists, emit `Abort`
 (`aborted: Alice recovered the NOID first`), and let `--closed-by` record a refused-because-late close as `aborted`.
+*Fixed in part (2026-11-16, commit `198241c`):* see the section below. What remains open of F-11: Alice in `funding_submitted` (the file cannot know), and the F-18 state when no `--closed-by` is given.
 
-### F-10 (Low) "More than one instance fits" is waited on for ever, also after D
+### F-10 (Low) "More than one instance fits" is waited on for ever, also after D. FIXED 2026-11-16 (Bob)
 Bob in `funding_final` (and Alice in `funding_submitted`, F-7) with two instances of the agreed amount at the root answers
 `Wait` instead of `Abort` once the lock-by / D has passed. 5 scenarios. **Fix:** check the abort conditions (lock-by, D)
 before the ambiguity wait.
+*Fixed for Bob (2026-11-16):* with more than one fitting instance his give-up heights are checked before the "more than one instance" wait: the last lock
+height, and funding finality plus `B_bob` (the second only while no `lock_eth` intent was cancelled). He gives up at the same heights as with one instance.
+Before those heights the wait stands and no lock goes out on a guess. Alice's side was already covered (F-19 for a funding behind a lookalike, F-7 for
+`funding_submitted`). Tests, all in `tests/corner_cases.rs`: `f10_two_fitting_instances_before_the_give_up_heights_are_still_a_wait_and_nothing_is_locked`,
+`f10_two_fitting_instances_after_the_give_up_height_end_the_file_as_one_instance_would`, `f10_with_a_cancelled_lock_eth_intent_only_the_lock_by_height_ends_the_wait`,
+`f10_on_the_command_line_path_with_a_decided_lock_eth_intent_the_abort_is_printed_and_not_recorded`; the tests `f10_alice_with_two_fitting_instances_does_not_reveal_before_d`
+and `f10_alice_with_two_fitting_instances_is_offered_the_recovery_close_of_her_own_instance_at_d` pin Alice's side.
 
 ### F-7 (Low, seen during development, no replayable seed in the final harness) Alice never accepts her funding behind a lookalike instance
 While a second instance of the agreed amount sits at the root, Alice stays in `funding_submitted` ("funding not yet visible")
@@ -257,10 +267,16 @@ limit or a clock 100 s behind has a window up to 700 s shorter than `W_A_min` me
 rejects the lock and the swap ends by two refunds: a liveness loss, no safety loss (scenario 1639: 5,229 s instead of 5,400 s).
 **Fix:** at lock time and at resend require `T_reveal - max(now, latest_timestamp) >= W_A_min`. *Partly applied 2026-11-05:* the re-send of a dropped lock (F-5) checks it (measured to the likely block, `+ DE`); the first lock and the restart re-send (`reuse_pending`) do not yet, so the finding stays open.
 
-### F-14 (Info) The ledger prints `refund_noid` again after a reorg re-queued the first
+### F-14 (Info) The ledger prints `refund_noid` again after a reorg re-queued the first. FIXED 2026-11-16
 The intent resolved when the instance disappeared; a reorg brings the call back into the mempool and the instance back, and the
 next tick records and prints a second `refund_noid`. The first-seen mempool refuses the second; harmless (scenario 979).
 **Fix:** `alice_action` waits when `noid.pending_calls` is non-empty, as Bob's claim already does (T2).
+*Fixed (2026-11-16):* `refund_noid` is a wait while a call on the contract (one of its instances) is pending in the node's mempool, with the same second-node
+exception as Bob's claim wait (a second node that is fresh, level with the first and sees no pending call lets the refund go on). The refund is offered again only
+if the call is evicted and the instance is still there. Tests, all in `tests/corner_cases.rs`: `f14_a_reorged_recovery_close_in_the_mempool_is_not_offered_a_second_time`,
+`f14_the_library_path_does_not_send_a_recovery_close_while_a_call_is_pending`, `f14_a_second_node_that_is_level_and_sees_no_pending_call_lets_the_refund_go_on_as_for_bobs_claim`,
+`f14_the_wait_stands_beside_a_held_reveal_eth_intent_and_records_nothing_new`, `f14_the_wait_stands_in_done_and_in_revealed_with_a_leftover_refund`,
+`f14_with_a_pending_call_the_due_note_is_a_statement_that_is_true_beside_the_wait`.
 
 ### F-15 (Medium-Low) `intent --cancel` of `fund_noid` cannot see a funding in the mempool — **FIXED 2026-11-05**
 For `lock_eth` / `reveal_eth` / `refund_eth` the cancel checks the signer's nonces; for `refund_noid` the pending calls; for
@@ -278,7 +294,7 @@ with a live instance its own non-terminal marker.
 ## After the fixes (2026-11-05)
 
 Default run (1,000 scenarios, base seed `0xc4a05eed`): green, about 25 s; the only recorded symptoms are the open findings (F-2, F-6, F-10, F-11,
-F-14; `CHAOS_STRICT=1` fails on exactly those, 81 scenarios). Four runs of 3,000 scenarios (`0xc4a05eed`, `0xdeadbeef`, `0x5eed01`, `0xfeed42`) are
+F-14; `CHAOS_STRICT=1` fails on exactly those, 81 scenarios; since 2026-11-16 F-10 and F-14 are fixed, and the symptoms are F-6 in 69 scenarios and F-11 in 3, see the section "Extra seeds after the finality change"). Four runs of 3,000 scenarios (`0xc4a05eed`, `0xdeadbeef`, `0x5eed01`, `0xfeed42`) are
 green. The two seeds `0x5eed01` and `0xfeed42` had not been run before, and the longer runs found, besides the items in the Fix status table: F-17,
 the lock cancel, and four corrections of the harness (a party that adopted a foreign instance is not judged on `refund_noid` or on a cancel; the new
 incarnation of a re-minted funding; the abort residue; the reveal gate after a sent reveal). Atomicity held in every budgeted scenario of every run:
@@ -297,7 +313,7 @@ could still take back, after which the lock was open again with nobody to refund
 (and visible in the poll). (3) Same run, scenario 2633 (`gate-reveal`): the shifted timeline reached an old path (`done` -> recovery close recorded ->
 reorg -> `funding_final`) where Alice adopted a second matching lock and printed a second reveal; a file that already received its ETH
 (`eth_claim_final`) no longer looks for a lock. The four 3,000-scenario runs (`0xc4a05eed`, `0xdeadbeef`, `0x5eed01`, `0xfeed42`) are green again. No
-open finding closed: the list stays F-2, F-6, F-7, F-8, F-10, F-11, F-14. What the run still cannot show: R4-2's attack needs two nodes that disagree
+open finding closed: the list stays F-2, F-6, F-7, F-8, F-10, F-11, F-14 (F-10 and F-14 were closed on 2026-11-16). What the run still cannot show: R4-2's attack needs two nodes that disagree
 about the mempool and the simulator has one (see Limits); the fix holds by construction (the same lock id, so a duplicate reverts) and is tested
 directly in `tests/review4.rs`.
 
@@ -368,7 +384,116 @@ instance at the root pays Alice on the recovery branch and the gates that protec
 F-2 stays open on its own terms (a `pending_action` of unknown outcome with nothing at the root).
 
 Runs after both fixes (2026-11-05): the whole suite is green (452 passed, 1 ignored; it was 446 before the six new tests); the two replays pass; 1,000 scenarios on `0xc4a05eed` and `0x5eed0001`, and 3,000 on `0xc4a05eed`, `0x5eed0001`, `0xdeadbeef`, `0x5eed01`,
-`0xfeed42` are green (no hard failure; only the open findings are recorded).
+`0xfeed42` are green (no hard failure; only the open findings are recorded). Those runs were made before the finality change of 2026-11-08; the next section says what the later runs showed.
+
+## Extra seeds after the finality change, and the fixes of 2026-11-16
+
+The finality change of commit `05851ce` (17 to 18 blocks) shifted the timing of every scenario, and the extra seeds were not re-run at 1,000 scenarios afterwards.
+The seed `0x5eed0001` had been green at 1,000 and 3,000 on 2026-11-05. Run again on the tree of 2026-11-16 it showed three gaps of the TEST ORACLE, in two scenarios.
+None was an engine defect, and the engine was not changed for them.
+
+- **Scenario 496, first reported as `ledger-cancel-after-send`, then as `terminal-vs-chain`.** A held `fund_noid` intent was cancelled after `D`, when Alice's own
+  recovery close had already closed the instance. It is the F-1 / F-19 class "no trace of the funding", reached through `intent --cancel`: the tool cannot tell a
+  funding that was recovered outside it from one that never went out, and the cancel is the operator's statement that nothing was sent. The oracle no longer counts
+  Alice's own recovery close as the effect of the funding (`fund_noid_effect_in_world`), and a file that ends `aborted` in this case, with the NOID back at Alice, is
+  no longer a violation (`alice_aborted_after_a_cancelled_funding`); the run counts and prints these ("aborted after a cancelled sent funding").
+- **Scenario 715, `not-terminal`.** The documented F-18 cost: the reveal is on record, Bob's refund is final, the instance is gone, and no poll before `D` saw it
+  gone, so the file stays in `lock_final` or `reveal_submitted` by design. The allowance had matched on the text of the last action; it now matches on the file's
+  structured state (`alice_reveal_lost_but_unprovable`).
+
+Each helper is pinned by a unit test in `tests/chaos.rs`.
+
+The same commit (`6cca4e2`) fixed F-10 and F-14 above (and R7-4 of `REVIEW-7.md`) and decided gap G1 as a note only (`docs/hostile-run-plan.md`). The oracle no longer
+excuses F-10 and F-14: `OPEN_FINDINGS` is now F-2, F-6, F-7, F-8, F-11 (F-21 was added by the second batch below), so a return of either one is a hard failure with its own invariant id (`not-terminal` for F-10,
+`ledger-duplicate-print` for F-14).
+
+Results on the committed tree, 1,000 scenarios each (2026-11-16):
+
+| Base seed | Result | Open findings recorded |
+|---|---|---|
+| `0x5eed0001` | green | F-6 in 47 scenarios, F-11 in 9, F-2 in 1 |
+| `0xc4a05eed` (default) | green | F-6 in 69, F-11 in 3 |
+| `0xdeadbeef` | green | F-6 in 68, F-11 in 4, F-2 in 2 |
+| `0x5eed01` | green | F-6 in 58, F-11 in 6, F-2 in 2 |
+| `0x5eed0001`, 3,000 scenarios | green | F-6 in 192, F-11 in 19, F-2 in 2 |
+| `0xfeed42` | one hard violation (scenario 583, `noid-stuck`), older than this commit | F-20 below |
+
+Owed: the 3,000-scenario runs of the other seeds (`0xc4a05eed`, `0xdeadbeef`, `0x5eed01`, `0xfeed42`) on this tree. (Superseded for `0xfeed42` by the second batch below.)
+
+### F-20 (new 2026-11-16) `noid-stuck`: Alice's recorded instance is gone and a newer incarnation holds the same slot. FIXED 2026-11-16 for the case before any reveal
+Seen on `0xfeed42`, scenario 583 (replay: `CHAOS_SEED=0xfeed42 CHAOS_ONLY=583`); it is older than the commit of 2026-11-16 (`6cca4e2`) and not caused by it. Alice is in
+`funding_final`. After reorgs her recorded instance is gone and the same slot holds a newer incarnation, so the tool said there is nothing to refund and only named
+the instance for a wallet refund. The NOID stayed at the contract until it was taken back by hand. *Fixed before a reveal (commit `198241c`):* see the section below,
+which also says why there is deliberately no such fix after a reveal.
+
+## The stuck-instance finding and two chaos findings (2026-11-16, second batch)
+
+Commit `198241c` answers F-20, and the parts of F-11 and F-6 that the engine can decide. It changes decisions and adds end states in narrow cases. It was reviewed
+independently in three passes (the last one found nothing that must be fixed) and tested offline only; the new tests are in `tests/recovery_cases.rs`. Nothing was run against a real chain.
+
+**F-20, before any reveal.** At and after `D`, in the phases `funding_final`, `lock_seen` and `lock_final` with no reveal on record, when the recorded instance is not
+listed (and a configured second node is fresh and does not list it either) and no close before `D` was recorded, the engine offers the recovery close (`refund_noid`)
+for the oldest instance of the agreed amount at the contract root. The note says that this is not the recorded instance and names the other instances at the root,
+which this close does not cover. The tool writes a history entry `noid_recovery_adopted:<slot>:<creation>:<amount>` (helpers read the target from it), and a reset entry
+`noid_recovery_adopted:recorded` when a recovery close is decided again for the recorded instance because it came back. A final adopted close does not make the file
+`refunded` while the recorded instance is listed again; where the second node does not confirm the recorded instance absent, the file stays open and says why. Why it
+is safe: every instance at this opening pays Alice on the recovery branch, and nothing before `D` reads the adoption. **After a reveal there is deliberately no adoption,
+whatever markers exist.** After a reveal Bob may have claimed the recorded instance before `D`, and the file must not end with a label (`refunded`, or a recovery of "her"
+NOID) that it cannot know to be true. There the note reads "whether Bob claimed the recorded instance before D is not known to this file; the instance at the root can
+be recovered with the wallet". Tests: `x1_*`, `m1_*`, `s1_*`, `s3_*`.
+
+**F-11, a close made by someone else, recorded once it is final.** `tick --closed-by TXID` now accepts, on both files, a close that is FINAL (18 blocks deep, and on a
+configured second node too; otherwise nothing is recorded). On Bob's file a close at or after `D` is the recovery branch (it paid Alice): it is recorded log-only as
+`noid_closed_after_deadline:<txid>:<height>`, and his file then ends with "claim branch closed: ..." naming its evidence, either the operator's recorded close or
+"the instance was listed ... when the claim branch had closed (D ...) and block D - 1 was final" with a second node that agreed (the log-only entries
+`noid_instance_alive_at_d` and `noid_alive_at_d_tip:<tip>`). On Alice's file a final close before `D`, after a reveal (`lock_final` with a reveal on record, or
+`reveal_submitted`), is the claim branch (it paid Bob): it is recorded as `noid_closed_before_deadline:<txid>:<height>` and counts as the evidence the `lost` end state
+needs (F-18). What remains open of F-11: Alice in `funding_submitted` (the file cannot know what closed an instance it never saw), and the F-18 state when no
+`--closed-by` is given. Tests: `x3_*`, `s3_closed_by_needs_the_second_node_to_see_the_close_final_too`.
+
+**F-6, for `locked`.** Bob's file in `locked` ends `aborted` when its lock is gone for good. That needs all of: no such lock on any node used, each node on the pinned
+chain id and the pinned contract code hash, the head time at least `T_reveal` plus the profile's finality time, the finalized block's time at least `T_reveal` where the
+node reports it (`finalized_timestamp`; required under `production`), and no other lock of his on this swap's lock word that is open or claimed. The argument in one
+sentence: `newLock` reverts once the timelock is not in the future and `claim` reverts at or after the timelock, so a lock that is absent then can neither appear nor
+be claimed. A pending `refund_eth` intent is resolved by that abort. What remains open of F-6: the refund phases (`refund_submitted`, `refund_mined`). Tests: `x4_*`.
+
+**Notes (second batch).** Two forms of "abort not recorded": "abort not recorded: a <kind> was decided for this swap and never cancelled, so it may have been sent ..." and
+"abort not recorded yet: ... cancelled at <unix> (unix), <hold> s are kept back after a cancel (<left> s left) ...". A note on a recorded "too late to fund" abort after a cancelled
+funding with no instance at the root ("a fund_noid was decided and later cancelled (taken as not sent); no instance of this contract is visible and the funding window is
+closed; if a funding was sent, it is no longer at the contract: check the wallet's history"). Tests: `x2_*`.
+
+### F-21 (new 2026-11-16, OPEN) Bob's recorded lock is gone but another lock of his on the same lock word is open or claimed
+It is the case the F-6 rule must refuse. Bob's lock is not on the chain, but his sender has
+another lock to Alice's receiver on this swap's lock word, open or claimed, so the engine cannot say that nothing is locked and keeps waiting. An open one gets an
+ALARM that names it once its own `T_reveal` has passed ("... it can be refunded by hand with `live.js refund` (this tool offers no action for a lock that is not in
+this file)"). A CLAIMED one means the secret is public: the watcher now reads that lock's claim (`EthObservation.other_claims`), and Bob's file takes the preimage through the
+usual check (it must hash to the lock word and match the NOID address), moves to `secret_seen` and offers the NOID claim, with the note "the secret was read from a CLAIMED
+lock of Bob's other than the one in this file (same lock word)". Only Bob's own key can create such locks. The simulator never fills `other_claims`, so the chaos run does not
+exercise the claimed-other-lock path, and `other_claims` was not exercised against a real node; the symptom of the open-lock path is recorded in the runs below.
+Tests: `s2_*`.
+
+### Five minor points left open on purpose (low, 2026-11-16)
+The last review round left these open on purpose, and no further round was made; the work on these low findings was stopped there by decision.
+1. (F-21) The "other lock of Bob's" check does not know when the watcher's read cap (8 locks) cut the list short. Only Bob's own key can create such locks.
+2. (F-20) In the check of a final adopted close, a listing of the recorded instance on the SECOND node alone also sends the file back, where staying in `refund_included`
+   until both nodes agree would be better. The file says nothing false, and `--closed-by` still ends it.
+3. (F-20) That path writes the existing history entry `noid_tx_reorged` although nothing was reorged. No decision reads the name; it is wrong as a log line.
+4. (F-20) After such a go-back, the final text is plain "done: NOID refunded" and the adopted close is only in the history.
+5. (F-11, F-6) Bob in `secret_seen`, reached through another lock's claim whose recorded lock stays invisible, cannot end if his claim becomes too late: the abort waits on
+   "the ETH lock is not visible" for ever. No money is held by the file.
+
+### Chaos results of the second batch (commit `198241c`, 1,000 scenarios each, all green)
+
+| Base seed | Open findings recorded |
+|---|---|
+| `0x5eed0001` | F-11 in 1 scenario, F-2 in 1, F-21 in 14 |
+| `0xc4a05eed` (default) | F-21 in 15 |
+| `0xdeadbeef` | F-2 in 2, F-21 in 19 |
+| `0x5eed01` | F-2 in 2, F-21 in 12 |
+| `0xfeed42` | F-2 in 3, F-21 in 16 |
+
+F-6 is 0 on all five (the scenario of `0xfeed42` that failed before, 583, is fixed). `OPEN_FINDINGS` in `tests/chaos.rs` is the authority for the open list: F-2, F-6, F-7,
+F-8, F-11, F-21 (F-6 and F-11 stay in it for what is left of them). No 3,000-scenario run is recorded for this commit.
 
 ## The Ethereum lock kind (2026-11-05)
 

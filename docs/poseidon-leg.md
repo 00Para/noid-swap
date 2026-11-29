@@ -341,15 +341,17 @@ T17, T19; section 9.1 (gas money, minimum amount); section 10 M2 (stock variant 
     claim is also sent with a fixed 200,000 gas limit and never estimated, and a dry run with the secret is refused against a non-loopback node for both kinds (8).
     **REVIEW-7 supersedes item 3 again** (`swap-cli/README.md` "What REVIEW-7 changed", R7-1): the pre-lock check is no longer a scan of every `Locked` log; the node is asked
     for the `Locked` logs of Bob's own sender (indexed topic2) and the word is compared locally, so the exact-provider-cap-size rule (`SUSPECT_LOG_CAPS`) is gone.
-10. **Not done:** design `docs/protocol-design.md` 9.7 updates (sections 2.2, 5, 8, 9.1, 10); a live run of the poseidon kind (nothing was sent anywhere); the second
-    independent Yul review (review must-do 4) and Q8 are unchanged.
+10. **Not done:** design `docs/protocol-design.md` 9.7 updates (sections 2.2, 5, 8, 9.1, 10); the second
+    independent Yul review (review must-do 4) and Q8 are unchanged. (The live run of the poseidon kind, which this item first listed, has happened: run 5 on
+    Sepolia, run 8 on Ethereum mainnet, and every funded run since; `docs/live-run-5.md`, `docs/live-run-8.md`.)
 
 ## 10. Residual risks
 
 * Implementation equality is evidence (12,299 vendor vectors, hand proof, generator, fuzz), not a machine-checked
   proof, and the Yul has had one reviewer. A second independent Yul review and a symbolic check of `gmul` are open.
-* Whether `noid_gkr` can authorize for every 32-byte `s` (for example the all-zero secret) was not checked here;
-  an `s` the EVM accepts and the prover refuses would be the same attack (review F7, "related").
+* Whether `noid_gkr` can authorize for every 32-byte `s`: checked for the three edge secrets the review names (all zero, all ones, a secret that makes the
+  first S-box input zero) by `parano1d/harness/tests/edge_secrets.rs` (V2-9), and the code that was read has no value check; it is not proven for every
+  value. An `s` the EVM accepts and the prover refuses would be the same attack (review F7, "related").
 * Gas is Hardhat's. Real networks, rollups and zkEVM limits are untested; the floor must be re-measured after gas
   repricing forks. At small swap sizes the fee dominates on L1 (section 5).
 * Q8 (Poseidon2b with small round constants, which are the designers' reference constants: `docs/review-packet.md` section 5.1) needs a cryptographer; it is systemic to Parano1d.

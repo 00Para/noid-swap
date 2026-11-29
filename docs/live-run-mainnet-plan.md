@@ -197,9 +197,10 @@ roughly 20 of them waiting for Ethereum finality; Alice's file reaches `done` ab
 
 ## Known gaps carried into this run (for the owner to weigh at the go-ahead)
 
-- The abort paths have been settled on a local chain (run 2) but not on a public network, and the stock variant, contract v2, the
-  rotation case and the conflicting-close case (design Q1) are still open (`TASKS.md` M2.7). Mainnet adds nothing to those risks, but it
-  adds real ETH to them.
+- When this plan was written the abort paths had been settled on a local chain (run 2) but not on a public network, and the stock variant,
+  contract v2, the rotation case and the conflicting-close case (design Q1) were open (`TASKS.md` M2.7). Since then the abort paths ran on
+  public Sepolia (runs 4, 6, 9, 10 and 15 to 18) and the rotation guard ran in run 20; not on Ethereum mainnet. The stock variant, contract v2
+  and the conflicting-close case are still open. Mainnet adds nothing to those risks, but it adds real ETH to them.
 - The production profile has no amount cap; the 0.001 ETH rule is only as strong as the typed numbers.
 - Under `--mainnet`, `live.js lock`, `claim` and `refund` refuse without `--swap FILE`, so the commands in steps 5–7 are not usable by hand with bare flags.
 - `PROJECT.md` allows testnets, signet and tiny amounts only until the external review (M4). This run is a tiny amount on a real

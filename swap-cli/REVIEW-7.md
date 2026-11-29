@@ -232,6 +232,13 @@ still guards, and live.js's own scan and the duplicate-id rule stand behind it.
 
 **Fix.** Treat `eth.second_error` as a wait at the poseidon lock decision, as `abort_eth_blocker` already does (engine.rs:2871-2873).
 
+**Fixed 2026-11-16 (commit `6cca4e2`).** At Bob's decision to lock with the `poseidon` kind, a configured second Ethereum node that could not be read is a wait
+("the second Ethereum node could not be read (...): it must agree before this step (F5)"), also for the re-send of a dropped lock. The wait gives way to the abort
+once Bob is past his last lock height. Single-node mode (no second node configured) and the `sha256` kind (which has no such scan) are unchanged. Tests:
+`r7_4_a_failed_second_ethereum_node_holds_the_poseidon_lock_back_and_records_no_intent`, `r7_4_with_a_second_node_that_answers_or_with_no_second_node_the_lock_is_offered_as_before`,
+`r7_4_a_dropped_poseidon_lock_is_not_re_sent_while_the_second_ethereum_node_is_down`, `r7_4_the_sha256_kind_has_no_scan_and_is_not_held_back_by_the_second_ethereum_node`,
+`r7_4_the_second_node_wait_gives_way_to_the_abort_past_the_last_lock_height` (all in `tests/corner_cases.rs`). Tested offline only.
+
 ### R7-5 (Info) `--reveal-tx` evidence: one node, no canonical-block check
 
 Either node's verified reverted claim records the marker (engine.rs:1158). The receipt's block is not checked against the canonical chain
@@ -264,6 +271,12 @@ choose the limit from it.
 
 **Fix.** Re-check `getCode(receiver)` in `live.js claim` just before signing.
 
+**Fixed 2026-11-16 (commit `8e3150c`), the receiver's code part.** `live.js claim` reads the receiver's code at the `latest` and `pending` tags early (before the
+log scans, also in `--dry-run`) and again immediately before signing. For a first claim, any code (an EIP-7702 delegation included), a failed read or an answer that
+is not hex refuses before anything is signed and before the reveal sidecar is written. A `--replace` of a pending claim that carries this lock's secret (decided
+locally: its preimage hashes to the lock word) warns instead (`receiverCodeWarning`) and goes out, because the secret is already public and the replacement has the
+same receiver. The limit part (re-measure at a repricing fork) is not changed by this. Tested on a local chain only; it has never run against a real chain.
+
 ### R7-8 (Info) Bob sees a reverted claim only when told its hash
 
 A stranger Bob has no channel for Alice's hash. A secret published on a foreign lock is not watched either. In both cases Bob loses
@@ -285,10 +298,10 @@ improvement: scan `claim` calls to the pinned contract for the lock id in recent
 | R7-1 | Full scan: veto without knowing `A`; replace with an indexed `sender` query | Low (liveness) |
 | R7-2 | Failed self-test keeps the earlier pass valid | Low |
 | R7-3 | Build binding is the crate version | Info |
-| R7-4 | Pre-lock scan on one ETH node when the second fails | Info |
+| R7-4 | Pre-lock scan on one ETH node when the second fails | Info; FIXED 2026-11-16 (`6cca4e2`) |
 | R7-5 | `--reveal-tx`: one node, no canonical check | Info |
 | R7-6 | Malformed hash file stops tick and claim; frozen helpers | Info |
-| R7-7 | Fixed sha256 limit margin; no pre-flight for a receiver that gains code | Info |
+| R7-7 | Fixed sha256 limit margin; no pre-flight for a receiver that gains code | Info; the receiver-code re-check FIXED 2026-11-16 (`8e3150c`), the limit margin unchanged |
 | R7-8 | Bob needs the hash; foreign-lock reveal unwatched | Info |
 
 Severity counts (new): Low 2, Info 6.

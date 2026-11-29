@@ -17,6 +17,7 @@ Reading key: **value** = what it buys (safety, time, money, reach); **effort** S
 | 5 | Fixed-fee close (`fee == max_fee` in the program) kills the min-fee stall; then run Q1 | high (Bob's safety) | S + M (Q1) | contract v2 changes the pinned source | **now** |
 | 2 | Pre-prove π in the background; guest speed-up (M1.5); bigger RAM; dedicated circuit later | high (36 min off the critical path) | S / M / L | low | **now** (pre-prove), later (circuit) |
 | 10 | Trustless watchtower for Bob; two-node tip check; batch the mempool lookups | high (liveness) | S each | low | **now** |
+| 15 | A watching service that finishes Bob's side: after the reveal anyone with the public bundle can close the contract, and the close pays Bob (not built) | medium (Bob can be offline after his lock) | M | a service that picks the fee burns up to `max_fee` of Bob's coins; a delegated reveal hands the secret over early | later |
 | 1 | Poseidon2b inside the EVM HTLC: ETH locks on `A`, no π on EVM legs | high (removes two trust assumptions) | M | Solidity bug → Alice reveals into a revert | **now** (decide on the gas number) |
 | 13 | Stablecoin leg (`HTLCERC20.sol` exists): quote NOID in USDC | medium | S | low | next |
 | 11 | Signed bundles (ETH keys) and a `bundle verify`; relay/order board later | medium | S / M | low | now (signatures), later (relay) |
@@ -344,7 +345,7 @@ node's view of the chain.
   pinned to Bob: a watchtower needs only Bob's *public* swap file, watches ETH for the reveal and runs
   `claim --submit` from its own vantage points. Worst case it chooses the fee (bounded by `F_max`; zero discretion with
   idea 5). `swap-cli watch bob.public.json` = the `tick` + `claim` loop without a passphrase. This is also a service the
-  owner can run for every Bob (idea 6.4) and the answer to "Bob offline past `D`" (§2.4 row 3).
+  owner can run for every Bob (idea 6.4) and the answer to the §2.4 row "Bob locks, Alice reveals, Bob goes offline".
 - **Alice's side.** The reveal needs her ETH key; a pre-signed `claim` handed to a watchtower reveals `s` to it before
   broadcast (it could then force-settle, not steal). Her refund at `D` needs the wallet (or idea 7's agent key).
 - **Second node (S, now; REVIEW-1 M2).** `--noid-rpc` accepted twice: require the two tips within 2 blocks and the same
@@ -429,6 +430,47 @@ T15: the opening is not recoverable from Parano1d (`api.md:L136-L138`); both par
 only locally. `newLock(..., bytes opening)` emits it in the `Locked` event (~700 bytes of calldata, ~11 k gas) or stores
 `keccak(opening)` and the bytes go in the event. Bob's lock then doubles as a public backup; `swap-cli` can rebuild a lost
 swap file from the chain. Effort S; risk none (public data); design: §2.1 a7/a12, §8 T15 mitigation.
+
+## 15. A watching service that finishes Bob's side (idea, not built)
+
+**Plain words.** After Alice's reveal the secret is public, and with it anyone can close the NOID contract: the contract
+pays Bob and nobody else, whoever sends the close. So a service could do Bob's last step while he is offline. It can
+not do his first step, and it cannot take Alice's reveal off her hands without learning her secret early.
+
+Idea 10 has the first half of this (the trustless watchtower for Bob). This section states the whole service, what it
+lets Bob skip, and where it stops.
+
+- **What it would do.** Hold Bob's public swap data only (the bundle and his terms, no key and no coins), watch the
+  Ethereum lock until Alice's reveal puts the secret `s` in a `Claimed` log, then build and send the close of the
+  Parano1d contract. A close is the call that ends the contract and pays out its balance.
+- **Why it needs no trust.** The contract rule forces a close made before the deadline to pay the recipient committed
+  at creation, Bob, whoever proves it (`docs/q2-history-step.md`). The fee of a close is paid from the contract's
+  balance, so the service needs no coins either. It cannot redirect anything. Shown live in `docs/live-run-19.md`: a
+  third party with only the public bundle and the secret read from Ethereum closed the contract before Bob, and the
+  close paid Bob's payout address 4.994200 NOID.
+- **What Bob could then skip.** Being online between Alice's reveal and the deadline `D`, which is the part of the
+  swap that today needs him most: the row of design §2.4 for "Bob locks, Alice reveals, Bob goes offline" says Bob must be online, or have a watchtower, in the span `[T_reveal − W_A, D − 19]`. Once his lock is final he could go offline.
+- **Limits, stated plainly.**
+  - *Bob's lock needs Bob.* It is an Ethereum transaction from his key. The refund of his ETH after `T_reveal` needs
+    his key too (`refund` reverts unless the sender calls it). The service finishes the NOID side only.
+  - *Alice's reveal cannot be delegated without trust.* Whoever sends it holds the secret before it is public and
+    chooses when it goes out. A late reveal can leave Bob with both coins (`docs/protocol-design.md`, the reveal cutoff).
+    So "offline swaps" are only partly possible: Bob's NOID side can be left to a service, Alice's reveal cannot.
+  - *Every step still has to reach its chain inside its window.* The close must be in a block by `D - 19`, so that it
+    is final before `D`; a service that is slow or down costs Bob what an offline Bob loses today.
+  - *A close is large.* It carries a proof, about 90 KB (91,121 and 90,865 bytes in `docs/live-run-1.md`), far larger
+    than a payment. That matters for any offline or relay transport. Whether the wallet app's offline sending can
+    carry one is unchecked.
+  - *The fee.* A service that closes at a higher fee burns up to `max_fee` of Bob's coins (the T1 bound; 50,000 μNOID at
+    the usual cap). Bob should pin the fee or accept only a service that closes at the minimum. With contract
+    version 2 every close pays exactly `max_fee` (`docs/htlc-v2-fixed-fee.md`), so there the fee is not the service's choice
+    but it is always the maximum.
+  - *A foreign close cannot be outbid.* The mempool keeps the first close it sees per slot and has no replace-by-fee. If
+    the service's close is first, Bob's own cannot replace it; that is fine when the fee is the minimum and costly when
+    it is not.
+- **Experiment.** Run it for one swap on a second machine beside Bob's own tool, with Bob's `claim` held, and compare the
+  payout and the fee with a normal claim. **Design changes:** §7 (watchtower subsection), §2.4 (the row "Bob locks, Alice reveals, Bob goes offline").
+  Effort M; risk as in the table.
 
 ---
 

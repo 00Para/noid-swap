@@ -679,6 +679,9 @@ pub struct EthObservation {
     pub latest_timestamp: u64,
     /// Number of the `finalized` block, when the node reports one.
     pub finalized_block: Option<u64>,
+    /// `block.timestamp` of the `finalized` block, when the node reports it with the block (CHAOS m6; `None` = not reported).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalized_timestamp: Option<u64>,
     /// `eth_chainId`, when the node answers it (T17: the pinned chain).
     #[serde(default)]
     pub chain_id: Option<u64>,
@@ -702,6 +705,10 @@ pub struct EthObservation {
     /// `latest_block`, an upper bound (the real block is unknown), so finality is waited for conservatively.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub claim_state_from_record: bool,
+    /// CHAOS S2: the claims (secret included) of the OTHER locks of this swap's lock word that were read in this poll: a lock of Bob's other than
+    /// the pinned one that Alice claimed has published the secret as much as the pinned one would have.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_claims: Vec<EthClaimed>,
     pub pending_preimage: Option<PendingPreimage>,
     /// `poseidon` kind: a still-pending `claim` of our lock whose calldata is LONGER than 68 bytes and carries the secret. The contract
     /// reverts it (`BadCalldataLength`), so it pays nobody and is no reveal of Alice's, but the secret is public: Bob claims the NOID from
@@ -836,6 +843,7 @@ mod tests {
             latest_block: 5,
             latest_timestamp: 1_700_000_000,
             finalized_block: Some(3),
+            finalized_timestamp: Some(1_699_999_988),
             chain_id: Some(31_337),
             contract_code_hash: Some([8; 32]),
             lock: Some(EthLock {
@@ -858,6 +866,7 @@ mod tests {
             claimed: None,
             refunded: None,
             claim_state_from_record: false,
+            other_claims: Vec::new(),
             pending_preimage: Some(PendingPreimage { lock_id: [1; 32], preimage: [9; 32], tx_hash: [6; 32] }),
             overlong_claim: Some(PendingPreimage { lock_id: [1; 32], preimage: [9; 32], tx_hash: [7; 32] }),
             word_locks: vec![WordLock { lock_id: [1; 32], sender: [2; 20], receiver: [3; 20], amount_wei: 5, timelock: 9, block_number: 2 }],

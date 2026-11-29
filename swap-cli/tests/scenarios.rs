@@ -362,7 +362,8 @@ fn f9_alice_does_not_refund_before_d_after_the_reveal_and_never_a_different_inst
     s.world.borrow_mut().advance_noid(d - 2 - tip);
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "wait", "{ra:?}");
-    // The recorded instance is gone and a different incarnation sits at the root: it is not refunded here.
+    // The recorded instance is gone and a different incarnation sits at the root: it is not refunded here. (CHAOS M1: after a reveal, with no
+    // evidence that the recorded instance was alive when Bob could no longer claim, that stays so, and the note says what is not known.)
     let mut s2 = Scenario::new(Variant::Raw);
     s2.run_to_lock_final();
     s2.tick_alice();
@@ -378,6 +379,7 @@ fn f9_alice_does_not_refund_before_d_after_the_reveal_and_never_a_different_inst
     let ra = s2.tick_alice();
     assert_eq!(ra.action.kind(), "wait", "{ra:?}");
     assert!(ra.notes.iter().any(|n| n.contains("another one sits at the root")), "{:?}", ra.notes);
+    assert!(ra.notes.iter().any(|n| n == "whether Bob claimed the recorded instance before D is not known to this file; the instance at the root can be recovered with the wallet"), "{:?}", ra.notes);
     assert_eq!(s2.alice.executor.count("refund_noid"), 0);
 }
 
@@ -809,7 +811,7 @@ fn a_pure_wait_is_not_touched_by_unknown_or_stale_observations() {
     });
     assert_eq!(r.action.kind(), "wait");
     // T21: the simulator's healthy producer summary is said once while Bob waits (information; it decides nothing here).
-    assert!(r.notes.iter().all(|n| n.starts_with("lock-by margin") || n.starts_with("funding window") || n.starts_with("producer concentration ok")), "{:?}", r.notes);
+    assert!(r.notes.iter().all(|n| n.starts_with("lock-by margin") || n.starts_with("lock margin") || n.starts_with("funding window") || n.starts_with("producer concentration ok")), "{:?}", r.notes);
     assert!(r.notes.iter().filter(|n| !n.starts_with("producer concentration ok")).count() <= 1, "{:?}", r.notes);
     assert_eq!(s.bob_phase(), "received");
 }
@@ -1799,7 +1801,7 @@ fn m25d_a_close_on_the_wrong_side_of_the_deadline_or_in_the_wrong_phase_is_refus
     early.public.params.deadline_height += 1;
     let err = external_close_event(&early, &obs, &txid).unwrap_err();
     assert!(err.contains("before the deadline") && err.contains("pays Bob"), "{err}");
-    // Bob: a close at h >= D paid Alice; it is not his claim.
+    // Bob: a close at h >= D paid Alice; it is not his claim. CHAOS F-11: it is recorded as what it is (log-only, the claim is lost), not refused.
     let s = bob_secret_seen_claiming_by_hand();
     let txid = s.world.borrow_mut().close_outside(false, Some(*s.secret.bytes()));
     let h = s.world.borrow().tip;
@@ -1807,8 +1809,13 @@ fn m25d_a_close_on_the_wrong_side_of_the_deadline_or_in_the_wrong_phase_is_refus
     assert!(external_close_event(&s.bob.file, &obs, &txid).is_ok());
     let mut late = s.bob.file.clone();
     late.public.params.deadline_height = h;
+    // (CHAOS M3: not recorded while the close is not final.)
     let err = external_close_event(&late, &obs, &txid).unwrap_err();
-    assert!(err.contains("pays Alice"), "{err}");
+    assert!(err.contains("not final yet"), "{err}");
+    s.world.borrow_mut().advance_noid(18);
+    let obs = s.world.borrow().noid_obs(Some(&txid));
+    let ev = external_close_event(&late, &obs, &txid).unwrap();
+    assert!(matches!(&ev, swap_cli::state::Event::NoidClosedAfterDeadline { height, .. } if *height == h), "{ev:?}");
 }
 
 // ------------------------------------------------------------------ REVIEW-2 F10: every lock and every instance
