@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# A wallet run (USE_SWAP_WALLET=1 in $L/env.local.sh): the key is the swap's own Ethereum key, piped from `swap-cli ethkey emit` into live.js (--key-stdin; for the reveal the secret follows on a second line); no key file, no argument, no temporary file. Exit 2 also when that key cannot be emitted (nothing was sent). Not run against a real node or a public network.
 # usage: lock.sh [--dry-run]       Bob's Ethereum lock, from the intent his last `tick --apply` recorded in his swap file.
 # live.js lock --swap FILE fills and checks every term (amount, hashlock, receiver, T_reveal, contract, chain, code hash)
 # against the file and refuses a duplicate hashlock, and (also with --dry-run) a file whose producer screen remembers a detection under
@@ -73,8 +74,23 @@ if [ -z "$MODE" ]; then
   APPROVE=(--approved-intent "$2" --approved-terms "$3" --approved-at "$4")
   echo "fresh read-only tick: the engine still offers Bob's lock ($L/lock-precheck-$N.json), intent decided_at $2, tick time $4, tick limit $LOCK_PRECHECK_TIMEOUT s of the $APPROVAL_WINDOW_S s the approval is good for"
 fi
+if [ "$USE_SWAP_WALLET" = 1 ]; then
+  # A wallet run: the key is Bob's swap key, sealed in his swap file. It goes from `swap-cli ethkey emit` into live.js through a pipe (never a key file, an argument or a
+  # temporary file); the passphrase goes to swap-cli only. If no key could be emitted live.js got nothing to sign with: exit 2, nothing was sent.
+  [ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (run setup.sh)" >&2; exit 2; }
+  ( load_passphrase && "$BIN" ethkey emit "$BOB_FILE" ) 2> "$L/eth-lock-$N.emit.err" | ( unset SWAP_PASSPHRASE; "$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-stdin --chain-id "$CHAIN" ${FEES[@]+"${FEES[@]}"} ${APPROVE[@]+"${APPROVE[@]}"} $MODE \
+    > "$L/eth-lock-$N.json" 2> "$L/eth-lock-$N.err" )
+  RCS=("${PIPESTATUS[@]}")
+  if [ "${RCS[0]}" -ne 0 ]; then
+    rm -f "$L/eth-lock-$N.json"
+    echo "lock REFUSED, nothing sent: the swap key could not be emitted from Bob's swap file (swap-cli ethkey emit exit ${RCS[0]}), so live.js had nothing to sign with:"; head -c 400 "$L/eth-lock-$N.emit.err"; echo
+    exit 2
+  fi
+  EC=${RCS[1]}
+else
 "$NODE" scripts/live.js lock --swap "$(win_path "$BOB_FILE")" --key-file "$BOB_KEY" --chain-id "$CHAIN" ${FEES[@]+"${FEES[@]}"} ${APPROVE[@]+"${APPROVE[@]}"} $MODE \
   > "$L/eth-lock-$N.json" 2> "$L/eth-lock-$N.err"; EC=$?
+fi
 echo "lock ${MODE:-SEND} exit $EC at $(date +%T)"; head -c 800 "$L/eth-lock-$N.err"; echo; head -c 1200 "$L/eth-lock-$N.json"; echo
 if [ -z "$MODE" ]; then ensure_pub; cp "$L/eth-lock-$N.json" "$PUB/eth-lock.json" 2>/dev/null; fi
 exit $EC

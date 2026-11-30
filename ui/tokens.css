@@ -1,0 +1,171 @@
+/* noid-swap design tokens — v0.2 (2026-11-04)
+   Derived from the Parano1d wallet palette (vendor/parano1d/noid_gui/src/theme.rs)
+   but an original system: own accent (mint), own semantic set, chain identity colours,
+   dark theme first, light theme via [data-theme="light"].
+   Contrast ratios were measured for every text pair when the tokens were chosen.
+   Rules of thumb: body text uses --text / --text-muted on any surface; --text-dim and the
+   semantic colours are text on --bg, --surface-1, --surface-2 and (since v0.2) --surface-3;
+   --line is decorative only (cards) — anything that must be *seen* as a boundary (inputs,
+   hollow stepper nodes, pending dots) uses --line-control, which clears 3:1 on every surface. */
+
+:root {
+  /* ---- Surfaces (dark) ---------------------------------------------- */
+  --bg:           #0A0D16;   /* app background (the wallet's 10,12,20 family) */
+  --bg-deep:      #06080F;   /* gradient start, modal backdrop base */
+  --surface-1:    #171B29;   /* cards, panels */
+  --surface-2:    #20263A;   /* nested panels, table header, inputs */
+  --surface-3:    #2A3148;   /* hover / raised controls / chips */
+  --chrome:       #141827;   /* top strip, sidebar, status bar */
+  --line:         rgba(214, 224, 255, 0.14);   /* decorative: card edges, row dividers */
+  --line-strong:  rgba(224, 232, 255, 0.26);   /* separators inside capsules */
+  --line-control: rgba(224, 232, 255, 0.40);   /* v0.2: inputs, hollow nodes, pending dots — 3.3:1 on surface-1 */
+  --grid-line:    rgba(103, 215, 246, 0.07);   /* decorative backdrop only */
+
+  /* ---- Text ---------------------------------------------------------- */
+  --text:         #F2F4F9;
+  --text-muted:   #BDC2D3;
+  --text-dim:     #9AA0B5;   /* v0.2: was #9298AD; now ≥ 4.8:1 on surface-3 and on the warn tint */
+  --ink:          #0D1120;   /* text on filled accent / chain / semantic buttons */
+
+  /* ---- Accent (interactive) ----------------------------------------- */
+  --accent:       #5EE6B8;   /* mint: primary buttons, links, focus ring, active nav — actions only */
+  --accent-hover: #7DEFC8;
+  --accent-press: #3FCB9E;
+  --accent-soft:  rgba(94, 230, 184, 0.14);
+  --focus-ring:   0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  /* ---- Chain identity (never used for buttons) ----------------------- */
+  --chain-noid:   #34E06F;   /* Parano1d brand green, kept as-is on purpose */
+  --chain-noid-soft: rgba(52, 224, 111, 0.14);
+  --chain-eth:    #8DA2FB;
+  --chain-eth-soft: rgba(141, 162, 251, 0.14);
+  --chain-btc:    #F7A23B;
+  --chain-btc-soft: rgba(247, 162, 59, 0.14);
+
+  /* ---- Semantic ------------------------------------------------------ */
+  --ok:           #3FD27A;   /* final, settled, verified (1.1:1 from --chain-noid: same green family on purpose, never side by side with a different meaning) */
+  --ok-soft:      rgba(63, 210, 122, 0.14);
+  --on-ok:        var(--ink); /* v0.2: glyph on an --ok fill (done nodes); 9.6:1 here, white in the light theme */
+  --warn:         #F2C94C;   /* a window is closing, attention needed soon */
+  --warn-soft:    rgba(242, 201, 76, 0.14);
+  --attn:         #FFA94D;   /* stale / degraded, the engine is fail-closed */
+  --attn-soft:    rgba(255, 169, 77, 0.14);
+  --danger:       #FF6E7E;   /* unreachable, refused, aborted */
+  --danger-soft:  rgba(255, 110, 126, 0.14);
+  --proof:        #B48CFF;   /* zero-knowledge proof, sealed secret, verification */
+  --proof-soft:   rgba(180, 140, 255, 0.14);
+  --info:         #67D7F6;   /* wallet cyan, kept for labels and heights */
+  --info-soft:    rgba(103, 215, 246, 0.12);
+
+  /* ---- Typography ---------------------------------------------------- */
+  --font-sans: "Noto Sans", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Noto Sans Mono", "Cascadia Mono", "JetBrains Mono", ui-monospace, Consolas, "Liberation Mono", monospace;
+  --fs-xs:   11px;   /* mono labels, legal */
+  --fs-sm:   12px;   /* table body, chips, timestamps */
+  --fs-base: 13px;   /* default body (wallet density) */
+  --fs-md:   14px;   /* form inputs, list items */
+  --fs-lg:   16px;   /* section titles */
+  --fs-xl:   20px;   /* screen titles */
+  --fs-2xl:  26px;   /* amounts on a swap card */
+  --fs-3xl:  34px;   /* hero countdown */
+  --lh-tight: 1.2;
+  --lh-base:  1.45;
+  --track-label: 0.06em;   /* uppercase mono labels */
+
+  /* ---- Spacing (4-pt) ------------------------------------------------ */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 20px; --sp-6: 24px; --sp-8: 32px; --sp-10: 40px; --sp-12: 48px;
+
+  /* ---- Radii --------------------------------------------------------- */
+  --r-xs: 3px;   /* table header, key caps */
+  --r-sm: 5px;   /* chips, inputs */
+  --r-md: 8px;   /* cards, buttons */
+  --r-lg: 12px;  /* top strip, modals */
+  --r-pill: 999px;
+
+  /* ---- Elevation ----------------------------------------------------- */
+  --shadow-0: none;
+  --shadow-1: 0 2px 6px rgba(5, 7, 13, 0.20);                 /* card */
+  --shadow-2: 0 5px 13px rgba(1, 2, 7, 0.48);                 /* top strip, popover */
+  --shadow-3: 0 12px 32px rgba(1, 2, 7, 0.60);                /* modal */
+  --shadow-accent: 0 0 0 1px rgba(94, 230, 184, 0.35), 0 4px 14px rgba(94, 230, 184, 0.18);
+
+  /* ---- Motion -------------------------------------------------------- */
+  --dur-fast: 120ms;   /* hover, press */
+  --dur-base: 200ms;   /* tab change, chip state */
+  --dur-slow: 400ms;   /* panel enter, phase advance */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- Layout -------------------------------------------------------- */
+  --sidebar-w: 216px;
+  --strip-h: 52px;
+  --content-max: 1360px;
+  --tap-min: 44px;     /* v0.2: minimum hit size on coarse pointers */
+
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg:           #F1F3F8;
+  --bg-deep:      #E4E8F1;
+  --surface-1:    #FFFFFF;
+  --surface-2:    #E9ECF4;
+  --surface-3:    #DDE1EC;
+  --chrome:       #FFFFFF;
+  --line:         rgba(20, 28, 60, 0.12);
+  --line-strong:  rgba(20, 28, 60, 0.24);
+  --line-control: rgba(20, 28, 60, 0.52);   /* 3.5:1 on white, 3.3:1 on surface-2 */
+  --grid-line:    rgba(11, 110, 134, 0.06);
+
+  --text:         #131726;
+  --text-muted:   #474D63;
+  --text-dim:     #596074;   /* v0.2: was #5F657B; 4.8:1 on surface-3, 5.3:1 on surface-2 */
+  --ink:          #0D1120;
+
+  --accent:       #0B7A5B;   /* text / outline use */
+  --accent-hover: #0A6C50;
+  --accent-press: #085A43;
+  --accent-soft:  rgba(11, 122, 91, 0.12);
+  --focus-ring:   0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+
+  --chain-noid:   #0E7334;
+  --chain-noid-soft: rgba(14, 115, 52, 0.12);
+  --chain-eth:    #3A4DC9;
+  --chain-eth-soft: rgba(58, 77, 201, 0.12);
+  --chain-btc:    #9A5200;
+  --chain-btc-soft: rgba(154, 82, 0, 0.12);
+
+  --ok:           #126A35;   /* v0.2: was #177A3E; an ok chip on surface-2 was 3.9:1, now 4.8:1 */
+  --ok-soft:      rgba(18, 106, 53, 0.12);
+  --on-ok:        #FFFFFF;   /* ink on this green is 2.8:1; white is 6.7:1 */
+  --warn:         #7A5D00;
+  --warn-soft:    rgba(122, 93, 0, 0.14);
+  --attn:         #9C4B00;
+  --attn-soft:    rgba(156, 75, 0, 0.12);
+  --danger:       #BF2D3A;
+  --danger-soft:  rgba(191, 45, 58, 0.12);
+  --proof:        #6336CC;
+  --proof-soft:   rgba(99, 54, 204, 0.12);
+  --info:         #0B6E86;
+  --info-soft:    rgba(11, 110, 134, 0.10);
+
+  --shadow-1: 0 1px 3px rgba(20, 28, 60, 0.10);
+  --shadow-2: 0 4px 12px rgba(20, 28, 60, 0.14);
+  --shadow-3: 0 12px 32px rgba(20, 28, 60, 0.22);
+  --shadow-accent: 0 0 0 1px rgba(11, 122, 91, 0.35), 0 4px 14px rgba(11, 122, 91, 0.16);
+
+  color-scheme: light;
+}
+
+/* Filled primary buttons in the light theme keep a bright mint fill with ink text
+   (9.7:1) instead of the dark accent, so the primary action stays recognisable
+   across themes. */
+[data-theme="light"] { --accent-fill: #1FD3A0; --accent-fill-hover: #3BDDAF; --accent-fill-press: #16B88A; }
+:root { --accent-fill: var(--accent); --accent-fill-hover: var(--accent-hover); --accent-fill-press: var(--accent-press); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-slow: 0ms; }
+  /* keyframe animations do not read the duration tokens: every component that animates
+     must also switch itself off here (the mockup's progress stripe does). */
+}

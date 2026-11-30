@@ -347,7 +347,8 @@ fn count_instances(n: usize) -> String {
 }
 
 /// Alice, phase `created`: instances sit at her contract root and none is accepted. The `wait` reason, or `None` when there is nothing
-/// to say (no instance, or one is accepted). It comes first, whatever the tip is relative to `h_create`.
+/// to say (no instance, or one is accepted). It comes first, whatever the tip is relative to the height at which the funding opens
+/// ([`funding_opens_at`]): before it as a wait here, from it on through [`guard_fund_noid`], with the same text.
 /// - More than one instance fits (live run 9, a funding made more than once): the swap cannot go on with them, nothing may be funded
 ///   again, and the NOID is taken back once `D` is reached.
 /// - The instance there does not fit (a foreign deposit, dust, another amount): it is not counted as a funding; nothing else is claimed.
@@ -382,6 +383,54 @@ fn alice_instance_problem_text(file: &SwapFile, noid: &NoidObservation) -> Optio
             ))
         }
     }
+}
+
+/// The first Parano1d height at which Alice's `created` file offers the funding (`tip + 1 >=` it), and whether the trial start sets it.
+/// `H_create - D_offset`, so the NOID is never locked for more than `2 * D_offset` blocks (`D = H_create + D_offset`); and never below the trial
+/// start height, which `check_i5` enforces for `H_create` itself. Saturating: an `H_create` below `D_offset` gives the trial start.
+fn funding_opens_at(file: &SwapFile) -> (u64, bool) {
+    let by_window = file.public.params.h_create.saturating_sub(file.public.params.profile.gates().d_offset);
+    if by_window >= params::TRIAL_START_HEIGHT {
+        (by_window, false)
+    } else {
+        (params::TRIAL_START_HEIGHT, true)
+    }
+}
+
+/// The wait reason of a `created` Alice file before the funding opens.
+fn too_early_to_fund_text(file: &SwapFile, tip: u64, opens_at: u64, trial_bound: bool) -> String {
+    let p = &file.public.params;
+    if trial_bound {
+        format!("too early to fund: the funding opens at height {opens_at} (tip {tip}), the trial start; no swap starts before it")
+    } else {
+        format!(
+            "too early to fund: the funding opens at height {opens_at} (tip {tip}); a funding before it would lock the NOID for more than twice the swap's planned length (D {} is {} blocks after H_create {})",
+            p.deadline_height,
+            p.profile.gates().d_offset,
+            p.h_create
+        )
+    }
+}
+
+/// Display only: the height from which Alice's `created` file offers the funding, or that it is open now. Read by nothing; it is a note of its
+/// own (the lock-by margin note keeps its wording). None beside an abort (a closed window has no opening to say), and none while an instance sits at
+/// the contract root or a funding is held (an intent or a pending record of a `fund_noid`): the note is built before [`guard_fund_noid`] and the ledger
+/// turn a funding into a wait, and "funding is open" must not stand beside "do not fund again".
+fn funding_open_note(file: &SwapFile, phase: &Phase, action: &Action, noid: &NoidObservation) -> Option<String> {
+    let tip = noid.tip;
+    if !matches!(phase, Phase::Alice(AlicePhase::Created)) || matches!(action, Action::Abort { .. }) {
+        return None;
+    }
+    let funding_held = file.pending_intent.as_ref().is_some_and(|i| i.action == "fund_noid") || file.pending_action.as_ref().is_some_and(|a| a.kind == "fund_noid");
+    if !noid.all_instances().is_empty() || funding_held {
+        return None;
+    }
+    let (opens_at, _) = funding_opens_at(file);
+    Some(if tip.saturating_add(1) >= opens_at {
+        format!("funding is open from height {opens_at} (tip {tip})")
+    } else {
+        format!("funding opens at height {opens_at} (tip {tip})")
+    })
 }
 
 /// The note for an Alice file that is aborted, or whose `abort` is decided now, while instances still hold NOID at her root. It says where
@@ -743,6 +792,7 @@ pub fn decide(file: &SwapFile, noid: &NoidObservation, eth: &EthObservation, now
     };
     // Display only, from the action as finally decided: the lock-by margin while Bob's lock is not yet seen. Read by nothing.
     notes.extend(lock_by_margin_note(file, &phase, &action, noid.tip));
+    notes.extend(funding_open_note(file, &phase, &action, noid));
     // T21: the first time `--accept-producer-concentration` lets a lock through that the screen would have held back, the swap file's history
     // says so (log only; once). Nothing here changes an event or the action.
     if matches!(&action, Action::LockEth { .. }) && matches!(&phase, Phase::Bob(BobPhase::FundingFinal { .. })) {
@@ -2155,9 +2205,12 @@ fn alice_action(
                     reason: format!("too late to fund: tip {} + {} > lock-by {lock_by}", noid.tip, g.b_fund + g.b_final),
                 };
             }
-            if noid.tip.saturating_add(1) < file.public.params.h_create {
+            // The funding opens `D_offset` blocks before `H_create` (never earlier than the trial start). `H_create` itself only plans `D`:
+            // the contract commits `D`, not a creation height, so a funding before it is accepted by both engines and by the chain.
+            let (opens_at, trial_bound) = funding_opens_at(file);
+            if noid.tip.saturating_add(1) < opens_at {
                 // Instances at the root that are not accepted are the real matter, whatever the tip is (live run 9).
-                let reason = alice_instance_problem_text(file, noid).unwrap_or_else(|| "node is behind H_create".to_string());
+                let reason = alice_instance_problem_text(file, noid).unwrap_or_else(|| too_early_to_fund_text(file, noid.tip, opens_at, trial_bound));
                 return Action::Wait { reason };
             }
             Action::FundNoid { amount_micronoid: file.public.params.amount_micronoid }
@@ -4605,6 +4658,121 @@ mod tests {
         // Too late: Bob could not lock before his lock-by height (300,107).
         let d = decide(&file, &noid_at(300_080), &eth_at(1, 1_000), 1_000);
         assert!(matches!(d.action, Action::Abort { .. }));
+    }
+
+    const FUND: Action = Action::FundNoid { amount_micronoid: 10_000_000 };
+
+    fn too_early(d: &Decision) -> bool {
+        matches!(&d.action, Action::Wait { reason } if reason.starts_with("too early to fund"))
+    }
+
+    #[test]
+    fn alice_funding_opens_d_offset_blocks_before_h_create() {
+        let s = Secret::generate().unwrap();
+        let file = alice_file(&s);
+        let (h_create, off) = (file.public.params.h_create, file.public.params.profile.gates().d_offset);
+        assert_eq!((h_create, off), (300_000, 738));
+        let opens = h_create - off;
+        // Inside the window, before H_create: the funding is offered (tip = H_create - 50, and the first tip whose next height is the opening).
+        for tip in [h_create - 50, opens - 1] {
+            let d = decide(&file, &noid_at(tip), &eth_at(1, 1_000), 1_000);
+            assert_eq!(d.action, FUND, "tip {tip}");
+            assert!(d.events.is_empty());
+            assert!(d.notes.iter().any(|n| n == &format!("funding is open from height {opens} (tip {tip})")), "{:?}", d.notes);
+        }
+        // One block earlier: a wait that names the height, no event, no other note of an opening.
+        let tip = opens - 2;
+        let d = decide(&file, &noid_at(tip), &eth_at(1, 1_000), 1_000);
+        assert!(too_early(&d), "{:?}", d.action);
+        let Action::Wait { reason } = &d.action else { unreachable!() };
+        assert!(reason.contains(&format!("opens at height {opens} (tip {tip})")) && reason.contains("more than twice the swap's planned length"), "{reason}");
+        assert!(reason.contains(&format!("D {} is {off} blocks after H_create {h_create}", file.public.params.deadline_height)), "{reason}");
+        assert!(d.events.is_empty());
+        assert!(d.notes.iter().any(|n| n == &format!("funding opens at height {opens} (tip {tip})")), "{:?}", d.notes);
+        // The lock-by note keeps its wording beside it.
+        let lock_by = file.public.params.lock_by_height;
+        assert!(d.notes.iter().any(|n| n.starts_with("funding window")), "{:?} (lock-by {lock_by})", d.notes);
+        // After H_create, as before.
+        assert_eq!(decide(&file, &noid_at(h_create), &eth_at(1, 1_000), 1_000).action, FUND);
+        assert_eq!(decide(&file, &noid_at(300_001), &eth_at(1, 1_000), 1_000).action, FUND);
+    }
+
+    #[test]
+    fn alice_too_late_to_fund_is_unchanged_at_its_boundary() {
+        let s = Secret::generate().unwrap();
+        let file = alice_file(&s);
+        let g = file.public.params.profile.gates();
+        let lock_by = file.public.params.lock_by_height;
+        let last = lock_by - g.b_fund - g.b_final;
+        assert_eq!(decide(&file, &noid_at(last), &eth_at(1, 1_000), 1_000).action, FUND);
+        let d = decide(&file, &noid_at(last + 1), &eth_at(1, 1_000), 1_000);
+        assert!(matches!(&d.action, Action::Abort { reason } if reason.starts_with("too late to fund")), "{:?}", d.action);
+        // No "opens" note beside an abort.
+        assert!(d.notes.iter().all(|n| !n.starts_with("funding is open") && !n.starts_with("funding opens")), "{:?}", d.notes);
+    }
+
+    #[test]
+    fn alice_funding_rule_has_no_overflow_and_a_sensible_answer_at_the_extremes() {
+        let s = Secret::generate().unwrap();
+        let mut file = alice_file(&s);
+        // tip 0: the funding is far from open.
+        let d = decide(&file, &noid_at(0), &eth_at(1, 1_000), 1_000);
+        assert!(too_early(&d), "{:?}", d.action);
+        // A tip a node should never report: a wait, not a panic and not a funding.
+        for tip in [u64::MAX - 1, u64::MAX] {
+            let n = NoidObservation { next_call_height: tip.saturating_add(1), ..noid_at(0) };
+            let d = decide(&file, &NoidObservation { tip, ..n }, &eth_at(1, 1_000), 1_000);
+            assert!(matches!(&d.action, Action::Wait { reason } if reason.contains("implausibly large")), "{:?}", d.action);
+        }
+        // H_create below D_offset (not a loadable file; the arithmetic must still hold): the opening is the trial start.
+        file.public.params.h_create = 100;
+        let d = decide(&file, &noid_at(0), &eth_at(1, 1_000), 1_000);
+        assert!(too_early(&d), "{:?}", d.action);
+        let Action::Wait { reason } = &d.action else { unreachable!() };
+        assert!(reason.contains(&format!("opens at height {}", params::TRIAL_START_HEIGHT)) && reason.contains("trial start"), "{reason}");
+        file.public.params.h_create = 0;
+        assert!(too_early(&decide(&file, &noid_at(1), &eth_at(1, 1_000), 1_000)));
+        assert_eq!(decide(&file, &noid_at(params::TRIAL_START_HEIGHT - 1), &eth_at(1, 1_000), 1_000).action, FUND);
+        // An H_create near the top of u64 (the file would not load; the opening arithmetic must not wrap).
+        file.public.params.h_create = u64::MAX;
+        let d = decide(&file, &noid_at(300_001), &eth_at(1, 1_000), 1_000);
+        assert!(too_early(&d), "{:?}", d.action);
+    }
+
+    #[test]
+    fn alice_funding_waits_for_the_trial_start_when_the_window_alone_would_open_it_earlier() {
+        let s = Secret::generate().unwrap();
+        let mut file = alice_file(&s);
+        // H_create - D_offset = 278,662 is below the trial start 279,388.
+        file.public.params.h_create = params::TRIAL_START_HEIGHT + 12;
+        let start = params::TRIAL_START_HEIGHT;
+        let d = decide(&file, &noid_at(start - 2), &eth_at(1, 1_000), 1_000);
+        assert!(too_early(&d), "{:?}", d.action);
+        assert!(d.notes.iter().any(|n| n == &format!("funding opens at height {start} (tip {})", start - 2)), "{:?}", d.notes);
+        assert_eq!(decide(&file, &noid_at(start - 1), &eth_at(1, 1_000), 1_000).action, FUND);
+    }
+
+    #[test]
+    fn an_instance_at_the_root_gives_the_same_wait_before_the_funding_opens_and_inside_its_window() {
+        let s = Secret::generate().unwrap();
+        let file = alice_file(&s);
+        let opens = file.public.params.h_create - file.public.params.profile.gates().d_offset;
+        let foreign = |tip: u64| NoidObservation {
+            instance: Some(NoidInstance { slot_index: 3, creation_id: 5, amount_micronoid: 1_000 }),
+            instance_matches_opening: Some(true),
+            ..noid_at(tip)
+        };
+        let mut reasons = Vec::new();
+        for tip in [opens - 50, opens - 2, opens - 1, file.public.params.h_create - 50, file.public.params.h_create + 1] {
+            let n = foreign(tip);
+            let mut d = decide(&file, &n, &eth_at(1, 1_000), 1_000);
+            // From the opening on `decide` still returns the funding; the one guard of both paths turns it into the wait.
+            guard_fund_noid(&file, &n, &mut d);
+            let Action::Wait { reason } = &d.action else { panic!("tip {tip}: {:?}", d.action) };
+            reasons.push(reason.clone());
+        }
+        assert!(reasons.iter().all(|r| r.contains("is not counted as a funding") && !r.contains("too early")), "{reasons:?}");
+        assert!(reasons.windows(2).all(|w| w[0] == w[1]), "{reasons:?}");
     }
 
     #[test]

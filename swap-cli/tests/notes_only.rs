@@ -904,3 +904,55 @@ fn no_engine_text_tells_the_operator_to_act_at_once() {
         assert!(!body.contains(word), "{word:?} in the margin note");
     }
 }
+
+fn opening_notes(notes: &[String]) -> Vec<&String> {
+    notes.iter().filter(|n| n.starts_with("funding is open") || n.starts_with("funding opens")).collect()
+}
+
+#[test]
+fn the_funding_opening_note_is_not_printed_beside_an_instance_at_the_root_or_a_held_funding() {
+    let s = Scenario::new(Variant::Raw);
+    let h_create = s.public.params.h_create;
+    let opens = h_create - s.gates().d_offset;
+    // Plain: said once, in both forms (inside the window and before it).
+    for (tip, word) in [(h_create - 40, "funding is open from height"), (opens - 10, "funding opens at height")] {
+        s.world.borrow_mut().tip = tip;
+        let d = alice_decision(&s);
+        assert_eq!(opening_notes(&d.notes).len(), 1, "tip {tip}: {:?}", d.notes);
+        assert!(opening_notes(&d.notes)[0].starts_with(word), "{:?}", d.notes);
+    }
+    // An instance at the contract root (a foreign deposit): not said, in either form, on either path.
+    s.world.borrow_mut().instances_before.push(swap_cli::watch::NoidInstance { slot_index: 3, creation_id: 5, amount_micronoid: 1_000 });
+    for tip in [h_create - 40, opens - 10] {
+        s.world.borrow_mut().tip = tip;
+        let d = alice_decision(&s);
+        assert!(opening_notes(&d.notes).is_empty(), "tip {tip}: {:?}", d.notes);
+        let (noid, eth, now) = {
+            let w = s.world.borrow();
+            (w.noid_obs(None), w.eth_obs(), w.eth_time)
+        };
+        let mut file = s.alice.file.clone();
+        let out = swap_cli::engine::tick_apply(&mut file, &noid, &eth, now, true).unwrap();
+        assert!(opening_notes(&out.decision.notes).is_empty(), "tip {tip}: {:?}", out.decision.notes);
+    }
+    // A held funding intent: not said beside "held" (the funding was decided on an earlier tick).
+    let s = Scenario::new(Variant::Raw);
+    s.world.borrow_mut().tip = h_create - 40;
+    let (tip, now) = (s.world.borrow().tip, s.now());
+    let mut file = s.alice.file.clone();
+    file.pending_intent = Some(swap_cli::swapfile::PendingIntent {
+        action: "fund_noid".into(),
+        params: serde_json::json!({}),
+        decided_at: now,
+        phase_at_decision: "created".into(),
+        noid_tip: tip,
+        eth_block: 0,
+    });
+    let (noid, eth) = {
+        let w = s.world.borrow();
+        (w.noid_obs(None), w.eth_obs())
+    };
+    let out = swap_cli::engine::tick_apply(&mut file, &noid, &eth, now, true).unwrap();
+    assert!(matches!(out.decision.action, Action::Wait { .. }), "{:?}", out.decision);
+    assert!(opening_notes(&out.decision.notes).is_empty(), "{:?}", out.decision.notes);
+}

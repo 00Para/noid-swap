@@ -51,13 +51,15 @@ const KNOWN_FINDINGS: &[&str] = &[];
 /// left: F-6 for `refund_submitted` / `refund_mined` over a lock that left the chain, F-11 for Alice's files whose instance was closed by someone
 /// else in a way the file cannot know (`funding_submitted` with no instance ever seen, and the F-18 state where no poll before D saw it gone and no
 /// `--closed-by` was given).
-const OPEN_FINDINGS: &[&str] = &["F-2", "F-6", "F-7", "F-8", "F-11", "F-21"];
+const OPEN_FINDINGS: &[&str] = &["F-2", "F-6", "F-7", "F-8", "F-11", "F-21", "F-22", "F-23"];
 
 /// A party's clock may be this far from the true time (below the engine's 120-s observation staleness limit).
 const SKEW_TOL: u64 = 100;
 const ALICE: usize = 0;
 const BOB: usize = 1;
 const MIN_CLOSE_FEE: u64 = 5_800;
+/// The longest Ethereum claim stall the budgeted regime draws (`freeze_eth_claim`: 101 to 400 s).
+const BUDGETED_CLAIM_STALL_S: u64 = 400;
 
 // ------------------------------------------------------------------------------------------------ configuration
 
@@ -274,6 +276,9 @@ struct Truth {
     secret_public: Option<(u64, u64)>,
     /// Ethereum time of Alice's (first) executed reveal.
     reveal_at: Option<u64>,
+    /// That first executed reveal was a re-send her file allowed under the late cutoff (`reveal_maybe_sent` or a maybe-sent pending record, R5-1), not a
+    /// first publication: the end-of-run ETH rule then measures it against `T_reveal - DE` and not `T_reveal - M_A`.
+    reveal_was_resend: bool,
 }
 
 #[derive(Default)]
@@ -307,6 +312,12 @@ struct Snap {
     finalized: u64,
     funded_height: Option<u64>,
     secret_public: bool,
+    /// Alice's file, read BEFORE the tick, carries evidence that a reveal send was started and its outcome is unknown (the `reveal_maybe_sent` marker or a
+    /// pending `reveal_eth` record marked maybe-sent). Set by `party_tick` for Alice; false in every other snapshot. The engine then judges a re-send by
+    /// the late cutoff (R5-1), which the oracle must accept although the secret is not public in the world.
+    reveal_maybe_sent: bool,
+    /// The extra locks the adversary put on the contract (`locks_before` and `locks_after`): real locks on Ethereum, not the swap's own one.
+    side_locks: Vec<EthLock>,
     fitting: usize,
 }
 
@@ -319,6 +330,8 @@ struct Run {
     version: ContractVersion,
     /// The Ethereum lock: `sha256` (`HTLC.sol`) or, for about two in five raw-variant scenarios, `poseidon` (`HTLCPoseidonV2.sol`).
     lock_kind: LockKind,
+    /// Blocks before tip 300,001 at which the simulated chain started (0: the old start; see `Run::new`).
+    early_start: u64,
     gates: &'static Gates,
     public: SwapPublic,
     secret: Secret,
@@ -427,7 +440,27 @@ impl Run {
             _ => LockKind::Sha256,
         };
         let public = example_public_kind(&secret, variant, profile, version, lock_kind);
-        let world = World::new(&public, 300_001, T0);
+        // Where the simulated Parano1d chain starts: after H_create (tip 300,001) as always, or, since the funding opens `D_offset` blocks before
+        // H_create (2026-11-17), sometimes earlier, from `D_offset + 20` blocks before it (so a few scenarios start before the funding is offered
+        // and wait for it). Drawn from its OWN generator, like the lock kind, so no other choice of any scenario moves; a scenario that draws no
+        // early start is the scenario its seed named before. `CHAOS_EARLY=0` forces the old start (every old seed reproduces), `CHAOS_EARLY=1`
+        // forces an early start in every scenario.
+        let (early_start, start_tip) = {
+            let early = match std::env::var("CHAOS_EARLY").ok().as_deref() {
+                Some("0") => 0,
+                Some("1") => Rng::new(seed ^ 0x4541_524c_5946_554e).range(1, profile.gates().d_offset + 20),
+                _ => {
+                    let mut r = Rng::new(seed ^ 0x4541_524c_5946_554e);
+                    if r.below(1000) < 250 {
+                        r.range(1, profile.gates().d_offset + 20)
+                    } else {
+                        0
+                    }
+                }
+            };
+            (early, 300_001 - early)
+        };
+        let world = World::new(&public, start_tip, T0);
         if profile == ProfileName::Sepolia {
             world.borrow_mut().finality_lag = SEPOLIA_FINALITY_LAG_BLOCKS;
         }
@@ -446,7 +479,7 @@ impl Run {
         };
         // Start times: mostly inside the funding window (Alice must fund, and Bob must see it, before lock-by), sometimes
         // far too late (the "too late to fund" and "last lock height passed" aborts).
-        let avail_s = public.params.lock_by_height.saturating_sub(300_001 + 30) * noid_lo;
+        let avail_s = public.params.lock_by_height.saturating_sub(start_tip + 30) * noid_lo;
         let mut start = |rng: &mut Rng| {
             if rng.chance(850) {
                 rng.range(0, avail_s * 7 / 10)
@@ -485,6 +518,7 @@ impl Run {
             variant,
             version,
             lock_kind,
+            early_start,
             gates,
             public,
             secret,
@@ -566,6 +600,8 @@ impl Run {
             finalized: w.eth_block.saturating_sub(w.finality_lag),
             funded_height: self.truth.funded_height,
             secret_public: self.truth.secret_public.is_some(),
+            reveal_maybe_sent: false,
+            side_locks: w.locks_before.iter().chain(w.locks_after.iter()).cloned().collect(),
             fitting,
         }
     }
@@ -750,7 +786,7 @@ impl Run {
                 true
             }
             "freeze_eth_claim" => {
-                let secs = long(&mut self.rng, 400, 10_800, budgeted);
+                let secs = long(&mut self.rng, BUDGETED_CLAIM_STALL_S, 10_800, budgeted);
                 self.ep.freeze_claim_until = time + secs;
                 self.say(format!("stall Ethereum claims for {secs} s"));
                 true
@@ -1054,7 +1090,9 @@ impl Run {
     fn ev_eth_claim_reorg(&mut self, budgeted: bool) -> bool {
         let mut w = self.world.borrow_mut();
         let young = w.claimed.as_ref().is_some_and(|c| c.block_number > w.eth_block.saturating_sub(w.finality_lag));
-        let roomy = w.lock.as_ref().is_some_and(|l| l.timelock > w.eth_time + 120);
+        // Room before T_reveal that a budgeted run must keep: the longest claim stall the same regime allows, plus the 120 s that were always required
+        // (a reorg puts the claim back in the mempool, a stall of up to `BUDGETED_CLAIM_STALL_S` may follow, and it still has to be mined before T_reveal).
+        let roomy = w.lock.as_ref().is_some_and(|l| l.timelock > w.eth_time + BUDGETED_CLAIM_STALL_S + 120);
         if !young || (budgeted && !roomy) {
             return false;
         }
@@ -1203,7 +1241,11 @@ impl Run {
             p.runner.executor.crash_before_effect = p.armed_before.clone();
             p.runner.executor.crash_after_effect = p.armed_after.clone();
         }
-        let snap = self.snap();
+        let mut snap = self.snap();
+        if i == ALICE {
+            let f = &self.parties[i].runner.file;
+            snap.reveal_maybe_sent = f.history.iter().any(|h| h.event == swap_cli::engine::REVEAL_MAYBE_SENT) || f.pending_action.as_ref().is_some_and(|a| a.kind == "reveal_eth" && a.maybe_sent);
+        }
         self.operator_closed_by(i, now)?;
         let before = self.parties[i].runner.file.phase.clone();
         let tracked = tracked_of(&before);
@@ -1551,6 +1593,7 @@ impl Run {
             Action::RevealEth { .. } => {
                 if self.truth.reveal_at.is_none() {
                     self.truth.reveal_at = Some(s.time);
+                    self.truth.reveal_was_resend = s.reveal_maybe_sent;
                 }
             }
             _ => {}
@@ -1585,6 +1628,14 @@ impl Run {
                 }
                 if s.tip + g.b_fund + g.b_final > p.lock_by_height {
                     return fail("gate-fund", format!("fund_noid at tip {} is too late for lock-by {}", s.tip, p.lock_by_height));
+                }
+                // The lower bound (2026-11-17), written here from the swap's own numbers and not from the engine's helper: the funding opens
+                // `D_offset` blocks before H_create, so the NOID is locked for at most `2 * D_offset` blocks, and never before the trial start.
+                // The offset is read from the file's own numbers (`D - H_create`), not from the profile table the engine uses.
+                let planned = p.deadline_height - p.h_create;
+                let opens_at = p.h_create.saturating_sub(planned).max(swap_cli::params::TRIAL_START_HEIGHT);
+                if s.tip + 1 < opens_at {
+                    return fail("gate-fund", format!("fund_noid at tip {} is before the funding opens at height {opens_at} (H_create {}, D - H_create {planned})", s.tip, p.h_create));
                 }
                 Ok(())
             }
@@ -1623,8 +1674,9 @@ impl Run {
             }
             Action::RevealEth { lock_id } => {
                 need_role(Role::Alice)?;
-                let Some(l) = s.lock.as_ref().filter(|l| l.lock_id == *lock_id) else {
-                    return fail("gate-reveal", "reveal_eth for a lock that is not on Ethereum");
+                // The swap's own lock, or an extra lock that is really on the contract (the engine adopts every open lock on the agreed terms: REVIEW-3 G2).
+                let Some(l) = s.lock.as_ref().filter(|l| l.lock_id == *lock_id).or_else(|| s.side_locks.iter().find(|l| l.lock_id == *lock_id)) else {
+                    return fail("gate-reveal", format!("reveal_eth for a lock that is not on Ethereum (lock {}.., the swap's lock {:?}, {} extra locks)", hex::encode(&lock_id[..4]), s.lock.as_ref().map(|l| hex::encode(&l.lock_id[..4])), s.side_locks.len()));
                 };
                 if l.claimed || l.refunded {
                     return fail("gate-reveal", "reveal_eth for a lock that is already closed");
@@ -1632,8 +1684,10 @@ impl Run {
                 if s.finalized < l.block_number {
                     return fail("gate-reveal-not-final", "reveal_eth before Bob's lock is final");
                 }
-                // Once the secret is public (a reveal of hers was sent) a re-send is allowed until T_reveal - DE (review H1).
-                let cutoff = if s.secret_public { l.timelock.saturating_sub(g.de_s) } else { g.reveal_cutoff(l.timelock) };
+                // Once the secret is public (a reveal of hers was sent) a re-send is allowed until T_reveal - DE (review H1). So it is when her file says a
+                // send was started with an unknown outcome (R5-1: the secret may be public, and withholding the re-send could leave a stuck claim): the engine
+                // cannot tell a crash before the send from one after it, and the oracle accepts the late cutoff for the same evidence.
+                let cutoff = if s.secret_public || s.reveal_maybe_sent { l.timelock.saturating_sub(g.de_s) } else { g.reveal_cutoff(l.timelock) };
                 if s.time > cutoff + SKEW_TOL {
                     return fail("gate-i2", format!("reveal_eth at {} after the cutoff {}", s.time, cutoff));
                 }
@@ -1868,7 +1922,17 @@ impl Run {
         if noid_left {
             let alice_hold = self.parties[ALICE].runner.file.pending_action.as_ref().is_some_and(|a| a.maybe_sent);
             let alice_ph = self.parties[ALICE].runner.file.phase.name();
-            if w.instance.is_some() && alice_ph == "funding_submitted" && w.instances_before.iter().chain(w.instances_after.iter()).any(|i| i.amount_micronoid == p.amount_micronoid) && !alice_hold {
+            // F-22: the Runner path holds a `reveal_eth` of unknown outcome for ever once the lock is refunded, past D (the ledger path of the
+            // command line has the rule that resolves it, REVIEW-5 R5-7). Exactly: Runner mode, Alice's pending record is a maybe-sent `reveal_eth`, Bob's
+            // lock was REFUNDED to him on Ethereum (not claimed), and the tip is at or past D. A claimed lock is not this finding: the ETH went to Alice
+            // while the NOID can only go back to her, which is a loss for Bob and must stay a hard `noid-stuck`.
+            let reveal_hold_runner = self.mode == Mode::Runner
+                && self.parties[ALICE].runner.file.pending_action.as_ref().is_some_and(|a| a.kind == "reveal_eth" && a.maybe_sent)
+                && w.lock.as_ref().is_some_and(|l| l.refunded && !l.claimed)
+                && w.tip >= d;
+            if reveal_hold_runner {
+                explained.push(format!("F-22 Alice (Runner path) holds a maybe-sent `reveal_eth` for ever: the lock was refunded on Ethereum and the tip {} is past D {d}, so the NOID instance is never taken back by the tool", w.tip));
+            } else if w.instance.is_some() && alice_ph == "funding_submitted" && w.instances_before.iter().chain(w.instances_after.iter()).any(|i| i.amount_micronoid == p.amount_micronoid) && !alice_hold {
                 explained.push("F-7 Alice never accepts her funding while a second instance of the agreed amount sits at the root, so the tool never offers her recovery close".into());
             } else {
                 return fail(
@@ -1889,7 +1953,18 @@ impl Run {
             }
         }
         if let Some(l) = w.lock.as_ref() {
-            if !l.claimed && !l.refunded {
+            // F-23: Bob's Runner holds a maybe-sent `claim_noid` for ever, so the ETH refund is never offered. Exactly: Runner mode, Bob's pending record is a
+            // maybe-sent `claim_noid`, his lock is open on Ethereum and past T_reveal, the tip is at or past D (the claim branch is closed for good), and
+            // the NOID was paid back to ALICE. A NOID paid to Bob with the lock still open is not this finding: Alice then has neither leg (only Bob can
+            // refund the ETH), which must stay a hard `eth-stuck`.
+            let claim_hold_runner = self.mode == Mode::Runner
+                && self.parties[BOB].runner.file.pending_action.as_ref().is_some_and(|a| a.kind == "claim_noid" && a.maybe_sent)
+                && w.eth_time >= l.timelock
+                && w.tip >= d
+                && w.noid_payout.as_ref().is_some_and(|(to, _)| *to == p.alice_noid);
+            if !l.claimed && !l.refunded && claim_hold_runner {
+                explained.push(format!("F-23 Bob (Runner path) holds a maybe-sent `claim_noid` for ever: his lock is open past T_reveal {} (eth time {}) and the tip {} is past D {d}, so the tool never offers the ETH refund", l.timelock, w.eth_time, w.tip));
+            } else if !l.claimed && !l.refunded {
                 return fail(
                     "eth-stuck",
                     format!(
@@ -1993,6 +2068,8 @@ impl Run {
                 "F-6" => "F-6 locked phase never re-checks the lock",
                 "F-11" => "F-11 a close by someone else leaves the file without a way to end",
                 "F-21" => "F-21 Bob's lock is gone but another lock of his on this lock word is open or claimed: the file waits",
+                "F-22" => "F-22 the Runner path holds a maybe-sent reveal_eth after the lock is closed and D has passed",
+                "F-23" => "F-23 the Runner path holds a maybe-sent claim_noid after D, so the ETH refund is never offered",
                 _ => "F-7 ambiguous funding never accepted, no recovery offered",
             };
             self.soft.push((code, e));
@@ -2012,7 +2089,8 @@ impl Run {
         }
         // The ETH rule.
         if eth_to_alice == Some(true) {
-            let cutoff = w.lock.as_ref().map(|l| self.gates.reveal_cutoff(l.timelock)).unwrap_or(0);
+            // (A re-send under the late cutoff is accepted by the gate; the same rule applies here. The trade-off is the one of CHAOS.md, "unknown-outcome re-send".)
+            let cutoff = w.lock.as_ref().map(|l| if self.truth.reveal_was_resend { l.timelock.saturating_sub(self.gates.de_s) } else { self.gates.reveal_cutoff(l.timelock) }).unwrap_or(0);
             match self.truth.reveal_at {
                 Some(t) if t <= cutoff + SKEW_TOL => {}
                 other => return fail("eth-to-alice-without-timely-reveal", format!("the ETH went to Alice, reveal executed at {other:?}, cutoff {cutoff}")),
@@ -2139,6 +2217,7 @@ struct Stats {
     by_variant: BTreeMap<String, u64>,
     by_version: BTreeMap<String, u64>,
     by_lock_kind: BTreeMap<String, u64>,
+    early_starts: u64,
     events: BTreeMap<&'static str, u64>,
     degrades: BTreeMap<String, u64>,
     actions: BTreeMap<&'static str, u64>,
@@ -2205,6 +2284,7 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
         *stats.by_variant.entry(format!("{:?}", run.variant)).or_insert(0) += 1;
         *stats.by_version.entry(format!("{:?}", run.version)).or_insert(0) += 1;
         *stats.by_lock_kind.entry(run.lock_kind.to_string()).or_insert(0) += 1;
+        stats.early_starts += u64::from(run.early_start > 0);
         for (k, v) in &run.events {
             *stats.events.entry(k).or_insert(0) += *v as u64;
         }
@@ -2269,6 +2349,7 @@ fn chaos_the_swap_survives_random_interleavings_and_adversaries() {
     println!("chaos: {} scenarios, {} ticks, {:.1} s ({:.1} ms per scenario)", stats.scenarios, stats.ticks, elapsed.as_secs_f64(), elapsed.as_secs_f64() * 1000.0 / stats.scenarios.max(1) as f64);
     println!("chaos: regime {:?}", stats.by_regime);
     println!("chaos: mode {:?} profile {:?} variant {:?} contract {:?} lock {:?}", stats.by_mode, stats.by_profile, stats.by_variant, stats.by_version, stats.by_lock_kind);
+    println!("chaos: scenarios that started before H_create (the funding opens D_offset blocks earlier): {}", stats.early_starts);
     println!("chaos: outcomes {:?}", stats.outcomes);
     println!("chaos: events {:?}", stats.events);
     println!("chaos: degraded observations {:?}", stats.degrades);
@@ -2348,6 +2429,8 @@ fn chaos_oracles_catch_planted_violations() {
         finalized: 1_000,
         funded_height: Some(300_001),
         secret_public: true,
+        reveal_maybe_sent: false,
+        side_locks: Vec::new(),
         fitting: 1,
     };
     let reveal = Action::RevealEth { lock_id: lock.lock_id };
@@ -2360,6 +2443,11 @@ fn chaos_oracles_catch_planted_violations() {
     assert!(run.gates_for(ALICE, &reveal, &resend).is_ok());
     let too_late = Snap { time: lock.timelock - g.de_s + SKEW_TOL + 1, secret_public: true, ..base.clone() };
     assert_eq!(run.gates_for(ALICE, &reveal, &too_late).unwrap_err().id, "gate-i2");
+    // The same late cutoff when her file carries the unknown-outcome evidence (the secret is not public in the world), and not past it.
+    let maybe = Snap { time: lock.timelock - g.m_a_s + SKEW_TOL + 1, secret_public: false, reveal_maybe_sent: true, ..base.clone() };
+    assert!(run.gates_for(ALICE, &reveal, &maybe).is_ok());
+    let maybe_too_late = Snap { time: lock.timelock - g.de_s + SKEW_TOL + 1, secret_public: false, reveal_maybe_sent: true, ..base.clone() };
+    assert_eq!(run.gates_for(ALICE, &reveal, &maybe_too_late).unwrap_err().id, "gate-i2");
     // Not final, two fitting instances, wrong role.
     let young = Snap { finalized: 0, ..base.clone() };
     assert_eq!(run.gates_for(ALICE, &reveal, &young).unwrap_err().id, "gate-reveal-not-final");
@@ -2389,6 +2477,13 @@ fn chaos_oracles_catch_planted_violations() {
     // Funding twice.
     let fund = Action::FundNoid { amount_micronoid: p.amount_micronoid };
     assert_eq!(run.gates_for(ALICE, &fund, &base).unwrap_err().id, "gate-fund");
+    // The lower bound of 2026-11-17: the funding opens at H_create - D_offset (never before the trial start), and not a block earlier.
+    let opens = p.h_create.saturating_sub(p.deadline_height - p.h_create).max(swap_cli::params::TRIAL_START_HEIGHT);
+    assert_eq!(opens, 300_000 - g.d_offset);
+    let fresh = Snap { instance: false, funding_pending: false, tip: opens - 1, ..base.clone() };
+    assert!(run.gates_for(ALICE, &fund, &fresh).is_ok());
+    let too_early = Snap { tip: opens - 2, ..fresh.clone() };
+    assert_eq!(run.gates_for(ALICE, &fund, &too_early).unwrap_err().id, "gate-fund");
     // The fail-closed table: a degradation blocks what it must, and only that.
     assert!(Degrade::EpochAnchorNone.blocks("claim_noid", run.profile));
     assert!(!Degrade::EpochAnchorNone.blocks("reveal_eth", run.profile));

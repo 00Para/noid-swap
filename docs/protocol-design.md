@@ -98,10 +98,10 @@ Test vectors. M0 must reproduce all of them before anything is funded:
 2. **Alice proves π locally** (§5) and self-verifies it.
 3. **Alice builds the lock.** She runs `pruv build htlc.pruv --params p.json`, then `parano1d-cli contract create def.json --out swap.opening.json`, with
    `hashlock_authority = A`, `receiver = B_noid`, `sender = A_noid`, `timeout_height = D`, `max_fee = F_max`.
-   She chooses `D` from §4: `D = H_create + D_offset`.
+   She chooses `D` from §4: `D = H_create + D_offset`, where `H_create` is the Parano1d height she plans from. The contract commits `D`, not a creation height.
 4. **Alice → Bob:** a2–a7.
 5. ✔ **Bob pre-checks** (§6.3 items 1–8, everything except funding): verify π; rebuild the opening byte-for-byte; check every policy field; check `D` is achievable under (I1).
-6. **Alice funds:** `parano1d-cli contract fund swap.opening.json <V in NOID>`. **Alice → Bob:** a9.
+6. **Alice funds:** `parano1d-cli contract fund swap.opening.json <V in NOID>`. **Alice → Bob:** a9. The funding may come before `H_create` (§4.2): `swap-cli` offers it from `H_create − D_offset` (and never before height 279,388), so the NOID is locked for at most `2 × D_offset` blocks, counted from the funding to `D`. Bob checks the funding (step 7) whenever it comes.
 7. ✔ **Bob funding checks** (§6.3 items 9–11):
    - the instance `(slot, creation_id)` exists at the `o1` root with amount `V`;
    - it is final, i.e. `tip ≥ h_f + 18`;
@@ -354,8 +354,8 @@ Let `H_b, t_b` be the Parano1d height and the wall-clock time when Bob locks. Le
                      BTC: broadcast claim only if  h_btc ≤ T_b − 6  and funding ≥ k_fund conf
 (I3) Alice liveness: T_reveal − t_b ≥ W_A_min   (else Alice will not reveal → abort)
 (I4) Hard rule:      Bob's claim inclusion h ≤ D − 1;  target h ≤ D − 19
-(I5) Version:        no scheduled owner-authorization version change in [H_create, D + B_post]
-                     (v2.1: 279,370 ∉ window; start only at ≥ 279,370 + 18)
+(I5) Version:        no scheduled owner-authorization version change in [H_fund, D + B_post],
+                     H_fund = the height of Alice's funding (v2.1: 279,370 ∉ window; start only at ≥ 279,370 + 18)
 ```
 
 Alice picks `D` at creation, before she knows `H_b`:
@@ -365,6 +365,8 @@ D = H_create + B_fund(10) + B_final(19) + B_bob(≤60, lock-by) + RHS(I1) + marg
 ```
 
 Bob enforces (I1) at his lock time. If it fails, he either shrinks `T_reveal` (down to `W_A_min`) or does not lock. His **lock-by height** is `D − RHS(I1)`.
+
+**The funding may come before `H_create` (2026-11-17).** `H_create` only plans `D`; no creation height is bound anywhere (the opening commits `D`, the parties, `F_max` and the modes), so a funding at an earlier height is valid for the contract, for Bob's checks (§2 step 7 and §6.3 items 9–11 read the instance, its amount, its finality and the mempool, nothing about `H_create`) and for the chain. Alice's tool offers it from `H_create − D_offset` on, and not before the trial start (279,388). Two consequences. (I5) is counted from the funding height `H_fund`, not from `H_create`: because `H_fund ≥ 279,388 > 279,370` the window never contains the activation height, which is why the trial-start bound applies to the funding and not only to `H_create`. And Alice's lockup, if Bob never locks, is `D − H_fund ≤ 2 × D_offset` blocks plus the 18 of finality of her refund (about 12 h 30 m in `production` at 30 s per block, against about 6 h counted from `H_create`). Bob's lock-by height does not move (it is `D − RHS(I1)`); his free option (T13) runs from the funding to his lock-by, so it is longer when Alice funds early: she presses the button when Bob is ready.
 
 ### 4.3 Worked example: ETH
 
@@ -379,7 +381,7 @@ The Parano1d height of 300,000 is illustrative (post-v2.1).
 5. Bob's lock-by height is `300,738 − 631 = 300,107` with `W_A = 7,200`. With `W_A_min = 5,400` it is `300,738 − (⌈5,740/20⌉ + 254) = 300,738 − 541 = 300,197`. (Measured from `H_create` that is `H_create + 107` / `+ 197`.)
 6. Nominal times: Alice must broadcast by 13:30 UTC. Bob's worst-case learn time is 14:05 UTC. `D` arrives at about 17:49 UTC at 30 s/block (698 blocks after the lock, 5 h 49 m), and at about 15:52 UTC at 20 s/block (3 h 52 m 40 s).
 7. In the fast case Bob still has 323 blocks after `t_L` (`300,738 − (300,040 + 375)`). He needs `2 (2·P_auth) + 254 = 256` ✔.
-8. Alice's worst-case lockup if Bob aborts: until about `D + 18`, roughly 6 h nominal.
+8. Alice's worst-case lockup if Bob aborts: until about `D + 18`, roughly 6 h nominal counted from `H_create`. If she funds as early as the tool allows (`H_create − D_offset = 299,262`), `D − H_fund` is 1,476 blocks (§4.2).
 
 ### 4.4 Worked example: BTC
 
@@ -530,7 +532,7 @@ The tool ships this file, and both parties pin its SHA-256. The params-file shap
    - `recovery_authority == recovery_recipient == A_noid`;
    - `A ∉ {B_noid, A_noid}`.
 4. Modes: `claim_can_close = recovery_can_close = true`, both `*_can_continue = false`, `unrestricted_payout_recipient = false`, `max_payout = 0`, `min_retained = 0`. The program equals the compiled `require terminal`, and `state = 0`.
-5. `D`: (I1) can be met at the expected lock time, (I5) holds, and `D − H_now ≤ 2 × D_offset` (sanity).
+5. `D`: (I1) can be met at the expected lock time, (I5) holds, and `D − H_now ≤ 2 × D_offset` (sanity). The check is not in Bob's tool, and his safety does not need it: his lock is bounded by his own rules ((I1) at his lock time, his lock-by height, the `T_reveal` window). Alice's tool applies the bound to herself, because it is her coins that wait: it does not offer the funding before `H_create − D_offset`, so they are never locked for more than `2 × D_offset` blocks, and a Bob who runs the sanity check by hand finds it met at the funding height.
 6. `F_max` headroom: `max(50,000, 3 × estimateFeeDetailed(1,1)) ≤ F_max ≤ 1% × V`. `estimateFeeDetailed` includes the current relay floor.
 7. Compute `root(opening)` locally (Rust `ObjectOpening::root`) and check it equals the `o1` address Alice will fund.
 8. π verifies (§5.5). `H` is fresh (not in Bob's swap DB), and `getSlotsByOwner(A)` is empty. Funds sitting at `A` would be stealable after the reveal and suggest secret reuse.
@@ -640,6 +642,8 @@ Alice's refund uses the stock wallet in both cases: recovery authority `= A_noid
 - `rehearsal` and `sepolia` keep `B_safety` = 5: `B_post` 34, `RHS(I1)` 69 / 63 and 252 / 210, `D_offset` 122 and 302 (see the profile table below).
 - The full "Alice never reveals" cycle, from creation to her final refund, is `D_offset + 18`: 756 blocks (production), 140 (rehearsal), 320 (sepolia).
 - The measurements in §9.3 and the earlier derivations above are kept as they were; where they say "17 blocks" they are the old rule.
+
+**The funding height (2026-11-17).** The numbers above count from `H_create`, the height `D` is planned from. The tool offers Alice's funding from `H_create − D_offset` (never before 279,388), so the cycle "Alice never reveals", counted from the funding and not from `H_create`, is at most `2 × D_offset + 18` blocks: 1,494 (production), 262 (rehearsal), 622 (sepolia). Nothing else in this section moves: `D_offset`, Bob's lock-by (`H_create + 107` / `+ 53` / `+ 50`), `B_post` and the claim target do not depend on when the funding is made. (I5) is counted from the funding height (§4.2).
 
 **Profiles (2026-11-05).** `swap-cli` runs the same (I1)/(I2)/(I3) formulas under three parameter sets. `production` is the table above. `rehearsal` (a local Hardhat chain, instant Ethereum finality) and `sepolia` (public Sepolia, real finality) shrink the budgets so that an abort path takes an hour or two instead of six, and cap the amounts. The derivation, the checker (`Gates::validate`) and the tests that pin the numbers are in `swap-cli/README.md`, "The rehearsal and sepolia profiles", and `swap-cli/src/params.rs`.
 

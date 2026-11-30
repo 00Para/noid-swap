@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>noid-swap console</title>
+  <link rel="stylesheet" href="/tokens.css">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="strip">
+    <div class="strip-title">
+      <span class="wordmark">noid<span class="wordmark-dot">·</span>swap</span>
+      <span class="muted">read-only console · <a href="/">operator console</a></span>
+      <span id="mode" class="chip chip-neutral" title="live: real nodes; mock: synthetic timelines">…</span>
+    </div>
+    <div class="strip-status">
+      <span id="poll" class="muted">connecting…</span>
+      <button id="refresh" type="button" class="btn btn-ghost">Refresh now</button>
+      <button id="theme" type="button" class="btn btn-ghost" aria-label="Toggle light/dark theme">☾ Theme</button>
+    </div>
+  </header>
+
+  <div id="chain-strip" class="chain-strip" aria-label="Chain status"></div>
+  <div id="banner" class="banner" role="alert" hidden></div>
+
+  <main class="layout">
+    <nav class="list" aria-label="Swaps">
+      <h2 class="section-title">Swaps</h2>
+      <ul id="swap-list" class="cards"></ul>
+      <p class="hint muted">One click opens the detail. The page refreshes every 15 s; node answers are cached 10 s. Anything older than 120 s, or that failed, is shown as stale — never as fine.</p>
+    </nav>
+    <section id="detail" class="detail" aria-live="polite">
+      <p class="muted">Select a swap.</p>
+    </section>
+  </main>
+
+  <footer class="foot muted">
+    Reads only: Parano1d <code>blockCount · getEpochAnchor · estimateFeeDetailed · getMempoolInfo · getObjectInstances · getObjectStatus · getTx</code>;
+    Ethereum <code>eth_chainId · eth_blockNumber · eth_getBlockByNumber · eth_getLogs · eth_call</code>; the public object/bundle files; the engine's loop text.
+    Never sends a transaction, never calls a wallet method, never opens a <code>*.swap.json</code>, never shows a secret.
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

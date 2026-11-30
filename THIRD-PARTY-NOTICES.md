@@ -56,6 +56,27 @@ Modifications copyright 2026 Succinct Labs, Benedikt Bunz, William Wang
 | `parano1d/harness/`, `swap-cli/` | Link against the vendored crates by path. No vendored code is copied. | MIT |
 | `equiv/reference/`, `equiv/zkvm/` (`core`, `guest`, `host`) | Link against the vendored crates by path (`reference`) or reimplement the permutation (`zkvm`). No vendored code is copied. | Apache-2.0 (their own `Cargo.toml`) |
 
+## Typefaces in `ui/app/fonts/` (SIL Open Font License 1.1)
+
+Two variable-weight typefaces, unmodified (only the file names were changed), served by the operator console from its own
+folder. The licence texts sit beside the files and travel with them; sources, commits and checksums are in
+`ui/app/fonts/README.md`.
+
+| Typeface | File | Copyright | Source (commit) | Licence text |
+|---|---|---|---|---|
+| Space Grotesk (variable weight) | `ui/app/fonts/SpaceGrotesk-wght.woff2` | Copyright 2020 The Space Grotesk Project Authors | `https://github.com/floriankarsten/space-grotesk` (`03507d024a01282884232081fc6011c09ff4e849`) | `ui/app/fonts/SpaceGrotesk-OFL.txt` |
+| JetBrains Mono (variable weight) | `ui/app/fonts/JetBrainsMono-wght.woff2` | Copyright 2020 The JetBrains Mono Project Authors | `https://github.com/JetBrains/JetBrainsMono` (`19371302b95d218af43299bce79ddbddd0bc364d`) | `ui/app/fonts/JetBrainsMono-OFL.txt` |
+
+## Libraries in `ui/app/vendor/` (MIT License)
+
+Two libraries, copied as files without change for the offer board (the files used, their checksums and what the board uses
+from them are in `ui/app/vendor/VENDORED.md`). Each folder keeps its `LICENSE`, which travels with the copy.
+
+| Package | Version | Copyright | Source | Licence text |
+|---|---|---|---|---|
+| `@noble/curves` (CommonJS build) | 1.2.0 | Copyright (c) 2022 Paul Miller | `https://github.com/paulmillr/noble-curves` | `ui/app/vendor/noble-curves/LICENSE` |
+| `@noble/hashes` (CommonJS build) | 1.3.2 | Copyright (c) 2022 Paul Miller | `https://github.com/paulmillr/noble-hashes` | `ui/app/vendor/noble-hashes/LICENSE` |
+
 ## Other dependencies
 
 Node packages (`eth/`, `btc/`) and Rust crates (the `Cargo.lock` files) are fetched at

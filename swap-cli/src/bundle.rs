@@ -124,12 +124,22 @@ impl<'a> CheckedBundle<'a> {
     pub fn line(&self) -> String {
         format!("bundle check: {} (opening_hex {} characters)", short(&self.bundle_check.sha256), self.bundle_check.opening_hex_len)
     }
+
+    /// The machine line for a program that reads the bundle's digest: `bundle digest: <64 hex>`, the whole SHA-256 the check line starts with.
+    pub fn digest_line(&self) -> String {
+        digest_line(&self.bundle_check.sha256)
+    }
+}
+
+/// `bundle digest: <64 lowercase hex>`: the whole SHA-256 of the canonical form (the check line shows its first 16 digits).
+pub fn digest_line(sha256: &str) -> String {
+    format!("bundle digest: {sha256}")
 }
 
 /// What [`open_bundle`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BundleStatus {
-    /// `bundle_check` present and matching; the first 16 hex digits of the digest.
+    /// `bundle_check` present and matching; the whole digest (64 lowercase hex digits).
     Verified(String),
     /// No `bundle_check` and the caller allowed it (`--allow-unchecked-bundle`).
     Unchecked,
@@ -139,10 +149,18 @@ impl BundleStatus {
     /// The line `new-bob` prints.
     pub fn line(&self) -> String {
         match self {
-            BundleStatus::Verified(short) => format!("bundle check: {short} ok"),
+            BundleStatus::Verified(sha256) => format!("bundle check: {} ok", short(sha256)),
             BundleStatus::Unchecked => {
                 "warning: this bundle carries no bundle_check (made before the check existed), so nothing shows that it arrived intact; compare the hashlock and the contract root with Alice by another route".into()
             }
+        }
+    }
+
+    /// The `bundle digest: <64 hex>` machine line, only for a verified bundle (an unchecked one has no digest to vouch for).
+    pub fn digest_line(&self) -> Option<String> {
+        match self {
+            BundleStatus::Verified(sha256) => Some(digest_line(sha256)),
+            BundleStatus::Unchecked => None,
         }
     }
 }
@@ -178,7 +196,7 @@ for a bundle made before the check existed, pass --allow-unchecked-bundle"
     Ok((public, status))
 }
 
-/// `value` is the bundle without `bundle_check`; `raw` is the field. Returns the short digest when it matches.
+/// `value` is the bundle without `bundle_check`; `raw` is the field. Returns the whole digest (lowercase hex) when it matches.
 fn verify_check(value: &Value, raw: Value) -> Result<String, String> {
     let Some(fields) = raw.as_object() else {
         return Err("bundle: `bundle_check` is malformed (not an object)".into());
@@ -196,7 +214,7 @@ fn verify_check(value: &Value, raw: Value) -> Result<String, String> {
     let digest_ok = claimed.sha256.eq_ignore_ascii_case(&actual.sha256);
     let length_ok = claimed.opening_hex_len == actual.opening_hex_len;
     if digest_ok && length_ok {
-        return Ok(short(&actual.sha256).to_string());
+        return Ok(actual.sha256);
     }
     let mut message = format!("bundle: {DAMAGED}.");
     if !length_ok {
@@ -255,8 +273,8 @@ mod tests {
         let checked = CheckedBundle::new(&public).unwrap();
         let (read, status) = open(&checked.to_pretty_json().unwrap()).unwrap();
         assert_eq!(read, public);
-        let BundleStatus::Verified(short) = status else { panic!("not verified") };
-        assert!(checked.line().starts_with(&format!("bundle check: {short} (opening_hex ")), "{}", checked.line());
+        let BundleStatus::Verified(sha256) = status else { panic!("not verified") };
+        assert!(checked.line().starts_with(&format!("bundle check: {} (opening_hex ", &sha256[..16])), "{}", checked.line());
         assert!(!serde_json::to_string(&public).unwrap().contains("bundle_check"));
     }
 
@@ -337,6 +355,45 @@ mod tests {
         // The flag does not excuse a check that is present and wrong.
         let wrong = example_text().replace("\"opening_hex_len\": ", "\"opening_hex_len\": 1");
         assert!(open_bundle(&wrong, true).is_err());
+    }
+
+    #[test]
+    fn the_digest_line_of_a_small_example_is_pinned() {
+        let check = compute_check(&small_example());
+        assert_eq!(digest_line(&check.sha256), "bundle digest: 9729820d1a6a0ad55bd3873c364bd449367e1291839620c3b346cf9c112f41f5");
+    }
+
+    #[test]
+    fn the_digest_line_is_the_whole_digest_the_check_line_starts_with_and_both_sides_print_the_same() {
+        let public = example_public(&Secret::from_bytes(htlc_harness::seq_bytes(0x33)), Variant::Raw);
+        let checked = CheckedBundle::new(&public).unwrap();
+        // Alice's side (new-alice, bundle): the line of the bundle just made.
+        let alice = checked.digest_line();
+        let hex = alice.strip_prefix("bundle digest: ").expect("the line starts with its name");
+        assert_eq!(hex.len(), 64, "{alice}");
+        assert!(hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')), "{alice}");
+        assert_eq!(alice, format!("bundle digest: {}", checked.check().sha256));
+        // The 16-hex check line is the start of it.
+        assert!(checked.line().starts_with(&format!("bundle check: {} (opening_hex ", &hex[..16])), "{}", checked.line());
+        // Pinned, so another implementation (or a later change of the canonical form) is caught.
+        assert_eq!(alice, "bundle digest: 507d6d477a12536fed7ec70df9c3667608bbd57b3b06877c0c1ab38324b9edb6");
+        // Bob's side (new-bob): the line of the same bundle read back from its text, in any whitespace or key order.
+        let (_, status) = open(&checked.to_pretty_json().unwrap()).unwrap();
+        assert_eq!(status.digest_line().as_deref(), Some(alice.as_str()));
+        let compact = serde_json::to_string(&serde_json::from_str::<Value>(&checked.to_pretty_json().unwrap()).unwrap()).unwrap();
+        assert_eq!(open(&compact).unwrap().1.digest_line().as_deref(), Some(alice.as_str()));
+        assert!(status.line().starts_with(&format!("bundle check: {} ok", &hex[..16])), "{}", status.line());
+    }
+
+    #[test]
+    fn a_damaged_bundle_gives_no_digest_line_and_an_unchecked_one_none_either() {
+        let text = example_text();
+        let public: SwapPublic = serde_json::from_str(&text).unwrap();
+        let first = public.opening_hex.chars().find(|c| *c != 'f').unwrap();
+        let tampered = text.replacen(&public.opening_hex, &public.opening_hex.replacen(first, "f", 1), 1);
+        assert!(open(&tampered).unwrap_err().contains("damaged in transit"));
+        let (_, status) = open_bundle(&serde_json::to_string_pretty(&public).unwrap(), true).unwrap();
+        assert_eq!(status.digest_line(), None);
     }
 
     #[test]

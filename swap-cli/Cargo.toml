@@ -39,6 +39,8 @@ dev = []
 
 [dev-dependencies]
 tempfile = "3"
+# The chain's own fee rule, state and admission-level checks, used only by the wallet tests (no mempool crate: it needs tokio, which is not in the offline registry).
+noid_chain = { path = "../vendor/parano1d/noid_chain" }
 # The crate depends on itself with `dev` so that `cargo test` (library, binary and integration tests alike)
 # has the fast KDF, while `cargo build` and `cargo build --release` do not.
 swap_cli = { path = ".", features = ["dev"] }

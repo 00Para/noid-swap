@@ -195,7 +195,8 @@ refuses, see G3). Carry each bundle to Bob's machine and run `swap-cli new-bob` 
    back for `abort_after_cancel_s` (3,600 s on `sepolia`): add up to an hour to this run. Alternative that avoids the
    cancel: tick Alice's file without `--apply` (a read-only tick records no intent) until the abort text appears,
    then apply once. Expected: `wait`, then once the funding could no longer be final before the lock-by, `abort`
-   "too late to fund: tip … > lock-by …" (`engine.rs:1851`), recorded, file `aborted`.
+   "too late to fund: tip … > lock-by …" (`engine.rs:1851`), recorded, file `aborted`. Since 2026-11-17 the tool offers the funding from
+   `H_create - D_offset`, not from `h_create - 1`; see `swap-cli/README.md`.
 4. Bob's machine, at `h_create + 92` or later: `abort` "last lock height … passed before Alice's funding was final"
    (`engine.rs:2634`), recorded by `tick --apply` (no intent is held), file `aborted`, loop stops.
 5. Bob's machine, after that: `lock.sh --dry-run`. Expected refusal from `live.js`: the file has no `lock_eth` intent

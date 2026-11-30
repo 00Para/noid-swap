@@ -4,7 +4,7 @@
  *
  *   node scripts/live.js <command> [flags]        (run from eth/)
  *
- * Commands: keygen, balance, deploy, lock, claim, refund, send, status.
+ * Commands: keygen, balance, address, deploy, lock, claim, refund, send, sweep, reserve, status.
  * See "Live runs (Sepolia)" in eth/README.md for the full sequence.
  *
  * Environment:  ETH_RPC_URL  JSON-RPC endpoint (default http://127.0.0.1:8545)
@@ -28,7 +28,7 @@
  *             (c) is sent with a FIXED gas limit of 1,000,000 (the contract's own floor is 540,000), and (d) is NEVER simulated: no
  *             eth_estimateGas, no eth_call carries the secret to the node. Only the signed raw transaction does. Review V2-6, V2-7.
  *
- * A private key is only ever read from a key file and is never printed.
+ * A private key is only ever read from a key file (--key-file) or from a pipe on stdin (--key-stdin) and is never printed.
  * The swap secret is never accepted on the command line: `claim` reads it from
  * stdin (--secret-stdin) or a file (--secret-file) and never prints it.
  * (In-process callers may pass it as args.secret; the CLI cannot.)
@@ -182,6 +182,41 @@
  * eth_claim_mined, eth_claim_reorged, eth_reveal_dropped), claim takes the cutoff the intent froze (T_reveal - DE) instead of the
  * stricter timelock - 1800 s; an explicit --margin-s still tightens it. A --replace of a pending claim grants the late cutoff only when that claim carries this lock's secret.
  *
+ * The swap's own Ethereum key (swap wallet, piece 2b; swap-cli seals it in the swap file, `swap-cli ethkey emit FILE | node scripts/live.js ... --key-stdin`):
+ *   --key-stdin      lock, claim, refund and sweep (and `address`) read the key from stdin instead of --key-file; exactly one of the two. stdin must be a pipe (a terminal
+ *                    is refused, the key would be typed in the clear) and holds exactly ONE line, the key (0x and 64 hex). With claim AND --secret-stdin together the
+ *                    framing is exactly TWO lines: the key, then the secret; one line or three, a blank line, or anything else is refused. Nothing of either is ever
+ *                    shown in an error. Every check on the key (claim: it must be alice_receiver; lock and refund: bob_sender) is unchanged, whatever the source.
+ *   keygen --stdout  a fresh key from the OS random generator (32 bytes, checked valid), written as two lines, the address then the key, to a pipe only (a terminal is
+ *                    refused): node scripts/live.js keygen --stdout | swap-cli ethkey new --out KEYFILE. swap-cli has no secp256k1 code, so it is this tool that makes the key
+ *                    and recomputes the address: `address --key-stdin [--expect ADDRESS]` prints the address of the key on stdin, and refuses when --expect differs.
+ *   sign-message --key-stdin|--key-file F --message-hex 0x..   signs one EIP-191 personal message (the bytes given as 0x-hex, nothing else is accepted) with the key and prints
+ *                    JSON {address, signature} (the signature: 65 bytes, 0x + 130 hex, v 27 or 28). Offline: no node, no network. Exactly one of the two key flags. DOMAIN RULE: the
+ *                    tool refuses (exit status 1, nothing signed) unless the message bytes start with the ASCII text `no1d-swap-v1 ` (the handover's tuples do), so a signature of
+ *                    this command can never be read as another protocol's message, and the EIP-191 prefix (the byte 0x19 first) keeps it from being a valid Ethereum transaction.
+ *                    At most 2,048 bytes. The key is registered as a secret (scrubbed from every message) and is never printed.
+ *   verify-message --address ADDR --message-hex 0x.. --signature 0x..   read-only, offline, no key: recovers the signer of the EIP-191 message and prints JSON {valid, recovered};
+ *                    exit status 0 when `recovered` is ADDR, 3 when it is not (including a signature that is malformed, has a high s or a v other than 27 or 28: valid false,
+ *                    recovered null). The domain prefix is not demanded here (it is a check of the bytes the caller built).
+ *   balance --address ADDR   read-only: the balance in wei, and the latest and the pending nonce.
+ *   reserve --role alice|bob --swap FILE --key-stdin|--key-file F [--mainnet --max-fee-gwei N | --gas-price-gwei N]   read-only. REQUIRES the key (exactly one of the two) and
+ *                    refuses, before any amount or address is printed (exit status 1), unless the address recomputed from the key is the file's own account (alice_receiver for
+ *                    Alice, bob_sender for Bob) and the file's eth_key address when it has one: a stated address that is not the key's would be a deposit nobody can spend.
+ *                    The ETH the swap's key must hold (amendment C): Alice, the claim's
+ *                    fixed gas limit (200,000 sha256, 1,000,000 poseidon) x the fee ceiling x 1.25; Bob, the swap's amount_wei + (the lock's + the refund's gas ceiling) x the fee
+ *                    ceiling x 1.25 (the gas ceilings are LOCK_GAS_RESERVE and REFUND_GAS_RESERVE below: above what the live runs measured). The fee ceiling is the cap a send
+ *                    would use (--max-fee-gwei on mainnet, --gas-price-gwei elsewhere, else the node's own suggestion). Prints the numbers (wei, decimal strings) and
+ *                    `covered`; exit status 0 when the key's balance covers it, 3 when it does not. Integer arithmetic only.
+ *   sweep --swap FILE --to ADDR --key-stdin|--key-file F [--dry-run]   sends the key's whole balance minus the fee (21,000 gas x the capped fee) to ADDR, and refuses unless ALL
+ *                    hold: the key is the file's own account (alice_receiver for Alice, bob_sender for Bob) and the file's eth_key record's address; ADDR is the payout address
+ *                    stored in the file's eth_key record (and not the key itself); the file holds no pending lock_eth, refund_eth or reveal_eth intent (nor a pending action
+ *                    of those kinds); the node is on the file's chain (and mainnet only with --mainnet, the production file and --max-fee-gwei) and the contract is the pinned
+ *                    artifact; ADDR has no code (eth_getCode empty: a contract or an EIP-7702 delegation is refused, amendment M); the key has no pending transaction (pending
+ *                    nonce = latest nonce); no lock of THIS swap (the file's lock word, from this key as sender for Bob, to this key as receiver from bob_sender for Alice)
+ *                    is open on chain: every such lock must be claimed or refunded; and no unresolved lock record exists (FILE.lock-sent, the per-user record): a record
+ *                    counts as resolved only when the lock it names shows claimed or refunded on chain. With NO lock of this swap on chain at all the file's phase must be an
+ *                    ended one (aborted, refunded, lost, done). The same fee-cap checks as the other sends apply. --dry-run prints what it would send. Not run on a public network.
+ *
  * Tied to the swap file (REVIEW-3 F3): lock, claim and refund take --swap FILE, the JSON swap file of
  * `swap-cli` (read-only; the sealed secret in it is never touched). The terms (--chain-id, --contract,
  * and for lock --hashlock, --receiver, --amount-wei, --t-reveal; for claim and refund --lock-id)
@@ -217,6 +252,14 @@ const POSEIDON_CLAIM_CALLDATA_BYTES = 68;
 // itself). HTLC.sol's claim is a hash, a storage write and one ETH transfer: the fuzz run (eth/FUZZ.md) measured at most 120,993 gas, so 200,000 clears it with
 // a wide margin and, like the poseidon limit, costs only what is used (the balance must cover limit x fee cap at signing).
 const SHA256_CLAIM_GAS_LIMIT = 200_000n;
+// Swap wallet, piece 2b (amendment C): the gas CEILINGS the reserve of Bob's key is computed from. The lock and the refund are estimated, not fixed, so these are not limits
+// of a transaction: they sit above what the live runs measured (poseidon lock 600,174 estimated, 583,853 mined; poseidon refund 158,608; sha256 lock 149,197 and refund 66,577
+// on the local chain) so the reserve covers them with room. The claim's gas is the fixed limit above.
+const LOCK_GAS_RESERVE = { sha256: 250_000n, poseidon: 700_000n };
+const REFUND_GAS_RESERVE = { sha256: 100_000n, poseidon: 200_000n };
+const TRANSFER_GAS = 21_000n; // a plain ETH transfer to an address without code
+const RESERVE_NUM = 125n; // the reserve is gas x fee ceiling x 1.25, in integers: (x * 125 + 99) / 100
+const RESERVE_DEN = 100n;
 // Chains on which this tool will send transactions: Sepolia, Holesky, Hardhat/ganache-style local.
 // Ethereum mainnet (1) is refused unless the command carries --mainnet (see mainnetFlags); it is never in this set.
 // Another chain needs an explicit allowChainId.
@@ -708,21 +751,69 @@ function explain(e) {
   return redact(plainNodeText(String(msg).split("\n")[0]));
 }
 
-async function readStdinText(maxBytes = 4096) {
+async function readStdinText(maxBytes = 4096, flagName = "--secret-stdin") {
   if (process.stdin.isTTY) {
     throw new UserError(
-      "--secret-stdin: stdin is a terminal, so the secret would be typed in the clear; pipe it in " +
-        "(swap-cli secret FILE | node scripts/live.js claim --secret-stdin ...)"
+      flagName === "--secret-stdin"
+        ? "--secret-stdin: stdin is a terminal, so the secret would be typed in the clear; pipe it in " + "(swap-cli secret FILE | node scripts/live.js claim --secret-stdin ...)"
+        : `${flagName}: stdin is a terminal, so the key would be typed in the clear; pipe it in (swap-cli ethkey emit FILE | node scripts/live.js ... ${flagName})`
     );
   }
   const chunks = [];
   let n = 0;
   for await (const c of process.stdin) {
     n += c.length;
-    if (n > maxBytes) throw new UserError("--secret-stdin: input is far longer than a 32-byte secret");
+    if (n > maxBytes) throw new UserError(flagName === "--secret-stdin" ? "--secret-stdin: input is far longer than a 32-byte secret" : `${flagName}: input is far longer than a key and a secret`);
     chunks.push(c);
   }
   return Buffer.concat(chunks).toString("utf8");
+}
+
+const ETH_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
+
+/** A Wallet from the key's text. The text is registered as a secret (every message is scrubbed of it) and never shown in an error. */
+function signerFromKeyText(provider, text, where) {
+  if (!ETH_KEY_RE.test(text)) throw new UserError(`${where}: the key must be 0x followed by exactly 64 hex characters; its text is not shown`);
+  registerSecret(text);
+  try {
+    return new ethers.Wallet(text, provider);
+  } catch {
+    throw new UserError(`${where}: not a valid secp256k1 private key; its text is not shown`);
+  }
+}
+
+/**
+ * --key-stdin: read the key (and, with --secret-stdin on a claim, the secret) from ONE read of stdin. The framing is exactly: with --key-stdin alone ONE line, the key; with
+ * --key-stdin and --secret-stdin TWO lines, the key and then the secret. A terminal, another number of lines, a blank line and a malformed line are refused, and no message
+ * carries the text. The secret goes to `args.secret` (the in-process way readSecret takes it; the command line itself cannot set it) and `args.secretStdin` is dropped, so
+ * stdin is not read a second time. Returns the key's text.
+ */
+async function readKeyStdin(args) {
+  if (args.keyFile !== undefined) throw new UserError("give the key by exactly one of --key-file or --key-stdin; refusing");
+  const both = args.secretStdin === true;
+  const text = await readStdinText(4096, "--key-stdin");
+  let body = text;
+  if (body.endsWith("\n")) body = body.slice(0, -1);
+  if (body.endsWith("\r")) body = body.slice(0, -1);
+  const lines = body.split("\n").map((l) => (l.endsWith("\r") ? l.slice(0, -1) : l));
+  const want = both ? 2 : 1;
+  if (lines.length !== want || lines.some((l) => l.trim() === "")) {
+    throw new UserError(
+      both
+        ? "--key-stdin with --secret-stdin: stdin must be exactly two lines, the key and then the secret; anything else is refused (nothing is shown)"
+        : "--key-stdin: stdin must be exactly one line, the key; anything else is refused (nothing is shown)"
+    );
+  }
+  const key = lines[0].trim();
+  if (!ETH_KEY_RE.test(key)) throw new UserError("--key-stdin: the key must be 0x followed by exactly 64 hex characters; its text is not shown");
+  registerSecret(key);
+  if (both) {
+    const secret = hex32("--secret-stdin", lines[1].trim());
+    registerSecret(secret);
+    args.secret = secret;
+    delete args.secretStdin;
+  }
+  return key;
 }
 
 /**
@@ -1320,6 +1411,16 @@ function checkProducerMemory(sw) {
   }
 }
 
+/** The `eth_key` record of a swap file as { address, payout } (checksummed), null when there is none, { invalid: true } when it does not parse. Never throws. */
+function ethKeyRecordOf(rec) {
+  if (rec === undefined || rec === null) return null;
+  try {
+    return { address: ethers.getAddress(rec.address), payout: ethers.getAddress(rec.payout) };
+  } catch {
+    return { invalid: true };
+  }
+}
+
 /** Parse the parts of the swap file this script needs. Read-only; `secret` is never looked at. */
 function readSwapFile(file, want = null) {
   const abs = path.resolve(String(file));
@@ -1374,6 +1475,13 @@ function readSwapFile(file, want = null) {
       // As swap-cli stores it: `public.params.eth.lock_kind`, absent for `sha256` (the default is not written).
       lockKind: eth.lock_kind === undefined ? "sha256" : String(eth.lock_kind),
       intent: j.pending_intent || null,
+      // Swap wallet, piece 2b (sweep and reserve only; lock, claim and refund never look at these): the file's role ("alice" or "bob", else null), the phase's name, the kind of
+      // a pending action, and the `eth_key` record (the address of the party's own Ethereum account and the payout address the sweep goes to; `{ invalid: true }` when the
+      // record does not parse, which only sweep reads, and refuses).
+      role: j.role === "alice" || j.role === "bob" ? j.role : null,
+      phaseName: j.phase && typeof j.phase === "object" && typeof j.phase.phase === "string" ? j.phase.phase : null,
+      pendingActionKind: j.pending_action && typeof j.pending_action === "object" && typeof j.pending_action.kind === "string" ? j.pending_action.kind : null,
+      ethKey: ethKeyRecordOf(j.eth_key),
       // REVIEW-4 R4-3: swap-cli's own predicate (`secret_may_be_public`): the file shows Alice's claim reached the network.
       secretMayBePublic: Array.isArray(j.history) && j.history.some((h) => h && SECRET_PUBLIC_EVENTS.has(h.event)),
       // The producer screen of swap-cli (T21): its remembered detection is the history entry `producer_differs_seen`; the operator's waiver is an
@@ -2529,9 +2637,64 @@ async function lockedEventsBySender(provider, contractAddr, sender, fromBlock, t
   return out;
 }
 
+/**
+ * The Locked events of one sender and/or one receiver (both indexed: topic2 and topic3), in 50,000-block chunks, like `lockedEventsBySender` and checked the same way: every
+ * log is checked again locally (contract, event, the topics asked for, the lock id recomputed from its own fields), so a provider that ignores a topic filter cannot slip another
+ * party's lock in. `who` is { sender?, receiver? } (at least one). `sweep` uses it for the locks of one swap.
+ */
+async function lockedEventsFor(provider, contractAddr, who, fromBlock, toBlock, kind) {
+  if (!who.sender && !who.receiver) throw new Error("lockedEventsFor: a sender or a receiver is required");
+  const iface = htlcInterface(kind);
+  const topic0 = iface.getEvent("Locked").topicHash.toLowerCase();
+  const senderTopic = who.sender ? ethers.zeroPadValue(who.sender, 32).toLowerCase() : null;
+  const receiverTopic = who.receiver ? ethers.zeroPadValue(who.receiver, 32).toLowerCase() : null;
+  const logs = await getLogsChunked(provider, { address: contractAddr, topics: [topic0, null, senderTopic, receiverTopic] }, fromBlock, toBlock, LOG_RANGE_MAX);
+  const out = [];
+  for (const log of logs) {
+    if (log.removed) continue;
+    const t = (log.topics || []).map((x) => String(x).toLowerCase());
+    if (String(log.address).toLowerCase() !== String(contractAddr).toLowerCase() || t.length !== 4 || t[0] !== topic0) continue;
+    if (senderTopic !== null && t[2] !== senderTopic) continue;
+    if (receiverTopic !== null && t[3] !== receiverTopic) continue;
+    const args = iface.parseLog(log).args;
+    const word = lockWordOf(kind, args);
+    const id = computeLockIdLocal(args.sender, args.receiver, args.amount, word, args.timelock);
+    if (id.toLowerCase() !== String(args.lockId).toLowerCase()) {
+      throw new UserError(`refusing: a Locked event (lockId ${args.lockId}, block ${log.blockNumber}) does not recompute its lock id from its own fields; do not trust this node`);
+    }
+    out.push({ log, args, word });
+  }
+  return out;
+}
+
 // -------------------------------------------------------------- commands
+/**
+ * keygen --stdout: a fresh key, 32 bytes from the OS random generator (never the mnemonic route: that has 128 bits), checked to be a valid secp256k1 secret, written as two
+ * lines, the address then the key, to `out` (a pipe: a terminal is refused). Returns { address } (not printed by the caller: the key must not go to a second place).
+ */
+function keygenStdout(args, out = process.stdout) {
+  if (args.out !== undefined) throw new UserError("give exactly one of --out FILE or --stdout");
+  if (out.isTTY) {
+    throw new UserError(
+      "keygen --stdout writes the private key: pipe it (node scripts/live.js keygen --stdout | swap-cli ethkey new --out KEYFILE); stdout is a terminal, so the key would be shown on the screen"
+    );
+  }
+  let wallet = null;
+  for (let i = 0; i < 8 && wallet === null; i++) {
+    try {
+      wallet = new ethers.Wallet("0x" + crypto.randomBytes(32).toString("hex")); // refuses zero and a value at or above the group order: draw again
+    } catch {
+      wallet = null;
+    }
+  }
+  if (wallet === null) throw new UserError("keygen --stdout: the random generator gave no valid key (8 draws); refusing");
+  out.write(`${wallet.address}\n${wallet.privateKey}\n`);
+  return { address: wallet.address };
+}
+
 /** keygen: write a fresh private key (mode 0600, never overwrite). Prints only the address. */
 async function keygen(_provider, _signer, args) {
+  if (args.stdout !== undefined) throw new UserError("keygen --stdout writes to the pipe itself (the command line wrapper); in-process use --out FILE");
   const out = need(args, "out");
   const file = path.resolve(out);
   if (fs.existsSync(file)) throw new UserError(`refusing to overwrite existing file ${file}`);
@@ -2558,8 +2721,68 @@ function loadSigner(provider, keyFile) {
 
 async function balance(provider, _signer, args) {
   const a = address("ADDRESS", need(args, "address", "ADDRESS"));
-  const [bal, net, blockNumber] = await Promise.all([provider.getBalance(a), provider.getNetwork(), provider.getBlockNumber()]);
-  return { address: a, balanceWei: bal.toString(), balanceEth: ethers.formatEther(bal), chainId: net.chainId.toString(), blockNumber };
+  const [bal, net, blockNumber, nonceLatest, noncePending] = await Promise.all([
+    provider.getBalance(a),
+    provider.getNetwork(),
+    provider.getBlockNumber(),
+    provider.getTransactionCount(a, "latest"),
+    provider.getTransactionCount(a, "pending"),
+  ]);
+  return { address: a, balanceWei: bal.toString(), balanceEth: ethers.formatEther(bal), chainId: net.chainId.toString(), blockNumber, nonceLatest, noncePending };
+}
+
+/** address: the address of the key (--key-file or --key-stdin), read-only and offline. With --expect ADDRESS it refuses when the key's address is another one. */
+async function keyAddress(_provider, signer, args) {
+  requireSigner(signer);
+  const a = await signer.getAddress();
+  let expected = null;
+  if (args.expect !== undefined) {
+    expected = address("--expect", args.expect);
+    if (!sameAddr(a, expected)) throw new UserError(`the key's address is ${a}, not the expected ${expected}; refusing`);
+  }
+  return { address: a, matchesExpected: expected === null ? null : true };
+}
+
+/** The ASCII text every message of sign-message must start with (the handover's tuples, piece 3). */
+const MESSAGE_DOMAIN = "no1d-swap-v1 ";
+const MESSAGE_MAX_BYTES = 2048;
+
+/** A message given as 0x-hex bytes; anything else (text, an odd length, an empty message, too long) is refused. */
+function messageBytes(v) {
+  if (typeof v !== "string" || !/^0x([0-9a-fA-F]{2})+$/.test(v)) throw new UserError("--message-hex must be 0x followed by whole bytes in hex (at least one); text is not accepted");
+  const bytes = ethers.getBytes(v);
+  if (bytes.length > MESSAGE_MAX_BYTES) throw new UserError(`--message-hex is ${bytes.length} bytes; at most ${MESSAGE_MAX_BYTES}`);
+  return bytes;
+}
+
+/** sign-message: an EIP-191 personal-message signature by the key, only over a message that starts with the domain text. Offline. */
+async function signMessage(_provider, signer, args) {
+  requireSigner(signer);
+  const bytes = messageBytes(need(args, "messageHex", "message-hex"));
+  registerSecret(signer.privateKey);
+  const head = Buffer.from(MESSAGE_DOMAIN, "ascii");
+  if (bytes.length < head.length || !Buffer.from(bytes.subarray(0, head.length)).equals(head)) {
+    throw new UserError(`refusing to sign: the message must start with the ASCII text "${MESSAGE_DOMAIN}" (this command signs the handover's tuples only); nothing was signed`);
+  }
+  return { address: await signer.getAddress(), signature: await signer.signMessage(bytes) };
+}
+
+/** verify-message: read-only and offline. valid is true only when the signature is canonical (65 bytes, v 27 or 28, low s) and recovers to --address. */
+async function verifyMessage(_provider, _signer, args) {
+  const want = address("--address", need(args, "address", "address"));
+  const bytes = messageBytes(need(args, "messageHex", "message-hex"));
+  const sig = need(args, "signature", "signature");
+  if (typeof sig !== "string" || !/^0x[0-9a-fA-F]{130}$/.test(sig)) throw new UserError("--signature must be 0x followed by exactly 130 hex characters (65 bytes)");
+  let recovered = null;
+  const v = parseInt(sig.slice(130), 16);
+  if (v === 27 || v === 28) {
+    try {
+      recovered = ethers.verifyMessage(bytes, sig);
+    } catch {
+      recovered = null; // a high s, an off-curve r or a failed recovery: not a valid signature
+    }
+  }
+  return { valid: recovered !== null && sameAddr(recovered, want), recovered };
 }
 
 async function deploy(provider, signer, args) {
@@ -3465,6 +3688,239 @@ async function send(provider, signer, args) {
   return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, from: r.from, to, valueWei: amount.toString() };
 }
 
+// ------------------------------------------------ reserve and sweep (swap wallet, piece 2b)
+
+/** `x * 1.25` rounded up, in integers. */
+const withMargin = (x) => (x * RESERVE_NUM + (RESERVE_DEN - 1n)) / RESERVE_DEN;
+
+/**
+ * The fee ceiling a send would use: the cap given (--max-fee-gwei with --mainnet, --gas-price-gwei elsewhere), else the node's own suggestion (maxFeePerGas, else gasPrice).
+ * Returns { capWei, source, fees } where `fees` is the fee-field object a send would carry ({} when the node's suggestion is only a number to reserve against).
+ */
+async function feeCeiling(provider, args) {
+  const given = feeOverrides(args);
+  if (given.maxFeePerGas !== undefined) return { capWei: given.maxFeePerGas, source: args.mainnet === true ? "--max-fee-gwei" : "--gas-price-gwei", fees: given };
+  const fd = await provider.getFeeData();
+  const cap = fd.maxFeePerGas !== null && fd.maxFeePerGas !== undefined ? fd.maxFeePerGas : fd.gasPrice;
+  if (cap === null || cap === undefined) throw new UserError("the node gave no fee suggestion; give --gas-price-gwei (or --max-fee-gwei with --mainnet) so there is a fee ceiling to reserve against");
+  const tip = fd.maxPriorityFeePerGas !== null && fd.maxPriorityFeePerGas !== undefined ? fd.maxPriorityFeePerGas : cap < GWEI ? cap : GWEI;
+  return { capWei: cap, source: "the node's fee suggestion", fees: { maxFeePerGas: cap, maxPriorityFeePerGas: tip < cap ? tip : cap } };
+}
+
+/** The swap file's chain and profile against --mainnet, and the node's chain against the file's: the one rule bindSwap applies, for the commands that take no intent. */
+async function requireSwapChain(provider, args, sw) {
+  if (args.mainnet === true) {
+    if (sw.chainId !== 1n) throw new UserError(`--mainnet: the swap file's chain_id is ${sw.chainId}, not 1; refusing`);
+    if (sw.profile !== "production") throw new UserError(`--mainnet: the swap file's profile is ${sw.profile}, not production; refusing`);
+  }
+  const chainId = await assertAllowedChain(provider, args);
+  if (chainId !== sw.chainId) throw new UserError(`chain id mismatch: the swap file is for chain ${sw.chainId} but the node reports ${chainId}; refusing`);
+  return chainId;
+}
+
+/**
+ * reserve (read-only): the ETH the swap's key must hold before the swap goes on (amendment C), and whether it does. Alice: the claim's fixed gas limit x the fee ceiling x 1.25.
+ * Bob: amount_wei + (lock gas ceiling + refund gas ceiling) x the fee ceiling x 1.25. All amounts are wei, decimal strings; integer arithmetic only. `covered` false makes the
+ * command line exit with status 3.
+ */
+async function reserve(provider, signer, args) {
+  if (!signer) throw new UserError("reserve needs the swap's key (--key-stdin or --key-file, exactly one): the amount and the address are printed only for a key whose address is the swap file's own; refusing");
+  const role = need(args, "role");
+  if (role !== "alice" && role !== "bob") throw new UserError("--role must be alice or bob");
+  mainnetFlags(args);
+  const sw = readSwapFile(need(args, "swap"), "reserve");
+  if (sw.role === null) throw new UserError("--swap: the file has no role (alice or bob); is it a swap-cli swap file?");
+  if (sw.role !== role) throw new UserError(`--role ${role} but the swap file is ${sw.role}'s; refusing`);
+  if (!LOCK_KINDS.includes(sw.lockKind)) throw new UserError(`--swap ${sw.file}: unknown lock_kind "${sw.lockKind}"; refusing`);
+  const kind = sw.lockKind;
+  const key = role === "alice" ? sw.aliceReceiver : sw.bobSender;
+  const keyName = role === "alice" ? "alice_receiver" : "bob_sender";
+  // The key must own the stated address: swap-cli cannot compute an Ethereum address, so a wrong stated address would be a deposit nobody can spend. Checked before any node
+  // call and before any amount or address is printed.
+  const real = await signer.getAddress();
+  const stated = [[keyName, key]];
+  if (sw.ethKey !== null && sw.ethKey !== undefined) {
+    if (sw.ethKey.invalid) throw new UserError("--swap: the file's eth_key record does not parse (address and payout must be Ethereum addresses); refusing");
+    stated.push(["eth_key address", sw.ethKey.address]);
+  }
+  for (const [name, addr] of stated) {
+    if (!sameAddr(real, addr)) {
+      throw new UserError(`this key does not belong to the swap file's ${name} ${addr} (the key's own address is ${real}); nothing must be deposited to ${addr}: no amount is shown; refusing`);
+    }
+  }
+  const chainId = await requireSwapChain(provider, args, sw);
+  const ceiling = await feeCeiling(provider, args);
+  const claimGas = kind === "poseidon" ? POSEIDON_CLAIM_GAS_LIMIT : SHA256_CLAIM_GAS_LIMIT;
+  const parts = role === "alice" ? { claimGasLimit: claimGas } : { lockGasCeiling: LOCK_GAS_RESERVE[kind], refundGasCeiling: REFUND_GAS_RESERVE[kind] };
+  const gas = role === "alice" ? claimGas : LOCK_GAS_RESERVE[kind] + REFUND_GAS_RESERVE[kind];
+  const amountWei = role === "bob" ? sw.amountWei : 0n;
+  const reserveWei = withMargin(gas * ceiling.capWei);
+  const requiredWei = amountWei + reserveWei;
+  const balanceWei = await provider.getBalance(key);
+  const covered = balanceWei >= requiredWei;
+  const str = (o) => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v.toString()]));
+  return {
+    role,
+    address: key,
+    chainId: chainId.toString(),
+    lockKind: kind,
+    ...str(parts),
+    ...(role === "bob" ? { amountWei: amountWei.toString() } : {}),
+    gasTotal: gas.toString(),
+    feeCeilingWei: ceiling.capWei.toString(),
+    feeCeilingGwei: ethers.formatUnits(ceiling.capWei, "gwei"),
+    feeCeilingSource: ceiling.source,
+    margin: "1.25",
+    reserveWei: reserveWei.toString(),
+    requiredWei: requiredWei.toString(),
+    balanceWei: balanceWei.toString(),
+    shortfallWei: (balanceWei >= requiredWei ? 0n : requiredWei - balanceWei).toString(),
+    covered,
+    keyChecked: true,
+  };
+}
+
+/** A lock record (beside the swap file, or the per-user one) is resolved only when the lock it names shows claimed or refunded on chain. { resolved, detail }; never throws except for a node error. */
+async function lockRecordResolution(provider, contractAddr, kind, found, keyAddr) {
+  if (found.placeError) return { resolved: false, detail: found.placeError.message };
+  let rec;
+  try {
+    const st = fs.lstatSync(found.file);
+    if (!st.isFile() || st.size > LOCK_SENT_MAX_BYTES) return { resolved: false, detail: "it is not a record this tool wrote (not a regular file, or too large)" };
+    rec = JSON.parse(fs.readFileSync(found.file, "utf8"));
+  } catch {
+    return { resolved: false, detail: "it cannot be read" };
+  }
+  if (!rec || rec.version !== 1 || typeof rec.lock_id !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(rec.lock_id) || typeof rec.sender !== "string") {
+    return { resolved: false, detail: "it is not a record this tool wrote" };
+  }
+  if (!sameAddr(rec.sender, keyAddr)) return { resolved: false, detail: `it names another sender (${rec.sender})` };
+  const l = await fetchLock(provider, contractAddr, rec.lock_id, kind);
+  if (!l) return { resolved: false, detail: `the lock ${rec.lock_id} it names is not on chain (it may be pending, dropped or never mined)` };
+  if (l.claimed || l.refunded) return { resolved: true, detail: `the lock ${rec.lock_id} is ${l.claimed ? "claimed" : "refunded"}` };
+  return { resolved: false, detail: `the lock ${rec.lock_id} it names is still open` };
+}
+
+/** The refusal of a sweep for a lock record that is not resolved. */
+function sweepRecordRefusal(found, why) {
+  return new UserError(
+    `refusing: the ${found.kind === "user" ? "per-user lock record" : "lock record"} ${found.file} exists (${found.why}) and it is not resolved (${why}), so it is not known whether a lock of this key is still pending or open; ` +
+      `a sweep now could take the ETH a lock or a refund still needs. Nothing was sent. A record is resolved when the lock it names shows claimed or refunded on chain; otherwise see the section "${CLEARING_NAME}" of scripts/live/README.md`
+  );
+}
+
+const ENDED_PHASES = new Set(["aborted", "refunded", "lost", "done"]);
+const SWEEP_BLOCKING_ACTIONS = new Set(["lock_eth", "refund_eth", "reveal_eth"]);
+
+/**
+ * sweep: send the key's whole balance minus the fee (21,000 gas x the capped fee) to the payout address stored in the swap file. Refuses unless everything in the header's
+ * `sweep` paragraph holds (amendments F and M). The local checks come first (the file, the key, --to, the intents), then the node's (chain, contract, --to has no code, no pending
+ * nonce, no open lock of this swap, no unresolved lock record), then the fee. `--dry-run` prints what it would send.
+ */
+async function sweep(provider, signer, args0) {
+  requireSigner(signer);
+  mainnetFlags(args0);
+  if (args0.swap === undefined || args0.swap === null || args0.swap === "") {
+    throw new UserError("sweep needs --swap FILE (the payout address, the role and the intents are read from it); refusing");
+  }
+  const to = address("--to", need(args0, "to"));
+  const sw = readSwapFile(args0.swap, "sweep");
+  // ---- the file and the key (local)
+  if (sw.role === null) throw new UserError("--swap: the file has no role (alice or bob); is it a swap-cli swap file?; refusing");
+  if (sw.ethKey === null) throw new UserError("--swap: the file holds no Ethereum swap key record (eth_key): it was made without --eth-key, so it names no payout address and a sweep is refused");
+  if (sw.ethKey.invalid) throw new UserError("--swap: the file's eth_key record does not parse (address and payout must be Ethereum addresses); refusing");
+  const own = sw.role === "alice" ? sw.aliceReceiver : sw.bobSender;
+  const ownName = sw.role === "alice" ? "alice_receiver" : "bob_sender";
+  const me = await signer.getAddress();
+  if (!sameAddr(me, own)) throw new UserError(`this key is ${me} but the swap file's ${ownName} is ${own}; refusing`);
+  if (!sameAddr(sw.ethKey.address, own)) throw new UserError(`the swap file's eth_key address ${sw.ethKey.address} is not its ${ownName} ${own}; refusing`);
+  if (!sameAddr(to, sw.ethKey.payout)) throw new UserError(`--to ${to} is not the payout address stored in the swap file (${sw.ethKey.payout}); refusing`);
+  if (sameAddr(to, me)) throw new UserError("--to is the key's own address: a sweep to itself sends nothing; refusing");
+  // ---- the intents (local): a send of the swap is still to come or may be in flight
+  if (sw.intent && SWEEP_BLOCKING_ACTIONS.has(sw.intent.action)) {
+    throw new UserError(`the swap file holds a pending ${sw.intent.action} intent: a send of this swap still needs this key; refusing`);
+  }
+  if (sw.pendingActionKind !== null && SWEEP_BLOCKING_ACTIONS.has(sw.pendingActionKind)) {
+    throw new UserError(`the swap file holds a pending ${sw.pendingActionKind} action: a send of this swap may be in flight and still needs this key; refusing`);
+  }
+  // ---- the file's terms against the node (chain, contract, code)
+  const kind = sw.lockKind;
+  if (!LOCK_KINDS.includes(kind)) throw new UserError(`--swap ${sw.file}: unknown lock_kind "${kind}"; refusing`);
+  const merged = { ...args0, lockKind: kind };
+  if (args0.mainnet === true) {
+    if (sw.chainId !== 1n) throw new UserError(`--mainnet: the swap file's chain_id is ${sw.chainId}, not 1; refusing`);
+    if (sw.profile !== "production") throw new UserError(`--mainnet: the swap file's profile is ${sw.profile}, not production; refusing`);
+  }
+  merged.chainId = agree("--chain-id", args0.chainId, sw.chainId.toString(), sameUint);
+  if (sw.codeHash === null) throw new UserError(`--swap ${sw.file}: the file pins no code_hash; refusing`);
+  if (sw.codeHash !== artifactCodeHash(kind)) throw new UserError(`the swap file pins code_hash ${sw.codeHash}, which is not the local artifact's ${artifactCodeHash(kind)}; refusing`);
+  merged.codeHash = agree("--code-hash", args0.codeHash, sw.codeHash, sameAddr);
+  if ((args0.fromBlock === undefined || args0.fromBlock === null || args0.fromBlock === "") && sw.ethFromBlock !== null) merged.fromBlock = sw.ethFromBlock.toString();
+  const contractAddr = sw.contract;
+  const target = await verifyTarget(provider, merged, contractAddr);
+  // ---- the payout has no code (amendment M): a contract, or an EIP-7702 delegation, may refuse or redirect a plain transfer
+  const toCode = await provider.getCode(to);
+  if (toCode !== "0x") throw new UserError(`--to ${to} has code on this chain (${(toCode.length - 2) / 2} bytes): a plain transfer to a contract, or to an account with a delegation, may revert or be taken; refusing`);
+  // ---- the key has nothing in flight
+  const [nonceLatest, noncePending] = await Promise.all([provider.getTransactionCount(me, "latest"), provider.getTransactionCount(me, "pending")]);
+  if (noncePending !== nonceLatest) {
+    throw new UserError(`refusing: the key ${me} has a transaction pending on this node (pending nonce ${noncePending}, latest nonce ${nonceLatest}); wait until it is mined or dropped, then sweep`);
+  }
+  // ---- no lock of this swap is open
+  const blk = await latestBlock(provider);
+  const fromBlock = await resolveFromBlock(provider, contractAddr, merged, blk.number);
+  if (fromBlock > blk.number) throw new UserError(`--from-block ${fromBlock} is beyond the latest block ${blk.number}`);
+  const who = sw.role === "bob" ? { sender: me } : { sender: sw.bobSender, receiver: me };
+  const events = (await lockedEventsFor(provider, contractAddr, who, fromBlock, blk.number, kind)).filter((e) => String(e.word).toLowerCase() === sw.hashlock);
+  const seen = [];
+  for (const e of events) {
+    const l = await fetchLock(provider, contractAddr, e.args.lockId, kind);
+    if (!l) throw new UserError(`refusing: a Locked event shows lock ${e.args.lockId} but the contract has no such lock; the node contradicts itself`);
+    const state = l.claimed ? "claimed" : l.refunded ? "refunded" : "open";
+    seen.push({ lockId: e.args.lockId, state });
+    if (state === "open") {
+      throw new UserError(
+        `refusing: lock ${e.args.lockId} of this swap is still open on chain (not claimed, not refunded; timelock ${l.timelock}): ` +
+          (sw.role === "bob" ? "it is Bob's ETH until it is claimed or refunded" : "Alice's reveal still needs this key's gas") +
+          "; sweep when it is claimed or refunded"
+      );
+    }
+  }
+  if (seen.length === 0 && !ENDED_PHASES.has(String(sw.phaseName))) {
+    throw new UserError(
+      `refusing: no lock of this swap is on chain, and the swap file's phase is ${sw.phaseName === null ? "unknown" : sw.phaseName}, not an ended one (${[...ENDED_PHASES].join(", ")}): the lock may still be sent or mined, and this key's balance is what it needs`
+    );
+  }
+  // ---- no unresolved lock record (beside the file, and the per-user one)
+  const records = [findLockSent(sw), findUserLockSent(target.chainId, me, sw.hashlock)].filter((r) => r !== null);
+  for (const found of records) {
+    const res = await lockRecordResolution(provider, contractAddr, kind, found, me);
+    if (!res.resolved) throw sweepRecordRefusal(found, res.detail);
+  }
+  // ---- the fee: pinned here, so that the amount is exactly the balance minus what the transaction may cost
+  const given = feeOverrides(args0);
+  let fees = given;
+  if (given.maxFeePerGas === undefined) {
+    const ceil = await feeCeiling(provider, args0);
+    fees = ceil.fees;
+  }
+  const { mainnet, tipWei } = mainnetFlags(args0);
+  const feeCheck = await checkFeeCap(provider, fees, 1n, mainnet, FEE_WHY.other, tipWei);
+  const feeWei = TRANSFER_GAS * fees.maxFeePerGas;
+  const balanceWei = await provider.getBalance(me);
+  if (balanceWei <= feeWei) {
+    throw new UserError(`refusing: the key holds ${ethers.formatEther(balanceWei)} ETH, which does not exceed the fee of the transfer at the cap (${TRANSFER_GAS} gas x ${ethers.formatUnits(fees.maxFeePerGas, "gwei")} gwei = ${ethers.formatEther(feeWei)} ETH): nothing to sweep`);
+  }
+  const valueWei = balanceWei - feeWei;
+  const extra = {
+    sweep: { role: sw.role, key: me, payout: to, balanceWei: balanceWei.toString(), feeWei: feeWei.toString(), valueWei: valueWei.toString(), locksSeen: seen, recordsResolved: records.length, phase: sw.phaseName },
+    ...(feeCheck ? { feeCheck } : {}),
+  };
+  const r = await execute(provider, signer, args0, { to, value: valueWei }, extra, { fees, fixedGas: TRANSFER_GAS });
+  if (r.dry) return r.out;
+  return { txHash: r.receipt.hash, blockNumber: r.receipt.blockNumber, from: r.from, to, valueWei: valueWei.toString(), feeCapWei: fees.maxFeePerGas.toString(), balanceBeforeWei: balanceWei.toString(), role: sw.role, ...(feeCheck ? { feeCheck } : {}) };
+}
+
 // Some providers echo the endpoint, with an API key in it, in their error text: anything that looks like an address (scheme://..., so ws:// and wss:// too) is cut out before the text is printed.
 const plainNodeText = (text) => String(text).replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "[address removed]");
 
@@ -3643,22 +4099,27 @@ const TARGET = { "chain-id": "v", "code-hash": "v", "from-block": "v" };
 // The Ethereum contract of the swap: `sha256` (HTLC.sol, default) or `poseidon` (HTLCPoseidonV2.sol); with --swap it is the file's.
 const KIND = { "lock-kind": "v", "contract-kind": "v" };
 const SPECS = {
-  keygen: { flags: { out: "v" }, signer: false },
-  balance: { flags: {}, positional: "address", signer: false },
+  keygen: { flags: { out: "v", stdout: "b" }, signer: false },
+  balance: { flags: { address: "v" }, positional: "address", signer: false },
+  address: { flags: { "key-file": "v", "key-stdin": "b", expect: "v" }, signer: true },
+  "sign-message": { flags: { "key-file": "v", "key-stdin": "b", "message-hex": "v" }, signer: true },
+  "verify-message": { flags: { address: "v", "message-hex": "v", signature: "v" }, signer: false },
   deploy: { flags: { ...COMMON, ...KIND, "key-file": "v" }, signer: true },
   lock: {
-    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", hashlock: "v", "lock-addr": "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v", "approved-intent": "v", "approved-terms": "v", "approved-at": "v" },
+    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", "key-stdin": "b", contract: "v", hashlock: "v", "lock-addr": "v", "t-reveal": "v", receiver: "v", "amount-wei": "v", swap: "v", "approved-intent": "v", "approved-terms": "v", "approved-at": "v" },
     signer: true,
   },
   claim: {
-    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v", replace: "b", "replace-tx": "v" },
+    flags: { ...COMMON, ...TARGET, ...KIND, "key-file": "v", "key-stdin": "b", contract: "v", "lock-id": "v", "margin-s": "v", "secret-stdin": "b", "secret-file": "v", swap: "v", replace: "b", "replace-tx": "v" },
     signer: true,
   },
-  refund: { flags: { ...COMMON, ...KIND, "chain-id": "v", "code-hash": "v", "key-file": "v", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
+  refund: { flags: { ...COMMON, ...KIND, "chain-id": "v", "code-hash": "v", "key-file": "v", "key-stdin": "b", contract: "v", "lock-id": "v", swap: "v", replace: "b", "replace-tx": "v" }, signer: true },
   send: { flags: { ...COMMON, "key-file": "v", to: "v", "amount-wei": "v" }, signer: true },
+  sweep: { flags: { ...COMMON, ...TARGET, "key-file": "v", "key-stdin": "b", swap: "v", to: "v" }, signer: true },
+  reserve: { flags: { role: "v", swap: "v", mainnet: "b", "max-fee-gwei": "v", "gas-price-gwei": "v", "allow-chain-id": "v", "key-file": "v", "key-stdin": "b" }, signer: true },
   status: { flags: { ...KIND, contract: "v", "lock-id": "v", "from-block": "v", "chain-id": "v", "code-hash": "v" }, signer: false },
 };
-const COMMANDS = { keygen, balance, deploy, lock, claim, refund, send, status };
+const COMMANDS = { keygen, balance, address: keyAddress, "sign-message": signMessage, "verify-message": verifyMessage, deploy, lock, claim, refund, send, sweep, reserve, status };
 
 const camel = (s) => s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 
@@ -3712,9 +4173,26 @@ async function main(argv) {
   // Under --mainnet a missing --swap is a refusal (requireSwapOnMainnet), not a warning.
   if (["lock", "claim", "refund"].includes(command) && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_WARNING);
   if (command === "lock" && args.swap === undefined && args.mainnet !== true) process.stderr.write(NO_SWAP_LOCK_WARNING);
-  const provider = command === "keygen" ? null : makeProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545");
+  // keygen --stdout writes the key to the pipe and nothing else (no provider, no JSON: the key must not go to a second place).
+  if (command === "keygen" && args.stdout === true) {
+    keygenStdout(args);
+    return;
+  }
+  const provider = ["keygen", "address", "sign-message", "verify-message"].includes(command) ? null : makeProvider(process.env.ETH_RPC_URL || "http://127.0.0.1:8545");
   try {
-    const signer = SPECS[command].signer ? loadSigner(provider, args.keyFile) : null;
+    let signer = null;
+    if (SPECS[command].signer) {
+      if (command === "sign-message" && args.keyStdin !== true && args.keyFile === undefined) throw new UserError("give the key by exactly one of --key-file or --key-stdin; refusing");
+      if (args.keyStdin === true) signer = signerFromKeyText(provider, await readKeyStdin(args), "--key-stdin");
+      else if (command === "sign-message") {
+        // A key that does not load is reported without the library's own text (it may carry the value).
+        try {
+          signer = loadSigner(provider, args.keyFile);
+        } catch (e) {
+          throw e instanceof UserError ? e : new UserError("--key-file: not a valid secp256k1 private key; its text is not shown");
+        }
+      } else signer = loadSigner(provider, args.keyFile);
+    }
     if (signer) {
       // Shown as soon as the transaction is sent, before the wait for the receipt: a stuck one needs its hash for --replace-tx.
       args.onSent = (s) =>
@@ -3733,14 +4211,21 @@ async function main(argv) {
       process.stderr.write(`error: the claim ${result.txHash} was mined and REVERTED; the secret is PUBLIC (see the JSON on stdout, then swap-cli tick --reveal-tx)\n`);
       process.exitCode = 3;
     }
+    // reserve: the numbers are the result; "not covered" is exit status 3 (0 when covered).
+    // verify-message: the answer is the result; "not valid" is exit status 3 (0 when valid).
+    if (command === "verify-message" && result && result.valid === false) process.exitCode = 3;
+    if (command === "reserve" && result && result.covered === false) {
+      process.stderr.write(`the key ${result.address} holds less than the reserve: ${result.balanceWei} wei of ${result.requiredWei} wei needed (short by ${result.shortfallWei} wei)\n`);
+      process.exitCode = 3;
+    }
   } finally {
     if (provider) provider.destroy();
   }
 }
 
 module.exports = {
-  keygen, balance, deploy, lock, claim, refund, send, status,
-  loadSigner, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
+  keygen, keygenStdout, balance, keyAddress, signMessage, verifyMessage, MESSAGE_DOMAIN, deploy, lock, claim, refund, send, sweep, reserve, status,
+  loadSigner, signerFromKeyText, readKeyStdin, LOCK_GAS_RESERVE, REFUND_GAS_RESERVE, TRANSFER_GAS, lockedEventsFor, withMargin, computeLockIdLocal, parseArgs, UserError, explain, ALLOWED_CHAIN_IDS, MAINNET_WARNING,
   getLogsChunked, findDeploymentBlock, readBlockTimestamp, readSecret, verifyTarget, redact, LOG_RANGE_MAX, DEFAULT_MARGIN_S,
   readRevealSidecar, readRevealSidecarOf, leftoverSidecarTmpFiles, writeRevealSidecar, revealSidecarPath, REVEAL_SIDECAR_SUFFIX, claimLockPath, CLAIM_LOCK_SUFFIX, execute, makeProvider, sendGuard,
   pidLiveness, checkProducerMemory, NO_SWAP_LOCK_WARNING,

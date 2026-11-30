@@ -15,6 +15,7 @@ CHAOS_N=10000 CHAOS_SEED=0xdeadbeef cargo test --offline --test chaos -- --nocap
 CHAOS_SEED=0xc4a05eed CHAOS_ONLY=1639 CHAOS_VERBOSE=1 cargo test --offline --test chaos -- --nocapture   # replay one
 CHAOS_TRACE=1 CHAOS_LOG_LINES=100000 ...                           # with CHAOS_ONLY: one line per tick of every party; the failure log keeps all lines
 CHAOS_STRICT=1 ...                                                  # an OPEN finding (OPEN_FINDINGS in chaos.rs) also fails the run; a FIXED one always does
+CHAOS_EARLY=0 ...                                                   # the simulated chain starts at tip 300,001 in every scenario, as before 2026-11-17 (every old seed reproduces); CHAOS_EARLY=1 starts every scenario before H_create
 ```
 
 Every scenario seed is derived from `(CHAOS_SEED, index)`, so `CHAOS_ONLY=<index>` with the same base seed replays exactly
@@ -29,6 +30,37 @@ Default run: 1,000 scenarios, about 356,000 ticks, 30-40 s on the owner's WSL (a
 One scenario = one whole swap, both roles, with the simulator of `tests/common/mod.rs`. Drawn from the seed: the profile
 (production / rehearsal / sepolia), the variant (raw / stock), the contract version (v1 / v2), the regime, the driving mode,
 each party's start time and clock skew (up to 100 s), the Parano1d block interval (20-49 s), the tick gaps.
+
+**The start of the chain (2026-11-17).** The simulated Parano1d chain used to start at tip 300,001, after `H_create` (300,000), so Alice's funding was never
+drawn before it. Since the funding opens `D_offset` blocks before `H_create` (`swap-cli/README.md`), about a quarter of the scenarios (the draw is one in four, from its own
+generator seeded from the scenario seed, the way the lock kind is drawn, so no other choice of any scenario moves) start between 1 and `D_offset + 20` blocks earlier,
+some of them before the funding opens, where Alice must wait ("too early to fund"), and the others inside the new window. A scenario that draws no early start is the scenario
+its seed named before; `CHAOS_EARLY=0` forces that for all of them. The party start times scale with the blocks available before the lock-by, as they did. The oracle's `fund_noid` gate
+has the new lower bound (invariant 2 below); the run prints how many scenarios started early.
+
+*What the early start showed, and what was changed (2026-11-17).* The first runs with the early start printed a handful of hard violations across the sweeps and the replays. Each was
+replayed; none comes from the funding rule (which only decides `created`), and all but one of the classes also occur with the old start (`CHAOS_EARLY=0`). They are now
+classified, and the run is green on the default seeds:
+- **Oracle: the late re-send (`gate-i2` and `eth-to-alice-without-timely-reveal`; seed `0xc4a05eed` scenario 321, and 5037 with `CHAOS_EARLY=1`).** Alice's `reveal_eth`
+  crashed with an unknown outcome, her next tick came after the `M_A` cutoff, and the engine re-sent under the late cutoff `T_reveal - DE`. That is the documented design
+  (R5-1: the outcome is unknown, so the secret may be public; `reveal_may_have_been_sent`, tested in `tests/review5.rs`). The oracle allowed the late cutoff only when the
+  secret was truly public in the world. It now also allows it when Alice's file, read BEFORE the tick, carries the `reveal_maybe_sent` marker or a pending `reveal_eth` record
+  marked maybe-sent (`Snap.reveal_maybe_sent`), and the end-of-run ETH rule measures such a first executed reveal against `T_reveal - DE`. **The accepted trade-off under it:**
+  if nothing was in fact sent and the re-send misses `T_reveal`, the secret is published for the first time too late and Alice can lose both legs (Bob refunds his ETH and
+  claims the NOID). That risk is pre-existing and was accepted in REVIEW-5, because withholding the re-send would leave a claim that was really sent stuck in the mempool.
+- **Oracle: extra locks (`gate-reveal`; `0xc4a05eed` scenario 4534 and `0xdeadbeef` scenario 6697, both with the old start).** After Bob's own lock was refunded, the
+  adversary's second lock on the agreed terms (variant 1 of `side_lock`) was open, and the engine revealed for that lock (it adopts every open lock on the agreed terms,
+  REVIEW-3 G2: the lock pays Alice, the secret is the same, and the reveal is after `D`, where the claim branch is closed, so it exposes nothing). The oracle only knew the
+  swap's own lock and called it "not on Ethereum". It now also accepts a lock id of the extra locks (`Snap.side_locks`); every other check of the gate applies to it.
+- **Harness: the budgeted claim reorg (`atomicity-budgeted`; `0xc4a05eed` scenario 7694 with `CHAOS_EARLY=1`).** `ev_eth_claim_reorg` in the budgeted regime required 120 s
+  of room before `T_reveal`, while the same regime draws a claim stall of up to 400 s (`freeze_eth_claim`: 101 to 400 s), so it could build a case no engine can win (the claim is back in the
+  mempool, a stall follows, `T_reveal` passes). The room is now the longest stall plus the old 120 s (`BUDGETED_CLAIM_STALL_S` = 400, so 520 s), and the stall draw uses the same
+  constant. This changes the scenarios of the budgeted regime that reached such a reorg between 120 and 520 s before `T_reveal` (the reorg is refused there now).
+- **Real, pre-existing: F-22 and F-23** (`noid-stuck` seed `0xdeadbeef` scenario 1466 and, with the old start, 5888; `eth-stuck` seed `0xdeadbeef` scenario 5101 with the old start).
+  Open findings below, each with a soft code limited to its exact conditions.
+- The oracle's funding gate computes its opening from the file's own numbers (`D - H_create`), not from the profile table the engine reads.
+The classes were seen with the old start too: a sweep of `0xdeadbeef` with `CHAOS_EARLY=0` (8,000 scenarios) still finds F-22 and F-23 once each (and, before the changes above,
+`gate-reveal` in scenarios 4534 and 6697 and `noid-stuck` in 5888). Do not read these classes as rare in the old start.
 
 - **Regime `Budgeted`** (437 of 1,000): every disturbance stays inside the design budget (ticks at least every 4 minutes, no
   party silent, outages up to 10 minutes, Parano1d stall up to 25 blocks, Ethereum claim stall up to 400 s, nothing that forces
@@ -70,7 +102,8 @@ After every tick (all scenarios):
 1. **Fail closed.** No action kind that the applied degradation must block (`Degrade::blocks`, from `spend_blocker` and
    `f5_gate`) is ever performed.
 2. **Gates, judged on the true state of the world before the tick, not on what the engine saw.** `fund_noid`: no instance
-   exists or is pending, `tip + B_FUND + B_FINAL <= lock-by`. `lock_eth`: the agreed terms; funding final in the world;
+   exists or is pending, `tip + B_FUND + B_FINAL <= lock-by`, and (since 2026-11-17) `tip + 1 >= max(H_create - D_offset, 279,388)`: the funding
+   opens `D_offset` blocks before `H_create`, never before the trial start. The oracle writes this bound from the swap numbers, not from the engine's helper. `lock_eth`: the agreed terms; funding final in the world;
    claim branch open; (I1) holds (a 100-s clock tolerance in the engine's favour); window >= `W_A_min`; no lock on chain and no
    different pending lock; no call pending on the instance; not with two instances of the agreed amount. `reveal_eth`: the
    lock exists, is open, agreed, final, the time is at most the cutoff `T_reveal - M_A` (+ tolerance), exactly one instance of
@@ -494,6 +527,50 @@ The last review round left these open on purpose, and no further round was made;
 
 F-6 is 0 on all five (the scenario of `0xfeed42` that failed before, 583, is fixed). `OPEN_FINDINGS` in `tests/chaos.rs` is the authority for the open list: F-2, F-6, F-7,
 F-8, F-11, F-21 (F-6 and F-11 stay in it for what is left of them). No 3,000-scenario run is recorded for this commit.
+
+## F-22 and F-23 (new 2026-11-17, OPEN): the Runner path holds a maybe-sent action for ever once the situation behind it has ended
+Both are the F-2 hold (a pending action of unknown outcome is never retried blindly) meeting a state in which the held action can no longer matter, on the library
+`Runner` path only. The command-line ledger path has the rule that resolves such a hold (REVIEW-5 R5-7: a `reveal_eth` intent resolves when its lock is closed); the Runner
+lacks it. Live, the Runner is used only for Bob's claim; the command-line path is what the operator runs.
+- **F-22 (`noid-stuck`).** Alice's Runner holds a maybe-sent `reveal_eth` (the executor crashed with an unknown outcome), Bob's lock was refunded to him, and the tip is at or past `D`:
+  her file stays in `lock_final` ("a reveal_eth was sent ... waiting for it to appear on chain (clear the pending record by hand if it never will)") and never offers `refund_noid`.
+  Who can lose what: the coin is not lost (after `D` only her recovery authority can close the instance; `recover-noid.sh` or the wallet takes it back), the tool only stops acting.
+  Seen: `0xdeadbeef` scenario 1466 (early start) and 5888 (old start). Soft code `F-22 ...`: Runner mode, Alice's pending record is a maybe-sent `reveal_eth`, the lock was refunded
+  (not claimed) on Ethereum, the tip is at or past `D`, and the NOID is still at the contract at the end. Narrowed on 2026-11-17 after an independent read: the code
+  first accepted a claimed lock too, which is a loss for Bob (the ETH went to Alice, the NOID can only go back to her); that case is a hard `noid-stuck` again.
+- **F-23 (`eth-stuck`).** Bob's Runner holds a maybe-sent `claim_noid` (crash with an unknown outcome), Alice's reveal was dropped by an Ethereum reorg and she took her NOID back at
+  `D`; Bob's lock is open past `T_reveal` and his file stays in `secret_seen`, so the ETH refund is never offered. Who can lose what: Bob's ETH stays locked until he refunds it
+  by hand (`live.js refund`), which the contract allows him at any time after `T_reveal`; nothing is lost if he does. Seen: `0xdeadbeef` scenario 5101 (old start). Soft code
+  `F-23 ...`: Runner mode, Bob's pending record is a maybe-sent `claim_noid`, the lock is open on Ethereum past `T_reveal`, the tip is at or past `D`, and the NOID
+  was paid back to Alice. The last condition was added on 2026-11-17 after the same read: without it a run in which the NOID went to Bob while the lock stayed open
+  (Alice has neither leg) ended with the soft code; it is a hard `eth-stuck` again.
+Both are in `OPEN_FINDINGS`, so the default run records them and `CHAOS_STRICT=1` still fails on them.
+
+**An independent read of the oracle's 2026-11-17 changes (same day; reading only).** Two must-fix points, both in the soft codes above and both fixed (the narrowed
+conditions; the suite is 742 passed, 0 failed after them). Left as they are, low:
+- The late cutoff after a reveal of unknown outcome is coded as stated. The marker it reads never expires and is not tied to one lock, as in the engine.
+- A reveal for an extra lock on the agreed terms is accepted at any height, also while the swap's own lock is open; the text says "after Bob's own lock was refunded,
+  after `D`". Every check that protects Alice still applies to that lock (open, final, its own cutoff, one fitting instance), and the simulator judges the outcome through
+  the swap's own lock, so nothing is hidden.
+- The room before a budgeted claim reorg: the generator no longer makes a budgeted claim reorg in the last 520 s before `T_reveal`. A reorg there without a following
+  stall is winnable and is now exercised only in the hostile regime, where any loss is excused: a coverage gap, not a hidden violation.
+- The trial-start floor of the funding gate never applies in chaos runs; its branch is covered by the engine's unit test only.
+
+### The 2026-11-17 runs (default draw, early start about one scenario in four)
+Hard violations: 0 in every run below. `CHAOS_STRICT=1`, which also fails on open findings, lists:
+
+| Base seed (size) | Open findings recorded |
+|---|---|
+| `0xc4a05eed` (1,000) | F-2 in 1, F-21 in 18 |
+| `0xdeadbeef` (3,000) | F-11 in 1, F-2 in 7, F-21 in 46, F-22 in 1, F-6 in 1 |
+| `0x5eed01` (3,000) | F-11 in 1, F-2 in 13, F-21 in 45, F-6 in 3 |
+| `0x5eed0001` (1,000) | F-11 in 1, F-2 in 6, F-21 in 17 |
+| `0xfeed42` (1,000) | F-2 in 4, F-21 in 18 |
+
+Sweeps of `0xdeadbeef`, 8,000 scenarios, no hard violation in either: with `CHAOS_EARLY=0`: F-11 6, F-2 16, F-21 134, F-22 1, F-23 1, F-6 3, F-8 2 (outcomes: swapped 3,793, both refunded 1,138,
+nothing locked 1,992, nothing funded 979, Alice lost a leg 44, Bob lost a leg 52, unresolved 2); with the default draw (2,026 early starts): F-11 6, F-2 33, F-21 123, F-22 2, F-23 1, F-6 4, F-8 2
+(swapped 3,771, both refunded 1,148, nothing locked 2,000, nothing funded 966, Alice lost a leg 55, Bob lost a leg 57, unresolved 3). `OPEN_FINDINGS` in `tests/chaos.rs` is the authority:
+F-2, F-6, F-7, F-8, F-11, F-21, F-22, F-23.
 
 ## The Ethereum lock kind (2026-11-05)
 

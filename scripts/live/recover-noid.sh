@@ -29,6 +29,7 @@
 #   AMOUNT       micro-NOID, as everywhere in these helpers (the amount of the swap file)
 set -u
 . "$(dirname "$0")/env.sh"
+require_classic_run recover-noid.sh wallet-recover.sh || exit 2   # a wallet run recovers from the swap wallet (wallet-recover.sh); this helper is the classic run's
 DRY=0
 case "${1:-}" in --dry-run) DRY=1 ;; "") ;; *) echo "usage: recover-noid.sh [--dry-run]" >&2; exit 2 ;; esac
 if [ "$LIVE_PLATFORM" = native ]; then _cli_default=parano1d-cli; else _cli_default=/mnt/c/Parano1d/bin/parano1d-cli.exe; fi

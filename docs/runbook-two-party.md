@@ -172,7 +172,8 @@ runbook is the same, with three differences to plan for: Alice's reveal costs ab
 must hold `1,000,000 × fee cap`: 0.02 ETH at 20 gwei, not the 0.01 ETH of "gas money" above for a sha256 swap); small swaps are uneconomic on L1 (the reveal fee is about
 half of a 0.001 ETH leg at 1 gwei); and the helper scripts take `LOCK_KIND=poseidon` (`scripts/live/env.sh`, `prepare.sh` skips the proof and the receipt).
 
-**Bob checks. This is the only moment he can say no. He types his own terms; nothing comes from the bundle (the first thing the tool does with it is its `bundle check`):**
+**Bob checks. This is the only moment he can say no. He types his own terms; nothing comes from the bundle (the first thing the tool does with it is its `bundle check`).**
+On Bob's own machine the helper does it: with all his terms written in `$L/env.local.sh` (`BOB_NOID`, `BOB_ETH`, `CONTRACT`, `AMOUNT`, `WEI`, `CHAIN`, `PROFILE`, `CONTRACT_VERSION`, `LOCK_KIND`, `VARIANT`; nothing of Alice's; the helper refuses a term that is only a default of `env.sh`, and prints the terms it will state before it runs the tool), `bash $L/bin/join.sh /path/to/bundle.json /path/to/alice.receipt` (the receipt only for the `sha256` lock kind) copies the two files into his run folder, runs the command below with exactly his own terms, prints the tool's `bundle check:` line whole (compare it with Alice's), the receipt and self-test lines and the status of his file, and exits non-zero when anything is refused (a missing setting or file, a swap file already there or a destination with other content refuse before anything is written; the exit statuses are in the script's header). The command by hand, which is the fallback:
 ```sh
 $BIN new-bob --bundle bundle.json --out bob.swap.json --bob o1BOB --amount 10000000 \
    --eth-chain-id 11155111 --eth-contract 0xC --eth-amount-wei 1000000000000000 \
@@ -190,9 +191,13 @@ bob.swap.json`: `D`, the amount, your `o1` as recipient, `max_fee`. **Bob tells 
 > **Then fund at once; do not wait for `h_create`.** Bob's lock-by is fixed at `h_create` + 50 (`sepolia` profile) and the funding needs 18 blocks to
 > be final, so every block the funding comes earlier is a block more for Bob's lock. Funded about 30 blocks before `h_create` (runs 10, 11, 12), Bob had
 > about 60 blocks when his lock was offered; funded 22 blocks after it (run 13), he had 6. The order is: Bob runs `new-bob`, the two `bundle check`
-> lines are compared and Bob says OK; Alice runs `fund.sh` (dry run first); only then anything else. In a run driven from the operator console the
-> console's own funding step opens only at `h_create`: fund with `fund.sh` from a terminal right after Bob's OK and mark the funding as done in the
-> console.
+> lines are compared and Bob says OK; Alice funds (dry run first); only then anything else. Since 2026-11-17 Alice's file offers the funding from the
+> height `h_create - D_offset` on (never below 279,388; before it the engine waits with "too early to fund: the funding opens at height X"), so there
+> is no wait for `h_create`. In a run driven from the operator console the Fund button (dry run, then Send with the typed amount) is the normal way:
+> before it sends, tick the two statements of the confirmation, "No funding of this contract is pending" and "Bob's check line matches mine" (the 16 hex
+> digits of Bob's `bundle check:` line are those of Alice's line, compared over a second channel). The alternative is `fund.sh` from a terminal
+> (`fund.sh --dry-run`, then `fund.sh`, once) and then the console's "I have funded" box. Use one way, never both. A funding made through the console
+> well before `h_create` has not been run live yet.
 
 ## 4. The run, side by side
 
@@ -434,6 +439,21 @@ README). None of them sends anything without an explicit `--submit` or a missing
 and records. Checked read-only on 2026-11-05 against the finished run-3 files: the ticks (single node, `--single-node-ok`,
 stored from-block), the three `live.js --swap` wrappers (each refused for the right reason: no intent in a finished file)
 and the object check all run from WSL, the swap file reaching Windows `node` through its `\wsl.localhost` path.
+
+### A run with the tool's own wallets (swap wallet, piece 2c)
+
+**Not run against a real node or a public network.** Everything in this section is tested on stub tools and fake helpers only; a first run uses test networks and tiny amounts, and the owner's go-ahead is needed for every real send, as everywhere else.
+
+In a wallet run (`USE_SWAP_WALLET='1'` in `env.local.sh`, the tick "Use the tool's own wallets" in the console's settings form) nobody uses a wallet program, an object file or a key file. For each swap the tool makes a fresh NOID wallet (Alice) and a fresh Ethereum key (each party), seals them in the swap file, shows the addresses to deposit to, does every step from them, and sends what is left to the user's own addresses when the swap is over. The order:
+
+1. Install and set up as before. In the settings give the terms, and your OWN payout addresses (`NOID_PAYOUT` for Alice, `ETH_PAYOUT` for both): they are where the leftovers go and are part of the one approval.
+2. Each side runs `wallet-setup.sh` (the console's "Make this swap's own wallets" step). Bob tells Alice the Ethereum address it shows (the sender of his lock); nothing is deposited yet.
+3. Alice runs Prepare (it seals her wallet and key into her swap file) and hands Bob the bundle file; Bob checks it (`join.sh`) and the two bundle check lines are compared over a second channel, as before.
+4. Each side deposits to the addresses the console shows, from a wallet they control, and early: the console reads the deposit about every 40 seconds and refuses to fund or lock until the NOID and the fee reserve (Alice) or the ETH amount and the fee reserve (Bob) are seen. An exchange withdrawal can arrive after the swap's window; then the swap simply does not start, and nothing is locked.
+5. One approval per swap and role ("Run this swap for me"): the funding, the lock, the reveal, the claim, the refunds, the NOID recovery after `D`, and both sweeps then go through the same dry run, gate and audit line as a manual send. Without the autopilot every step has its own box on the swap page.
+6. **Back up the swap file** (`alice.swap.json`, `bob/bob.swap.json`) as soon as it exists: the keys are sealed in it and exist nowhere else. There is no export button; in a terminal `swap-cli wallet export FILE --i-understand-this-is-the-key` and `swap-cli ethkey emit FILE` (to a pipe) are the ways out, as described in `ui/app/README.md`.
+
+An abort needs no extra step: after `D` the NOID comes back to the swap wallet (`wallet-recover.sh`, then its recording in the swap file), Bob's ETH comes back to his key, and the sweeps send both to the payout addresses. Details and exit statuses: `scripts/live/README.md` ("A wallet run") and `ui/app/README.md` ("The tool's own wallets").
 
 ## 7. Checklists and troubleshooting
 

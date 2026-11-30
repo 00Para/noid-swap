@@ -46,7 +46,9 @@ Plain words for the pieces (the design doc explains them in full):
 | `src/equiv.rs` | **REVIEW-2 F2** `verify_receipt`: runs `equiv-prove verify <variant> <H> <A> <receipt>` (H, A from the bundle) through `CommandRunner` (`Step::EquivVerify`), parses `OK` + `image id`, checks the image id against the compiled-in `EQUIV_IMAGE_ID`, builds the `receipt` attestation; `ProcessRunner` is the real runner and runs that one step only | `tests/equiv.rs` (fakes + a shell-script stand-in for the binary) |
 | `src/params.rs` (profiles) | `ProfileName` (`production` default, `rehearsal`, `sepolia`) and `Gates` (`PRODUCTION`, `REHEARSAL`, `SEPOLIA`): every timing number, the caps, `validate()`; the gate functions are methods on `Gates` | see "The rehearsal and sepolia profiles" |
 | `src/params.rs` (contract versions) | `ContractVersion` (`V1` default, `V2`): `allowed_fee_range(max_fee)`, `is_fixed_fee()`, `source_path()`; `engine::close_fee_for(version, …)`; `swapfile::detect_contract_version(opening)`; `SwapParams::{fixed_close_fee, expected_bob_payout}` | see "Contract versions" |
-| `src/main.rs` | `swap-cli new-alice | new-bob | bundle | status | tick | claim | alice-params | gates`; `tick`/`claim` take a fixture or a live node per chain (`--transport tcp|curl`) | `claim` is a dry run unless `--submit` |
+| `src/ethkey.rs` | **swap wallet, piece 2b** the Ethereum swap key of one party: the secp256k1 range check, address and key parsing (no text of a key in an error), the two-line framing of `ethkey new`, the standalone sealed key file; the sealed `eth_key` field itself is in `src/swapfile.rs` | see "The Ethereum swap key"; `tests/eth_key.rs` |
+| `src/wallet/` | **swap wallet, piece 2a** the throwaway NOID wallet of one swap: `key.rs` (master secret, `Derive(m,0)`, standalone wallet file), `chain.rs` (node reads), `send.rs` (plain-payment builder and coin selection), `contract.rs` (recovery close), `persist.rs` (the record written before a send, the re-send / rebuild / wait / stop rule, submit verdicts), `flow.rs` (fund, recover, sweep, export, the engine executors) | see "The NOID swap wallet"; `tests/wallet_*.rs` |
+| `src/main.rs` | `swap-cli new-alice | new-bob | bundle | status | tick | claim | alice-params | gates | wallet | ethkey`; `tick`/`claim` take a fixture or a live node per chain (`--transport tcp|curl`) | `claim` is a dry run unless `--submit` |
 | `tests/` | `scenarios.rs` (M2.5; also the rehearsal- and sepolia-profile scenarios), `equiv.rs` (F2), `rehearsal_cli.rs`, `resume.rs` (M2.3), `client_r.rs`, `client_s.rs`, `watch_eth.rs`, `watch_parano1d.rs`, `cli_live.rs` (flags, tick/claim over a loopback mock node), `alice_params.rs`, `contract_version.rs` (the version through the files and the binary); `common/mod.rs` is a two-chain simulator (it enforces the v2 fee rule on every close), `common/http_node.rs` a loopback JSON-RPC server | |
 | `fixtures/` | `eth/*.json` recorded (Hardhat); `parano1d/idle.json`, `parano1d/recorded_misc.json` and the six LIVE RUN 1 files `parano1d/recorded_{funded_unfinal,funded_final,funded_first_seen,claim_pending,claim_included,claim_final}.json` recorded from the real node; `parano1d/{funded,pending_claim,malformed}.json` synthesized (each file's `description` says which) | |
 | `REVIEW-1.md` | independent review of the load-bearing code | |
@@ -71,7 +73,7 @@ test process, the `curl` tests use fake shell scripts); `cargo` fetches four sma
 
 Expected: every test binary green (unit 102, the binary 5, `alice_params` 3, `chaos` 3, `chaos_fixes` 23, `cli` 7, `cli_live` 15 (+1 `#[ignore]`d helper),
 `client_r` 9, `client_s` 16, `contract_version` 11, `equiv` 13, `intents` 13, `rehearsal_cli` 12, `resume` 8, `review4` 19, `review5` 14, `scenarios` 92, `watch_eth` 18,
-`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 728 (+1 ignored) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
+`watch_eth_discovery` 6, `watch_parano1d` 29: 418 tests (+1 ignored) at that point. The suite now runs 848 (+1 ignored; 845 before the `bundle digest:` machine line of 2026-11-17 (piece 3, step P3.1), which added 3 unit tests; 832 at the previous count written here; 824 before the wallet review of 2026-11-17, which added 8 tests; 742 before the swap wallet of 2026-11-17, which added 82 tests in `src/wallet/` and `tests/wallet_{vendor,flow,cli,swapfile}.rs`; 742 was 728 before the funding-opens-early change of 2026-11-17, which added 14 tests; all 31 test binaries pass, and the chaos run has no hard violation on the five documented seeds, with the open findings F-2, F-6, F-7, F-8, F-11, F-21, F-22 and F-23 recorded, see `CHAOS.md`) with the `poseidon_*` test binaries, later review fixes and the producer-concentration gate (`producer_gate.rs` 28, 7 unit tests) added; the per-binary counts above were not re-taken. It was 404 before the REVIEW-5 fixes, 385 before the REVIEW-4 fixes, 362 before the chaos-test fixes (`CHAOS.md`), 359 before the chaos test, 349 before M2.5b, 325 before the REVIEW-3 fixes, 318 before the REVIEW-3 F3 work, 291 before the F5 second-node, header-time and plain-HTTP work, 267 before the F9 leftover-leg cleanup and the F10 every-lock/every-instance work, 251 before the F6 reorg tracking and `tick --closed-by`, 240 before the per-version `max_fee` rule and the relay-floor note, 225 before the sepolia profile, 203 before contract versions, 173 before the F2 receipt
 check and the rehearsal profile, 157 before REVIEW-2). Use `--offline --no-fail-fast`. The crate lists itself as a
 dev-dependency with the `dev` feature (no new external crate), which is what gives `cargo test` the fast KDF.
 
@@ -310,6 +312,49 @@ the existing action assertions of `scenarios.rs` and the engine unit tests are t
 `a_pure_wait_is_not_touched_by_unknown_or_stale_observations`, now allows the margin note, nothing else); `main.rs` unit tests for the
 tunnel text and the redacted label.
 
+**The funding opens before `H_create` (2026-11-17).** `H_create` only plans `D` (`D = H_create + D_offset`): the contract commits `D`, the parties,
+`max_fee` and the modes, not a creation height, so a funding sent before `H_create` is accepted by Alice's engine, by Bob's engine and by the chain
+(runs 11 and 12 funded about 30 blocks early from a terminal and settled). Until now Alice's `created` file waited with `node is behind H_create`
+until `tip + 1 >= H_create`, so the funding was offered only from `H_create` to `lock-by - (b_fund + b_final)` (78 blocks in `production`, 29 in
+`rehearsal`, 26 in `sepolia`) and the console's Send button opened only then. The checks of `created` now run in this order:
+1. `tip + b_fund + b_final > lock-by`: `abort`, "too late to fund" (unchanged).
+2. An instance at the contract root that is not accepted: a `wait` with the instance text (unchanged). Before the funding opens it comes from
+   `alice_action`, from then on through `guard_fund_noid` (which turns a `fund_noid` into a wait while any instance sits at the root); the words are
+   the same, and a second funding is never offered.
+3. `tip + 1 < max(H_create - D_offset, 279,388)`: `wait`, "too early to fund: the funding opens at height X (tip T); a funding before it would lock the
+   NOID for more than twice the swap's planned length (D is D_offset blocks after H_create)", or, when the trial start sets X, "... the trial start; no
+   swap starts before it". `D_offset` is the profile's own (738 / 122 / 302). Saturating arithmetic: an `H_create` below `D_offset` opens at the trial
+   start, a tip of `u64::MAX` is the old "implausibly large" wait.
+4. Otherwise `fund_noid`, the same amount and the same intent as before.
+
+So the NOID is locked for at most `2 * D_offset` blocks counted from the funding (`D - funding height`), and the funding is offered from 299,262 in a
+`production` swap planned at 300,000 (299,878 `rehearsal`, 299,698 `sepolia`). The trial start (`TRIAL_START_HEIGHT`, 279,388) is the one constant of
+this kind the source has; `check_i5` enforces it for `H_create`, and the new bound enforces it for the funding height too, which is what keeps (I5)
+true when the window is counted from the funding (`docs/protocol-design.md` section 4.2). Nothing else changed: not Bob's side, not `D`, not
+`lock_by_height`, not the file format, not `Gates::validate`, not the profiles; a file made earlier loads and decides as before from `H_create` on (what it prints is not quite as before: the new note below, and the new wait text before the funding opens).
+Bob counts finality from his own first sighting of the instance (the engine does not read the funding's height from the chain), so a Bob file made
+after the funding is already final still waits 18 blocks after his first tick before he locks.
+Display only, as a note of its own (the `funding window` notes keep their wording): `funding is open from height X (tip T)` once the funding is
+offered, `funding opens at height X (tip T)` before; none beside the abort, none while an instance sits at the contract root, and none while a funding is held (an intent or a pending record of a `fund_noid`): the note is built before the guard and the ledger turn a funding into a wait, so it must not stand beside "do not fund again".
+What the change costs, as named by the design: Alice can fund before Bob has checked the bundle, and if he walks away her coins wait until `D` (time,
+not coins); the Send button is open for longer, so the run-9 mistake (funding twice) has a longer window (the three markers, the instance listing,
+`guard_fund_noid` and the intent ledger still stand; a funding made with the wallet's own command that is still pending leaves no marker and no
+instance, as before); an unsent funding intent recorded early keeps the abort unrecorded until `intent --cancel`, for longer; and Bob's free option
+(the time he may wait before he locks, `docs/protocol-design.md` T13) runs from the funding to his lock-by, so it is longer when Alice funds early.
+Not run live: a funding made through the console well before `H_create`, the abort path with an early funding and how `watch.sh` treats an intent
+recorded early are still to be seen on a real run. Tests: engine unit tests `alice_funding_opens_d_offset_blocks_before_h_create`,
+`alice_too_late_to_fund_is_unchanged_at_its_boundary`, `alice_funding_rule_has_no_overflow_and_a_sensible_answer_at_the_extremes`,
+`alice_funding_waits_for_the_trial_start_when_the_window_alone_would_open_it_earlier`,
+`an_instance_at_the_root_gives_the_same_wait_before_the_funding_opens_and_inside_its_window`; `tests/scenarios.rs` (the last section, every profile:
+a swap funded 40 blocks early settles with Alice's full reveal window, Bob's file made after the funding is final, Bob never locks and Alice recovers at
+`D`, the exact opening and too-late boundaries, an instance at the root before `H_create`); `tests/intents.rs`
+`a_funding_decided_before_h_create_is_recorded_once_and_held_across_h_create`; `tests/resume.rs`
+`a_funding_of_unknown_outcome_sent_before_h_create_is_held_across_h_create_and_not_offered_again` (the Runner path); `tests/notes_only.rs`
+`the_funding_opening_note_is_not_printed_beside_an_instance_at_the_root_or_a_held_funding`; `tests/cli.rs`
+`tick_apply_before_h_create_records_the_funding_intent_and_the_next_tick_holds_it`; and `tests/chaos.rs`, whose simulated chain now starts before
+`H_create` in about a quarter of the scenarios (`CHAOS_EARLY=0` restores the old start and every old seed, `CHAOS_EARLY=1` forces an early start; see
+`CHAOS.md`).
+
 **Bob waiting on a foreign pending close.** Where Bob's claim waits because the primary node shows a pending call on the instance (T2), a
 second Parano1d node that shows NONE ends the wait: the note "the primary node reports a pending call the second node does not see: not
 waiting on it (F5)" is added and the claim decision goes on (a lying primary could otherwise keep Bob waiting until the claim branch
@@ -454,7 +499,7 @@ no signer); `tick` prints which one is due (`lock_eth` with `t_reveal`, `reveal_
    which asks for the current relay minimum). The wallet remembers the opening when it funds (`remember_object_opening`), so
    `contract watch` is not required; keep `swap.object.json` and `alice.swap.json` anyway (the opening cannot be recovered from the
    chain). Funding twice creates two instances: if the response is lost, look first (step b).
-   Fund promptly: Bob must lock on Ethereum by Parano1d height `lock_by_height` (printed), and `D` does not move.
+   Fund promptly: Bob must lock on Ethereum by Parano1d height `lock_by_height` (printed), and `D` does not move. The tool offers the funding from `H_create - D_offset` on (see "The funding opens before `H_create`"), so it need not wait for `H_create`.
 2. (b) **Check the instance after inclusion:**
    ```sh
    parano1d-cli contract instances swap.object.json        # "Slot <S>  incarnation <C>  10.0 NOID"
@@ -1355,6 +1400,11 @@ The bundle now carries its own check as one more top-level field:
   and the hash of a small example, for anyone who checks another implementation against it.
 - **Written** by `new-alice` (stdout, with the line below on stderr) and by `swap-cli bundle FILE`, which prints the same bundle again from the swap file; `alice-params`
   prints the line too. The line is `bundle check: <first 16 hex of sha256> (opening_hex <len> characters)`: compare it on both machines. Hand the bundle over **as a file**.
+- **The machine line.** `new-alice` and `swap-cli bundle FILE` also print `bundle digest: <64 hex>` on stderr, and `new-bob` prints it right after its `bundle check: <16 hex> ok` line: the whole
+  SHA-256 the check line starts with, for a program that must compare or sign the digest (the console reads the line; it does not re-implement the canonical JSON). Both sides print the same
+  64 digits for the same bundle. It is printed only for a bundle whose check passed: none for a damaged one (refused before any output) and none for an unchecked one
+  (`--allow-unchecked-bundle`). Nothing else about the bundle, its check or any refusal changed. Tests: `src/bundle.rs` (a pinned vector, the prefix of the check line, same digest from both sides,
+  none for a damaged or unchecked bundle) and `tests/bundle_check.rs` (the binary on both sides).
 - **Verified** by `new-bob` before anything else is done with the bundle (before the hex is decoded, the opening rebuilt or any proof or network work), and printed as
   `bundle check: <16 hex> ok`. A bundle whose content does not match is refused with exit status 1 and nothing written: *the bundle was damaged in transit; ask Alice to
   hand it over again as a file*, and, when the length of `opening_hex` differs from `opening_hex_len`, the sentence `opening_hex has N characters, the bundle says M`. A `v`
@@ -1583,6 +1633,141 @@ Bob's claim final ≈ 9 min); the long `D_offset` only matters when somebody doe
   anchor falls inside a `sepolia` window (with `rehearsal`'s 122 one can), and a claim evicted at a rotation must be re-proved; the budget accepts
   that risk, and the one-epoch wait that production budgets (144 blocks) is not exercised. The mainnet relay-floor behaviour (Q6) and the
   Ethereum mainnet itself (chain 1) are not covered by either profile; the Sepolia run itself is pending (`docs/runbook-two-party.md` §6).
+
+## The NOID swap wallet (swap wallet, piece 2a, 2026-11-17)
+
+Plain words. Until now Alice funded the contract by hand from her own wallet app, and recovered the NOID the same way. The swap wallet
+makes the tool do both from a **fresh, throwaway wallet made for this one swap**: the user deposits only that swap's coins to the wallet's
+address, the tool funds the contract from it, takes the NOID back from the contract after the deadline if the swap fails, and finally sweeps
+whatever is left to an address the user named when the swap was made. The user's own wallet is never used. Nothing in the protocol, the
+contract, the timeouts, Bob's checks or any engine decision changes: only who holds which address. Piece 2b (the Ethereum keys, `live.js`) and
+2c (the console and the autopilot) are separate.
+
+**The key.** A random 32-byte master secret `m` from the operating system's generator. The wallet's address is `Addr(Derive(m, 0))`, the stock
+wallet's first address for that master secret, so `m` can be imported into the stock wallet (`parano1d --import-wallet-secret`, into a FRESH data
+folder) if this tool is ever gone. `Derive` is `htlc_harness::derive_bytes`; the vendor wallet's own derivation is a private method of the node
+binary and cannot be called from here, so a test transcribes it with the vendor's primitives, another reads its source for the pinned lines, and the
+known vector `m = 00 01 .. 1f` gives `o125qayv...7wlk` (`wallet/key.rs`). The master secret is sealed in the swap file in a new optional field
+`wallet` (Argon2id + XChaCha20-Poly1305, its own associated-data label, `AAD_LABEL_WALLET`; the label, the public digest, the wallet's address
+and the payout address are all inside the associated data, so none can be edited or moved to another field and still open). A file made before has
+no such field and loads exactly as before. Only Alice's file may hold one.
+
+**What it does** (`src/wallet/`):
+
+| step | what |
+|---|---|
+| reads (`chain.rs`) | `getSlotsByOwner` (confirmed state only: no pending view), `blockCount`, `getEpochAnchor`, `estimateFeeDetailed(n_in, n_out)`, `getSlotHintsSalted(count, address + random bytes)`, `getObjectInstances`. Every answer is checked (owner, duplicates, overflow, shape); native-asset carriers (creation id bit 62 without bit 63) are shown apart and never counted or spent |
+| plain payment (`send.rs`) | the vendor wallet's private builder rewritten against `noid_tx` / `noid_gkr`: inputs packed 8 to a page, payment output, change output only when worth it, the fee and the START / END bits where the vendor puts them, one proof for the group with the witness `Derive(m, 0)` for the height's owner-authorization version. Coin selection: an exact single coin, else the largest first; coins worth no more than the per-input fee are skipped; the fee of each shape comes from the node, never from a constant |
+| funding (`flow::fund`) | a plain payment of exactly the swap's amount to `opening.root()`. Refused unless the output is exactly that root and amount, the opening is the one the file says (guard, contract version, root), the phase is `created` / `funding_submitted`, nothing sits at the contract's address, the deposit has been seen for two blocks, and the last funding height (`lock_by - b_fund - b_final`) has not passed |
+| recovery (`contract.rs`, `flow::recover`) | the claim builder of `client::raw` taken to the other branch: height at or after `D`, the wallet's `Derive(m, 0)` must derive `recovery_authority`, the fee follows the contract (v1 `[5,800, max_fee]`, v2 exactly `max_fee`), the one output must pay the committed recovery recipient. `build_claim` itself is untouched |
+| sweep (`flow::sweep`) | everything spendable minus the fee, to the payout address in the swap file, in one output (the largest 1,020 coins when there are more; run it again for the rest). Only after the swap is over and the instance the swap file RECORDED is closed (a stranger's dust coin at the contract does not block it); never to the contract's address or the wallet itself; refused when the fee would be more than half of what is moved |
+| export (`wallet export`) | prints `m` and the 699-byte opening once on stdout, only with `--i-understand-this-is-the-key`; the way to use them without this tool is on stderr |
+
+**An unknown outcome is never repeated as a new transaction** (`persist.rs`). Every send writes its full bytes, id, anchor and the list of coins it
+spends to `<swap file>.wallet-fund.json` / `-recover.json` / `-sweep.json` BEFORE anything is submitted (temporary file, `fsync`, rename, directory
+sync, as the swap file is saved). From then on the same command only ever does one of: send the same bytes again (every recorded coin still unspent and the
+anchor `a` still current, `tip + 1 <= a + 144`: a node that already has them says "already admitted"); rebuild on EXACTLY the recorded coins (the
+window has passed and every recorded coin is still unspent: the first transaction can no longer land, and two transactions on the same coins can never both
+be in a block); wait (a recorded coin is gone: the transaction may have landed; nothing is built or judged until the tip is `a + 144 + 18`, and then
+only the coins at the contract's address decide, "state unknown" when there are none); or stop (the last funding height has passed, or the file is
+aborted). A submit whose answer is a timeout, a broken connection after the bytes may have left, or an unreadable reply is reported as "MAY HAVE BEEN SENT",
+never as "not sent". `wallet fund --submit` run twice therefore never funds twice. A record is checked on every load (its bytes decode, its id is the bytes' id,
+its coins and anchor are the bytes' own, it belongs to this swap file).
+
+**Commands.** `swap-cli wallet new --out WALLETFILE` (a sealed standalone wallet file and its address; `new-alice --wallet WALLETFILE --payout o1..` moves the
+secret into the swap file and sets the recovery address to the wallet's; delete the wallet file afterwards), `wallet address|balance|fund|recover|sweep|export
+FILE`. The three sending commands are a dry run unless `--submit` (`--dry-run` says the same and cannot be combined with `--submit`): a dry run builds, proves,
+verifies, prints, and writes and sends nothing. `--submit` takes the swap file lock, writes the record, then sends to `--noid-rpc` and every `--submit-rpc`.
+
+**Executors.** `wallet::flow::WalletExecutor` performs the engine's `fund_noid` and `refund_noid` from the wallet (`Executor` trait; every other action is refused)
+and returns `FundingSubmitted { txid }` / `NoidRefundSubmitted { txid, call_height }`, so the swap file tracks the recovery's txid the way the engine tracks any close
+it sent itself. An unknown outcome is an `ExecError::unknown`: the runner holds a funding and retries a recovery, and the retry sends the recorded bytes. The
+executor adds refusals only; no engine decision, gate or timeout was changed. The `wallet` commands do not themselves update the swap file's phase (a manual run
+is followed by `tick`, which sees the instance or the close on chain); wiring the executors into a running `tick` loop is piece 2c.
+
+**What is tested, and against what.** `tests/wallet_vendor.rs` and `tests/wallet_flow.rs` submit every built transaction to `tests/common/wallet_node.rs`, a node
+double whose admission is the vendor's own wherever the vendor has a function for it (`noid_tx::validate_paged_spend`, `noid_chain::consensus::fee_breakdown`, the exact
+`SlotValue::with_owner_fields` comparison, `ObjectOpening::check_call`, the proof verifiers at `owner_authorization_version(height)`) and applies mined transactions with
+the vendor's `noid_chain::state::apply_tx` after `validate_paged_spend_tx_page_stream` and `validate_block_slot_conflicts`. A tampered output amount, target, change, slot,
+fee or anchor, a proof of another owner, a proof of the old version, a fee below the floor, a replay, and a rotation are all rejected by those checks. **Not the real
+node:** `noid_mempool::AsyncMempool::submit` needs `tokio` and `thiserror` 1, which are not in the offline registry, so the node's own admission function cannot be linked;
+the double re-runs `submit_inner` / `run_admission_checks` line by line (read in `vendor/parano1d/noid_mempool/src/pool.rs`) and the small parts it mirrors by hand are the
+epoch-anchor equality, the pool's slot-conflict sets and the byte-canonical match. `noid_chain` (libmdbx) is a path **dev**-dependency for these tests only; no crates.io
+dependency was added to the build. No test touches a node or sends anything.
+
+### Review of the wallet, 2026-11-17
+
+An independent read of the wallet found two must-fix points, both fixed:
+
+- **Fees quoted by a node had no ceiling.** Every fee the wallet takes from a node comes through `NodeReads::fee_for` (the funding, a fresh sweep, both rebuilds, the
+  balance and the recovery fee), and it now refuses a fee above `fee_ceiling(inputs, outputs)`: the chain's fee rule at its highest state pressure
+  (`5000 + 100 * inputs + 700 * outputs + 2500 * 8 * max(outputs - inputs, 0)`, constants in `wallet/mod.rs`, pinned to `noid_chain`'s `fees.rs` and `params.rs` by a
+  test that reads the vendor source) times 4 for the relay floor. A quote above it is an error ("the node quotes a fee of X, above the ceiling Y; nothing was
+  built"), never a clamp. A sweep rebuild now also refuses a fee above half of what it moves, as a fresh sweep does.
+- **A second funding.** When the swap file is in `funding_submitted` and this wallet has no record of its own, the funding was made by another path (the wallet
+  program, the console) and its pending payment cannot be seen at the contract's address; `wallet fund` now holds ("this swap's funding was submitted by another
+  path; the wallet does not fund") and builds nothing. With a record of its own the re-send and rebuild rules are unchanged.
+
+Low points, written down and not fixed:
+
+- the send record is keyed by the swap file's path: a renamed or copied swap file loses it, and a fresh funding could then be built on other coins if the wallet holds twice the amount;
+- the standalone wallet file can be reused for two swaps, which would give both the same wallet; the tool does not delete or mark it, and on Windows it gets no file permissions;
+- the record's check does not compare its kind, target and amount with the outputs in the bytes;
+- a finished sweep record blocks every later sweep, so coins that arrive later, or the rest of a split sweep, do not leave through the tool (the export is the way out);
+- a payment with about a thousand inputs may exceed the node's block budget; it is refused by the node;
+- `wallet fund` on the command line applies only the last funding height, not the engine's other funding gates nor the Ethereum fee reserve; the executor path is the one meant for the app;
+- `wallet recover` on the command line does not write its txid into the swap file; only the executor does, and it takes no swap-file lock;
+- a deposit that vanishes resets the wait to 2 blocks, not 18, and the deposit-seen file is not authenticated;
+- the contract root is read for its first 16 slots only: dust sent there can hide the recorded instance from `recover`, and dust blocks `wallet fund` (time, not coins; the export is the way out);
+- a funding that lands after the file was aborted is reachable only through the export;
+- `export` holds the key in an ordinary string in memory for a moment;
+- the record is synced to disk before the submit on Unix only;
+- the offline test stand-in for the node calls the chain's own checking functions for the payment's validity, fee, ownership, authorization proof and block application, mirrors the pool's conflict and duplicate rules by hand, and does not cover the node's size limits, block budgets and pool capacity: a payment it accepts can still be refused by a real node, which fails closed. Not run against a real node.
+
+## The Ethereum swap key (swap wallet, piece 2b, 2026-11-17)
+
+Plain words. Each party's swap uses a fresh Ethereum account of its own, so the user's main Ethereum wallet is never used by the tool. Alice's is the swap's
+`alice_receiver`: it pays the reveal's fee, receives the ETH she buys, and what is left goes on to her own address. Bob's is `bob_sender`: it receives his deposit,
+sends the lock, and receives the refund if the swap fails. The tool keeps the key sealed in the swap file with the same scheme as the claim secret and gives it to
+`live.js` through a pipe (`swap-cli ethkey emit FILE | node scripts/live.js ... --key-stdin`), never on a command line and never in a log. Nothing in the protocol, the
+contract, the timeouts, Bob's checks or any engine decision changes, and `live.js` keeps its rule that the key of `claim` is `alice_receiver` and the key of `lock` and
+`refund` is `bob_sender`. **Not run on a public network.** The live-side commands (`--key-stdin`, `balance --address`, `reserve` with the key, `sweep`) are in `eth/README.md`.
+
+**The sealed field.** A new optional field `eth_key` in either role's swap file (Bob's file may hold a sealed secret since this piece): `{ address, secret, payout }`.
+`secret` is the 32-byte key under Argon2id and XChaCha20-Poly1305 with its own associated-data label (`AAD_LABEL_ETH_KEY`); the label, the public digest of the swap,
+the key's address and the payout address are all inside the associated data, so none can be edited or moved to another field (not the claim secret's, not the NOID
+wallet's, not the standalone key file's) and still open. A file made before has no such field and loads exactly as before. At load the address must be this role's
+account in the swap's terms (`alice_receiver` for Alice, `bob_sender` for Bob) and the payout must not be zero, the key's own address or the HTLC contract. When it is made
+(`SwapFile::with_eth_key`) the payout must also not be the other party's account, and Alice's key must not be her claim secret or her NOID wallet's master secret.
+
+**The key's address is not computed here.** An Ethereum address needs secp256k1 point multiplication and Keccak-256 over the public key; this crate has no secp256k1
+implementation and may not add a dependency for one. So the key is made by `node scripts/live.js keygen --stdout` (32 bytes from the OS generator, checked valid; it writes
+the address and then the key, two lines, to a pipe only) and `swap-cli ethkey new --out KEYFILE` reads those two lines from stdin, checks the framing and that the key is a
+valid secp256k1 secret (not zero, below the group order; the one thing this crate can check), seals it with the passphrase and prints only the address. The address beside the
+sealed key is therefore the caller's claim until `live.js` uses the key: every use there recomputes the address and refuses unless it is the swap's account. The order of
+steps is: `ethkey new`, then `live.js reserve` with the key (`swap-cli ethkey emit FILE | node scripts/live.js reserve --role alice|bob --swap FILE --key-stdin`), which refuses,
+before it prints any amount or address, unless the key's own address is the swap file's account and its `eth_key` address, and only then a deposit to that address.
+`swap-cli ethkey emit KEYFILE | node scripts/live.js address --key-stdin --expect ADDRESS` is the same check on its own.
+
+**Commands.**
+
+| command | what |
+|---|---|
+| `ethkey new --out KEYFILE` | stdin: exactly two lines, the address then the key (what `live.js keygen --stdout` writes); a terminal is refused; seals a standalone key file (its own label `noid-swap/eth-key-file/v1`), never overwrites, prints only the address |
+| `ethkey address FILE` | the address (and, for a swap file, the payout and the role) of a key file or a swap file; needs no passphrase |
+| `ethkey emit FILE` | the raw key (`0x` and 64 hex, a line) on stdout for a pipe only: it refuses a terminal; the key never appears on stderr, in an error or in a log. A key file or a swap file |
+| `new-alice ... --eth-key KEYFILE --eth-payout 0x..` | seals the key into Alice's swap file. Refused unless the key file's address is `--eth-receiver` and the two flags are given together; the payout is stored in the file (and bound to the key), and is where `live.js sweep` sends what is left. The swap file is built first, so a refused swap leaves no hashlock registry line |
+| `new-bob ... --eth-key KEYFILE --eth-payout 0x..` | the same for Bob, with `--eth-sender`; sealed before the (slow) client R self-test of a poseidon swap |
+
+The bundle that goes to Bob is the public section only: it carries neither the key nor the payout address. Delete the standalone key file once the swap file holds the key
+and is backed up: the file is a second copy.
+
+**Tests.** `tests/eth_key.rs` (9): a file without the field loads and writes nothing; the round trip and the binding of the blob to the payout, the address and the public
+digest; Bob's file; the blobs of the claim secret, the NOID wallet, the Ethereum key and the standalone key file cannot be moved into each other's place; every refusal of
+`with_eth_key`; the standalone file; the framing of `ethkey new` (every wrong shape, a zero key, a key above the group order, a zero address, a short passphrase) with no
+error showing the key; `ethkey address` and `emit` on both kinds of file; `new-alice` and `new-bob` through the binary. **Not tested:** that `ethkey new` and `ethkey emit`
+refuse a terminal (the test runner has none; the check is `IsTerminal` on stdin and stdout), and that the address belongs to the key (`live.js address` does that, with its own
+tests).
 
 ## Known gaps (follow-ups, not bugs in what is tested)
 

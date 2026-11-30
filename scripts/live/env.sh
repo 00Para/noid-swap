@@ -96,6 +96,13 @@ ALICE_NOID=${ALICE_NOID:-}
 BOB_NOID=${BOB_NOID:-}
 ALICE_ETH=${ALICE_ETH:-}
 BOB_ETH=${BOB_ETH:-}
+# The tool's own wallets (swap wallet, piece 2c). A run is EITHER a wallet run (USE_SWAP_WALLET=1: the NOID wallet and the Ethereum key of the swap are made by
+# wallet-setup.sh, sealed into the swap file, and every step uses them) OR a classic run (the stock wallet, key files: fund.sh, recover-noid.sh, lock.sh with BOB_KEY).
+# The mode is fixed in $L/env.local.sh and nowhere else: the environment is ignored, so that the console (which reads that file) and every helper agree.
+# NOID_PAYOUT and ETH_PAYOUT are the user's OWN addresses the leftovers are swept to (wallet runs only), also set only there.
+USE_SWAP_WALLET=0
+NOID_PAYOUT=""
+ETH_PAYOUT=""
 AMOUNT=${AMOUNT:-10000000}                           # micro-NOID (10 NOID)
 WEI=${WEI:-1000000000000000}                         # 0.001 ETH
 VARIANT=${VARIANT:-raw}
@@ -111,6 +118,7 @@ BOB_KEY=${BOB_KEY:-keys/bob.key}
 ALICE_KEY=${ALICE_KEY:-keys/alice.key}
 ALICE_FILE="$L/alice.swap.json"; BOB_FILE="$L/bob/bob.swap.json"
 [ -f "$L/env.local.sh" ] && . "$L/env.local.sh"
+case "$USE_SWAP_WALLET" in 0|1) ;; *) echo "USE_SWAP_WALLET must be 0 or 1, not '$USE_SWAP_WALLET' (set it in $L/env.local.sh); refusing" >&2; exit 2 ;; esac
 # The defaults above were computed for one platform. If the file changed LIVE_PLATFORM after all (a value the early read could not see,
 # or a different one than the environment gave), they would be the wrong set: stop instead of running with a mix.
 if [ "${LIVE_PLATFORM:-}" != "$_platform_for_defaults" ]; then
@@ -266,6 +274,18 @@ enter_eth_dir() {
 # Native mode: the "Windows-side copies" are plain local copies in $PUB; make the folder before a script copies into it. Under wsl nothing is made here.
 ensure_pub() { if [ "$LIVE_PLATFORM" = native ]; then mkdir -p "$PUB" 2>/dev/null; fi; return 0; }
 require_parties() { for v in ALICE_NOID BOB_NOID ALICE_ETH BOB_ETH CONTRACT; do [ -n "${!v}" ] || { echo "$v is not set: put the four party addresses and CONTRACT in $L/env.local.sh" >&2; return 2; }; done; }
+# require_bob_terms: what `swap-cli new-bob` needs from Bob's own settings, and nothing of Alice's (join.sh runs on Bob's machine, where ALICE_NOID and
+# ALICE_ETH need not be set). Says in one line every setting that is empty or not a plain whole number where one is needed; returns 2 then.
+require_bob_terms() {
+  local v bad=""
+  for v in BOB_NOID BOB_ETH CONTRACT AMOUNT WEI CHAIN PROFILE CONTRACT_VERSION; do
+    [ -n "${!v:-}" ] || bad="$bad $v (empty)"
+  done
+  for v in AMOUNT WEI CHAIN CONTRACT_VERSION; do
+    case "${!v:-}" in ''|*[!0-9]*) case "$bad" in *" $v "*) ;; *) bad="$bad $v (not a whole number: '${!v:-}')" ;; esac ;; esac
+  done
+  [ -z "$bad" ] || { echo "Bob's terms are not complete in $L/env.local.sh:$bad. new-bob needs BOB_NOID, BOB_ETH, CONTRACT, AMOUNT, WEI, CHAIN, PROFILE and CONTRACT_VERSION (nothing of Alice's)" >&2; return 2; }
+}
 # Opt-in only (ACCEPT_PRODUCER_CONCENTRATION=1 in front of ONE command; a standing waiver, so not as a line in $L/env.local.sh), said on EVERY call that builds the node flags. Nothing when the setting is off.
 producer_concentration_warning() {
   [ "$ACCEPT_PRODUCER_CONCENTRATION" = 1 ] || return 0
@@ -451,3 +471,174 @@ run_with_limit() {
   done
   wait "$pid"
 }
+
+# ---- the tool's own wallets (swap wallet, piece 2c). NOT run against a real node or a public network; every case of selftest.sh uses stub tools.
+# A wallet run keeps no key file: the NOID wallet's secret and the Ethereum key are sealed in the swap file (swap-cli) and handed on only through pipes.
+# wallet-setup.sh writes $L/wallet-addresses.txt LAST (after the wallet and the key exist and the key was checked against its address); the lines of that file are
+# the swap's own addresses (ALICE_NOID, ALICE_ETH for Alice; BOB_ETH for Bob) and, in a wallet run, they replace the settings of the same names. Only a line of
+# exactly the expected shape is read (the file is not sourced).
+WALLET_ADDR_FILE="$L/wallet-addresses.txt"
+load_wallet_addresses() {
+  [ "$USE_SWAP_WALLET" = 1 ] || return 0
+  { [ -f "$WALLET_ADDR_FILE" ] && [ ! -L "$WALLET_ADDR_FILE" ]; } || return 0
+  local line k v noid_re='^o1[0-9a-z]{20,100}$' eth_re='^0x[0-9a-fA-F]{40}$'
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%$'\r'}
+    k=${line%%=*}; v=${line#*=}
+    case "$k" in
+      ALICE_NOID) if [[ "$v" =~ $noid_re ]]; then ALICE_NOID=$v; else echo "WARNING: $WALLET_ADDR_FILE: the ALICE_NOID line is not an o1... address; ignored" >&2; fi ;;
+      ALICE_ETH) if [[ "$v" =~ $eth_re ]]; then ALICE_ETH=$v; else echo "WARNING: $WALLET_ADDR_FILE: the ALICE_ETH line is not 0x and 40 hex digits; ignored" >&2; fi ;;
+      BOB_ETH) if [[ "$v" =~ $eth_re ]]; then BOB_ETH=$v; else echo "WARNING: $WALLET_ADDR_FILE: the BOB_ETH line is not 0x and 40 hex digits; ignored" >&2; fi ;;
+      *) ;;
+    esac
+  done < "$WALLET_ADDR_FILE"
+  return 0
+}
+load_wallet_addresses
+# require_wallet_run / require_classic_run: the two kinds of helper never meet (a run is one or the other, fixed in $L/env.local.sh). Status 2 = nothing was done.
+require_wallet_run() {
+  [ "$USE_SWAP_WALLET" = 1 ] && return 0
+  echo "this is a classic run (USE_SWAP_WALLET is not 1 in $L/env.local.sh): the swap wallet helpers refuse. Nothing was done" >&2
+  return 2
+}
+require_classic_run() {
+  [ "$USE_SWAP_WALLET" = 1 ] || return 0
+  echo "this is a wallet run (USE_SWAP_WALLET=1 in $L/env.local.sh): the classic helper $1 refuses, the tool's own wallet does this step ($2). Nothing was done" >&2
+  return 2
+}
+# The settings of a wallet run that no helper may do without: the shape of the payout addresses (a payout is where the leftovers go, so a bad one stops the step).
+require_payout_settings() {
+  local noid_re='^o1[0-9a-z]{20,100}$' eth_re='^0x[0-9a-fA-F]{40}$' bad=""
+  case "${1:-both}" in noid|both) [[ "$NOID_PAYOUT" =~ $noid_re ]] || bad="$bad NOID_PAYOUT" ;; esac
+  case "${1:-both}" in eth|both) [[ "$ETH_PAYOUT" =~ $eth_re ]] || bad="$bad ETH_PAYOUT" ;; esac
+  [ -z "$bad" ] || { echo "not set to an address in $L/env.local.sh:$bad (the user's own addresses the leftovers are swept to). Nothing was done" >&2; return 2; }
+}
+# swap-cli's node flags for the wallet commands: one NOID node (the swap wallet reads and sends through it), the transport, the timeout.
+wallet_noid_flags() {
+  local f=(--transport curl --noid-rpc "$NOID_RPC" --rpc-timeout "$RPC_TIMEOUT")
+  if [ "$LIVE_PLATFORM" = native ]; then f+=(--curl-path "$CURL"); fi
+  printf '%s\n' "${f[@]}"
+}
+# live.js reserve takes the cap flags only (no tip): MAX_FEE_GWEI (--mainnet --max-fee-gwei) or GAS_PRICE_GWEI (--gas-price-gwei), else the node's own suggestion.
+reserve_fee_flags() {
+  if [ -n "${MAX_FEE_GWEI:-}" ]; then printf '%s\n' --mainnet --max-fee-gwei "$MAX_FEE_GWEI"
+  elif [ -n "${GAS_PRICE_GWEI:-}" ]; then printf '%s\n' --gas-price-gwei "$GAS_PRICE_GWEI"
+  fi
+  return 0
+}
+# wallet_parse KIND FILE: validates one tool's JSON output and prints it as `key=value` lines (nothing else, printable characters only); status 1 and one `ERR ...`
+# line when the output is not exactly what the tool prints. KIND: noid_balance (swap-cli wallet balance), eth_reserve (live.js reserve), step (swap-cli wallet
+# fund|recover|sweep). Needs python3 (run with -I: no module is taken from the current folder).
+IFS= read -r -d '' WALLET_PARSE_PY <<'PY' || true
+import sys, json, re
+kind, path = sys.argv[1], sys.argv[2]
+def fail(msg):
+    print("ERR " + msg); sys.exit(1)
+try:
+    with open(path, encoding="utf-8") as f:
+        v = json.loads(f.read(1048577))
+except Exception:
+    fail("the tool's output is not JSON")
+if not isinstance(v, dict):
+    fail("the tool's output is not a JSON object")
+O1 = re.compile(r"^o1[0-9a-z]{20,100}$"); E0 = re.compile(r"^0x[0-9a-fA-F]{40}$"); DEC = re.compile(r"^[0-9]{1,40}$"); H64 = re.compile(r"^[0-9a-f]{64}$")
+def whole(x): return isinstance(x, int) and not isinstance(x, bool) and x >= 0
+def need(cond, what):
+    if not cond: fail("the field " + what + " is missing or not of the expected shape")
+def out(k, x):
+    if isinstance(x, bool): x = "true" if x else "false"
+    if x is None: x = "none"
+    print("%s=%s" % (k, re.sub(r"[^\x20-\x7e]", "?", str(x))[:400]))
+if kind == "noid_balance":
+    need(isinstance(v.get("address"), str) and O1.match(v["address"]), "address")
+    for k in ("tip", "plain_micronoid", "swap_amount_micronoid", "funding_fee_reserve_micronoid", "needed_micronoid"): need(whole(v.get(k)), k)
+    need(isinstance(v.get("deposit_covers"), bool), "deposit_covers")
+    out("address", v["address"]); out("tip", v["tip"]); out("plain_micronoid", v["plain_micronoid"]); out("amount_micronoid", v["swap_amount_micronoid"])
+    out("fee_reserve_micronoid", v["funding_fee_reserve_micronoid"]); out("need_micronoid", v["needed_micronoid"]); out("covers", v["deposit_covers"])
+elif kind == "eth_reserve":
+    need(isinstance(v.get("address"), str) and E0.match(v["address"]), "address")
+    for k in ("requiredWei", "reserveWei", "balanceWei", "shortfallWei"): need(isinstance(v.get(k), str) and DEC.match(v[k]), k)
+    need(isinstance(v.get("covered"), bool), "covered")
+    need(v.get("keyChecked") is True, "keyChecked")
+    need(v.get("amountWei") is None or (isinstance(v.get("amountWei"), str) and DEC.match(v["amountWei"])), "amountWei")
+    out("address", v["address"]); out("required_wei", v["requiredWei"]); out("reserve_wei", v["reserveWei"]); out("amount_wei", v.get("amountWei", "0"))
+    out("balance_wei", v["balanceWei"]); out("shortfall_wei", v["shortfallWei"]); out("covered", v["covered"]); out("key_checked", True)
+elif kind == "step":
+    need(v.get("step") in ("fund", "recover", "sweep"), "step")
+    need(v.get("outcome") in ("dry_run", "sent", "maybe_sent", "not_sent", "hold", "done"), "outcome")
+    need(isinstance(v.get("summary"), str), "summary")
+    need(v.get("txid") is None or (isinstance(v.get("txid"), str) and H64.match(v["txid"])), "txid")
+    need(v.get("target") is None or (isinstance(v.get("target"), str) and O1.match(v["target"])), "target")
+    for k in ("amount_micronoid", "fee_micronoid", "change_micronoid", "inputs", "child_height"): need(v.get(k) is None or whole(v.get(k)), k)
+    out("step", v["step"]); out("outcome", v["outcome"]); out("txid", v.get("txid")); out("target", v.get("target"))
+    for k in ("amount_micronoid", "fee_micronoid", "change_micronoid", "inputs", "child_height"): out(k, v.get(k))
+    out("summary", v["summary"])
+else:
+    fail("unknown kind")
+PY
+wallet_parse() { python3 -I -c "$WALLET_PARSE_PY" "$1" "$2"; }
+# wallet_kv TEXT KEY: the value of the first `KEY=value` line of TEXT (what wallet_parse printed), empty when there is none.
+wallet_kv() { printf '%s\n' "$1" | sed -n "s/^$2=//p" | head -n 1; }
+# wallet_reserve ROLE OUTFILE ERRFILE: live.js reserve for the swap file of ROLE with the swap's key piped from `swap-cli ethkey emit` (never a key file, never an
+# argument, never a temporary file). Read-only. OUTFILE gets the JSON, ERRFILE the tools' stderr. Status 0 = covered, 3 = not covered (the JSON says by how much),
+# 1 = refused or failed (the key does not own the stated address, the node did not answer, the key could not be emitted); nothing is ever sent.
+wallet_reserve() {
+  local role=$1 out=$2 err=$3 F wf RFEES
+  F=$(swap_file "$role") || return 1
+  : > "$out"; : > "$err"
+  { [ -d "${ETH_DIR:-}" ] && [ -s "$L/passphrase.txt" ] && [ -f "$F" ]; } || { echo "wallet_reserve: ETH_DIR, the passphrase file or the swap file of $role is missing" > "$err"; return 1; }
+  wf=$(win_path "$F")
+  read_lines RFEES reserve_fee_flags
+  ( cd "$ETH_DIR" || exit 1
+    ( load_passphrase && "$BIN" ethkey emit "$F" ) 2>> "$err" | ( unset SWAP_PASSPHRASE; "$NODE" scripts/live.js reserve --role "$role" --swap "$wf" --key-stdin ${RFEES[@]+"${RFEES[@]}"} > "$out" 2>> "$err" )
+    rcs=("${PIPESTATUS[@]}"); rc0=${rcs[0]}; rc1=${rcs[1]}
+    [ "$rc0" -eq 0 ] || exit 1       # no key was emitted: live.js got nothing to sign with
+    exit "$rc1" )
+  return $?
+}
+# wallet_step SUB BASE DRY [--prefix NAME]: runs `swap-cli wallet SUB ALICE_FILE ...` (SUB = fund | recover | sweep; a dry run unless DRY is 0, then --submit and every
+# NOID_RPC2 as --submit-rpc), keeps its output in BASE.json / BASE.err, validates it (wallet_parse step) and sets WSTEP_PARSED (the validated key=value lines) and
+# WSTEP_RC, the exit status the calling helper must end with. The mapping is the one the console's lib/exitcodes.js documents:
+#   0  a dry run was built and verified (outcome dry_run), or a real step was sent (outcome sent: at least one node holds the transaction)
+#   3  nothing was sent: the tool refused (an error before any submit, or outcome not_sent)
+#   4  nothing was sent by this run: the tool says there is nothing to do now (outcome hold: waiting, text says for what) or already done
+#   6  the transaction MAY HAVE BEEN SENT (outcome maybe_sent): run the same command again, it sends the SAME bytes, never a second transaction
+#   1  anything else (an unreadable output after a real submit, an unknown exit status, a signal): treat it as possibly sent
+# A refusal before swap-cli runs is the calling helper's own exit 2 or 3.
+wallet_step() {
+  local sub=$1 base=$2 dry=$3 F=$ALICE_FILE NF EXTRA RC outcome
+  read_lines NF wallet_noid_flags
+  if [ "$dry" = 1 ]; then EXTRA=(--dry-run); else EXTRA=(--submit); if [ -n "$NOID_RPC2" ]; then EXTRA+=(--submit-rpc "$NOID_RPC2"); fi; fi
+  ( load_passphrase && "$BIN" wallet "$sub" "$F" ${NF[@]+"${NF[@]}"} "${EXTRA[@]}" ) > "$base.json" 2> "$base.err" < /dev/null; RC=$?
+  WSTEP_PARSED=""
+  if WSTEP_PARSED=$(wallet_parse step "$base.json" 2>/dev/null) && [ "$(wallet_kv "$WSTEP_PARSED" step)" = "$sub" ]; then
+    outcome=$(wallet_kv "$WSTEP_PARSED" outcome)
+    if [ "$dry" = 1 ]; then
+      case "$outcome" in dry_run) WSTEP_RC=0 ;; hold|done) WSTEP_RC=4 ;; *) WSTEP_RC=3 ;; esac
+    else
+      case "$outcome:$RC" in
+        sent:0) WSTEP_RC=0 ;;
+        hold:0|done:0) WSTEP_RC=4 ;;
+        maybe_sent:1) WSTEP_RC=6 ;;
+        not_sent:1) WSTEP_RC=3 ;;
+        *) WSTEP_RC=1 ;;
+      esac
+    fi
+    return 0
+  fi
+  WSTEP_PARSED=""
+  # no readable report: an error before anything was submitted prints no JSON and exits 1 (the tool's own rule); a dry run never sends
+  if [ "$dry" = 1 ] || { [ "$RC" -eq 1 ] && [ ! -s "$base.json" ]; }; then WSTEP_RC=3; else WSTEP_RC=1; fi
+  return 0
+}
+# wallet_step_report PREFIX: prints the validated report of the last wallet_step as plain `PREFIX: key value` lines (the console's dry-run rows read them).
+wallet_step_report() {
+  local p=$1 k v
+  [ -n "$WSTEP_PARSED" ] || return 0
+  for k in outcome target amount_micronoid fee_micronoid inputs child_height txid; do
+    v=$(wallet_kv "$WSTEP_PARSED" "$k"); [ "$v" = none ] || echo "$p: $k $v"
+  done
+  echo "$p: summary $(wallet_kv "$WSTEP_PARSED" summary)"
+}
+# wallet_json_value FILE KEY: the string value of the first `"KEY": "value"` line of a swap-cli JSON object (a plain match; the caller checks the shape).
+wallet_json_value() { sed -n "s/^[[:space:]]*\"$2\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*\$/\1/p" "$1" | head -n 1; }

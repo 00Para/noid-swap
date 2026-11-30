@@ -115,6 +115,10 @@ All low, unless said. They come from the operator's notes of the run, from the P
    margin on the page while the funding is open. Bob's logs give the comparison: blocks left to the lock-by when his lock was offered
    were 60, 59 and 62 in runs 10 to 12 and 6 in this run. Chosen for the next console run: fund from a terminal right after Bob's check
    (`docs/runbook-two-party.md`, section 3).
+   *Correction, 2026-11-17:* the contract does not hold `h_create` as a creation height. It commits the deadline `D` (and the parties,
+   `max_fee` and the modes); `h_create` is only the height the deadline was planned from (`D = h_create + D_offset`). Nothing in the
+   contract, in Bob's engine or on the chain refuses a funding before it. The engine's wait for `h_create` was its own rule, and it has
+   been replaced by an earlier opening of the funding (`swap-cli/README.md`, "The funding opens before `H_create`").
 3. **The page hid the step.** The funding box sits at the bottom of a card titled "Next: wait", whose text says nothing is to be done and
    that the funding has "no button on purpose". The operator did not find it for several minutes and almost took the terminal
    command shown above it for something to send to the other machine. The card must lead with the step that is due.

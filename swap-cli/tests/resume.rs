@@ -195,6 +195,40 @@ fn unresolved_pending_funding_is_never_retried_blindly() {
 }
 
 #[test]
+fn a_funding_of_unknown_outcome_sent_before_h_create_is_held_across_h_create_and_not_offered_again() {
+    // The funding opens D_offset blocks before H_create. On the Runner path an executor that reports an unknown outcome leaves a pending record, and
+    // that record holds exactly as one made after H_create: not while the funding is unseen, not after the tip passes H_create.
+    let mut s = Scenario::new(Variant::Raw);
+    let h_create = s.public.params.h_create;
+    s.world.borrow_mut().tip = h_create - 40;
+    s.alice.executor.crash_after_effect.insert("fund_noid");
+    let ra = s.tick_alice();
+    assert_eq!(ra.action.kind(), "fund_noid", "{ra:?}");
+    assert!(ra.exec_error.unwrap().contains("unknown"));
+    assert!(s.world.borrow().tip + 1 < h_create, "sent before H_create");
+    assert!(s.alice.file.pending_action.as_ref().is_some_and(|a| a.maybe_sent));
+    // The funding is not seen for a while: the tip is set past H_create without mining (a restart in the middle). Every tick waits; nothing is funded again.
+    for (i, tip) in [h_create - 40, h_create - 30, h_create - 20, h_create + 10, h_create + 30].into_iter().enumerate() {
+        if i == 2 {
+            s.restart_alice();
+        }
+        s.world.borrow_mut().tip = tip;
+        let ra = s.tick_alice();
+        assert_eq!(ra.action.kind(), "wait", "step {i}: {ra:?}");
+        assert_eq!(s.alice_phase(), "created");
+    }
+    assert!(s.world.borrow().tip + 1 > h_create, "now past H_create");
+    assert_eq!(s.alice.executor.count("fund_noid"), 0, "the second funding was never offered");
+    // It lands: resolved, and still exactly one funding.
+    s.world.borrow_mut().advance_noid(1);
+    let ra = s.tick_alice();
+    assert_eq!(ra.events, vec!["noid_instance_seen"], "{ra:?}");
+    assert_eq!(s.alice_phase(), "funded");
+    assert!(s.alice.file.pending_action.is_none());
+    assert_eq!(s.alice.executor.count("fund_noid"), 0);
+}
+
+#[test]
 fn claim_submitted_before_a_crash_keeps_being_tracked() {
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();

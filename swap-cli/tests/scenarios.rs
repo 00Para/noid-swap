@@ -31,6 +31,11 @@ fn happy_path(variant: Variant) -> Scenario {
 fn happy_path_in(variant: Variant, profile: ProfileName) -> Scenario {
     let mut s = Scenario::with_profile(variant, profile);
     s.run_to_lock_final();
+    settle_from_lock_final(s)
+}
+
+/// The rest of the happy path, from Bob's final lock to both files `done`.
+fn settle_from_lock_final(mut s: Scenario) -> Scenario {
     // Alice: lock final -> reveal (inside (I2)).
     let ra = s.tick_alice();
     assert_eq!(ra.action.kind(), "reveal_eth", "{ra:?}");
@@ -3192,4 +3197,177 @@ fn m25b_alice_is_not_declared_lost_while_a_refund_noid_was_decided_for_her() {
     assert!(ra.events.iter().all(|e| e != "both_legs_lost"), "{ra:?}");
     assert_eq!(s.alice_phase(), "reveal_submitted");
     assert!(ra.notes.iter().any(|n| n.contains("closed-by")), "{:?}", ra.notes);
+}
+
+// ---------------------------------------------------------------- the funding opens before H_create (2026-11-17)
+//
+// `D = H_create + D_offset` is only planned from H_create: the contract commits D, not a creation height. Alice's file offers the funding from
+// `H_create - D_offset` (never before the trial start), so the NOID is locked for at most `2 * D_offset` blocks. Every profile the file covers.
+
+const EARLY_PROFILES: [ProfileName; 3] = [ProfileName::Production, ProfileName::Rehearsal, ProfileName::Sepolia];
+
+/// A scenario whose Parano1d tip stands `early` blocks before H_create.
+fn early_scenario(profile: ProfileName, early: u64) -> Scenario {
+    let s = Scenario::with_profile(Variant::Raw, profile);
+    let h_create = s.public.params.h_create;
+    s.world.borrow_mut().tip = h_create - early;
+    s
+}
+
+#[test]
+fn a_swap_funded_before_h_create_settles_with_alices_full_reveal_window_in_every_profile() {
+    for profile in EARLY_PROFILES {
+        let mut s = early_scenario(profile, 40);
+        let g = s.gates();
+        let h_create = s.public.params.h_create;
+        let funding_tip = s.world.borrow().tip;
+        assert!(funding_tip + 1 < h_create, "{profile:?}: the funding comes before H_create");
+        s.run_to_lock_final();
+        let s = settle_from_lock_final(s);
+        let w = s.world.borrow();
+        let (to, amount) = w.noid_payout.clone().expect("NOID paid out");
+        assert_eq!(to, s.public.params.bob_noid, "{profile:?}");
+        assert_eq!(amount, s.public.params.amount_micronoid - 6_000, "{profile:?}");
+        let (addr, wei) = w.eth_payout.expect("ETH paid out");
+        assert_eq!((addr, wei), (s.public.params.eth.alice_receiver, s.public.params.eth.amount_wei), "{profile:?}");
+        // Alice's reveal window is the profile's whole W_A: Bob's lock used `t_b + W_A`, and the reveal went out before the cutoff.
+        assert_eq!(w.lock.as_ref().unwrap().timelock, T0 + g.w_a_s, "{profile:?}");
+        assert_eq!(s.alice.executor.count("fund_noid"), 1, "{profile:?}");
+        assert_eq!(s.alice.executor.count("reveal_eth"), 1, "{profile:?}");
+        assert_eq!(s.bob.executor.count("lock_eth"), 1, "{profile:?}");
+        assert_eq!(s.bob.executor.count("claim_noid"), 1, "{profile:?}");
+        // The whole swap, from the early funding, settled inside the deadline.
+        assert!(w.tip < s.public.params.deadline_height, "{profile:?}: tip {} D {}", w.tip, s.public.params.deadline_height);
+    }
+}
+
+#[test]
+fn bobs_file_made_after_the_early_funding_is_already_final_still_locks_and_the_swap_settles() {
+    for profile in EARLY_PROFILES {
+        let mut s = early_scenario(profile, 40);
+        let r = s.tick_alice();
+        assert_eq!(r.action.kind(), "fund_noid", "{profile:?}: {r:?}");
+        s.world.borrow_mut().advance_noid(1);
+        s.tick_alice();
+        s.world.borrow_mut().advance_noid(18);
+        s.tick_alice();
+        assert_eq!(s.alice_phase(), "funding_final", "{profile:?}");
+        assert_eq!(s.bob_phase(), "received", "{profile:?}: Bob has not looked yet");
+        // Bob's first tick: the funding is already 19 blocks deep, but he counts finality from his own first sighting, so he waits for it
+        // (the engine does not read the funding's height from the chain), and locks once 18 blocks have passed after that.
+        let rb = s.tick_bob();
+        assert_eq!(rb.action.kind(), "wait", "{profile:?}: {rb:?}");
+        assert_eq!(s.bob_phase(), "funded", "{profile:?}");
+        s.world.borrow_mut().advance_noid(18);
+        s.tick_alice();
+        let rb = s.tick_bob();
+        assert_eq!(rb.action.kind(), "lock_eth", "{profile:?}: {rb:?}");
+        assert_eq!(s.bob_phase(), "lock_submitted", "{profile:?}");
+        s.world.borrow_mut().advance_eth(1);
+        s.tick_both();
+        assert_eq!(s.alice_phase(), "lock_seen", "{profile:?}");
+        assert_eq!(s.bob_phase(), "locked", "{profile:?}");
+        let lag = s.world.borrow().finality_lag;
+        s.world.borrow_mut().advance_eth(lag + 1);
+        let s = settle_from_lock_final(s);
+        let w = s.world.borrow();
+        assert_eq!(w.noid_payout.as_ref().unwrap().0, s.public.params.bob_noid, "{profile:?}");
+        assert_eq!(w.eth_payout.unwrap().0, s.public.params.eth.alice_receiver, "{profile:?}");
+    }
+}
+
+#[test]
+fn an_early_funding_where_bob_never_locks_ends_in_alices_recovery_at_d_in_every_profile() {
+    for profile in EARLY_PROFILES {
+        let mut s = early_scenario(profile, 40);
+        let g = s.gates();
+        let d = s.public.params.deadline_height;
+        s.bob.executor.offline_for.insert("lock_eth");
+        let funding_tip = s.world.borrow().tip;
+        let r = s.tick_alice();
+        assert_eq!(r.action.kind(), "fund_noid", "{profile:?}: {r:?}");
+        s.world.borrow_mut().advance_noid(1);
+        s.tick_both();
+        s.world.borrow_mut().advance_noid(18);
+        s.tick_both();
+        assert_eq!(s.alice_phase(), "funding_final", "{profile:?}");
+        // Bob never sends; time runs to the last block before D. Bob gives up, Alice recovers as soon as the next call height is D.
+        let tip = s.world.borrow().tip;
+        s.world.borrow_mut().advance_noid(d - 1 - tip);
+        let rb = s.tick_bob();
+        assert_eq!(rb.action.kind(), "abort", "{profile:?}: {rb:?}");
+        let ra = s.tick_alice();
+        assert_eq!(ra.action.kind(), "refund_noid", "{profile:?}: {ra:?}");
+        s.world.borrow_mut().advance_noid(1);
+        s.tick_alice();
+        s.world.borrow_mut().advance_noid(18);
+        s.tick_alice();
+        assert!(matches!(s.alice.file.phase, Phase::Alice(AlicePhase::Refunded { .. })), "{profile:?}: {}", s.alice_phase());
+        let w = s.world.borrow();
+        assert_eq!(w.noid_payout.as_ref().unwrap().0, s.public.params.alice_noid, "{profile:?}");
+        assert!(w.eth_payout.is_none() && w.lock.is_none(), "{profile:?}");
+        // The NOID sat in the contract for less than twice the planned length D - H_create.
+        assert!(d - funding_tip <= 2 * g.d_offset, "{profile:?}: funded at {funding_tip}, D {d}");
+    }
+}
+
+#[test]
+fn the_funding_opens_d_offset_blocks_before_h_create_and_not_a_block_earlier_in_every_profile() {
+    for profile in EARLY_PROFILES {
+        let mut s = Scenario::with_profile(Variant::Raw, profile);
+        let g = s.gates();
+        let opens = s.public.params.h_create - g.d_offset;
+        // tip + 1 == opens: offered and recorded.
+        s.world.borrow_mut().tip = opens - 1;
+        let mut alice = s.alice.file.clone();
+        let out = apply_now(&s, &mut alice, true);
+        assert_eq!(out.decision.action.kind(), "fund_noid", "{profile:?}: {:?}", out.decision);
+        assert!(alice.pending_intent.is_some(), "{profile:?}");
+        // One block earlier: the "too early" wait, nothing recorded.
+        s.world.borrow_mut().tip = opens - 2;
+        let mut alice = s.alice.file.clone();
+        let out = apply_now(&s, &mut alice, true);
+        let why = wait_reason_of(&out);
+        assert!(why.starts_with("too early to fund") && why.contains(&format!("opens at height {opens}")), "{profile:?}: {why}");
+        assert!(alice.pending_intent.is_none() && alice.phase.name() == "created", "{profile:?}");
+        let r = s.tick_alice();
+        assert_eq!(r.action.kind(), "wait", "{profile:?}: {r:?}");
+        assert_eq!(s.alice.executor.count("fund_noid"), 0, "{profile:?}");
+        // Too late is unchanged: the last height to fund is lock-by - (B_fund + B_final).
+        let last = s.public.params.lock_by_height - g.b_fund - g.b_final;
+        s.world.borrow_mut().tip = last;
+        let mut copy = s.alice.file.clone();
+        assert_eq!(apply_now(&s, &mut copy, false).decision.action.kind(), "fund_noid", "{profile:?}");
+        s.world.borrow_mut().tip = last + 1;
+        let mut copy = s.alice.file.clone();
+        assert_eq!(apply_now(&s, &mut copy, false).decision.action.kind(), "abort", "{profile:?}");
+    }
+}
+
+#[test]
+fn an_instance_at_the_root_before_h_create_gives_the_instance_wait_and_no_funding_in_every_profile() {
+    for profile in EARLY_PROFILES {
+        let s = Scenario::with_profile(Variant::Raw, profile);
+        two_fitting_at_alice_root(&s);
+        let opens = s.public.params.h_create - s.gates().d_offset;
+        let mut reasons = Vec::new();
+        for tip in [opens - 5, opens - 1, s.public.params.h_create - 40, s.public.params.h_create + 1] {
+            s.world.borrow_mut().tip = tip;
+            let mut alice = s.alice.file.clone();
+            let out = apply_now(&s, &mut alice, true);
+            let why = wait_reason_of(&out);
+            assert!(why.contains("2 instances") && why.contains("none is accepted") && why.contains("Fund NOTHING again"), "{profile:?} tip {tip}: {why}");
+            assert!(!why.contains("too early"), "{profile:?} tip {tip}: {why}");
+            assert_eq!(alice.phase.name(), "created", "{profile:?}");
+            assert!(alice.pending_intent.is_none(), "{profile:?} tip {tip}: no funding was recorded");
+            reasons.push(why);
+        }
+        assert!(reasons.windows(2).all(|w| w[0] == w[1]), "{profile:?}: the same text before and after H_create: {reasons:?}");
+        // The library path never funds beside them either.
+        s.world.borrow_mut().tip = s.public.params.h_create - 40;
+        let mut s = s;
+        let r = s.tick_alice();
+        assert_eq!(r.action.kind(), "wait", "{profile:?}: {r:?}");
+        assert_eq!(s.alice.executor.count("fund_noid"), 0, "{profile:?}");
+    }
 }

@@ -1,0 +1,444 @@
+{
+  "description": "MOCK timeline of live run 1 (settled): 10 NOID (mainnet) <-> 0.001 ETH (local Hardhat). Heights and the NOID txids are the real public ones from docs/live-run-1.md; the ETH tx hashes and the preimage/hashlock are synthetic.",
+  "advance": true,
+  "fund_txid": "267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780",
+  "close_txid": "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324",
+  "terms": {
+    "object": {
+      "abi_version": 3,
+      "address": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+      "claim_authority": "o1myesz750uxepkx3hfekln7pp7h0f7prn2lu5taswn940g3mws0yqedcswg",
+      "claim_can_close": true,
+      "claim_can_continue": false,
+      "claim_recipient": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+      "code_id": "5d2f0afe89db1e06c90bc78bff1e3082b1bcad54662757a6916924d2244d3efe",
+      "deadline_height": 281286,
+      "max_fee_micronoid": 50000,
+      "max_payout_micronoid": 0,
+      "min_retained_micronoid": 0,
+      "opening_hex": "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+      "program": [
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "terminal",
+          "opcode": "assert_equal",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "one"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        }
+      ],
+      "recovery_authority": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+      "recovery_can_close": true,
+      "recovery_can_continue": false,
+      "recovery_recipient": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+      "state": [
+        "0",
+        "0"
+      ],
+      "state_hex": "00000000000000000000000000000000",
+      "unrestricted_payout_recipient": false
+    },
+    "bundle": {
+      "hashlock": "0x02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc",
+      "claim_authority": "o1myesz750uxepkx3hfekln7pp7h0f7prn2lu5taswn940g3mws0yqedcswg",
+      "opening_hex": "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+      "contract_root": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+      "params": {
+        "variant": "raw",
+        "amount_micronoid": 10000000,
+        "max_fee_micronoid": 50000,
+        "h_create": 280561,
+        "deadline_height": 281286,
+        "lock_by_height": 280667,
+        "w_a_s": 7200,
+        "alice_noid": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+        "bob_noid": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+        "eth": {
+          "chain_id": 31337,
+          "contract": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+          "code_hash": null,
+          "amount_wei": "1000000000000000",
+          "alice_receiver": "0x49877dace5b72f4e8768fbf5cb7ee1573c9ff9ea",
+          "bob_sender": "0x6f8560ec1185f50104f5b64df21e858dbd592883"
+        }
+      }
+    }
+  },
+  "noid": {
+    "description": "MOCK Parano1d answers for the noid-swap console; see generate.js",
+    "calls": [
+      {
+        "method": "paranoid_blockCount",
+        "params": [],
+        "result": 280700
+      },
+      {
+        "method": "paranoid_getEpochAnchor",
+        "params": [],
+        "result": "28931e56442916500aa93d58394a7d024aee9afeae746d32bd176b8099d7a02d"
+      },
+      {
+        "method": "paranoid_estimateFeeDetailed",
+        "params": [
+          1,
+          1
+        ],
+        "result": {
+          "n_inputs": 1,
+          "n_outputs": 1,
+          "net_new_slots": 0,
+          "active_slot_count": 106091,
+          "log_slots": 24,
+          "fee_micronoid": 5800,
+          "breakdown": {
+            "base": 5000,
+            "input": 100,
+            "output": 700,
+            "io": 800,
+            "state_growth": 0,
+            "burned": 0,
+            "relay_floor": 5000,
+            "relay_total": 5800,
+            "required_total": 5800,
+            "paid_total": 5800,
+            "miner_claimable": 5800
+          }
+        }
+      },
+      {
+        "method": "paranoid_getObjectInstances",
+        "params": [
+          "4e4f49444f424a330300c87200000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000d933017a8fe1b21b1a374e6df9f821f5de9f047357f945f60e996af4476e83c814a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832c64a04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+          0,
+          16
+        ],
+        "result": {
+          "address": "o1qjnr505ua8gg63enxsjq9a4rsvlfg3nkx7zy5pfsdudy9ktuajlq786367",
+          "height": 280700,
+          "tip_hash": "e22854c465f310d9e2b4caee288593a275c458bb5b81629e078c23ede8901182",
+          "next_slot": null,
+          "slots": []
+        }
+      },
+      {
+        "method": "paranoid_getMempoolInfo",
+        "params": [],
+        "result": {
+          "size": 3,
+          "fee_floor": 5000,
+          "txs": [
+            {
+              "tx_hash": "a0f03a2e6bf1c016a7169d669a1684154a6ddd470be8d1d60a56f6d7be4c2ca0",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 280700,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "96e03b2bd14365d9bf15532fa38e346912195f29779d38c773b1429d263dc00a",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 280700,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "d832a2c015335e472542951042fa7e23c2efd91f195074f7f9c1555ea688c25e",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 280700,
+              "has_authorization": true
+            }
+          ]
+        }
+      },
+      {
+        "method": "paranoid_getTx",
+        "params": [
+          "267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780"
+        ],
+        "result": {
+          "tx_hash": "267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780",
+          "height": 280638,
+          "block_hash": "aad47bb7b3250b6067b7cb3d3177a51e8814f80765c4b3d74eec3e9f357a8422",
+          "tx_position": 1
+        }
+      },
+      {
+        "method": "paranoid_getTx",
+        "params": [
+          "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324"
+        ],
+        "result": {
+          "tx_hash": "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324",
+          "height": 280659,
+          "block_hash": "3759a40c3a044fea5b5e49537679426cc7ebcca89305c78cfadf5492233f8cdb",
+          "tx_position": 1
+        }
+      }
+    ]
+  },
+  "eth": {
+    "description": "MOCK Ethereum answers (Hardhat-shaped, chain id 31337) for the noid-swap console; see generate.js",
+    "calls": [
+      {
+        "method": "eth_chainId",
+        "result": "0x7a69"
+      },
+      {
+        "method": "eth_blockNumber",
+        "result": "0x12c"
+      },
+      {
+        "method": "eth_getBlockByNumber",
+        "params": [
+          "latest",
+          false
+        ],
+        "result": {
+          "number": "0x12c",
+          "hash": "0x0a7ce4bef5cc2b4019e13ab9d0a6f1a380c6dd08ce13a7037d93027e841dddff",
+          "parentHash": "0xa1e60d63b28918788c4b7d8929ac82220d7930e8fd9595d3e13861a4f3bab8f8",
+          "timestamp": "0x6aeb442a",
+          "transactions": []
+        }
+      },
+      {
+        "method": "eth_getBlockByNumber",
+        "params": [
+          "finalized",
+          false
+        ],
+        "result": {
+          "number": "0x12c",
+          "hash": "0x0a7ce4bef5cc2b4019e13ab9d0a6f1a380c6dd08ce13a7037d93027e841dddff",
+          "parentHash": "0xa1e60d63b28918788c4b7d8929ac82220d7930e8fd9595d3e13861a4f3bab8f8",
+          "timestamp": "0x6aeb442a",
+          "transactions": []
+        }
+      },
+      {
+        "method": "eth_getLogs",
+        "result": [
+          {
+            "removed": false,
+            "logIndex": "0x0",
+            "transactionIndex": "0x0",
+            "transactionHash": "0xb1816331ad1acdd0469db40c907724fbd2026237fbb133dac89f01aa40843f5c",
+            "blockHash": "0x2f3881ed3c5bb5a31bbe1028c8f7ffd8d67996c94876543a4c9419c656e5370c",
+            "blockNumber": "0x109",
+            "address": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+            "data": "0x00000000000000000000000000000000000000000000000000038d7ea4c6800002d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc000000000000000000000000000000000000000000000000000000006aeb5ea6",
+            "topics": [
+              "0x578af4d125bb96ec89cd1ade591cb196f35d15047d5b096c478e45e311d84263",
+              "0x23a340a69533ae4fb235df236f6edba98a77d6413ab1c31a0f14874e6ff98c69",
+              "0x0000000000000000000000006f8560ec1185f50104f5b64df21e858dbd592883",
+              "0x00000000000000000000000049877dace5b72f4e8768fbf5cb7ee1573c9ff9ea"
+            ]
+          },
+          {
+            "removed": false,
+            "logIndex": "0x0",
+            "transactionIndex": "0x0",
+            "transactionHash": "0x4405e4f344bf7b7cd886e3776739a27419efdffeaf29994967551d9d62570a09",
+            "blockHash": "0xb806b9e113318cb774cc9536d66071e10f221bb95462d661ebb9c68b5e370361",
+            "blockNumber": "0x10d",
+            "address": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+            "data": "0x1111111111111111111111111111111111111111111111111111111111111111",
+            "topics": [
+              "0x38d6042dbdae8e73a7f6afbabd3fbe0873f9f5ed3cd71294591c3908c2e65fee",
+              "0x23a340a69533ae4fb235df236f6edba98a77d6413ab1c31a0f14874e6ff98c69"
+            ]
+          }
+        ]
+      },
+      {
+        "method": "eth_call",
+        "result": "0x0000000000000000000000006f8560ec1185f50104f5b64df21e858dbd59288300000000000000000000000049877dace5b72f4e8768fbf5cb7ee1573c9ff9ea00000000000000000000000000000000000000000000000000038d7ea4c6800002d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc000000000000000000000000000000000000000000000000000000006aeb5ea6000000000000000000000000000000000000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000001111111111111111111111111111111111111111111111111111111111111111"
+      }
+    ]
+  },
+  "status_text": null
+}

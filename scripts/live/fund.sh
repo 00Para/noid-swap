@@ -50,6 +50,7 @@
 # bash 3.2 safe (the macOS /bin/bash): no mapfile, no GNU-only options.
 set -u
 . "$(dirname "$0")/env.sh"
+require_classic_run fund.sh wallet-fund.sh || exit 2   # a wallet run funds from the swap wallet (wallet-fund.sh); this helper is the classic run's
 DRY=0
 case "${1:-}" in --dry-run) DRY=1 ;; "") ;; *) echo "usage: fund.sh [--dry-run]" >&2; exit 2 ;; esac
 if [ "$LIVE_PLATFORM" = native ]; then _cli_default=parano1d-cli; else _cli_default=/mnt/c/Parano1d/bin/parano1d-cli.exe; fi

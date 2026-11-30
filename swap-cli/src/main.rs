@@ -15,6 +15,8 @@
 //!   claim         Bob: if the engine says ClaimNoid, build+prove+verify the claim; --submit sends it
 //!   alice-params  print the contract parameters/definition Alice funds with the stock wallet
 //!   gates         evaluate the section 4.2 gates for given heights and times
+//!   wallet        the NOID swap wallet of one swap (Alice): new, address, balance, fund, recover, sweep, export
+//!   ethkey        the Ethereum swap key of one party: new, address, emit (the key leaves only through a pipe)
 //!
 //! The passphrase that seals Alice's secret is read from the environment
 //! variable named by `--passphrase-env` (default `SWAP_PASSPHRASE`), never from
@@ -38,6 +40,9 @@ use swap_cli::equiv::{verify_receipt, ProcessRunner, VerifyRequest};
 use swap_cli::params::{self, ContractVersion, ProfileName};
 use swap_cli::secret::{parse_hex32, LockKind, Secret, Variant};
 use swap_cli::state::{BobPhase, Phase, Role};
+use swap_cli::wallet::flow::{self, FlowEnv, Outcome};
+use swap_cli::wallet::key::WalletFile;
+use swap_cli::wallet::WalletKey;
 use swap_cli::swapfile::{AttestationSource, BobTerms, EquivalenceAttestation, EthParams, HashlockRegistry, KdfParams, Passphrase, SwapFile, SwapLock, SwapPublic};
 use swap_cli::watch::eth::{EthWatcher, LockDiscovery};
 use swap_cli::watch::exec::ExecJsonRpc;
@@ -52,7 +57,7 @@ const USAGE: &str = "usage:
                      --eth-receiver 0x.. --eth-sender 0x.. [--variant raw|stock]
                      [--eth-code-hash 0x..] [--profile production|rehearsal|sepolia] [--contract-version 1|2]
                      [--floor-seen MICRONOID] [--passphrase-env VAR] [--registry FILE] [--eth-lock-kind sha256|poseidon]
-                     (the bundle printed on stdout carries a `bundle_check`; hand it to Bob as a file and compare the `bundle check:` line on stderr on both machines)
+                     (the bundle printed on stdout carries a `bundle_check`; hand it to Bob as a file and compare the `bundle check:` line on stderr on both machines; the line `bundle digest: <64 hex>` after it is the whole digest, for a program)
                      (--eth-lock-kind: the Ethereum lock. sha256 (default) = HTLC.sol keyed on SHA-256(s), Bob needs the equivalence proof; poseidon =
                       HTLCPoseidonV2.sol keyed on A = Addr(s), the raw variant only, NO equivalence proof, the lock word is the NOID claim authority;
                       the bundle carries a non-default kind and Bob must ask for the same)
@@ -104,6 +109,36 @@ const USAGE: &str = "usage:
                  (Bob only; dry run unless --submit; --submit needs a live --noid-rpc)
   swap-cli alice-params FILE [--definition-out FILE] [--params-out FILE] [--check-object FILE]
   swap-cli gates --d HEIGHT --h-now HEIGHT --t-now UNIX [--h-final HEIGHT] [--profile production|rehearsal|sepolia]
+  swap-cli wallet new --out WALLETFILE [--passphrase-env VAR]
+                (the NOID swap wallet, piece 2a: a fresh throwaway wallet for ONE swap. `new` makes the wallet (a random 32-byte master secret, sealed with the
+                 passphrase) and prints its address; hand the file to `new-alice --wallet WALLETFILE [--payout o1..]`, which seals the secret into the swap file and
+                 sets the swap's recovery address to the wallet's address. The address is the stock wallet's first address for that master secret, so
+                 `wallet export` lets you import it into the stock wallet: you are never locked in)
+  swap-cli wallet address FILE
+  swap-cli wallet balance FILE --noid-rpc URL [--transport tcp|curl] [--curl-path PATH] [--rpc-timeout SECS]
+                (plain NOID coins only; native-asset carriers are shown apart and never counted; the amount, the funding's fee and whether the deposit covers them)
+  swap-cli wallet fund|recover|sweep FILE --noid-rpc URL [--submit-rpc URL]... [--dry-run | --submit] [--passphrase-env VAR] [--transport ..] [--curl-path ..] [--rpc-timeout ..]
+                (fund: a plain payment of exactly the swap's amount to the contract's address, from the wallet. recover: the close at or after the deadline, which pays the
+                 wallet. sweep: everything spendable minus the fee to the payout address stored in the swap file, only once the swap is over and the swap's own instance is
+                 closed. Without --submit nothing is sent and nothing is written: the transaction is built, proved, verified and printed (--dry-run says the same).
+                 With --submit the transaction's bytes and id are written beside the swap file (FILE.wallet-fund.json etc.) BEFORE they are sent; a run
+                 that is interrupted or times out is finished by running the same command again, which sends the SAME bytes, never a second funding. A failed
+                 send is reported as 'may have been sent' whenever it might have left. The funding is refused after the swap's last funding height.)
+  swap-cli ethkey new --out KEYFILE [--passphrase-env VAR]     (stdin: the two lines `live.js keygen --stdout` writes, the address then the key)
+                (the Ethereum swap key, piece 2b: a fresh throwaway key for ONE swap and one party. This tool has no secp256k1 code, so the key is made by
+                 `node scripts/live.js keygen --stdout | swap-cli ethkey new --out KEYFILE`; this command checks the key is a valid secp256k1 secret, seals it with the
+                 passphrase and prints only the address. Run `swap-cli ethkey emit KEYFILE | node scripts/live.js address --key-stdin --expect ADDRESS` once: that
+                 recomputes the address from the key (this tool cannot). Hand the file to `new-alice --eth-key` or `new-bob --eth-key`; delete it once the swap file holds the key.)
+  swap-cli ethkey address FILE          (the address, and for a swap file the payout address too; KEYFILE or a swap file)
+  swap-cli ethkey emit FILE [--passphrase-env VAR]
+                (writes the raw key, `0x` and 64 hex, on stdout for a PIPE only (it refuses a terminal): swap-cli ethkey emit FILE | node scripts/live.js ... --key-stdin.
+                 KEYFILE or a swap file. Never on a command line, never in a log.)
+  swap-cli new-alice|new-bob ... --eth-key KEYFILE --eth-payout 0x..
+                (seal the Ethereum swap key into the swap file; the key's address must be --eth-receiver (Alice) or --eth-sender (Bob). --eth-payout is the user's own Ethereum
+                 address `live.js sweep` sends what is left to: stored in the file, bound to the sealed key; both flags are given together)
+  swap-cli wallet export FILE --i-understand-this-is-the-key [--passphrase-env VAR]
+                (prints the wallet's master secret and the 699-byte opening ONCE, on stdout, for a backup. To use them without this tool: import the master secret into a
+                 FRESH stock-wallet data folder with `parano1d --import-wallet-secret`; the first address that wallet shows is the swap wallet's.)
   --transport tcp   built-in http:// client (default; no TLS)
   --transport curl  spawn curl (default /mnt/c/Windows/System32/curl.exe in WSL, else `curl`); also https://
   Plain http:// is accepted only to 127.0.0.1, localhost or [::1]; any other host needs https:// with --transport curl, or --allow-plain-http.
@@ -120,7 +155,9 @@ const USAGE: &str = "usage:
   It is a screen, not a defence.";
 
 /// Flags that never take a value, so `claim --submit FILE` cannot swallow FILE.
-const BOOL_FLAGS: [&str; 12] = [
+const BOOL_FLAGS: [&str; 14] = [
+    "dry-run",
+    "i-understand-this-is-the-key",
     "apply",
     "submit",
     "fast-kdf",
@@ -162,6 +199,8 @@ fn run(args: &[String]) -> Res<()> {
         "claim" => claim(positional.first().ok_or(USAGE)?, &flags),
         "alice-params" => alice_params(positional.first().ok_or(USAGE)?, &flags),
         "gates" => gates(&flags),
+        "wallet" => wallet_cmd(&positional, &flags),
+        "ethkey" => ethkey_cmd(&positional, &flags),
         _ => Err(USAGE.into()),
     }
 }
@@ -1049,7 +1088,36 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
         "stock" => Variant::Stock,
         other => return Err(format!("unknown variant {other}")),
     };
-    let alice = Address::parse(flag(flags, "alice")?).map_err(|e| format!("--alice: {e}"))?;
+    // The NOID swap wallet (piece 2a): `--wallet WALLETFILE` (made by `wallet new`) makes the wallet's address the swap's recovery address; `--payout` is
+    // the user's own address for the sweep. Without `--wallet` this is the swap as it always was (`--alice` names the stock wallet's address).
+    let pass = passphrase(flags)?;
+    let kdf = kdf_params(flags)?;
+    let wallet_key = match flags.get("wallet").and_then(|v| v.first()) {
+        Some(path) => Some(WalletFile::load(Path::new(path)).and_then(|w| w.open(&pass)).map_err(|e| format!("--wallet: {e}"))?),
+        None => None,
+    };
+    // The Ethereum swap key (piece 2b): `--eth-key KEYFILE --eth-payout 0x..`, opened now so a wrong passphrase or a key that is not --eth-receiver's refuses before anything is made.
+    let eth_key = eth_key_flags(flags, "eth-receiver")?;
+    let payout = match flags.get("payout").and_then(|v| v.first()) {
+        Some(p) => {
+            if wallet_key.is_none() {
+                return Err("--payout belongs to a swap with a NOID swap wallet: give --wallet WALLETFILE too".into());
+            }
+            Some(Address::parse(p).map_err(|e| format!("--payout: {e}"))?)
+        }
+        None => None,
+    };
+    let alice = match (&wallet_key, flags.get("alice").and_then(|v| v.first())) {
+        (Some(k), Some(a)) => {
+            let given = Address::parse(a).map_err(|e| format!("--alice: {e}"))?;
+            if given != k.address() {
+                return Err("--alice is not the swap wallet's address: with --wallet the recovery address IS the wallet's; leave --alice out".into());
+            }
+            given
+        }
+        (Some(k), None) => k.address(),
+        (None, _) => Address::parse(flag(flags, "alice")?).map_err(|e| format!("--alice: {e}"))?,
+    };
     let bob = Address::parse(flag(flags, "bob")?).map_err(|e| format!("--bob: {e}"))?;
     let lock_kind = parse_lock_kind(flags)?;
     if lock_kind == LockKind::Poseidon && variant != Variant::Raw {
@@ -1064,8 +1132,6 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
         alice_receiver: addr20(flag(flags, "eth-receiver")?)?,
         bob_sender: addr20(flag(flags, "eth-sender")?)?,
     };
-    let pass = passphrase(flags)?;
-    let kdf = kdf_params(flags)?;
     let secret = Secret::generate().map_err(|e| e.to_string())?;
     let contract_version = parse_contract_version(flags)?;
     // F_max input: v1 = the live estimate; v2 = max(estimate, --floor-seen) (docs/htlc-v2-fixed-fee.md section 5).
@@ -1088,11 +1154,32 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
         eth,
     )
     .map_err(|e| e.to_string())?;
-    // T9: never two swaps under one hashlock on this machine.
-    register_hashlock(flags, &out, &public.hashlock, "alice")?;
-    let file = SwapFile::new_alice(public, &secret, &pass, &kdf, now_unix()).map_err(|e| e.to_string())?;
+    let mut file = match &wallet_key {
+        Some(k) => SwapFile::new_alice_with_wallet(public, &secret, k.master(), payout.as_ref(), &pass, &kdf, now_unix()),
+        None => SwapFile::new_alice(public, &secret, &pass, &kdf, now_unix()),
+    }
+    .map_err(|e| e.to_string())?;
+    if let Some((k, eth_payout)) = &eth_key {
+        file = file.with_eth_key(k, eth_payout, &pass, &kdf).map_err(|e| format!("--eth-key: {e}"))?;
+    }
+    // T9: never two swaps under one hashlock on this machine (after the file is built, so a refused swap leaves no registry line).
+    register_hashlock(flags, &out, &file.public.hashlock, "alice")?;
     file.save(&out).map_err(|e| e.to_string())?;
     eprintln!("swap file written: {} (phase created; nothing on chain)", out.display());
+    if let Some((k, eth_payout)) = &eth_key {
+        eprintln!(
+            "Ethereum swap key: this swap's alice_receiver is the key's address, {}; it pays the reveal's fee and receives the ETH you buy, so fund it with the reserve `live.js reserve --role alice --swap FILE` prints BEFORE the NOID funding. What is left is swept to {} (stored in the swap file). The key file you made with `ethkey new` is a second copy of the key: delete it once this swap file is saved and backed up.",
+            swap_cli::ethkey::address_hex(&k.address()),
+            swap_cli::ethkey::address_hex(eth_payout)
+        );
+    }
+    if let Some(k) = &wallet_key {
+        eprintln!(
+            "NOID swap wallet: the swap's recovery address is the wallet's, {}; deposit only this swap's coins there (the amount and the funding fee), payout address for the sweep: {}. The wallet file you made with `wallet new` is a second copy of the wallet secret: delete it once this swap file is saved and backed up.",
+            k.address().to_bech32(),
+            payout.as_ref().map(Address::to_bech32).unwrap_or_else(|| "none (the sweep is refused until the swap has one)".into())
+        );
+    }
     if let Some(fee) = file.public.params.fixed_close_fee() {
         eprintln!(
             "contract v2 (HashTimeLockV2): every close pays exactly {fee} micro-NOID; Bob receives {} micro-NOID; tell Bob to pass --contract-version 2",
@@ -1106,6 +1193,7 @@ fn new_alice(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     let bundle = CheckedBundle::new(&file.public)?;
     eprintln!("{}", bundle.line());
+    eprintln!("{}", bundle.digest_line());
     eprintln!("send Bob the bundle below as a file, not as pasted text (it contains no secret); Bob's new-bob prints the same `bundle check:` line:");
     println!("{}", bundle.to_pretty_json()?);
     Ok(())
@@ -1128,10 +1216,15 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     let eth_code_hash = eth_code_hash_flag(flags, lock_kind)?;
     let eth_amount_wei = flag(flags, "eth-amount-wei")?.parse::<u128>().map_err(|e| format!("--eth-amount-wei: {e}"))?;
     let bob_sender = addr20(flag(flags, "eth-sender")?)?;
+    // The Ethereum swap key (piece 2b, amendment K: Bob's file may hold a sealed secret): opened now, and refused unless its address is --eth-sender.
+    let eth_key = eth_key_flags(flags, "eth-sender")?;
     let text = std::fs::read_to_string(flag(flags, "bundle")?).map_err(|e| e.to_string())?;
     // The carrier check comes before any other use of the bundle: a copy damaged in transit is refused here, with that message.
     let (public, bundle_status) = open_bundle(&text, flags.contains_key("allow-unchecked-bundle"))?;
     eprintln!("{}", bundle_status.line());
+    if let Some(line) = bundle_status.digest_line() {
+        eprintln!("{line}");
+    }
     if bundle_status == BundleStatus::Unchecked {
         eprintln!("(--allow-unchecked-bundle: every other check below still runs)");
     }
@@ -1169,6 +1262,12 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     // Design step 5: rebuild the opening byte-for-byte, run the guard and the gates,
     // compare with Bob's terms, and tie the verified proof (or, for poseidon, the lock word) to this bundle.
     let mut file = SwapFile::new_bob_with(public, &terms, equivalence.as_ref(), now_unix()).map_err(|e| e.to_string())?;
+    // Sealed before the slow self-test, so a refusal costs nothing.
+    if let Some((k, eth_payout)) = &eth_key {
+        let pass = passphrase(flags)?;
+        let kdf = kdf_params(flags)?;
+        file = file.with_eth_key(k, eth_payout, &pass, &kdf).map_err(|e| format!("--eth-key: {e}"))?;
+    }
     // Review V2-10: with a lock on A = Addr(s) only client R can claim; Bob sees it work on this machine before the file exists.
     let mut selftest_note = None;
     if lock_kind == LockKind::Poseidon {
@@ -1198,6 +1297,13 @@ fn new_bob(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     eprintln!("The Ethereum contract code hash (compiled into this tool, per lock kind) and the chain id you gave are checked on every poll, before any ETH spend (lock, reveal, refund).");
     eprintln!("swap file written: {}", out.display());
+    if let Some((k, eth_payout)) = &eth_key {
+        eprintln!(
+            "Ethereum swap key: this swap's bob_sender is the key's address, {}; it receives your deposit, sends the lock and receives the refund if the swap fails: fund it with the reserve `live.js reserve --role bob --swap FILE` prints BEFORE the lock. What is left is swept to {} (stored in the swap file). The key file you made with `ethkey new` is a second copy of the key: delete it once this swap file is saved and backed up.",
+            swap_cli::ethkey::address_hex(&k.address()),
+            swap_cli::ethkey::address_hex(eth_payout)
+        );
+    }
     println!("{}", summary_json(&file)?);
     Ok(())
 }
@@ -1308,6 +1414,7 @@ fn bundle(path: &str) -> Res<()> {
     let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
     let bundle = CheckedBundle::new(&file.public)?;
     eprintln!("{}", bundle.line());
+    eprintln!("{}", bundle.digest_line());
     println!("{}", bundle.to_pretty_json()?);
     Ok(())
 }
@@ -1450,6 +1557,219 @@ fn gates(flags: &HashMap<String, Vec<String>>) -> Res<()> {
     }
     println!("{}", serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?);
     Ok(())
+}
+
+// ---------------------------------------------------------------- Ethereum swap key (swap wallet, piece 2b)
+
+/// `--eth-key KEYFILE` and `--eth-payout 0x..`, given together or not at all: the opened key (it must be the address the terms flag `terms_flag` names:
+/// `--eth-receiver` for Alice, `--eth-sender` for Bob) and the payout. The passphrase is asked for only when they are given.
+fn eth_key_flags(flags: &HashMap<String, Vec<String>>, terms_flag: &str) -> Res<Option<(swap_cli::ethkey::EthKey, [u8; 20])>> {
+    let key_path = flags.get("eth-key").and_then(|v| v.first());
+    let payout = flags.get("eth-payout").and_then(|v| v.first());
+    let (key_path, payout) = match (key_path, payout) {
+        (None, None) => return Ok(None),
+        (Some(k), Some(p)) => (k, p),
+        _ => return Err("--eth-key and --eth-payout belong together: the swap file stores the key and the address the sweep goes to".into()),
+    };
+    let pass = passphrase(flags)?;
+    let payout = swap_cli::ethkey::parse_address(payout).map_err(|e| format!("--eth-payout: {e}"))?;
+    let key = swap_cli::ethkey::EthKeyFile::load(Path::new(key_path)).and_then(|f| f.open(&pass)).map_err(|e| format!("--eth-key: {e}"))?;
+    let terms = addr20(flag(flags, terms_flag)?)?;
+    if key.address() != terms {
+        return Err(format!("--eth-key: the key file's address is not --{terms_flag}: with this role the swap's Ethereum account must be the key's own"));
+    }
+    Ok(Some((key, payout)))
+}
+
+fn ethkey_cmd(positional: &[String], flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    use std::io::IsTerminal as _;
+    let sub = positional.first().ok_or(USAGE)?.as_str();
+    match sub {
+        "new" => {
+            let out = PathBuf::from(flag(flags, "out")?);
+            let pass = passphrase(flags)?;
+            let kdf = kdf_params(flags)?;
+            if std::io::stdin().is_terminal() {
+                return Err("`ethkey new` reads the address and the key from a pipe (node scripts/live.js keygen --stdout | swap-cli ethkey new --out KEYFILE); stdin is a terminal, so the key would be typed in the clear".into());
+            }
+            let text = read_stdin_limited(4096)?;
+            let key = swap_cli::ethkey::parse_keygen_output(&text).map_err(|e| e.to_string())?;
+            swap_cli::ethkey::EthKeyFile::create(&key, &pass, &kdf).and_then(|f| f.save_new(&out)).map_err(|e| e.to_string())?;
+            eprintln!("Ethereum key file written: {} (the key is sealed with the passphrase; nothing is on chain). This tool cannot recompute the address from the key: run `swap-cli ethkey emit KEYFILE | node scripts/live.js address --key-stdin --expect ADDRESS` once before you use the address. Give the file to `new-alice --eth-key` or `new-bob --eth-key`; delete it once the swap file holds the key.", out.display());
+            print_json(&serde_json::json!({"address": swap_cli::ethkey::address_hex(&key.address()), "eth_key_file": out.display().to_string()}))
+        }
+        "address" => {
+            let path = positional.get(1).ok_or(USAGE)?;
+            let v = read_json_file(path)?;
+            if v.get("public").is_some() {
+                let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
+                let k = file.eth_key.as_ref().ok_or("this swap file has no Ethereum swap key (it was made without --eth-key)")?;
+                print_json(&serde_json::json!({"address": k.address, "payout": k.payout, "role": file.role.to_string()}))
+            } else {
+                let f = swap_cli::ethkey::EthKeyFile::load(Path::new(path)).map_err(|e| e.to_string())?;
+                f.address().map_err(|e| e.to_string())?;
+                print_json(&serde_json::json!({"address": f.address}))
+            }
+        }
+        "emit" => {
+            let path = positional.get(1).ok_or(USAGE)?;
+            if std::io::stdout().is_terminal() {
+                return Err("`ethkey emit` writes the raw Ethereum key: pipe it (swap-cli ethkey emit FILE | node scripts/live.js ... --key-stdin); stdout is a terminal, so the key would be shown on the screen".into());
+            }
+            let pass = passphrase(flags)?;
+            let v = read_json_file(path)?;
+            let key = if v.get("public").is_some() {
+                SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?.decrypt_eth_key(&pass).map_err(|e| e.to_string())?
+            } else {
+                swap_cli::ethkey::EthKeyFile::load(Path::new(path)).and_then(|f| f.open(&pass)).map_err(|e| e.to_string())?
+            };
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            out.write_all(key.emit_hex().as_bytes()).and_then(|()| out.write_all(b"\n")).and_then(|()| out.flush()).map_err(|e| format!("stdout: {e}"))
+        }
+        _ => Err(USAGE.into()),
+    }
+}
+
+fn read_json_file(path: &str) -> Res<serde_json::Value> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    serde_json::from_slice(&bytes).map_err(|_| format!("{path}: not a JSON file"))
+}
+
+/// All of stdin, at most `max` bytes (more is refused, and nothing of it is shown).
+fn read_stdin_limited(max: u64) -> Res<zeroize::Zeroizing<String>> {
+    use std::io::Read as _;
+    let mut buf = zeroize::Zeroizing::new(String::new());
+    std::io::stdin().lock().take(max + 1).read_to_string(&mut buf).map_err(|e| format!("stdin: {e}"))?;
+    if buf.len() as u64 > max {
+        return Err(format!("stdin: more than {max} bytes; refusing"));
+    }
+    Ok(buf)
+}
+
+// ---------------------------------------------------------------- wallet (swap wallet, piece 2a)
+
+fn wallet_cmd(positional: &[String], flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    let sub = positional.first().ok_or(USAGE)?.as_str();
+    if sub == "new" {
+        return wallet_new(flags);
+    }
+    let path = positional.get(1).ok_or(USAGE)?.as_str();
+    match sub {
+        "address" => wallet_address(path),
+        "balance" => wallet_balance(path, flags),
+        "fund" => wallet_step(path, flags, WalletStep::Fund),
+        "recover" => wallet_step(path, flags, WalletStep::Recover),
+        "sweep" => wallet_step(path, flags, WalletStep::Sweep),
+        "export" => wallet_export(path, flags),
+        _ => Err(USAGE.into()),
+    }
+}
+
+fn wallet_new(flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    let out = PathBuf::from(flag(flags, "out")?);
+    let pass = passphrase(flags)?;
+    let kdf = kdf_params(flags)?;
+    let key = WalletKey::generate().map_err(|e| e.to_string())?;
+    WalletFile::create(&key, &pass, &kdf).and_then(|w| w.save_new(&out)).map_err(|e| e.to_string())?;
+    eprintln!("wallet file written: {} (the master secret is sealed with the passphrase; nothing is on chain). Give it to `new-alice --wallet`; delete it once the swap file holds the wallet.", out.display());
+    print_json(&serde_json::json!({"address": key.address().to_bech32(), "wallet_file": out.display().to_string()}))
+}
+
+fn load_alice_swap(path: &str) -> Res<SwapFile> {
+    let file = SwapFile::load(Path::new(path)).map_err(|e| e.to_string())?;
+    if file.wallet.is_none() {
+        return Err("this swap file has no NOID swap wallet (it was made without `new-alice --wallet`)".into());
+    }
+    Ok(file)
+}
+
+fn wallet_address(path: &str) -> Res<()> {
+    let file = load_alice_swap(path)?;
+    let w = file.wallet.as_ref().ok_or("no wallet")?;
+    print_json(&serde_json::json!({"address": w.address, "payout": w.payout, "contract_root": file.public.contract_root}))
+}
+
+fn wallet_balance(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    let file = load_alice_swap(path)?;
+    let pass = passphrase(flags)?;
+    let key = WalletKey::from_secret(file.decrypt_wallet(&pass).map_err(|e| e.to_string())?);
+    let net = net(flags)?;
+    let url = flag(flags, "noid-rpc")?;
+    let rpc = open_url(&net, url)?;
+    let b = swap_cli::wallet::flow::balance(&file, &key, &*rpc).map_err(|e| e.to_string())?;
+    print_json(&serde_json::json!({
+        "address": b.address,
+        "tip": b.tip,
+        "plain_micronoid": b.plain_total,
+        "plain_coins": b.plain_coins,
+        "native_asset_carriers_not_counted": b.carriers,
+        "swap_amount_micronoid": b.amount,
+        "funding_fee_reserve_micronoid": b.fee_reserve,
+        "needed_micronoid": b.need,
+        "deposit_covers": b.covers,
+    }))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WalletStep {
+    Fund,
+    Recover,
+    Sweep,
+}
+
+fn wallet_step(path: &str, flags: &HashMap<String, Vec<String>>, step: WalletStep) -> Res<()> {
+    let submit = flags.contains_key("submit");
+    if submit && flags.contains_key("dry-run") {
+        return Err("--submit and --dry-run say opposite things; give one (no flag at all is a dry run)".into());
+    }
+    let path_buf = PathBuf::from(path);
+    // A submitting step reads, builds, writes its record and sends: no other command may save the swap file's neighbours in between.
+    let _lock = if submit { Some(lock_swap_file(&path_buf)?) } else { None };
+    let file = load_alice_swap(path)?;
+    let pass = passphrase(flags)?;
+    let key = WalletKey::from_secret(file.decrypt_wallet(&pass).map_err(|e| e.to_string())?);
+    let net = net(flags)?;
+    let primary = flag(flags, "noid-rpc")?.to_string();
+    let rpc = open_url(&net, &primary)?;
+    let mut nodes: Vec<(String, Box<dyn IntentSubmitter>)> = Vec::new();
+    if submit {
+        let mut urls = vec![primary.clone()];
+        urls.extend(flags.get("submit-rpc").cloned().unwrap_or_default());
+        for u in &urls {
+            nodes.push((redact(u), Box::new(RpcSubmitter(open_url(&net, u)?))));
+        }
+        eprintln!("SUBMITTING from the swap wallet to {} node(s): {}", nodes.len(), nodes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    let refs: Vec<(&str, &dyn IntentSubmitter)> = nodes.iter().map(|(n, s)| (n.as_str(), s.as_ref())).collect();
+    let env = FlowEnv { swap_path: &path_buf, file: &file, key: &key, rpc: &*rpc, nodes: &refs, submit, now: now_unix() };
+    let report = match step {
+        WalletStep::Fund => flow::fund(&env),
+        WalletStep::Recover => {
+            let fee = flow::recovery_fee(&file, &swap_cli::wallet::chain::NodeReads::new(&*rpc)).map_err(|e| e.to_string())?;
+            flow::recover(&env, fee)
+        }
+        WalletStep::Sweep => flow::sweep(&env),
+    }
+    .map_err(|e| e.to_string())?;
+    print_json(&report.to_json())?;
+    match report.outcome {
+        Outcome::MaybeSent => Err("the transaction MAY HAVE BEEN SENT: do not build another; run the same command again to send the same bytes".into()),
+        Outcome::NotSent => Err("the transaction was not sent".into()),
+        _ => Ok(()),
+    }
+}
+
+fn wallet_export(path: &str, flags: &HashMap<String, Vec<String>>) -> Res<()> {
+    if !flags.contains_key("i-understand-this-is-the-key") {
+        return Err("`wallet export` prints the wallet's master secret: whoever holds it can spend what is in the wallet. Add --i-understand-this-is-the-key to print it once, on stdout, and keep it off screens, logs and shared files".into());
+    }
+    let file = load_alice_swap(path)?;
+    let pass = passphrase(flags)?;
+    let e = flow::export(&file, &pass).map_err(|e| e.to_string())?;
+    eprintln!("WARNING: the next lines hold the wallet's master secret. Whoever has it can spend the wallet. Write it down offline; do not paste it anywhere.");
+    eprintln!("To use the wallet without this tool: start a FRESH stock-wallet data folder and run `parano1d --import-wallet-secret` with the master secret; the first address the wallet shows is {}. The opening below is what a contract call needs (`contract call` takes the opening from the object file); keep it with the secret.", e.address);
+    print_json(&serde_json::json!({"address": e.address, "master_secret": e.master_secret_hex.as_str(), "contract_opening_hex": e.opening_hex}))
 }
 
 fn now_unix() -> u64 {

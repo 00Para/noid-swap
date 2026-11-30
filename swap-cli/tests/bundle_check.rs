@@ -92,7 +92,12 @@ fn new_alice_writes_the_check_and_both_sides_print_the_same_line() {
     assert!(ok, "{err}");
     assert_eq!(serde_json::from_str::<Value>(&again).unwrap(), v);
     assert_eq!(check_line(&err, "bundle check: "), line);
-    // `alice-params` prints it as well.
+    // The machine line `bundle digest: <64 hex>` is the whole digest; the check line shows its first 16 digits. `new-alice` and `bundle` print it, `new-bob` prints it
+    // after its `ok` line, all the same.
+    let digest = format!("bundle digest: {sha}");
+    assert_eq!(check_line(&f.alice_err, "bundle digest: "), digest);
+    assert_eq!(check_line(&err, "bundle digest: "), digest);
+    // `alice-params` prints the check line as well.
     let (ok, _, err) = run(bin().args(["alice-params", f.alice_file.to_str().unwrap()]));
     assert!(ok, "{err}");
     assert_eq!(check_line(&err, "bundle check: "), line);
@@ -100,6 +105,7 @@ fn new_alice_writes_the_check_and_both_sides_print_the_same_line() {
     let (ok, _, err, out) = f.new_bob("ok", &f.bundle_text, &[]);
     assert!(ok, "{err}");
     assert_eq!(check_line(&err, "bundle check: "), format!("bundle check: {} ok", &sha[..16]));
+    assert_eq!(check_line(&err, "bundle digest: "), digest);
     assert!(!std::fs::read_to_string(out).unwrap().contains("bundle_check"));
 }
 
@@ -135,6 +141,8 @@ fn a_damaged_bundle_is_refused_before_anything_else_and_nothing_is_written() {
         }
         // Refused first: none of the later checks spoke, and no file and no registry entry exist.
         assert!(!err.contains("byte-for-byte") && !err.contains("equiv"), "{name}: {err}");
+        // A damaged bundle prints no digest line either (the line would vouch for a bundle that did not verify).
+        assert!(!err.contains("bundle digest: "), "{name}: {err}");
         assert!(!out.exists() && !f.dir.path().join(format!("{name}.registry")).exists(), "{name}");
     }
 }
@@ -170,6 +178,7 @@ fn a_bundle_without_the_check_needs_the_flag_and_the_other_checks_still_run() {
     let (ok, _, err, out) = f.new_bob("old-flag", &old, &["--allow-unchecked-bundle"]);
     assert!(ok, "{err}");
     assert!(err.contains("warning: this bundle carries no bundle_check"), "{err}");
+    assert!(!err.contains("bundle digest: "), "an unchecked bundle has no digest to vouch for: {err}");
     assert!(out.exists());
     // With the flag the opening rebuild still refuses a tampered old-style bundle.
     let tampered = old.replacen("\"max_fee_micronoid\": 50000", "\"max_fee_micronoid\": 60000", 1);

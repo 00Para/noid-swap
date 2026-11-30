@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>No1d Swap operator console</title>
+  <link rel="icon" href="/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/operator.css">
+  <link rel="stylesheet" href="/board.css">
+</head>
+<body>
+  <a id="skip-link" class="skip" href="#next-action">Skip to the next action</a>
+
+  <header class="top">
+    <div class="wrap top-in">
+      <div class="top-row">
+        <img class="mark" src="/mark.svg" alt="" width="22" height="22"><span class="wordmark" aria-label="No1d Swap">No1d<i class="dia" aria-hidden="true"></i>Swap</span>
+        <span class="muted">operator console</span>
+        <span id="mode-chip" class="chip quiet">…</span>
+        <div class="strip-tools">
+          <div id="role-switch" class="seg" role="group" aria-label="Which side you are on"></div>
+          <button id="refresh" type="button" class="btn ghost sm">Refresh</button>
+        </div>
+      </div>
+      <section id="swap-head" aria-label="This swap"></section>
+    </div>
+  </header>
+
+  <section id="demo-bar" class="demo-bar" aria-label="Demo controls" hidden></section>
+
+  <main id="main" class="wrap">
+    <div id="bd-root" class="bd" hidden></div>
+    <div id="op-view">
+    <section id="alarms" class="alarms" aria-label="Alarms" aria-live="polite"></section>
+    <p id="board-line" class="margin-line" aria-live="polite" hidden></p>
+
+    <section id="next-action" class="due" tabindex="-1" aria-labelledby="h-action"></section>
+    <section id="start" class="start" aria-label="First steps of a swap" hidden></section>
+    <section id="timeline" class="block" aria-labelledby="h-timeline"></section>
+    <section id="picture" class="block" aria-labelledby="h-picture"></section>
+    <section id="deadlines" class="block" aria-labelledby="h-deadlines"></section>
+    <section id="abort" class="block" aria-labelledby="h-abort"></section>
+    <section id="receipts" class="block" aria-labelledby="h-receipts"></section>
+    <section id="actions" class="block actions" aria-labelledby="h-actions" hidden></section>
+
+    <details id="explain" class="fold" aria-labelledby="h-explain"></details>
+    <details id="history" class="fold" aria-labelledby="h-history"></details>
+    </div>
+  </main>
+
+  <footer class="foot">
+    <details id="files" class="fold">
+      <summary>What this page read</summary>
+      <div id="files-body"></div>
+    </details>
+    <p id="foot-note">
+      Read-only. This page never sends a transaction, never opens a <code>*.swap.json</code>, a key file or a passphrase, and never shows the secret
+      or a transaction opening. Spending commands are shown to be copied into your own terminal. See <a href="/console">the chain-polling console</a>.
+    </p>
+  </footer>
+
+  <script src="/phases.js"></script>
+  <script src="/enginetext.js"></script>
+  <script src="/viewmodel.js"></script>
+  <script src="/actions.js"></script>
+  <script src="/boardview.js"></script>
+  <script src="/board.js"></script>
+  <script src="/operator.js"></script>
+</body>
+</html>

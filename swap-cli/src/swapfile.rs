@@ -35,6 +35,12 @@ pub const SWAP_FILE_VERSION: u32 = 1;
 /// Files end in `.swap.json`, which the repository's `.gitignore` excludes.
 pub const SWAP_FILE_SUFFIX: &str = ".swap.json";
 const AAD_DOMAIN: &[u8] = b"noid-swap/swapfile/v1";
+/// Associated-data label of the NOID swap wallet's master secret (swap wallet, piece 2a, amendment K): every sealed field has its own
+/// label, so one sealed blob can never be moved into another field's place and still open.
+pub const AAD_LABEL_WALLET: &[u8] = b"noid-swap/swapfile/v1/wallet-secret";
+/// Associated-data label of a party's Ethereum swap key (swap wallet, piece 2b, amendment K): a label of its own, so that this blob cannot open as the claim
+/// secret or as the NOID wallet, nor those as this.
+pub const AAD_LABEL_ETH_KEY: &[u8] = b"noid-swap/swapfile/v1/eth-key";
 
 // ---------------------------------------------------------------- errors
 
@@ -761,9 +767,11 @@ impl fmt::Debug for Passphrase {
     }
 }
 
-fn aad(public_digest: &[u8; 32]) -> Vec<u8> {
-    let mut v = AAD_DOMAIN.to_vec();
+/// `label || public digest || context`: the associated data of a sealed field. `context` binds plain fields that sit beside the blob.
+fn aad_with(label: &[u8], public_digest: &[u8; 32], context: &[u8]) -> Vec<u8> {
+    let mut v = label.to_vec();
     v.extend_from_slice(public_digest);
+    v.extend_from_slice(context);
     v
 }
 
@@ -774,6 +782,18 @@ impl EncryptedSecret {
         kdf: &KdfParams,
         public_digest: [u8; 32],
     ) -> Result<Self, SwapFileError> {
+        Self::seal_labeled(secret, pass, kdf, public_digest, AAD_DOMAIN, &[])
+    }
+
+    /// [`EncryptedSecret::seal`] for another field: the associated data is `label || public digest || context`.
+    pub fn seal_labeled(
+        secret: &Secret,
+        pass: &Passphrase,
+        kdf: &KdfParams,
+        public_digest: [u8; 32],
+        label: &[u8],
+        context: &[u8],
+    ) -> Result<Self, SwapFileError> {
         let mut salt = [0u8; 16];
         let mut nonce = [0u8; 24];
         getrandom::getrandom(&mut salt).map_err(|e| SwapFileError::Crypto(e.to_string()))?;
@@ -781,12 +801,17 @@ impl EncryptedSecret {
         let key = kdf.derive(pass, &salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key));
         let ct = cipher
-            .encrypt(XNonce::from_slice(&nonce), Payload { msg: secret.bytes(), aad: &aad(&public_digest) })
+            .encrypt(XNonce::from_slice(&nonce), Payload { msg: secret.bytes(), aad: &aad_with(label, &public_digest, context) })
             .map_err(|e| SwapFileError::Crypto(e.to_string()))?;
         Ok(Self { kdf: kdf.clone(), salt, nonce, ciphertext: hex::encode(ct), sealed_to: public_digest })
     }
 
     pub fn open(&self, pass: &Passphrase, public_digest: [u8; 32]) -> Result<Secret, SwapFileError> {
+        self.open_labeled(pass, public_digest, AAD_DOMAIN, &[])
+    }
+
+    /// [`EncryptedSecret::open`] for a field sealed with [`EncryptedSecret::seal_labeled`] (same label and context, or it does not open).
+    pub fn open_labeled(&self, pass: &Passphrase, public_digest: [u8; 32], label: &[u8], context: &[u8]) -> Result<Secret, SwapFileError> {
         if self.sealed_to != public_digest {
             return Err(SwapFileError::PublicSectionModified);
         }
@@ -794,7 +819,7 @@ impl EncryptedSecret {
         let key = self.kdf.derive(pass, &self.salt)?;
         let cipher = XChaCha20Poly1305::new(Key::from_slice(&*key));
         let pt = cipher
-            .decrypt(XNonce::from_slice(&self.nonce), Payload { msg: &ct, aad: &aad(&public_digest) })
+            .decrypt(XNonce::from_slice(&self.nonce), Payload { msg: &ct, aad: &aad_with(label, &public_digest, context) })
             .map_err(|_| SwapFileError::WrongPassphrase)?;
         let pt = Zeroizing::new(pt);
         let bytes: [u8; 32] = pt
@@ -891,6 +916,96 @@ pub struct SwapFile {
     /// instance on this machine. The engine does not offer `lock_eth` without it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_r_selftest: Option<ClientRSelfTest>,
+    /// Alice only, optional (swap wallet, piece 2a): the fresh NOID wallet this swap uses, its address, and the payout address the sweep goes to.
+    /// A file made before has none and loads as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet: Option<WalletRecord>,
+    /// Either role, optional (swap wallet, piece 2b): the fresh Ethereum key this party uses for this swap (Alice's is `alice_receiver`, Bob's is `bob_sender`), the
+    /// address it is said to have, and the Ethereum address the sweep sends what is left to. A file made before has none and loads as it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eth_key: Option<EthKeyRecord>,
+}
+
+/// The Ethereum swap key of one party: the key sealed under its own label, the address it is said to have (`0x` and 40 lower-case hex; `live.js`
+/// recomputes it from the key at every use), and the user's own Ethereum payout address for the sweep. The associated data of the sealed blob covers
+/// the address and the payout, so editing either in the file makes the blob refuse to open; `live.js sweep` reads `payout` from here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EthKeyRecord {
+    pub address: String,
+    pub secret: EncryptedSecret,
+    pub payout: String,
+}
+
+impl EthKeyRecord {
+    fn context(address: &[u8; 20], payout: &[u8; 20]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(40);
+        v.extend_from_slice(address);
+        v.extend_from_slice(payout);
+        v
+    }
+
+    fn seal(key: &crate::ethkey::EthKey, payout: &[u8; 20], pass: &Passphrase, kdf: &KdfParams, public_digest: [u8; 32]) -> Result<Self, SwapFileError> {
+        let address = key.address();
+        let secret = EncryptedSecret::seal_labeled(key.secret(), pass, kdf, public_digest, AAD_LABEL_ETH_KEY, &Self::context(&address, payout))?;
+        Ok(Self { address: crate::ethkey::address_hex(&address), secret, payout: crate::ethkey::address_hex(payout) })
+    }
+
+    fn open(&self, pass: &Passphrase, public_digest: [u8; 32]) -> Result<crate::ethkey::EthKey, SwapFileError> {
+        let bad = |e: crate::ethkey::EthKeyError| SwapFileError::Invalid(format!("Ethereum key record: {e}"));
+        let address = crate::ethkey::parse_address(&self.address).map_err(bad)?;
+        let payout = crate::ethkey::parse_address(&self.payout).map_err(bad)?;
+        let secret = self.secret.open_labeled(pass, public_digest, AAD_LABEL_ETH_KEY, &Self::context(&address, &payout))?;
+        crate::ethkey::EthKey::new(secret, address).map_err(bad)
+    }
+}
+
+/// The NOID swap wallet of one swap (Alice's file): a fresh master secret `m` sealed under its own label, the wallet's address
+/// `Addr(Derive(m, 0))` (the stock wallet's first address, so `m` can be imported into the stock wallet), and the user's own NOID payout
+/// address for the sweep. The associated data of the sealed blob includes the address and the payout, so editing either in the file makes the
+/// blob refuse to open.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalletRecord {
+    /// `Addr(Derive(m, 0))`, bech32.
+    pub address: String,
+    pub secret: EncryptedSecret,
+    /// Where a sweep sends what is left (bech32); `None` = the sweep is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payout: Option<String>,
+}
+
+impl WalletRecord {
+    /// The bytes beside the blob that the associated data covers.
+    fn context(address: &str, payout: Option<&str>) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(address.len() as u32).to_le_bytes());
+        v.extend_from_slice(address.as_bytes());
+        match payout {
+            Some(p) => {
+                v.push(1);
+                v.extend_from_slice(&(p.len() as u32).to_le_bytes());
+                v.extend_from_slice(p.as_bytes());
+            }
+            None => v.push(0),
+        }
+        v
+    }
+
+    /// Seal `m` for the swap whose public digest is `public_digest`.
+    pub fn seal(m: &Secret, address: &Address, payout: Option<&Address>, pass: &Passphrase, kdf: &KdfParams, public_digest: [u8; 32]) -> Result<Self, SwapFileError> {
+        let address = address.to_bech32();
+        let payout = payout.map(Address::to_bech32);
+        let secret = EncryptedSecret::seal_labeled(m, pass, kdf, public_digest, AAD_LABEL_WALLET, &Self::context(&address, payout.as_deref()))?;
+        Ok(Self { address, secret, payout })
+    }
+
+    /// Open the wallet secret `m`; it must derive this record's address.
+    pub fn open(&self, pass: &Passphrase, public_digest: [u8; 32]) -> Result<Secret, SwapFileError> {
+        let m = self.secret.open_labeled(pass, public_digest, AAD_LABEL_WALLET, &Self::context(&self.address, self.payout.as_deref()))?;
+        if m.authority(Variant::Stock).to_bech32() != self.address {
+            return Err(SwapFileError::SecretMismatch);
+        }
+        Ok(m)
+    }
 }
 
 /// The record of a passed client-R self-test (`swap-cli self-test FILE`, also run by `new-bob` for the `poseidon` kind).
@@ -953,7 +1068,42 @@ impl SwapFile {
             secret: Some(sealed),
             equivalence: None,
             client_r_selftest: None,
+            wallet: None,
+            eth_key: None,
         })
+    }
+
+    /// [`SwapFile::new_alice`] for a swap that uses a fresh NOID swap wallet `m` (piece 2a): `public.params.alice_noid` must be the wallet's
+    /// address `Addr(Derive(m, 0))`, so that the recovery authority and recipient of the contract is the wallet, and `m` must not be the
+    /// claim secret (a second, different secret). `payout` is the user's own NOID address for the sweep (never the contract root nor the
+    /// wallet itself).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_alice_with_wallet(
+        public: SwapPublic,
+        secret: &Secret,
+        wallet_secret: &Secret,
+        payout: Option<&Address>,
+        pass: &Passphrase,
+        kdf: &KdfParams,
+        now: u64,
+    ) -> Result<Self, SwapFileError> {
+        let address = wallet_secret.authority(Variant::Stock);
+        if public.params.alice_noid != address.to_bech32() {
+            return Err(SwapFileError::Invalid("the swap's recovery address (alice_noid) is not the swap wallet's address".into()));
+        }
+        if wallet_secret.bytes() == secret.bytes() || wallet_secret.is_public_test_vector() {
+            return Err(SwapFileError::Invalid("the swap wallet secret must be a fresh secret of its own".into()));
+        }
+        if let Some(p) = payout {
+            if p.to_bech32() == public.contract_root || *p == address {
+                return Err(SwapFileError::Invalid("the payout address must be the user's own address, not the contract root nor the swap wallet".into()));
+            }
+        }
+        let digest = public.digest();
+        let record = WalletRecord::seal(wallet_secret, &address, payout, pass, kdf, digest)?;
+        let mut file = Self::new_alice(public, secret, pass, kdf, now)?;
+        file.wallet = Some(record);
+        Ok(file)
     }
 
     /// Bob's file: no secret. The bundle must pass the structural checks, agree
@@ -1004,7 +1154,61 @@ impl SwapFile {
             secret: None,
             equivalence: equivalence.cloned(),
             client_r_selftest: None,
+            wallet: None,
+            eth_key: None,
         })
+    }
+
+    /// Seal this party's Ethereum swap key into the file (swap wallet, piece 2b). The key's address must be the swap's own account for this role
+    /// (Alice: `alice_receiver`, Bob: `bob_sender`, amendment A), `payout` is the user's own Ethereum address for the sweep: never the zero address, the
+    /// key's own address, the HTLC contract or the other party's account. Alice's key must not be the claim secret nor the NOID wallet's master secret
+    /// (a key that is revealed or exported must never be the one that is spent from): this opens those two with `pass` to compare. A file that already
+    /// holds a key refuses.
+    pub fn with_eth_key(mut self, key: &crate::ethkey::EthKey, payout: &[u8; 20], pass: &Passphrase, kdf: &KdfParams) -> Result<Self, SwapFileError> {
+        let eth = &self.public.params.eth;
+        let (own, other, who) = match self.role {
+            Role::Alice => (eth.alice_receiver, eth.bob_sender, "alice_receiver"),
+            Role::Bob => (eth.bob_sender, eth.alice_receiver, "bob_sender"),
+        };
+        if self.eth_key.is_some() {
+            return Err(SwapFileError::Invalid("this swap file already holds an Ethereum key".into()));
+        }
+        if key.address() != own {
+            return Err(SwapFileError::Invalid(format!("the Ethereum key's address is not the swap's {who}: the swap's Ethereum account for this role must be the key's own")));
+        }
+        if *payout == [0u8; 20] || *payout == own || *payout == other || *payout == eth.contract {
+            return Err(SwapFileError::Invalid("the Ethereum payout address must be the user's own address: not the zero address, not this key's address, not the other party's account, not the HTLC contract".into()));
+        }
+        if self.role == Role::Alice {
+            let claim = self.decrypt_secret(pass)?;
+            if claim.bytes() == key.secret().bytes() {
+                return Err(SwapFileError::Invalid("the Ethereum key must not be the claim secret".into()));
+            }
+            if self.wallet.is_some() && self.decrypt_wallet(pass)?.bytes() == key.secret().bytes() {
+                return Err(SwapFileError::Invalid("the Ethereum key must not be the NOID wallet's master secret".into()));
+            }
+        }
+        let record = EthKeyRecord::seal(key, payout, pass, kdf, self.public.digest())?;
+        self.eth_key = Some(record);
+        Ok(self)
+    }
+
+    /// The Ethereum swap key (a file with one only). It is bound to the file's public section, its address and its payout.
+    pub fn decrypt_eth_key(&self, pass: &Passphrase) -> Result<crate::ethkey::EthKey, SwapFileError> {
+        let r = self.eth_key.as_ref().ok_or_else(|| SwapFileError::Invalid("this swap file has no Ethereum swap key".into()))?;
+        let key = r.open(pass, self.public.digest())?;
+        if key.address() != self.eth_account() {
+            return Err(SwapFileError::SecretMismatch);
+        }
+        Ok(key)
+    }
+
+    /// This role's own Ethereum account in the terms: `alice_receiver` for Alice, `bob_sender` for Bob.
+    pub fn eth_account(&self) -> [u8; 20] {
+        match self.role {
+            Role::Alice => self.public.params.eth.alice_receiver,
+            Role::Bob => self.public.params.eth.bob_sender,
+        }
     }
 
     /// `dir/<first 16 hex of the hashlock>.swap.json`.
@@ -1067,10 +1271,42 @@ impl SwapFile {
                 }
             }
         }
+        if let Some(w) = &file.wallet {
+            if file.role != Role::Alice {
+                return Err(SwapFileError::Invalid("a NOID swap wallet belongs in Alice's file only".into()));
+            }
+            w.secret.kdf.check_bounds()?;
+            if w.address != file.public.params.alice_noid {
+                return Err(SwapFileError::Invalid("the swap wallet's address is not the swap's recovery address".into()));
+            }
+            Address::parse(&w.address).map_err(|e| SwapFileError::Invalid(format!("wallet address: {e}")))?;
+            if let Some(p) = &w.payout {
+                Address::parse(p).map_err(|e| SwapFileError::Invalid(format!("wallet payout address: {e}")))?;
+            }
+        }
+        if let Some(k) = &file.eth_key {
+            k.secret.kdf.check_bounds()?;
+            let bad = |e: crate::ethkey::EthKeyError| SwapFileError::Invalid(format!("Ethereum key record: {e}"));
+            let address = crate::ethkey::parse_address(&k.address).map_err(bad)?;
+            let payout = crate::ethkey::parse_address(&k.payout).map_err(bad)?;
+            if address != file.eth_account() {
+                return Err(SwapFileError::Invalid("the Ethereum key's address is not this role's account in the swap's terms (alice_receiver for Alice, bob_sender for Bob)".into()));
+            }
+            let eth = &file.public.params.eth;
+            if payout == [0u8; 20] || payout == address || payout == eth.contract {
+                return Err(SwapFileError::Invalid("the Ethereum payout address is the zero address, the key's own address or the HTLC contract".into()));
+            }
+        }
         if file.client_r_selftest.is_some() && !(file.role == Role::Bob && file.public.params.eth.lock_kind == LockKind::Poseidon) {
             return Err(SwapFileError::Invalid("a client R self-test record belongs in Bob's poseidon file only".into()));
         }
         Ok(file)
+    }
+
+    /// The swap wallet's master secret `m` (Alice's file with a wallet only).
+    pub fn decrypt_wallet(&self, pass: &Passphrase) -> Result<Secret, SwapFileError> {
+        let w = self.wallet.as_ref().ok_or_else(|| SwapFileError::Invalid("this swap file has no NOID swap wallet".into()))?;
+        w.open(pass, self.public.digest())
     }
 
     pub fn decrypt_secret(&self, pass: &Passphrase) -> Result<Secret, SwapFileError> {
@@ -1151,6 +1387,32 @@ impl SwapFile {
         let name = self.phase.name();
         self.history.push(HistoryEntry { at: now, event: event.into(), from: name.clone(), to: name });
     }
+}
+
+/// Replace `path` atomically with `bytes`, the way [`SwapFile::save`] does: a uniquely named temporary file (created new, mode 600 on Unix),
+/// `fsync`, rename, then a sync of the directory. A failed directory sync is an error: the caller does not go on to send.
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), SwapFileError> {
+    let tmp = tmp_path(path)?;
+    let written = (|| -> Result<(), SwapFileError> {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp).map_err(io_err)?;
+        f.write_all(bytes).map_err(io_err)?;
+        f.sync_all().map_err(io_err)?;
+        Ok(())
+    })();
+    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, path).map_err(io_err)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    sync_dir(parent_dir(path)).map_err(|e| SwapFileError::Io(format!("{} was written but its directory could not be synced: {e}", path.display())))?;
+    Ok(())
 }
 
 /// `<path>.<pid>.<8 random hex>.tmp`: unique per writer (REVIEW-2 F8).

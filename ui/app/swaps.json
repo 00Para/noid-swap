@@ -1,0 +1,39 @@
+{
+  "_comment": "Swaps the read-only console displays. Only PUBLIC files are listed: the wallet's swap.object.json (contract opening + terms) and alice.bundle.json (hashlock, authority, params). Never a *.swap.json (sealed secret) and nothing under eth/keys/. status_file is the engine's own tick-loop text, read from WSL over the \\\\wsl.localhost share. fund_txid / close_txid are optional Parano1d txids looked up with getTx for inclusion heights and finality.",
+  "swaps": [
+    {
+      "id": "run-1",
+      "label": "Live run 1 — 10 NOID ↔ 0.001 ETH (settled)",
+      "role": "alice",
+      "object_file": "C:\\Users\\00\\Documents\\live-run-1\\swap.object.json",
+      "bundle_file": "C:\\Users\\00\\Documents\\live-run-1\\alice.bundle.json",
+      "noid_rpc": "http://127.0.0.1:9601",
+      "eth": {
+        "rpc": "http://127.0.0.1:8545",
+        "contract": "0x489228d5b89EC1B2e441fc5FFF5517Cb79C6Ec48",
+        "lock_id": "0x23a340a69533ae4fb235df236f6edba98a77d6413ab1c31a0f14874e6ff98c69",
+        "from_block": 0
+      },
+      "fund_txid": "267e6f1dbbfa7623d51d7acea9bcc1b78136ded8d205adbb3a3b0e88d4e67780",
+      "close_txid": "d50743e3ead6c3870ec7e9b1322113a956a034cf6fc259753743ecd49f3e1324",
+      "notes": "docs/live-run-1.md: funded 280,638, final 280,655, ETH lock block 265, reveal block 269, NOID claim included 280,659, final 280,676."
+    },
+    {
+      "id": "run-2",
+      "label": "Live run 2 — refund path (Alice never reveals)",
+      "role": "alice",
+      "object_file": "C:\\Users\\00\\Documents\\live-run-2\\swap.object.json",
+      "bundle_file": "C:\\Users\\00\\Documents\\live-run-2\\alice.bundle.json",
+      "noid_rpc": "http://127.0.0.1:9601",
+      "eth": {
+        "rpc": "http://127.0.0.1:8545",
+        "contract": "0x489228d5b89EC1B2e441fc5FFF5517Cb79C6Ec48",
+        "lock_id": "0x844f4c78d095ca6b65a01bf160c09c721ca394ca244288f6d64ada0d147e3cba",
+        "from_block": 0
+      },
+      "status_file": "\\\\wsl.localhost\\Ubuntu-24.04\\home\\USER\\live-run-2\\loop-alice.txt",
+      "fund_txid": "c47eb2270a1e4f10d01dd09c05ace351ffca3860f287697629fe16c5547ddccb",
+      "notes": "docs/live-run-2.md: funded 280,814, final 280,831, ETH lock block 716 (T_reveal 1,793,815,478), Bob refunded block 1320, D = 281,514."
+    }
+  ]
+}

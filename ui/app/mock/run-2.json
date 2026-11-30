@@ -1,0 +1,685 @@
+{
+  "description": "MOCK timeline of live run 2 (refund path): Bob refunded the ETH at T_reveal, Alice keeps the secret and waits for D = 281,514. Heights, txids and addresses are the real public ones from docs/live-run-2.md (ETH lock tx hash synthetic). The engine text is the real loop-alice.txt block of 18:25 UTC.",
+  "advance": true,
+  "fund_txid": "c47eb2270a1e4f10d01dd09c05ace351ffca3860f287697629fe16c5547ddccb",
+  "terms": {
+    "object": {
+      "abi_version": 3,
+      "address": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl",
+      "claim_authority": "o1tzhvcf0ytcek68mgm480xa7pqsx3gq2a8n5u4849vn3pwfz9raxsmzskfs",
+      "claim_can_close": true,
+      "claim_can_continue": false,
+      "claim_recipient": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+      "code_id": "5d2f0afe89db1e06c90bc78bff1e3082b1bcad54662757a6916924d2244d3efe",
+      "deadline_height": 281514,
+      "max_fee_micronoid": 50000,
+      "max_payout_micronoid": 0,
+      "min_retained_micronoid": 0,
+      "opening_hex": "4e4f49444f424a330300c8720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058aecc25e45e336d1f68dd4ef377c1040d14015d3ce9ca9ea564e21724451f4d14a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832aa4b04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+      "program": [
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "terminal",
+          "opcode": "assert_equal",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "one"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        },
+        {
+          "destination": "state0",
+          "immediate": "0",
+          "left": "state0",
+          "opcode": "keep",
+          "predicate": {
+            "inverted": false,
+            "source": "always"
+          },
+          "right": "state0"
+        }
+      ],
+      "recovery_authority": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+      "recovery_can_close": true,
+      "recovery_can_continue": false,
+      "recovery_recipient": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+      "state": [
+        "0",
+        "0"
+      ],
+      "state_hex": "00000000000000000000000000000000",
+      "unrestricted_payout_recipient": false
+    },
+    "bundle": {
+      "hashlock": "0x9a5e5fac07a41556073473cd7ee201fe4e7a587755d4402262ef9af8f1f5c260",
+      "claim_authority": "o1tzhvcf0ytcek68mgm480xa7pqsx3gq2a8n5u4849vn3pwfz9raxsmzskfs",
+      "opening_hex": "4e4f49444f424a330300c8720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058aecc25e45e336d1f68dd4ef377c1040d14015d3ce9ca9ea564e21724451f4d14a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832aa4b04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+      "contract_root": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl",
+      "params": {
+        "variant": "raw",
+        "amount_micronoid": 10000000,
+        "max_fee_micronoid": 50000,
+        "h_create": 280789,
+        "deadline_height": 281514,
+        "lock_by_height": 280895,
+        "w_a_s": 7200,
+        "alice_noid": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+        "bob_noid": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+        "eth": {
+          "chain_id": 31337,
+          "contract": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+          "code_hash": "0xa906117fc4e604bd25fcee2a6a41da8b824ec9b4a17d10137704e7da42545e2f",
+          "amount_wei": "1000000000000000",
+          "alice_receiver": "0x49877dace5b72f4e8768fbf5cb7ee1573c9ff9ea",
+          "bob_sender": "0x6f8560ec1185f50104f5b64df21e858dbd592883"
+        }
+      }
+    }
+  },
+  "noid": {
+    "description": "MOCK Parano1d answers for the noid-swap console; see generate.js",
+    "calls": [
+      {
+        "method": "paranoid_blockCount",
+        "params": [],
+        "result": 281108
+      },
+      {
+        "method": "paranoid_getEpochAnchor",
+        "params": [],
+        "result": "28931e56442916500aa93d58394a7d024aee9afeae746d32bd176b8099d7a02d"
+      },
+      {
+        "method": "paranoid_estimateFeeDetailed",
+        "params": [
+          1,
+          1
+        ],
+        "result": {
+          "n_inputs": 1,
+          "n_outputs": 1,
+          "net_new_slots": 0,
+          "active_slot_count": 106091,
+          "log_slots": 24,
+          "fee_micronoid": 5800,
+          "breakdown": {
+            "base": 5000,
+            "input": 100,
+            "output": 700,
+            "io": 800,
+            "state_growth": 0,
+            "burned": 0,
+            "relay_floor": 5000,
+            "relay_total": 5800,
+            "required_total": 5800,
+            "paid_total": 5800,
+            "miner_claimable": 5800
+          }
+        }
+      },
+      {
+        "method": "paranoid_getObjectInstances",
+        "params": [
+          "4e4f49444f424a330300c8720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058aecc25e45e336d1f68dd4ef377c1040d14015d3ce9ca9ea564e21724451f4d14a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832aa4b04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+          0,
+          16
+        ],
+        "result": {
+          "address": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl",
+          "height": 281108,
+          "tip_hash": "fbe203ce9f94506b64def36fb999f1113275549f012ade837a7be0443377a22b",
+          "next_slot": null,
+          "slots": [
+            {
+              "slot_index": 9705979,
+              "creation_id": 737344,
+              "value": 10000000,
+              "owner": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl",
+              "empty": false
+            }
+          ]
+        }
+      },
+      {
+        "method": "paranoid_getObjectStatus",
+        "params": [
+          "4e4f49444f424a330300c8720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058aecc25e45e336d1f68dd4ef377c1040d14015d3ce9ca9ea564e21724451f4d14a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832aa4b04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+          9705979
+        ],
+        "result": {
+          "matches_opening": true,
+          "active_authority": "o1tzhvcf0ytcek68mgm480xa7pqsx3gq2a8n5u4849vn3pwfz9raxsmzskfs",
+          "next_call_height": 281109,
+          "tip_height": 281108,
+          "object": {
+            "abi_version": 3,
+            "address": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl",
+            "claim_authority": "o1tzhvcf0ytcek68mgm480xa7pqsx3gq2a8n5u4849vn3pwfz9raxsmzskfs",
+            "claim_can_close": true,
+            "claim_can_continue": false,
+            "claim_recipient": "o1xpyc7ar25emv3tyvlphettpw43fec66q2agnd86r3g8fu5x6tg2s8w8q9r",
+            "code_id": "5d2f0afe89db1e06c90bc78bff1e3082b1bcad54662757a6916924d2244d3efe",
+            "deadline_height": 281514,
+            "max_fee_micronoid": 50000,
+            "max_payout_micronoid": 0,
+            "min_retained_micronoid": 0,
+            "opening_hex": "4e4f49444f424a330300c8720000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000058aecc25e45e336d1f68dd4ef377c1040d14015d3ce9ca9ea564e21724451f4d14a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c832aa4b04000000000030498f746aa676c8ac8cf86f95ac2eac539c6b405751369f438a0e9e50da5a1514a5a1031ee5ebf5c0b3c8c803e9adeea7ed43c291f1e775e84c27b84503c83250c3000000000000000000000000000000000000000000000a",
+            "program": [
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "terminal",
+                "opcode": "assert_equal",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "one"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              },
+              {
+                "destination": "state0",
+                "immediate": "0",
+                "left": "state0",
+                "opcode": "keep",
+                "predicate": {
+                  "inverted": false,
+                  "source": "always"
+                },
+                "right": "state0"
+              }
+            ],
+            "recovery_authority": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+            "recovery_can_close": true,
+            "recovery_can_continue": false,
+            "recovery_recipient": "o1zjj6zqc7uh4lts9neryq86dda6n76s7zj8c7wa0gfsnms3greqequtpurk",
+            "state": [
+              "0",
+              "0"
+            ],
+            "state_hex": "00000000000000000000000000000000",
+            "unrestricted_payout_recipient": false
+          },
+          "slot": {
+            "empty": false,
+            "value": 10000000,
+            "creation_id": 737344,
+            "owner": "o16yuvxwzpnl8r0j2h36yzhc0exxs258lnhwqys559d4a632muqgzqn2w4pl"
+          }
+        }
+      },
+      {
+        "method": "paranoid_getMempoolInfo",
+        "params": [],
+        "result": {
+          "size": 5,
+          "fee_floor": 5000,
+          "txs": [
+            {
+              "tx_hash": "a0f03a2e6bf1c016a7169d669a1684154a6ddd470be8d1d60a56f6d7be4c2ca0",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 281108,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "96e03b2bd14365d9bf15532fa38e346912195f29779d38c773b1429d263dc00a",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 281108,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "d832a2c015335e472542951042fa7e23c2efd91f195074f7f9c1555ea688c25e",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 281108,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "fa4ce9147c717df3d6664d9cbe20912824226ff98900569450d5d46a8215a28f",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 281108,
+              "has_authorization": true
+            },
+            {
+              "tx_hash": "70227677afa9017a1a9dbba8cf3256a0a4843283fc288e63564cd3f1af0aafa9",
+              "fee_micronoid": 6600,
+              "fee_rate": 1650,
+              "n_inputs": 2,
+              "n_outputs": 2,
+              "page_count": 1,
+              "minimum_proof_class": "B63",
+              "requires_b255_miner": false,
+              "admitted_height": 281108,
+              "has_authorization": true
+            }
+          ]
+        }
+      },
+      {
+        "method": "paranoid_getTx",
+        "params": [
+          "c47eb2270a1e4f10d01dd09c05ace351ffca3860f287697629fe16c5547ddccb"
+        ],
+        "result": {
+          "tx_hash": "c47eb2270a1e4f10d01dd09c05ace351ffca3860f287697629fe16c5547ddccb",
+          "height": 280814,
+          "block_hash": "489b956bf713c905cc676acb84257697d68ed7e04a67cef30fc70c79807ebf94",
+          "tx_position": 1
+        }
+      }
+    ]
+  },
+  "eth": {
+    "description": "MOCK Ethereum answers (Hardhat-shaped, chain id 31337) for the noid-swap console; see generate.js",
+    "calls": [
+      {
+        "method": "eth_chainId",
+        "result": "0x7a69"
+      },
+      {
+        "method": "eth_blockNumber",
+        "result": "0x588"
+      },
+      {
+        "method": "eth_getBlockByNumber",
+        "params": [
+          "latest",
+          false
+        ],
+        "result": {
+          "number": "0x588",
+          "hash": "0x0b40942d4e0013881e323c4a0e53c7b3d2b05b73a32e1596abb0ceffb88051b1",
+          "parentHash": "0x1ef29c27f5c281c759283fcc061ad68c1e3d6b4d5147f7a164aea12bbd832a3d",
+          "timestamp": "0x6aeb7884",
+          "transactions": []
+        }
+      },
+      {
+        "method": "eth_getBlockByNumber",
+        "params": [
+          "finalized",
+          false
+        ],
+        "result": {
+          "number": "0x588",
+          "hash": "0x0b40942d4e0013881e323c4a0e53c7b3d2b05b73a32e1596abb0ceffb88051b1",
+          "parentHash": "0x1ef29c27f5c281c759283fcc061ad68c1e3d6b4d5147f7a164aea12bbd832a3d",
+          "timestamp": "0x6aeb7884",
+          "transactions": []
+        }
+      },
+      {
+        "method": "eth_getLogs",
+        "result": [
+          {
+            "removed": false,
+            "logIndex": "0x0",
+            "transactionIndex": "0x0",
+            "transactionHash": "0x8b70494b6e42e78fbd3874669e959dc48ee9d13c52646c7673aab13cd77d28f1",
+            "blockHash": "0xeb7024887465f1852a77b344070fa73188531edec64cf8fbea2e87ab820ff07c",
+            "blockNumber": "0x2cc",
+            "address": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+            "data": "0x00000000000000000000000000000000000000000000000000038d7ea4c680009a5e5fac07a41556073473cd7ee201fe4e7a587755d4402262ef9af8f1f5c260000000000000000000000000000000000000000000000000000000006aeb73b6",
+            "topics": [
+              "0x578af4d125bb96ec89cd1ade591cb196f35d15047d5b096c478e45e311d84263",
+              "0x844f4c78d095ca6b65a01bf160c09c721ca394ca244288f6d64ada0d147e3cba",
+              "0x0000000000000000000000006f8560ec1185f50104f5b64df21e858dbd592883",
+              "0x00000000000000000000000049877dace5b72f4e8768fbf5cb7ee1573c9ff9ea"
+            ]
+          },
+          {
+            "removed": false,
+            "logIndex": "0x0",
+            "transactionIndex": "0x0",
+            "transactionHash": "0x6f659b4f10fd46620dad2011ff4f9aa2dffa63eea09412d724ac329e8be12682",
+            "blockHash": "0xcb995ec0eea678663e11946813cb953accc00cfa2f94f7bc673cd3390cb25dd5",
+            "blockNumber": "0x528",
+            "address": "0x489228d5b89ec1b2e441fc5fff5517cb79c6ec48",
+            "data": "0x",
+            "topics": [
+              "0xfe509803c09416b28ff3d8f690c8b0c61462a892c46d5430c8fb20abe472daf0",
+              "0x844f4c78d095ca6b65a01bf160c09c721ca394ca244288f6d64ada0d147e3cba"
+            ]
+          }
+        ]
+      },
+      {
+        "method": "eth_call",
+        "result": "0x0000000000000000000000006f8560ec1185f50104f5b64df21e858dbd59288300000000000000000000000049877dace5b72f4e8768fbf5cb7ee1573c9ff9ea00000000000000000000000000000000000000000000000000038d7ea4c680009a5e5fac07a41556073473cd7ee201fe4e7a587755d4402262ef9af8f1f5c260000000000000000000000000000000000000000000000000000000006aeb73b6000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000"
+      }
+    ]
+  },
+  "status_age_s": 45,
+  "status_text": "[alice] tick exit 0 at 18:25:14\nnoid: tip 281108 instance {\"amount_micronoid\": 10000000, \"creation_id\": 737344, \"slot_index\": 9705979} matches True pending 0 confirmed null tracked_pending None\neth : latest 1416 finalized 1416 ts 1793816708 lock null claimed null pending_preimage None refunded {'block_number': 1320, 'lock_id': '0x844f4c78d095ca6b65a01bf160c09c721ca394ca244288f6d64ada0d147e3cba', 'tx_hash': '0x6f659b4f10fd46620dad2011ff4f9aa2dffa63eea09412d724ac329e8be12682'}\nevents: []\nACTION: {\"action\": \"wait\", \"reason\": \"reveal cutoff passed; keeping the secret and waiting for D\"}\nnotes: [\"not revealing: (I2) reveal cutoff passed: now 1793816714 > T_reveal - M_A = 1793813678; the reveal must not be broadcast\"]\napplied: True phase_after: lock_final\n"
+}

@@ -95,14 +95,14 @@ No swap between two separate people has run yet. The amounts are trial amounts.
 | `docs/live-run-1.md` to `-6.md`, `-8.md`, `-9-10.md`, `-11.md` to `-20.md` | Logs of the nineteen runs (there is no run 7 log: it was prepared and never funded; runs 9 and 10 share one log) | done |
 | `docs/hostile-run-plan.md`, `docs/live-scenarios.md` | The plan of the hostile-counterparty runs (groups L1 to L6 ran as runs 15 to 20) and the operator's plan of the other live scenarios | done; what stays open is listed in them |
 | `docs/htlc-v2-fixed-fee.md`, `docs/poseidon-evm.md`, `docs/ideas.md` | A fixed-fee contract variant, `Addr(s)` on the EVM (an alternative hashlock), ranked improvements | notes |
-| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 508 tests (510 on Linux and macOS, where two symlink tests run that skip on Windows) |
+| `eth/` | Hardhat project: `HTLC.sol` (ETH), `HTLCERC20.sol`, `HTLCPoseidon.sol` + `Poseidon2b.sol`, `scripts/live.js` (deploy / lock / claim / refund on Sepolia or a local chain), `scripts/secret.js` | 556 tests on Windows (2 pending: two symlink tests skip there; the Linux and macOS count was not re-taken); since 2026-11-17 `live.js` can also take a swap's own Ethereum key from a pipe and has `balance`, `reserve`, `sweep`, `sign-message` and `verify-message`, tested on a local chain, not run on a public network |
 | `btc/` | Bitcoin HTLC as P2WSH: script, address, claim and refund transaction builders, a minimal script checker, a signet live layer over Esplora | 91 tests; nothing broadcast on signet yet |
 | `parano1d/` | `contracts/htlc.pruv` (`HashTimeLock`), the v2 fixed-fee variant, example params (never fund them), a Rust harness that builds, proves and verifies real calls against the vendored node code | 37 tests (+1 ignored benchmark), `pruv verify` passes |
 | `equiv/` | The equivalence proof: `portable/` (no_std Poseidon2b + Derive + SHA-256, the zkVM guest code), `reference/` (parity against the vendored code, 100,000 inputs), `zkvm/` (RISC Zero guest and host, `equiv-prove`) | 23 + 3 + 14 tests; receipts proved and verified |
-| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | 728 tests; drove every run |
-| `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 to 20 (on a Mac in native mode for Bob's side in runs 9 to 14) |
+| `swap-cli/` | The swap tool: persisted swap file with the secret sealed, state machine, Parano1d and Ethereum watchers, a fail-closed decision engine, the NOID claim client, profiles `production` / `rehearsal` / `sepolia` | 848 tests (+1 ignored); drove every run in the table. Since 2026-11-17 it also has a NOID wallet and an Ethereum key of its own for each swap (`wallet`, `ethkey`): tested offline, see "Status and warnings" |
+| `scripts/live/` | The versioned live-run helpers (setup, prepare, fund, tick, watch, lock, reveal, claim, refund, recover): one script per step, nothing sent without an explicit flag | drove runs 4 to 6 and 8 to 20 (on a Mac in native mode for Bob's side in runs 9 to 14); the wallet and board helpers added on 2026-11-17 are tested against stub tools only; the shell layer's self-test is 780 cases |
 | `scripts/` | `setup.sh` / `setup.ps1` (build and test everything), `fetch-vendor.sh` | — |
-| `ui/` | A private prototype | not part of this repository |
+| `ui/` | The operator console (`ui/app`: a read-only view, an actions mode behind a gate, the autopilot, wallet runs, the offer board and its screens) | 644 console tests, tested offline; not run on a public network |
 | `vendor/parano1d` | Unmodified copy of the Parano1d source at commit `d29b801` (Apache-2.0, see `THIRD-PARTY-NOTICES.md`) | read-only |
 | `PROJECT.md`, `TASKS.md` | Project memory and backlog | — |
 
@@ -117,6 +117,13 @@ Each component's `README.md` is the source of truth for that component.
   two reviews of the Poseidon2b port). The latest, `swap-cli/REVIEW-7.md`, finds nothing that blocks the owner in both roles on Sepolia or at trial amounts on
   mainnet, and lists what must be done before a stranger uses the tool (`SECURITY.md`). The security of the hashlock is the preimage resistance of Parano1d's `Addr`
   (Poseidon2b), which no cryptographer has reviewed for this use.
+- **New since 2026-11-17, tested offline, not run on a public network** (an easier desktop app is the direction; security comes first): the tool's own wallets
+  (a NOID wallet and an Ethereum key for each swap, so the user's main wallets are not used), an autopilot that does the steps of a swap after one approval, and an offer
+  board with an automatic handover over Nostr relays. Each piece had one independent design read and one independent code read; the low points are written down in the
+  component READMEs. The one exception: a one-person run on 2026-11-17 (run 22, `docs/live-run-22.md`), in which the funding, the recovery and the sweep built by the tool's own
+  NOID wallet were accepted and mined on Parano1d mainnet. The board is a private test board by invitation until an outside review;
+  the autopilot and the board refuse a production run; the board's messaging keys are stored unsealed until the installer moves secrets to the operating system's key
+  store; there is no native Windows build of `swap-cli` yet (it runs under WSL).
 - **Hard rules** (details in `SECURITY.md`): never fund the example params; never use Parano1d's stock
   `refundable_payment` template for a swap; one fresh secret per swap, sealed, never on a command line;
   `max_fee` at least 5,800 μNOID; the NOID claim must be *final* before the deadline.
@@ -132,7 +139,7 @@ Each component's `README.md` is the source of truth for that component.
 Node parts (any OS, Node 21 or later; tested on 22):
 
 ```sh
-cd eth && npm install && npx hardhat test      # 508 passing on Windows (510 on Linux and macOS: two symlink tests skip on Windows); solc falls back to the npm solc@0.8.24 package if the download is blocked
+cd eth && npm install && npx hardhat test      # 556 passing, 2 pending on Windows (two symlink tests skip there; the Linux and macOS count was not re-taken); solc falls back to the npm solc@0.8.24 package if the download is blocked
 cd btc && npm install && npm test              # 91 passing (node --test)
 ```
 

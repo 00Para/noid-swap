@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# A wallet run (USE_SWAP_WALLET=1 in $L/env.local.sh): the key is the swap's own Ethereum key, piped from `swap-cli ethkey emit` into live.js (--key-stdin; for the reveal the secret follows on a second line); no key file, no argument, no temporary file. Exit 2 also when that key cannot be emitted (nothing was sent). Not run against a real node or a public network.
 # usage: reveal.sh [--dry-run] [--replace [TXHASH]]     Alice's reveal = her claim of the ETH. The secret goes from the sealed file
 # over a pipe into node (Windows node under WSL; live.js claim --secret-stdin); never argv, never a terminal, never a file.
 # live.js claim --swap FILE checks receiver, sender, amount, hashlock, the signing key (alice_receiver) and the cutoff: the earlier of
@@ -26,13 +27,33 @@ while [ $# -gt 0 ]; do
   shift
 done
 check_fee_settings || exit 2   # a tip with no cap stops here (env.sh)
-ARGS=(scripts/live.js claim --swap "$(win_path "$ALICE_FILE")" --key-file "$ALICE_KEY" --chain-id "$CHAIN")
+# A wallet run (USE_SWAP_WALLET=1): the key is Alice's swap key (alice_receiver), sealed in her swap file; `swap-cli ethkey emit` pipes it to live.js (--key-stdin), never a key file.
+if [ "$USE_SWAP_WALLET" = 1 ]; then KEYARG=(--key-stdin); else KEYARG=(--key-file "$ALICE_KEY"); fi
+ARGS=(scripts/live.js claim --swap "$(win_path "$ALICE_FILE")" "${KEYARG[@]}" --chain-id "$CHAIN")
 read_lines FEES fee_flags   # MAX_FEE_GWEI (--mainnet --max-fee-gwei) or GAS_PRICE_GWEI, then PRIORITY_FEE_GWEI (--priority-fee-gwei)
 if [ ${#FEES[@]} -gt 0 ]; then ARGS+=("${FEES[@]}"); fi
 if [ "$REPLACE" = 1 ]; then
   ARGS+=(--replace)
   if [ -n "$TXHASH" ]; then ARGS+=(--replace-tx "$TXHASH"); fi
 fi
+if [ "$USE_SWAP_WALLET" = 1 ]; then
+  # The wallet path: the key (and, for a real reveal, the secret on a second line) goes from swap-cli into live.js through ONE pipe: never a key file, an argument or a
+  # temporary file; the passphrase goes to swap-cli only (live.js never gets it). If the key (or the secret) could not be emitted, live.js got an incomplete stdin and
+  # refuses before it signs: exit 2, nothing was sent.
+  [ -s "$L/passphrase.txt" ] || { echo "no $L/passphrase.txt (run setup.sh)" >&2; exit 2; }
+  if [ "$DRY" = 1 ]; then
+    ( load_passphrase && "$BIN" ethkey emit "$ALICE_FILE" ) 2> "$L/eth-claim-dry-$N.emit.err" | ( unset SWAP_PASSPHRASE; "$NODE" "${ARGS[@]}" --dry-run > "$L/eth-claim-dry-$N.json" 2> "$L/eth-claim-dry-$N.err" )
+    RCS=("${PIPESTATUS[@]}")
+    if [ "${RCS[0]}" -ne 0 ]; then rm -f "$L/eth-claim-dry-$N.json"; echo "claim dry-run REFUSED: the swap key could not be emitted from Alice's swap file (exit ${RCS[0]}); nothing was sent:"; head -c 400 "$L/eth-claim-dry-$N.emit.err"; echo; exit 2; fi
+    EC=${RCS[1]}
+    echo "claim dry-run exit $EC"; head -c 600 "$L/eth-claim-dry-$N.err"; echo; head -c 1400 "$L/eth-claim-dry-$N.json"; echo
+    exit $EC
+  fi
+  ( load_passphrase && "$BIN" ethkey emit "$ALICE_FILE" && "$BIN" secret "$ALICE_FILE" ) 2>/dev/null | ( unset SWAP_PASSPHRASE; "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err" )
+  RCS=("${PIPESTATUS[@]}")
+  if [ "${RCS[0]}" -ne 0 ]; then rm -f "$L/eth-claim.json"; echo "claim REFUSED: the swap key or the secret could not be emitted from Alice's swap file (exit ${RCS[0]}), so live.js had nothing complete to sign with; nothing was sent"; exit 2; fi
+  EC=${RCS[1]}
+else
 if [ "$DRY" = 1 ]; then
   "$NODE" "${ARGS[@]}" --dry-run > "$L/eth-claim-dry-$N.json" 2> "$L/eth-claim-dry-$N.err"; EC=$?
   echo "claim dry-run exit $EC"; head -c 600 "$L/eth-claim-dry-$N.err"; echo; head -c 1400 "$L/eth-claim-dry-$N.json"; echo
@@ -41,6 +62,7 @@ fi
 load_passphrase || exit 2
 "$BIN" secret "$ALICE_FILE" 2>/dev/null | "$NODE" "${ARGS[@]}" --secret-stdin > "$L/eth-claim.json" 2> "$L/eth-claim.err"
 EC=${PIPESTATUS[1]}
+fi
 echo "claim exit $EC at $(date +%T)"; head -c 600 "$L/eth-claim.err"; echo
 reveal_sent_note "$L/eth-claim.err"
 python3 - "$L/eth-claim.json" "$L/reveal-reverted-tx.txt" <<'PY'

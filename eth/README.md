@@ -89,7 +89,7 @@ keeps a trace per Poseidon call, so the tests recycle the chain every few dozen 
 with a message, never skip, when the machine cannot hold a chunk. Each vector is one `eth_call` of one permutation
 (`POSEIDON_BATCH=1`, the default): an `eth_call` that ran 8 permutations at once crashed the Hardhat runtime with a
 segmentation fault when it followed `live.test.js` in a full-suite run. Whole suite (`npx hardhat test`, one process):
-508 passing and 2 pending on Windows (the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 510 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
+556 passing and 2 pending on Windows (547 before `sign-message` and `verify-message` of 2026-11-17, which added 9 tests; the two tests that need the right to make symlinks skip there; on Linux and macOS they run: 558 passing), 0 failing, a few minutes. On Windows a run of `test/live.test.js` sometimes ends, after the passing summary, with a libuv line (`Assertion failed: ... UV_HANDLE_CLOSING`) and a non-zero exit code: a process-teardown fault of Node on Windows, not a failing test.
 
 ## Preimage encoding (the Parano1d side must match exactly)
 
@@ -229,9 +229,42 @@ until the first mainnet swap is planned.
 
 | File | Purpose |
 |------|---------|
-| `scripts/live.js` | CLI + module: `keygen`, `balance`, `deploy`, `lock`, `claim`, `refund`, `send`, `status`. All output is one JSON object on stdout; errors go to stderr with exit code 1. |
+| `scripts/live.js` | CLI + module: `keygen`, `balance`, `address`, `deploy`, `lock`, `claim`, `refund`, `send`, `sweep`, `reserve`, `status`. All output is one JSON object on stdout (except `keygen --stdout`, which writes the key to a pipe and nothing else); errors go to stderr with exit code 1 (`claim` that was mined and reverted, and `reserve` with a balance that does not cover the reserve, exit 3). |
 | `scripts/rpc-proxy.js` | Loopback plain-HTTP to HTTPS forwarder, so the Rust `swap-cli` (no TLS) can read Ethereum. |
 | `test/live.test.js` | Tests for both, over Hardhat's in-process network and 127.0.0.1 only. |
+| `test/live-swap-key.test.js` | Tests for the swap's own key commands below (`--key-stdin`, `keygen --stdout`, `address`, `balance --address`, `reserve`, `sweep`), the same way. |
+| `test/live-sign-message.test.js` | Tests for `sign-message` and `verify-message` (a pinned vector, sign then verify by pipe and by file, a changed message, signature or address, the other encodings of a signature, the domain rule, bad input, no key in any output); no node, no network. |
+
+### The swap's own Ethereum key (swap wallet, piece 2b)
+
+Each party's swap uses a fresh Ethereum key of its own: Alice's key IS the swap's `alice_receiver` (it pays the reveal's fee, receives the ETH she buys, and is swept to her own
+address afterwards), Bob's key IS `bob_sender` (it receives his deposit, sends the lock, receives the refund). `swap-cli` seals the key in the swap file (`new-alice --eth-key
+KEYFILE --eth-payout 0x..`, `new-bob` the same) and hands it to `live.js` through a pipe. The rule that the key must be `alice_receiver` (claim) or `bob_sender` (lock, refund) is
+unchanged. **None of this has been run on a public network**; every test is on Hardhat's in-process chain.
+
+| Command | What it does |
+|---|---|
+| `keygen --stdout` | a fresh key, 32 bytes from the OS random generator (not the mnemonic route), checked valid, written as two lines (the address, then the key) to a pipe; a terminal is refused. `node scripts/live.js keygen --stdout \| swap-cli ethkey new --out KEYFILE`. `swap-cli` has no secp256k1 code, so it cannot recompute the address. The order of steps: `keygen --stdout \| swap-cli ethkey new`, then `reserve` with the key (`swap-cli ethkey emit FILE \| node scripts/live.js reserve --role ... --swap FILE --key-stdin`, which refuses unless the key owns the stated address), and only then a deposit; `swap-cli ethkey emit KEYFILE \| node scripts/live.js address --key-stdin --expect ADDRESS` is the same check on its own. `keygen --out FILE` is unchanged. |
+| `--key-stdin` | on `lock`, `claim`, `refund`, `sweep`, `address` and `reserve`, instead of `--key-file` (exactly one of the two). stdin must be a pipe (a terminal is refused) and holds **one line**, the key. `claim` with `--key-stdin` **and** `--secret-stdin` reads **two lines, the key then the secret**; any other shape (one line, three, a blank line) is refused. No message shows either text. `swap-cli ethkey emit FILE \| node scripts/live.js claim --key-stdin ...` |
+| `address --key-stdin\|--key-file [--expect ADDR]` | prints the key's address; refuses when `--expect` is another address. Offline. |
+| `sign-message --key-stdin\|--key-file F --message-hex 0x..` | signs one EIP-191 personal message with the key and prints JSON `{address, signature}` (65 bytes, `v` 27 or 28). Offline (no node is asked). The message is given as `0x` hex bytes and nothing else is accepted (at least one byte, at most 2,048). **Domain rule:** the tool refuses, exit 1 and nothing signed, unless the message bytes start with the ASCII text `no1d-swap-v1 ` (the handover's tuples of the offer board do), so a signature of this command is never another protocol's message; the EIP-191 prefix (first byte `0x19`) already keeps it from being a valid Ethereum transaction. The key is never printed or put in an error. |
+| `verify-message --address ADDR --message-hex 0x.. --signature 0x..` | read-only, offline, needs no key: recovers the signer and prints JSON `{valid, recovered}`; exit 0 when `recovered` is `ADDR`, 3 when it is not. A signature that is not 65 bytes is refused (exit 1); one with a `v` other than 27 or 28, a high `s` or no recoverable signer answers `valid: false, recovered: null` (exit 3), so one signature has one encoding. The domain text is not demanded here: it checks the bytes the caller built. |
+| `balance --address ADDR` | adds `nonceLatest` and `noncePending` to the balance. |
+| `reserve --role alice\|bob --swap FILE --key-stdin\|--key-file F [--mainnet --max-fee-gwei N \| --gas-price-gwei N]` | read-only. **Requires the key** (exactly one of the two flags): the address is recomputed from it and the command refuses, before printing any amount or address, unless that address is the file's own account (`alice_receiver` for Alice, `bob_sender` for Bob) and the file's `eth_key` address when the file has one. The refusal says the key does not belong to the stated address and that nothing must be deposited to it; exit 1, the code of every refused precondition (not 3). The reason: `swap-cli` cannot compute an Ethereum address, so the address sealed next to the key is only what it was told, and a deposit to an address the key does not own is lost for good. The JSON carries `keyChecked: true`. The ETH the swap's key must hold (amendment C), as wei in decimal strings, integer arithmetic: Alice `claim gas limit × fee ceiling × 1.25` (200,000 sha256, 1,000,000 poseidon, the limits above); Bob `amount_wei + (lock gas ceiling + refund gas ceiling) × fee ceiling × 1.25` (`LOCK_GAS_RESERVE` 250,000 / 700,000 and `REFUND_GAS_RESERVE` 100,000 / 200,000 for sha256 / poseidon, chosen above what the live runs measured; the lock and the refund are estimated, not fixed). The fee ceiling is the cap a send would use (`--max-fee-gwei` with `--mainnet`, `--gas-price-gwei` elsewhere, else the node's own suggestion, said in `feeCeilingSource`). Prints `reserveWei`, `requiredWei`, `balanceWei`, `shortfallWei`, `covered`, `keyChecked`; exit 0 when covered, 3 when not. |
+| `sweep --swap FILE --to ADDR --key-stdin\|--key-file F [--dry-run]` | sends the key's whole balance minus the fee (21,000 gas × the capped fee) to `ADDR`. Refuses unless ALL hold: the key is the file's own account (`alice_receiver` for Alice, `bob_sender` for Bob) and the file's `eth_key` record; `ADDR` is the payout address stored in that record (and not the key itself); the swap file holds no pending `lock_eth`, `refund_eth` or `reveal_eth` intent (nor a pending action of those kinds); the node is on the file's chain and the contract is the pinned artifact (mainnet only with `--mainnet`, a production file and `--max-fee-gwei`); `ADDR` has no code (`eth_getCode` empty: a contract and an EIP-7702 delegation are refused); the key has no pending transaction (pending nonce = latest); no lock of this swap is open on chain (Bob: the Locked events of his key as sender under the file's lock word; Alice: of `bob_sender` to her key as receiver), each one must be claimed or refunded, and **with no lock of this swap on chain at all the file's phase must be an ended one** (`aborted`, `refunded`, `lost`, `done`); and no unresolved lock record exists (`FILE.lock-sent`, the per-user record): a record counts as resolved only when the lock it names shows claimed or refunded on chain (the tool never removes a record). The same fee-cap checks as the other sends. `--dry-run` prints what it would send and writes nothing. |
+
+**Review of the swap key, 2026-11-17.** An independent read found one must-fix point, fixed: `reserve` took no key, so the amount and the address it printed could belong to a stated address the key does not own (a deposit nobody can spend); it now requires the key and refuses, before printing anything, unless the key's address is the file's account and its `eth_key` address. These low points are written down and not fixed:
+
+- `reserve` with a typed gas price does not apply the claim's floor of twice the base fee, so it can say covered for a cap the reveal would refuse; the reveal is then refused before signing and the key can be topped up;
+- `live.js` reads the payout address from the swap file without opening the seal; the seal protects it only when the key is emitted from the same swap file in the same pipe;
+- a lock scan that comes back empty (a `--from-block` override, or an endpoint that pruned its logs) with an ended phase lets a sweep through while a lock is still open; the lock can still be refunded after a new deposit;
+- a sweep accepts a claimed or refunded lock that is not final yet; after a reorg the key must be topped up to refund;
+- Alice's sweep waits as long as Bob leaves an expired lock unrefunded; `ethkey emit` is the way out;
+- a dropped lock leaves its record unresolved, and the sweep is refused until the record is cleared by hand;
+- `keygen --stdout` and `ethkey emit` refuse a terminal only: a redirect to a file writes the plain key to disk;
+- the payout address is checked for contract code at sweep time only, not when the swap is created;
+- nothing in the tools refuses the NOID funding while Alice's key holds less than her reserve; the app must check it before it funds;
+- not covered by a test: an edited payout, a per-user record whose place cannot be determined, any reorg case. Not run on a public network.
 
 ### The poseidon lock kind in `live.js` (`docs/poseidon-leg.md` section 9.6)
 
@@ -471,7 +504,8 @@ Test: `R6-8` in `test/live.test.js` records every JSON-RPC request.
 ### Mainnet
 
 Ethereum mainnet (chainId 1) is refused by default, as before. Two flags open it, on the five signing
-commands only (`deploy`, `send`, `lock`, `claim`, `refund`); `balance`, `status` and `keygen` do not take them.
+commands only (`deploy`, `send`, `lock`, `claim`, `refund`) and on `sweep` (which also needs a swap file with chain id 1 and the production profile); `reserve` takes the fee flags
+and the mainnet check, read-only; `balance`, `status` and `keygen` do not take them.
 
 | Flag | Rule |
 |------|------|

@@ -1,0 +1,254 @@
+# Build the swap tool on GitHub's hosted machines (Windows, macOS, Linux), run the offline tests and
+# attach the programs as build artifacts, so that nobody has to trust a program built on a private machine.
+# What this builds and how to check a download: docs/building.md.
+#
+# NOT VERIFIED: this workflow has never run. The native Windows build of swap-cli has never been made
+# (it was only built inside WSL, and natively on macOS for one role). The first run is the first test of
+# both, and of the comparison with upstream. Guesses are marked "GUESS" below.
+#
+# No secrets are used. The chain's source (vendor/parano1d) is part of this repository and the build uses it as
+# it is; a separate step clones upstream at one fixed commit and checks that the two trees are identical. The zkVM
+# prover (equiv/) is NOT built here: the proof-free lock kind needs neither a proof nor a receipt.
+#
+# No cache in this first version: it is simpler, and there is nothing that could be poisoned.
+#
+# The three actions below are pinned to the full commit id of a release, with the tag in a comment (a tag can be
+# moved, a commit id cannot). The ids were looked up on 2026-11-17.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # The chain's source commit and repository (the same ones scripts/fetch-vendor.sh names). The shipped copy is
+  # compared with upstream at this commit below.
+  VENDOR_COMMIT: d29b8016c3c120312814f52d7f8a8ffef5523b80
+  VENDOR_URL: https://github.com/ignotusnemo/parano1d.git
+
+jobs:
+  swap-cli:
+    name: swap-cli (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            exe: swap-cli.exe
+            # The test steps on Windows may fail without failing the job, for this reason only: the dev-dependency
+            # on the chain's noid_chain crate pulls in libmdbx (a C library built with bindgen), and neither the
+            # tests of swap-cli nor that crate have ever been built or run natively on Windows. Make the steps
+            # strict (set this to false) once a run shows them passing. The BUILD step is always strict.
+            tests_may_fail: true
+          - os: macos-latest
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            exe: swap-cli
+            tests_may_fail: false
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            exe: swap-cli
+            tests_may_fail: false
+    env:
+      # The compiler the chain's source pins in vendor/parano1d/rust-toolchain.toml (checked below). swap-cli
+      # has no pin of its own, so the version is named here and forced for every cargo call.
+      RUSTUP_TOOLCHAIN: "1.96.0"
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Git settings (keep LF, allow long paths)
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.longpaths true
+
+      # TO PIN: actions/checkout v4 (full commit SHA, with the tag in a comment)
+      - name: Check out this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The chain's source ships in this repository (vendor/parano1d) and the build uses it as it is. This step
+      # proves that it is the upstream source at the fixed commit: it clones upstream into a folder OUTSIDE the
+      # workspace and compares every file's bytes. A file on one side only, or one different byte, fails the job.
+      # The upstream .git folder and research/ directory are left out of the comparison. This step has never run.
+      - name: Check that vendor/parano1d is the chain's source at the fixed commit
+        run: |
+          # The commit and the repository named here are the ones the helper script names.
+          grep -q "$VENDOR_COMMIT" scripts/fetch-vendor.sh
+          grep -qF "$VENDOR_URL" scripts/fetch-vendor.sh
+          up="$RUNNER_TEMP/upstream-parano1d"
+          rm -rf "$up"
+          git -c core.autocrlf=false clone --filter=blob:none "$VENDOR_URL" "$up"
+          git -C "$up" config core.autocrlf false
+          git -C "$up" -c advice.detachedHead=false checkout "$VENDOR_COMMIT"
+          got="$(git -C "$up" rev-parse HEAD)"
+          echo "upstream is at $got"
+          if [ "$got" != "$VENDOR_COMMIT" ]; then
+            echo "::error::upstream checkout is at $got, expected $VENDOR_COMMIT"
+            exit 1
+          fi
+          # Leave out the upstream .git folder and the upstream research/ directory (the shipped copy omits both, as
+          # THIRD-PARTY-NOTICES.md says), then compare the two trees file by file. A carriage return at a line end is not
+          # counted as a difference: this repository stores text with LF endings (.gitattributes).
+          rm -rf "$up/.git" "$up/research"
+          if [ -e vendor/parano1d/.git ]; then
+            echo "::error::vendor/parano1d has a .git entry"
+            exit 1
+          fi
+          if ! diff -r -q --strip-trailing-cr "$up" vendor/parano1d; then
+            echo "::error::vendor/parano1d is not the upstream source at $VENDOR_COMMIT (see the lines above)"
+            exit 1
+          fi
+          echo "vendor/parano1d equals upstream at $VENDOR_COMMIT"
+          # The compiler pinned by the chain's source is the one this workflow installs.
+          grep -q "^channel = \"$RUSTUP_TOOLCHAIN\"" vendor/parano1d/rust-toolchain.toml
+
+      # Rust comes from rustup, which is already on the runner: no third-party action.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update --target "${{ matrix.target }}"
+          rustc -vV
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "::error::the compiler's host is $host, expected ${{ matrix.target }}"
+            exit 1
+          fi
+
+      # The chain's source needs a C compiler, CMake and libclang (vendor/parano1d/docs/developers/build.md).
+      - name: Native dependencies (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev cmake pkg-config
+
+      # GUESS: the macOS runner has Xcode's compiler; cmake and llvm (for libclang) are installed with brew if missing.
+      - name: Native dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          command -v cmake >/dev/null 2>&1 || brew install cmake
+          brew list llvm >/dev/null 2>&1 || brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      # GUESS: the Windows runner has Visual Studio Build Tools, CMake and LLVM preinstalled, and LLVM lives in
+      # C:\Program Files\LLVM. If libclang.dll is missing it is installed with choco.
+      - name: Native dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          if [ ! -f "/c/Program Files/LLVM/bin/libclang.dll" ]; then choco install llvm -y --no-progress; fi
+          command -v cmake >/dev/null 2>&1 || choco install cmake --installargs "ADD_CMAKE_TO_PATH=System" -y --no-progress
+          echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
+
+      # TO PIN: actions/setup-node v4
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      # The build is strict on every platform. A failure here fails the job.
+      - name: Build swap-cli (release)
+        working-directory: swap-cli
+        run: cargo build --release --locked
+
+      # Strict on Linux and macOS. On Windows it may fail without failing the job (matrix.tests_may_fail,
+      # see the reason in the matrix). Tests that use `sh`, symlinks, file modes or directory sync are
+      # compiled only on Unix (cfg(unix)), so they do not run on Windows at all (docs/building.md lists them).
+      - name: Test swap-cli
+        id: test
+        continue-on-error: ${{ matrix.tests_may_fail }}
+        working-directory: swap-cli
+        run: cargo test --locked --no-fail-fast
+
+      # The operator console has no package manager and no build step; its tests run on plain Node.
+      # GUESS: they have never run on Windows, so the step may fail there without failing the job, like the Rust tests.
+      - name: Test the operator console
+        id: console
+        continue-on-error: ${{ matrix.tests_may_fail }}
+        run: node --test "ui/app/test/*.test.js"
+
+      - name: Collect the program and print its sha256
+        env:
+          EXE: ${{ matrix.exe }}
+          PLATFORM: ${{ matrix.platform }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          CONSOLE_OUTCOME: ${{ steps.console.outcome }}
+        run: |
+          mkdir dist
+          cp "swap-cli/target/release/$EXE" "dist/$EXE"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$EXE" > "$EXE.sha256"
+          else
+            shasum -a 256 "$EXE" > "$EXE.sha256"
+          fi
+          {
+            echo "platform: $PLATFORM"
+            echo "commit: ${{ github.sha }}"
+            echo "run: ${{ github.run_id }} attempt ${{ github.run_attempt }}"
+            echo "chain source commit: $VENDOR_COMMIT"
+            echo "rustc: $(rustc -V)"
+            echo "swap-cli tests: $TEST_OUTCOME"
+            echo "operator console tests: $CONSOLE_OUTCOME"
+          } > BUILD-INFO.txt
+          cat BUILD-INFO.txt
+          echo "sha256 of the program:"
+          cat "$EXE.sha256"
+          {
+            echo "### $PLATFORM"
+            echo ""
+            echo "- commit: \`${{ github.sha }}\`"
+            echo "- sha256: \`$(cut -d' ' -f1 "$EXE.sha256")\`"
+            echo "- swap-cli tests: $TEST_OUTCOME, operator console tests: $CONSOLE_OUTCOME"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # TO PIN: actions/upload-artifact v4
+      - name: Upload the program, its sha256 file and the build info
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: swap-cli-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+  # The Ethereum side's tests (about 9 minutes with the fuzz campaign at its default size). Linux only.
+  eth:
+    name: eth tests (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # TO PIN: actions/checkout v4 (same pin as above)
+      - name: Check out this repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # TO PIN: actions/setup-node v4 (same pin as above)
+      - name: Set up Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+
+      - name: Install from the lock file
+        working-directory: eth
+        run: npm ci --no-audit --no-fund
+
+      # If the native solc download is blocked, hardhat.config.js falls back to the npm solc package (same version).
+      - name: Test
+        working-directory: eth
+        run: npx hardhat test

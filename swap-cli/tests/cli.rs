@@ -450,3 +450,95 @@ fn read_only_tick_withholds_the_parameters_of_a_spend_and_apply_records_and_prin
     assert_eq!(v["action"]["action"], "wait", "{out}");
     assert_eq!(v["intent"]["status"], "held");
 }
+
+#[test]
+fn tick_apply_before_h_create_records_the_funding_intent_and_the_next_tick_holds_it() {
+    // Alice's funding opens D_offset (738, production) blocks before H_create (300,000): at tip 299,500 the engine offers it, and `tick --apply`
+    // records the intent exactly as it does after H_create. At tip 299,000 (before 299,262) it is "too early" and records nothing.
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.swap.json");
+    let secret = Secret::from_bytes(swap_cli::htlc_harness::seq_bytes(0x33));
+    let public = example_public(&secret, Variant::Raw);
+    assert_eq!((public.params.h_create, public.params.deadline_height), (300_000, 300_738));
+    swap_cli::swapfile::SwapFile::new_alice(public, &secret, &swap_cli::swapfile::Passphrase::new("pw"), &swap_cli::swapfile::KdfParams::fast_for_tests(), 1)
+        .unwrap()
+        .save(&a)
+        .unwrap();
+    let real_code = {
+        let recorded: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/eth/locked.json")).unwrap()).unwrap();
+        let call = recorded["calls"].as_array().unwrap().iter().find(|c| c["method"] == "eth_getCode").unwrap();
+        call["result"].as_str().unwrap().to_string()
+    };
+    let eth = dir.path().join("eth.json");
+    std::fs::write(
+        &eth,
+        serde_json::json!({"description": "minimal Ethereum answers: chain 11155111, the HTLC runtime code, no lock", "calls": [
+            {"method": "eth_blockNumber", "result": "0xa"},
+            {"method": "eth_getBlockByNumber", "result": {"number": "0xa", "timestamp": "0x3e8"}},
+            {"method": "eth_getBlockByNumber", "result": {"number": "0x8", "timestamp": "0x3d0"}},
+            {"method": "eth_chainId", "result": "0xaa36a7"},
+            {"method": "eth_getCode", "result": real_code},
+            {"method": "eth_getLogs", "result": []},
+            {"method": "eth_call", "error": {"code": 3, "message": "execution reverted: LockNotFound"}}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    // The recorded idle node (no instance at the contract root) moved to a chosen height, with a fresh header time against `--now 1000`.
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/");
+    let noid_at = |tip: u64| {
+        let mut fx: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!("{root}parano1d/idle.json")).unwrap()).unwrap();
+        let calls = fx["calls"].as_array_mut().unwrap();
+        for c in calls.iter_mut() {
+            if c["method"] == "paranoid_blockCount" {
+                c["result"] = serde_json::json!(tip);
+            }
+            if c["method"] == "paranoid_getObjectInstances" {
+                c["result"]["height"] = serde_json::json!(tip);
+            }
+        }
+        calls.push(serde_json::json!({"method": "paranoid_getBlockHeader", "result": {"height": tip, "timestamp": 990}}));
+        let path = dir.path().join(format!("idle-{tip}.json"));
+        std::fs::write(&path, fx.to_string()).unwrap();
+        path.to_str().unwrap().to_string()
+    };
+    let flags = |tip: u64, extra: &[&str]| {
+        let mut v: Vec<String> = vec!["tick".into(), a.to_str().unwrap().into(), "--noid-fixture".into(), noid_at(tip), "--eth-fixture".into(), eth.to_str().unwrap().into(), "--now".into(), "1000".into(), "--single-node-ok".into()];
+        v.extend(extra.iter().map(|s| s.to_string()));
+        v
+    };
+    // Too early: a wait that says when the funding opens; nothing is recorded.
+    let (ok, out, err) = run(bin().args(flags(299_000, &["--apply"])));
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["action"]["action"], "wait", "{out}");
+    let reason = v["action"]["reason"].as_str().unwrap();
+    assert!(reason.starts_with("too early to fund") && reason.contains("opens at height 299262"), "{reason}");
+    assert!(SwapFile::load(&a).unwrap().pending_intent.is_none());
+    assert_eq!(SwapFile::load(&a).unwrap().phase.name(), "created");
+    // Inside the window, before H_create: read-only withholds the parameters; --apply records the intent and prints the funding.
+    let (ok, out, err) = run(bin().args(flags(299_500, &[])));
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["action"]["kind"], "fund_noid", "{out}");
+    assert_eq!(v["action"]["parameters"], "withheld");
+    assert!(SwapFile::load(&a).unwrap().pending_intent.is_none());
+    let (ok, out, err) = run(bin().args(flags(299_500, &["--apply"])));
+    assert!(ok, "{err}");
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(v["action"]["action"], "fund_noid", "{out}");
+    assert_eq!(v["action"]["amount_micronoid"], 10_000_000, "{out}");
+    assert_eq!(v["intent"]["status"], "recorded", "{out}");
+    let saved = SwapFile::load(&a).unwrap().pending_intent.expect("recorded before it was printed");
+    assert_eq!(saved.action, "fund_noid");
+    assert!(saved.noid_tip + 1 < 300_000, "decided before H_create");
+    // The next tick, still before H_create or after it, holds the intent: no second funding.
+    for tip in [299_500, 300_020] {
+        let (ok, out, err) = run(bin().args(flags(tip, &["--apply"])));
+        assert!(ok, "{err}");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["action"]["action"], "wait", "{out}");
+        assert_eq!(v["intent"]["status"], "held", "{out}");
+        assert!(v["action"]["reason"].as_str().unwrap().contains("intent fund_noid pending"), "{out}");
+    }
+}

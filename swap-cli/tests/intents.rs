@@ -171,6 +171,40 @@ fn alice_never_funds_twice_and_a_foreign_instance_is_not_a_reason_to_fund() {
 }
 
 #[test]
+fn a_funding_decided_before_h_create_is_recorded_once_and_held_across_h_create() {
+    // The funding opens D_offset blocks before H_create. An intent recorded there holds exactly as one recorded later: no second funding offer,
+    // not while the funding is unseen and not after the tip passes H_create.
+    let mut s = Scenario::new(Variant::Raw);
+    let h_create = s.public.params.h_create;
+    s.world.borrow_mut().tip = h_create - 40;
+    let path = s.dir.path().join("alice-ops.swap.json");
+    let mut alice = s.alice.file.clone();
+    let out1 = apply(&s, &mut alice, &path);
+    assert!(matches!(out1.decision.action, Action::FundNoid { .. }), "{:?}", out1.decision);
+    let IntentStatus::Recorded(intent) = &out1.intent else { panic!("{:?}", out1.intent) };
+    assert_eq!(intent.action, "fund_noid");
+    assert_eq!(SwapFile::load(&path).unwrap().pending_intent.as_ref(), Some(intent));
+    assert!(s.world.borrow().tip + 1 < h_create, "recorded before H_create");
+    // The operator has not sent it yet (or the node has not mined it): the chain shows nothing, the tip passes H_create.
+    for step in [0u64, 0, 10, 10, 30, 1] {
+        s.world.borrow_mut().advance_noid(step);
+        let out = apply(&s, &mut alice, &path);
+        assert!(wait_reason(&out).contains("intent fund_noid pending"), "{:?}", out.decision);
+        assert!(matches!(out.intent, IntentStatus::Held(_)), "{:?}", out.intent);
+    }
+    assert!(s.world.borrow().tip + 1 >= h_create, "now past H_create");
+    assert_eq!(s.alice.executor.count("fund_noid"), 0);
+    // The operator sends it after all; the next block shows it, the intent resolves, and nothing more is offered.
+    let now = s.now();
+    s.alice.executor.execute(&alice, &out1.decision.action, now).unwrap();
+    s.world.borrow_mut().advance_noid(1);
+    let out = apply(&s, &mut alice, &path);
+    assert!(matches!(&out.intent, IntentStatus::Resolved(h) if h.action == "fund_noid"), "{:?}", out.intent);
+    assert_eq!(alice.phase.name(), "funded");
+    assert_eq!(s.alice.executor.count("fund_noid"), 1);
+}
+
+#[test]
 fn reveal_eth_intent_holds_until_the_claim_is_mined() {
     let mut s = Scenario::new(Variant::Raw);
     s.run_to_lock_final();

@@ -22,6 +22,8 @@
 //! - `engine`   : the automatic actions: decide from (role, swap file, observations, now).
 //! - `contract_params` : the Parano1d contract definition/params of a swap, for the stock wallet.
 //! - `client`   : client R (raw secret, `noid_gkr` + `ObjectIntent`) and client S (stock wallet script).
+//! - `ethkey`   : the Ethereum swap key of one party (swap wallet, piece 2b): checked, sealed, handed to `live.js` through a pipe.
+//! - `wallet`   : the NOID swap wallet (a fresh throwaway wallet per swap): key, node reads, the plain-payment builder, funding, recovery, sweep, and the record that makes a re-send safe.
 
 pub mod bundle;
 pub mod child_env;
@@ -29,6 +31,7 @@ pub mod client;
 pub mod contract_params;
 pub mod engine;
 pub mod equiv;
+pub mod ethkey;
 pub mod params;
 pub mod producer_gate;
 pub mod producer_marker;
@@ -36,6 +39,7 @@ pub mod reveal_sidecar;
 pub mod secret;
 pub mod state;
 pub mod swapfile;
+pub mod wallet;
 pub mod watch;
 
 pub use htlc_harness;
