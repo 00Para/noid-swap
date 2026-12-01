@@ -712,7 +712,7 @@ const { readRun } = require("../lib/runfolder");
 const STMT = { noPendingFunding: true, bobCheckMatches: true }; // the two statements of the funding confirmation
 const viewOf = (s) => s.runner.view(readRun([s.f.run, s.f.pub], Math.floor(s.clock.ms / 1000)));
 
-test("funding: dry-fund parses fund.sh's text; send-fund is gated on tick, dry run, object file, marker, typed NOID; the marker latches it for good", () => {
+test("funding: dry-fund parses fund.sh's text; send-fund is gated on tick, dry run, object file, marker, typed NOID; the marker latches it for good", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice" });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -814,7 +814,7 @@ test("funding: every refusal fund.sh prints makes the dry run red and is shown a
   }
 });
 
-test("funding: without an object file the console can see no dry run passes; a failed fund.sh keeps the marker and says do not repeat", () => {
+test("funding: without an object file the console can see no dry run passes; a failed fund.sh keeps the marker and says do not repeat", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ objectFile: false });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -944,7 +944,7 @@ test("watch status only counts the loop file of the role this console drives", (
 // ---------------------------------------------------------------------------------------------- H1: a funding done outside fund.sh, and the second statement
 const restart = (s, o = {}) => new A.ActionRunner({ ...WSL, ...(o.role ? { role: o.role } : {}), runDirs: [s.f.run, s.f.pub] }, { audit: new AuditLog(s.f.pub, { now: () => s.clock.ms, role: o.role }), exec: () => assert.fail("must not run"), now: () => s.clock.ms, pollWatch: false });
 
-test("H1: 'I have funded' is persistent: it writes the markers and is logged, closes send-fund for good, and a restart sees it (markers and audit log)", () => {
+test("H1: 'I have funded' is persistent: it writes the markers and is logged, closes send-fund for good, and a restart sees it (markers and audit log)", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice" });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -984,7 +984,7 @@ test("H1: 'I have funded' is persistent: it writes the markers and is logged, cl
   }
 });
 
-test("H1: the acknowledgement is refused once a marker exists (either) or a send-fund was started from this console, and is a no-op for bob", () => {
+test("H1: the acknowledgement is refused once a marker exists (either) or a send-fund was started from this console, and is a no-op for bob", { skip: F.WSL_HOST_ONLY }, () => {
   // the run folder's marker
   let s = setup({ role: "alice" });
   try {
@@ -1047,7 +1047,7 @@ test("H1: the acknowledgement is refused once a marker exists (either) or a send
   }
 });
 
-test("H1: send-fund needs the second statement in the request; without it nothing runs, with it the audit start line records it", () => {
+test("H1: send-fund needs the second statement in the request; without it nothing runs, with it the audit start line records it", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice" });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -1082,7 +1082,7 @@ test("H1: send-fund needs the second statement in the request; without it nothin
   }
 });
 
-test("H1: the contract's own marker (funded-<root>.marker next to the object file) closes send-fund and is named in the view", () => {
+test("H1: the contract's own marker (funded-<root>.marker next to the object file) closes send-fund and is named in the view", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice" });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -1106,7 +1106,7 @@ test("H1: the contract's own marker (funded-<root>.marker next to the object fil
 });
 
 // ---------------------------------------------------------------------------------------------- M1 / M3 through the runner
-test("M1/M3 through the runner: the dry run names the platform's wallet program and the very object file the terms came from", () => {
+test("M1/M3 through the runner: the dry run names the platform's wallet program and the very object file the terms came from", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice", behaviour: { fund: { cli: "/tmp/evil" } } });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);
@@ -1359,7 +1359,7 @@ test("C3: the terms and the binding come from ONE object file: the newest swap.o
   }
 });
 
-test("C3: the funding dry run in the view is bound to the file the terms came from, and its contract-address row is green", () => {
+test("C3: the funding dry run in the view is bound to the file the terms came from, and its contract-address row is green", { skip: F.WSL_HOST_ONLY }, () => {
   const s = setup({ role: "alice" });
   try {
     s.f.writeTick("alice", F.spendTick("fund_noid"), 0);

@@ -12,7 +12,7 @@ function spy(h) {
   return calls;
 }
 
-test("a whole swap: fund, lock, reveal, claim, each helper once, nothing typed or posted by a page", () => {
+test("a whole swap: fund, lock, reveal, claim, each helper once, nothing typed or posted by a page", { skip: require("./actions-fixtures").WSL_HOST_ONLY }, () => {
   const A = make({ role: "alice" });
   const B = make({ role: "bob" });
   try {

@@ -206,4 +206,9 @@ function makeFolders(o = {}) {
   };
 }
 
-module.exports = { INTENT_AT, TERMS, E, NOW, D, T_REVEAL, LOCK_ID, SEL_NEWLOCK, SEL_REFUND, lockDry, revealDry, refundDry, claimDry, fundDry, FUND_OBJ_LINUX, FUND_OBJ_WIN, FUND_COPY, MARKER_RECOVERY, FUND_SHA, FUND_CLI, lockCalldata, spendTick, runWith, makeFolders, PARAMS };
+// The tests that read a real object file through a console set up for WSL helpers: the console's folders are made under the system's temp
+// folder and the fake helper names them as WSL sees them (C:\... as /mnt/c/...). That mapping exists only on a Windows host; on Linux or macOS the
+// temp folder is a POSIX path, which the console rightly refuses to treat as a path inside the WSL distribution. So these run on Windows only.
+const WSL_HOST_ONLY = process.platform === "win32" ? false : "simulates a Windows console with WSL helpers over real C:\\ folders: Windows only";
+
+module.exports = { WSL_HOST_ONLY, INTENT_AT, TERMS, E, NOW, D, T_REVEAL, LOCK_ID, SEL_NEWLOCK, SEL_REFUND, lockDry, revealDry, refundDry, claimDry, fundDry, FUND_OBJ_LINUX, FUND_OBJ_WIN, FUND_COPY, MARKER_RECOVERY, FUND_SHA, FUND_CLI, lockCalldata, spendTick, runWith, makeFolders, PARAMS };

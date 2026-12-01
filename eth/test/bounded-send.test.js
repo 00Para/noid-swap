@@ -453,7 +453,12 @@ describe("bounded-send.js", function () {
       await pause(400);
       const received = tap.conns[0].c2sBytes;
       expect(socks[0].bytesWritten, "after the kill nothing more is written").to.equal(written);
-      expect(tap.conns[0].clientEnd, "the relay saw a reset, not a graceful end").to.equal("ECONNRESET");
+      // How the relay hears of the reset depends on the system: Linux reports an RST that arrives while unread data waits in the receive queue as a
+      // plain end of stream once that data is read, not as ECONNRESET (seen on Linux under Node 22 and 24). What proves the reset there is the next
+      // two checks: a graceful end would have delivered the unsent rest after the relay resumed reading; a reset dropped it. Elsewhere the RST is
+      // required to be seen as one, and cases 6, 20, 20b and 21d require ECONNRESET on every system.
+      if (process.platform === "linux") expect(tap.conns[0].clientEnd, "the relay saw the connection end").to.be.oneOf(["ECONNRESET", "FIN"]);
+      else expect(tap.conns[0].clientEnd, "the relay saw a reset, not a graceful end").to.equal("ECONNRESET");
       expect(received, `the relay received less than the whole body (${received} of ${bodyLen}): the unsent rest was dropped by the reset`).to.be.below(bodyLen);
       await pause(300);
       expect(tap.conns[0].c2sBytes, "and not one byte more later").to.equal(received);
@@ -865,7 +870,9 @@ describe("bounded-send.js", function () {
       expect(dt).to.be.within(600 - 20, 600 + 1000);
       tap.conns[0].resumeClient();
       await pause(400);
-      expect(tap.conns[0].clientEnd, "the relay saw a reset under TLS too").to.equal("ECONNRESET");
+      // Linux: see case 5 (an RST behind unread data is reported as an end of stream); the two checks below are what prove the reset.
+      if (process.platform === "linux") expect(tap.conns[0].clientEnd, "the relay saw the connection end").to.be.oneOf(["ECONNRESET", "FIN"]);
+      else expect(tap.conns[0].clientEnd, "the relay saw a reset under TLS too").to.equal("ECONNRESET");
       const received = tap.conns[0].c2sBytes;
       expect(received, `less than the whole request reached the relay (${received} bytes of about 8 MB)`).to.be.below(8 * 1024 * 1024);
       await pause(300);

@@ -234,7 +234,7 @@ const FLOWS = [
   { name: "refund the ETH (Bob)", role: "bob", kind: "refund_eth", script: "refund-eth.sh", id: "send-refund-eth", sendFlags: [] },
 ];
 for (const fl of FLOWS) {
-  test(`loop: ${fl.name}: the dry run, then the send through startSpend, each once, with nothing posted by a page`, () => {
+  test(`loop: ${fl.name}: the dry run, then the send through startSpend, each once, with nothing posted by a page`, { skip: fl.kind === "fund_noid" && F.WSL_HOST_ONLY }, () => {
     const h = make({ role: fl.role });
     try {
       // Alice's approval needs the funding on offer; the swap then moves on to the tick of the step under test
@@ -632,7 +632,7 @@ test("A: a tick being rewritten does not starve the send: the same dry run is us
   }
 });
 
-test("B: the funding statements are used once, within 300 s, by the process that took them; fresh ones re-arm", () => {
+test("B: the funding statements are used once, within 300 s, by the process that took them; fresh ones re-arm", { skip: F.WSL_HOST_ONLY }, () => {
   // single use: a clean refusal of fund.sh used them up
   const h = make({ role: "alice", behaviour: { exits: { "fund.sh": 3 }, stdout: { "fund.sh": "REFUSED: a guard failed\n" } } });
   try {
@@ -701,7 +701,7 @@ test("B: the funding statements are used once, within 300 s, by the process that
   }
 });
 
-test("C: a clean success is exit 0 AND a result file AND no warning; the funding also needs `Funding submitted` in the marker", () => {
+test("C: a clean success is exit 0 AND a result file AND no warning; the funding also needs `Funding submitted` in the marker", { skip: F.WSL_HOST_ONLY }, () => {
   const fundNoTx = make({ role: "alice", behaviour: { markerWithoutTx: true } });
   try {
     fundNoTx.tick("alice", "fund_noid");

@@ -85,7 +85,7 @@ const refused = (fn) => {
   assert.fail("expected a refusal");
 };
 
-test("join: runs as Bob's non-spending action, is audited, and one job at a time", () => {
+test("join: runs as Bob's non-spending action, is audited, and one job at a time", { skip: F.WSL_HOST_ONLY }, () => {
   const h = harness();
   try {
     fs.rmSync(path.join(h.f.run, "alice.bundle.json"));
@@ -113,7 +113,7 @@ test("join: runs as Bob's non-spending action, is audited, and one job at a time
   }
 });
 
-test("join: the public copy's file is passed (built on the server) only when the run folder has none and the public one is good", () => {
+test("join: the public copy's file is passed (built on the server) only when the run folder has none and the public one is good", { skip: F.WSL_HOST_ONLY }, () => {
   // the fixtures' folders are Windows temp paths; the console reads them as a drive path under the distro
   const tailOf = (args) => args.slice(args.findIndex((a) => /join\.sh$/.test(a)) + 1);
   // the run folder has the file: no argument, whatever the public folder holds
@@ -212,7 +212,7 @@ test("join: the run folder's lock is looked at first (a console that does not ho
   }
 });
 
-test("join: the view's file facts: names, plain files only, links and bad files are named, nothing of the content", () => {
+test("join: the view's file facts: names, plain files only, links and bad files are named, nothing of the content", { skip: F.WSL_HOST_ONLY }, () => {
   const h = harness();
   try {
     let j = h.view().join;

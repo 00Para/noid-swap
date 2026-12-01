@@ -5,7 +5,8 @@ GitHub's own machines, runs the offline tests, prints the sha256 of each program
 artifacts. The point is that you can get a program whose build you can read, instead of trusting one built on a private
 machine.
 
-**Status: the workflow has never run.** Nothing below about its results is known yet. Read "Not verified" before relying on it.
+**Status: the workflow ran once (run 1, at the public commit `111f72d`).** What it showed is in "Run 1" below; the fixes it
+called for are in the workflow and the tests since. Read "Not verified" before relying on it.
 
 ## What the workflow does
 
@@ -33,8 +34,9 @@ Each job does this, in order:
 4. Installs the native tools the chain's source needs: a C compiler, CMake and libclang.
 5. Builds the program: `cargo build --release --locked` in `swap-cli`. `--locked` means the exact versions in
    `Cargo.lock` are used or the build fails.
-6. Runs the tests: `cargo test --locked --no-fail-fast` in `swap-cli`, and `node --test "ui/app/test/*.test.js"` for the
-   operator console (Node 22, no package manager).
+6. Runs the tests: `cargo test --locked --no-fail-fast` in `swap-cli`; then installs `eth/`'s locked packages (`npm ci`; the
+   console's server loads `ethers` from there) and runs `node --test "ui/app/test/*.test.js"` for the operator console
+   (Node 24).
 7. Prints the sha256 of the program, writes it to a `.sha256` file and to the job summary, and uploads the program, the
    `.sha256` file and a `BUILD-INFO.txt` (commit, chain source commit, compiler version, test results) as the artifact
    `swap-cli-windows-x86_64`, `swap-cli-macos-aarch64` or `swap-cli-linux-x86_64`.
@@ -42,9 +44,37 @@ Each job does this, in order:
 A fourth job runs the Ethereum side's tests (`npm ci`, `npx hardhat test` in `eth`) on Linux only. It takes about nine
 minutes.
 
-On Windows the two test steps are allowed to fail without failing the job, because they have never been run there. The
-build step is never allowed to fail. Once a run shows the Windows tests passing, the flag `tests_may_fail` in the file
-must be set to `false`. `BUILD-INFO.txt` records the real test result either way.
+On Windows the `swap-cli` test step is allowed to fail without failing the job, because those tests had never been run
+there. The build step and the console's tests are never allowed to fail. Once a run shows the Windows `swap-cli` tests
+passing, the flag `tests_may_fail` in the file must be set to `false`. `BUILD-INFO.txt` records the real test result either
+way.
+
+Sixteen console tests need a Windows host: they set the console up for helpers inside WSL and read real folders that the
+console sees as `C:\...` and the helpers as `/mnt/c/...`. On Linux and macOS they are skipped with that reason
+(`WSL_HOST_ONLY` in `ui/app/test/actions-fixtures.js`); they run in the Windows job.
+
+## Run 1
+
+- The comparison of `vendor/parano1d` with upstream at the fixed commit **passed** on Linux and on Windows.
+- The native tools were found or installed on Windows as the workflow guessed (LLVM, CMake).
+- **`swap-cli` built natively on Windows** (the first native Windows build) and on Linux. The Linux tests of `swap-cli`
+  passed.
+- macOS did not run: GitHub had no Apple Silicon machine free ("not acquired by a runner even after multiple attempts").
+- The console's tests failed on Linux, for two reasons, both fixed: `eth/`'s packages were not installed before them; and
+  the sixteen Windows-host tests above ran on Linux. Under Node 22 the test runner also ended eight relay tests early (the
+  relay pool's timers do not hold the process open; in the console the HTTP server does), so the workflow uses Node 24.
+- The Ethereum tests had two failures on Linux, in `bounded-send.js` (the claim's time-bounded send), cases 5 and 21c:
+  at the deadline the test relay saw a plain end of the connection instead of a reset. Linux reports a reset that arrives
+  while unread data waits as an end of stream once that data is read. The checks that prove the reset (the relay received
+  less than the whole request, and not one byte more later; a graceful close would have delivered the rest) passed. On
+  Linux those two cases now accept either report; everywhere else, and in cases 6, 20, 20b and 21d on every system, a
+  reset is still required to be seen as one.
+- On Windows the `swap-cli` tests **failed** (cargo's exit code 101, after 51 minutes, so they compiled and ran) and the
+  console's tests failed (the same two causes as on Linux). Both steps were allowed to fail, so the Windows program was
+  built and uploaded. Which `swap-cli` tests fail on Windows is not known: a run's log can be read only when logged in.
+  The workflow now writes the names of failing tests and the first lines of each failure as annotations of the run, which
+  anyone can read (`https://api.github.com/repos/00Para/noid-swap/check-runs/<job id>/annotations`).
+- Not verified either way: whether the Windows program runs at all. It was built; nothing more.
 
 There is no cache in this first version. It is simpler, and there is nothing that could be poisoned.
 
@@ -87,18 +117,13 @@ GitHub's machines and the toolchain they download. A program you build yourself 
 
 ## Not verified
 
-- **The workflow itself has not run.** Its syntax, the native tool installation on each runner (CMake, libclang, paths
-  marked as guesses in the file) and the comparison step on a Windows runner are all untested.
-- **The comparison of `vendor/parano1d` with upstream has never run.** Until it passes, "the shipped copy equals upstream
-  at that commit" is a claim the workflow is written to test, not a result. Differences in line endings or in files the
-  copy leaves out would make it fail, by design.
-- **The native Windows build of `swap-cli`** has never been made. It was built inside WSL, and natively on macOS for one
-  role. The first Windows run is the first test of it.
+- **macOS has not run in the workflow** (no runner was free in run 1); its native tool step is still a guess.
+- **The native Windows program has never been run.** It was built (run 1); nothing more. Its `swap-cli` tests fail on
+  Windows for reasons not yet seen (see Run 1).
 - **The native Windows tests.** The dev-dependency on the chain's `noid_chain` crate pulls in libmdbx, a C library built
   with bindgen. It has not been built on Windows here.
 - The three actions (checkout, setup-node, upload-artifact) are pinned to full commit ids, looked up on 2026-11-17; that
   each id is the release its comment names was not checked a second way.
-- The operator console's tests run on Windows on a developer machine; they have never run on a hosted runner.
 
 ### Code that only works on Unix, and what the tool does on Windows
 
@@ -175,7 +200,7 @@ cargo test --locked --no-fail-fast
 Get-FileHash -Algorithm SHA256 .\target\release\swap-cli.exe
 ```
 
-The operator console's tests (Node 22 or later, from the repository root):
+The operator console's tests (Node 24, from the repository root, after `npm ci` in `eth`):
 
 ```sh
 node --test "ui/app/test/*.test.js"

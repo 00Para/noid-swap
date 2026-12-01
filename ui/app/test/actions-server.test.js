@@ -415,7 +415,7 @@ test("the default role is both: nothing is blocked and /api/run says so", async 
 });
 
 // ---------------------------------------------------------------------------------------------- send-fund, the acknowledgement and --role bob over HTTP
-test("/api/spend send-fund over HTTP: refused as a plain action; needs the second statement; the marker closes /api/funded and funding for good", async () => {
+test("/api/spend send-fund over HTTP: refused as a plain action; needs the second statement; the marker closes /api/funded and funding for good", { skip: F.WSL_HOST_ONLY }, async () => {
   await withActions({ opts: { role: "alice" } }, async ({ post, f, log, server }) => {
     f.writeTick("alice", F.spendTick("fund_noid"));
     // a spend id is never a plain action

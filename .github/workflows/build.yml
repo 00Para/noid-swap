@@ -46,10 +46,10 @@ jobs:
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
             exe: swap-cli.exe
-            # The test steps on Windows may fail without failing the job, for this reason only: the dev-dependency
+            # The swap-cli TEST step on Windows may fail without failing the job, for this reason only: the dev-dependency
             # on the chain's noid_chain crate pulls in libmdbx (a C library built with bindgen), and neither the
-            # tests of swap-cli nor that crate have ever been built or run natively on Windows. Make the steps
-            # strict (set this to false) once a run shows them passing. The BUILD step is always strict.
+            # tests of swap-cli nor that crate have ever been built or run natively on Windows. Make the step
+            # strict (set this to false) once a run shows it passing. The BUILD step and the console's tests are always strict.
             tests_may_fail: true
           - os: macos-latest
             platform: macos-aarch64
@@ -153,10 +153,13 @@ jobs:
           echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"
 
       # TO PIN: actions/setup-node v4
-      - name: Set up Node 22
+      # Node 24 (the current long-term release): under Node 22 the test runner ends eight relay tests of the console early ("the event loop has
+      # already resolved": the relay pool's timers do not hold the process open, and in a test nothing else does; in the console the HTTP server
+      # does). Seen in run 1.
+      - name: Set up Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: "24"
 
       # The build is strict on every platform. A failure here fails the job.
       - name: Build swap-cli (release)
@@ -170,14 +173,38 @@ jobs:
         id: test
         continue-on-error: ${{ matrix.tests_may_fail }}
         working-directory: swap-cli
-        run: cargo test --locked --no-fail-fast
+        run: cargo test --locked --no-fail-fast 2>&1 | tee "$RUNNER_TEMP/swap-cli-test.log"
 
-      # The operator console has no package manager and no build step; its tests run on plain Node.
-      # GUESS: they have never run on Windows, so the step may fail there without failing the job, like the Rust tests.
+      # The operator console has no package manager and no build step, but its server loads ethers from eth/node_modules (ui/app/lib/eth.js),
+      # so eth/'s locked packages are installed first (run 1 failed without them). Strict on every system: the console's tests pass on Windows
+      # (where it runs today), and the tests that need a Windows host (a console with WSL helpers over real C:\ folders) skip elsewhere with
+      # that reason (ui/app/test/actions-fixtures.js, WSL_HOST_ONLY).
+      - name: Install eth/'s locked packages (the console's server needs ethers)
+        working-directory: eth
+        run: npm ci --no-audit --no-fund
+
       - name: Test the operator console
         id: console
-        continue-on-error: ${{ matrix.tests_may_fail }}
-        run: node --test "ui/app/test/*.test.js"
+        run: node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/console-test.tap" "ui/app/test/*.test.js"
+
+      # The logs of a run can be read only when logged in to GitHub; the annotations of a run can be read by anyone (the API's check-run
+      # annotations). So when a test step failed, the names of the failing tests and the first lines of each failure are written as one
+      # annotation per step. Nothing secret is in these logs (the workflow uses no secrets).
+      - name: Name the failing tests in the annotations
+        if: ${{ !cancelled() && (steps.test.outcome == 'failure' || steps.console.outcome == 'failure') }}
+        run: |
+          report() {
+            body="$(cut -c1-300 | head -n 80)"
+            [ -n "$body" ] || body="no failing test was named in the output (a build or start-up error: see the log)"
+            body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
+            echo "::error title=$1::$body"
+          }
+          if [ "${{ steps.test.outcome }}" = failure ] && [ -f "$RUNNER_TEMP/swap-cli-test.log" ]; then
+            grep -E -A2 '^test .* FAILED$|panicked at|^error(\[|:)' "$RUNNER_TEMP/swap-cli-test.log" | report "swap-cli tests (${{ matrix.platform }})"
+          fi
+          if [ "${{ steps.console.outcome }}" = failure ] && [ -f "$RUNNER_TEMP/console-test.tap" ]; then
+            grep -E -A10 '^ *not ok ' "$RUNNER_TEMP/console-test.tap" | grep -vE '^ *(at |stack:|duration_ms|[.][.][.]|---|code:|name:|operator:|failureType:)' | report "console tests (${{ matrix.platform }})"
+          fi
 
       - name: Collect the program and print its sha256
         env:
@@ -239,10 +266,10 @@ jobs:
           persist-credentials: false
 
       # TO PIN: actions/setup-node v4 (same pin as above)
-      - name: Set up Node 22
+      - name: Set up Node 24
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install from the lock file
         working-directory: eth
@@ -250,5 +277,15 @@ jobs:
 
       # If the native solc download is blocked, hardhat.config.js falls back to the npm solc package (same version).
       - name: Test
+        id: test
         working-directory: eth
-        run: npx hardhat test
+        run: npx hardhat test 2>&1 | tee "$RUNNER_TEMP/eth-test.log"
+
+      # As in the swap-cli job: the failing tests, readable without logging in.
+      - name: Name the failing tests in the annotations
+        if: ${{ !cancelled() && steps.test.outcome == 'failure' }}
+        run: |
+          body="$(sed -n '/^  [0-9]* failing$/,$p' "$RUNNER_TEMP/eth-test.log" | grep -v '^ *at ' | cut -c1-300 | head -n 80)"
+          [ -n "$body" ] || body="no failing test was named in the output (see the log)"
+          body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
+          echo "::error title=eth tests (linux)::$body"
