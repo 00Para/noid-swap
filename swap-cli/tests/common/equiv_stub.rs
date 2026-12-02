@@ -1,7 +1,9 @@
 //! REVIEW-3 F2: since a typed attestation is accepted under the rehearsal profile only, the CLI tests that
 //! run `new-bob` against a production or sepolia bundle go through a stand-in for `equiv-prove` (a shell
 //! script that prints the verifier's OK output and the image id compiled into the tool). Include with
-//! `#[path = "common/equiv_stub.rs"] mod equiv_stub;`. Unix only (it writes a `#!/bin/sh` script).
+//! `#[path = "common/equiv_stub.rs"] mod equiv_stub;`. On Unix it writes a `#!/bin/sh` script; on Windows a `.cmd`
+//! file with the same output (Rust runs a `.cmd` through the system's command interpreter; the tool trims each
+//! output line, so the CR LF line ends do not matter). The first hosted Windows run failed on the shell script.
 
 #![allow(dead_code)]
 
@@ -12,13 +14,21 @@ use swap_cli::params::EQUIV_IMAGE_ID;
 /// `["--receipt", FILE, "--equiv-prove", BIN]` with a stand-in `equiv-prove` (and a dummy receipt) in `dir`,
 /// created once per directory. The stand-in answers `verify raw|stock ...` with the OK line and the pinned image id.
 pub fn receipt_flags(dir: &Path) -> Vec<String> {
-    let bin = dir.join("equiv-prove-stub");
+    let bin = dir.join(if cfg!(windows) { "equiv-prove-stub.cmd" } else { "equiv-prove-stub" });
     let receipt = dir.join("stub.receipt");
     if !bin.exists() {
-        let script = format!(
-            "#!/bin/sh\ncase \"$2\" in\n  raw) echo 'OK: exists m with sha256(m) = H and Addr(m) = A' ;;\n  stock) echo 'OK: exists m with sha256(m) = H and Addr(Derive(m,0)) = A' ;;\n  *) exit 9 ;;\nesac\necho 'image id: {}'\n",
-            hex::encode(EQUIV_IMAGE_ID)
-        );
+        let script = if cfg!(windows) {
+            // Labels and gotos, not `( … )` blocks: a `)` inside `sha256(m)` would end a block early.
+            format!(
+                "@echo off\r\nif \"%~2\"==\"raw\" goto raw\r\nif \"%~2\"==\"stock\" goto stock\r\nexit /b 9\r\n:raw\r\necho OK: exists m with sha256(m) = H and Addr(m) = A\r\ngoto id\r\n:stock\r\necho OK: exists m with sha256(m) = H and Addr(Derive(m,0)) = A\r\n:id\r\necho image id: {}\r\n",
+                hex::encode(EQUIV_IMAGE_ID)
+            )
+        } else {
+            format!(
+                "#!/bin/sh\ncase \"$2\" in\n  raw) echo 'OK: exists m with sha256(m) = H and Addr(m) = A' ;;\n  stock) echo 'OK: exists m with sha256(m) = H and Addr(Derive(m,0)) = A' ;;\n  *) exit 9 ;;\nesac\necho 'image id: {}'\n",
+                hex::encode(EQUIV_IMAGE_ID)
+            )
+        };
         let tmp = dir.join("equiv-prove-stub.tmp");
         std::fs::write(&tmp, script).unwrap();
         #[cfg(unix)]

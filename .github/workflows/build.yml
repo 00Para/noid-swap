@@ -194,13 +194,13 @@ jobs:
         if: ${{ !cancelled() && (steps.test.outcome == 'failure' || steps.console.outcome == 'failure') }}
         run: |
           report() {
-            body="$(cut -c1-300 | head -n 80)"
+            body="$(cut -c1-240 | head -n 400)"
             [ -n "$body" ] || body="no failing test was named in the output (a build or start-up error: see the log)"
             body="${body//'%'/'%25'}"; body="${body//$'\r'/}"; body="${body//$'\n'/'%0A'}"
             echo "::error title=$1::$body"
           }
           if [ "${{ steps.test.outcome }}" = failure ] && [ -f "$RUNNER_TEMP/swap-cli-test.log" ]; then
-            grep -E -A2 '^test .* FAILED$|panicked at|^error(\[|:)' "$RUNNER_TEMP/swap-cli-test.log" | report "swap-cli tests (${{ matrix.platform }})"
+            { grep -E '^test .* FAILED$|^error(\[|:)' "$RUNNER_TEMP/swap-cli-test.log"; echo "--- first lines of each failure:"; grep -E -A2 'panicked at' "$RUNNER_TEMP/swap-cli-test.log"; } | report "swap-cli tests (${{ matrix.platform }})"
           fi
           if [ "${{ steps.console.outcome }}" = failure ] && [ -f "$RUNNER_TEMP/console-test.tap" ]; then
             grep -E -A10 '^ *not ok ' "$RUNNER_TEMP/console-test.tap" | grep -vE '^ *(at |stack:|duration_ms|[.][.][.]|---|code:|name:|operator:|failureType:)' | report "console tests (${{ matrix.platform }})"

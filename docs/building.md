@@ -5,8 +5,10 @@ GitHub's own machines, runs the offline tests, prints the sha256 of each program
 artifacts. The point is that you can get a program whose build you can read, instead of trusting one built on a private
 machine.
 
-**Status: the workflow ran once (run 1, at the public commit `111f72d`).** What it showed is in "Run 1" below; the fixes it
-called for are in the workflow and the tests since. Read "Not verified" before relying on it.
+**Status: the workflow ran twice (run 1 at the public commit `111f72d`, run 2 at `fed3c64`).** Run 2 built and tested the
+program on Linux and macOS and passed the Ethereum tests; on Windows it built the program but stopped at the console's
+tests. What each run showed is below; the fixes are in the workflow and the tests since. Read "Not verified" before relying
+on it.
 
 ## What the workflow does
 
@@ -106,6 +108,18 @@ commit, using the chain's source at the fixed commit (the workflow proves that t
 GitHub's machines and the toolchain they download. A program you build yourself on your own machine can differ in its bytes
 (paths, compiler build); byte-for-byte reproducibility has not been tested.
 
+## Run 2
+
+- Linux and **macOS** (its first run): `swap-cli` built, its tests and the console's tests passed, the program was uploaded.
+  The macOS native tool step worked as written.
+- The Ethereum tests passed on Linux.
+- Windows: `swap-cli` built again. Its tests still failed, and this time the annotations named them: every failure was a
+  test that gives `new-bob` a stand-in for the prover, which was a shell script, and Windows cannot run one ("not a valid
+  Win32 application"). The stand-in is now a `.cmd` file on Windows with the same output. Three console tests failed on
+  the hosted Windows machine only: its temp folder is a short name with `~` (`RUNNER~1`), which the console rightly cannot
+  pass to a helper as a plain path; the tests now make their folders under the long form of that path. The console step is
+  strict, so the job failed and the Windows program of run 2 was not uploaded.
+
 ## What is not built
 
 - The zkVM prover and its proofs (`equiv/`). The proof-free lock kind (`poseidon`) needs neither a proof nor a receipt, so
@@ -117,7 +131,6 @@ GitHub's machines and the toolchain they download. A program you build yourself 
 
 ## Not verified
 
-- **macOS has not run in the workflow** (no runner was free in run 1); its native tool step is still a guess.
 - **The native Windows program has never been run.** It was built (run 1); nothing more. Its `swap-cli` tests fail on
   Windows for reasons not yet seen (see Run 1).
 - **The native Windows tests.** The dev-dependency on the chain's `noid_chain` crate pulls in libmdbx, a C library built
@@ -137,7 +150,7 @@ code does, read from the source and never run on Windows.
 | The per-machine hashlock registry's place (`machine_registry_path` in `swapfile.rs`) | `NOID_SWAP_HOME`, else `$HOME/.noid-swap/hashlocks.txt` | `NOID_SWAP_HOME`, else `%USERPROFILE%\.noid-swap\hashlocks.txt` when `HOME` is unset |
 | The per-user lock record of the Ethereum helper (`eth/scripts/live.js`) | in the home the account database gives the user (`os.userInfo().homedir`); a run whose `HOME` differs, or under `sudo`, is refused | the same code runs; what Node reports as the account home on Windows, and whether the check against `USERPROFILE` behaves, have not been tested. The helper also skips its own directory sync on Windows |
 | The default `curl` program of the `curl` transport (`watch/exec.rs`) | `curl` from `PATH` (inside WSL, the Windows `curl.exe`) | `curl` from `PATH`; Windows ships `curl.exe`, but this has not been run |
-| Tests using `sh`, symlinks, file modes or stub scripts (`child_env.rs`, `swapfile.rs`, `reveal_sidecar.rs`, `producer_marker.rs`, `watch/exec.rs`, and in `tests/`: `equiv.rs`, `hostile_gaps.rs`, `eth_key.rs`, `producer_gate.rs`, `common/equiv_stub.rs`) | run | not compiled, so not run: the checks they make (modes, symlink handling, directory sync, the stub prover) have no Windows test |
+| Tests using `sh`, symlinks, file modes or stub scripts (`child_env.rs`, `swapfile.rs`, `reveal_sidecar.rs`, `producer_marker.rs`, `watch/exec.rs`, and in `tests/`: `equiv.rs`, `hostile_gaps.rs`, `eth_key.rs`, `producer_gate.rs`; the prover stand-in in `common/equiv_stub.rs` is a `.cmd` file on Windows since run 2) | run | not compiled, so not run: the checks they make (modes, symlink handling, directory sync, the stub prover) have no Windows test |
 
 So on Windows, until this is looked at: keep the swap file and the run folder in a folder only your own account can read, and
 treat the lack of a folder sync as a reason not to pull the plug during a save. These are known limits, not fixed ones.

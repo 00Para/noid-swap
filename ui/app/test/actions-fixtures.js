@@ -176,7 +176,9 @@ function runWith(role, tick, o = {}) {
 
 /** A temp run folder + public copy dir with the public files the reader opens. */
 function makeFolders(o = {}) {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), "noid-act-"));
+  // The long form of the temp folder: a hosted Windows machine gives it as a short name with "~" (C:\Users\RUNNER~1\...), which the console
+  // rightly cannot pass to a helper as a plain path, so the join tests failed there and nowhere else.
+  const base = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), "noid-act-"));
   const run = path.join(base, "live-run-5");
   const pub = path.join(base, "public");
   fs.mkdirSync(run);
